@@ -95,6 +95,9 @@ export interface LocalTriageState {
   seenReplyKeys: string[];
   snoozedUntil: string | null;
   snoozedActivityKeys: string[];
+  /** Set by "done until new activity"; cleared automatically when a new activity key appears. */
+  doneAt: string | null;
+  doneActivityKeys: string[];
 }
 
 export interface AttentionReason {
@@ -130,6 +133,10 @@ export interface PullRequestItem {
   unreadReplyKeys: string[];
   hasNote: boolean;
   snoozedUntil: string | null;
+  /** When the PR was marked done; null when it is not (or no longer) done. */
+  doneAt: string | null;
+  createdAt: string;
+  headRefName: string;
 }
 
 export interface SyncStatus {
@@ -162,4 +169,5 @@ export interface TriageUpdate {
   note?: string;
   seenReplyKeys?: string[];
   snoozeUntil?: string | null;
+  done?: boolean;
 }

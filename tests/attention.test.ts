@@ -228,3 +228,44 @@ describe('review attention', () => {
     ]);
   });
 });
+
+describe('done until new activity', () => {
+  const marked = (keys: string[]) => ({
+    ...emptyTriage(),
+    doneAt: '2026-11-05T09:30:00.000Z',
+    doneActivityKeys: keys,
+  });
+
+  it('moves a PR out of the attention queue while its activity is unchanged', () => {
+    const pr = snapshot({ headOid: 'head-2' });
+    const before = deriveItem(pr, emptyTriage(), 'me', []);
+    const done = deriveItem(pr, marked(before.activityKeys), 'me', []);
+
+    expect(before.queue).toBe('attention');
+    expect(done.queue).toBe('caught_up');
+    expect(done.doneAt).toBe('2026-11-05T09:30:00.000Z');
+  });
+
+  it('returns the PR to attention when a new activity key appears', () => {
+    const pr = snapshot({ headOid: 'head-2' });
+    const keys = deriveItem(pr, emptyTriage(), 'me', []).activityKeys;
+    const pushedAgain = deriveItem(snapshot({ headOid: 'head-3' }), marked(keys), 'me', []);
+
+    expect(pushedAgain.queue).toBe('attention');
+    expect(pushedAgain.doneAt).toBeNull();
+  });
+
+  it('lets an active snooze take precedence over done', () => {
+    const pr = snapshot({ headOid: 'head-2' });
+    const keys = deriveItem(pr, emptyTriage(), 'me', []).activityKeys;
+    const triage = {
+      ...marked(keys),
+      snoozedUntil: '2026-11-06T09:00:00.000Z',
+      snoozedActivityKeys: keys,
+    };
+    const item = deriveItem(pr, triage, 'me', [], Date.parse('2026-11-05T10:00:00Z'));
+
+    expect(item.queue).toBe('snoozed');
+    expect(item.doneAt).toBeNull();
+  });
+});

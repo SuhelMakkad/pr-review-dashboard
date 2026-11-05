@@ -196,6 +196,26 @@ describe('sync and local persistence', () => {
   });
 });
 
+describe('done until new activity', () => {
+  it('marks a PR done, then permanently wakes it on new activity', async () => {
+    const github = fakeGitHub();
+    const service = new SyncService(store(), github);
+
+    vi.mocked(github.snapshot).mockResolvedValue(snapshot({ headOid: 'head-2' }));
+    await service.sync();
+    expect(service.list().items[0].queue).toBe('attention');
+
+    service.update('pr-1', { account: 'me', done: true });
+    expect(service.list().items[0].queue).toBe('caught_up');
+    expect(service.list().items[0].doneAt).not.toBeNull();
+
+    vi.mocked(github.snapshot).mockResolvedValue(snapshot({ headOid: 'head-3' }));
+    await service.sync();
+    expect(service.list().items[0].queue).toBe('attention');
+    expect(service.detail('pr-1')?.triage.doneAt).toBeNull();
+  });
+});
+
 describe('local API', () => {
   it('allows local reads, validates updates, and blocks cross-origin or stale writes', async () => {
     const service = new SyncService(store(), fakeGitHub());

@@ -8,6 +8,7 @@ const updateSchema = z
     note: z.string().max(30_000).optional(),
     seenReplyKeys: z.array(z.string().max(250)).max(10_000).optional(),
     snoozeUntil: z.iso.datetime().nullable().optional(),
+    done: z.boolean().optional(),
   })
   .strict();
 

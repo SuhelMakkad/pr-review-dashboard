@@ -154,11 +154,15 @@ export class SyncService {
             const triage = this.store.triage(account.login, id);
             const item = deriveItem(snapshot, triage, account.login, this.status.teams);
 
-            if (triage.snoozedUntil && !item.snoozedUntil) {
+            const wokeFromSnooze = Boolean(triage.snoozedUntil && !item.snoozedUntil);
+            const wokeFromDone = Boolean(triage.doneAt && !item.doneAt && !item.snoozedUntil);
+
+            // New activity permanently ends a snooze or a "done" mark, even if it is later reviewed.
+            if (wokeFromSnooze || wokeFromDone) {
               this.store.saveTriage(account.login, id, {
                 ...triage,
-                snoozedUntil: null,
-                snoozedActivityKeys: [],
+                ...(wokeFromSnooze ? { snoozedUntil: null, snoozedActivityKeys: [] } : {}),
+                ...(wokeFromDone ? { doneAt: null, doneActivityKeys: [] } : {}),
               });
             }
           } catch (error) {
@@ -260,6 +264,16 @@ export class SyncService {
     if (update.snoozeUntil !== undefined) {
       triage.snoozedUntil = update.snoozeUntil;
       triage.snoozedActivityKeys = detail.item.activityKeys;
+    }
+
+    if (update.done !== undefined) {
+      triage.doneAt = update.done ? new Date().toISOString() : null;
+      triage.doneActivityKeys = update.done ? detail.item.activityKeys : [];
+
+      if (update.done) {
+        triage.snoozedUntil = null;
+        triage.snoozedActivityKeys = [];
+      }
     }
 
     this.store.saveTriage(update.account, id, triage);

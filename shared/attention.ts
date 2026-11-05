@@ -11,6 +11,8 @@ export const emptyTriage = (): LocalTriageState => ({
   seenReplyKeys: [],
   snoozedUntil: null,
   snoozedActivityKeys: [],
+  doneAt: null,
+  doneActivityKeys: [],
 });
 
 const sameLogin = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
@@ -132,13 +134,19 @@ export function deriveItem(
   const isSnoozed = Boolean(
     triage.snoozedUntil && Date.parse(triage.snoozedUntil) > now && !hasNewActivity,
   );
+  const isDone =
+    !isSnoozed &&
+    Boolean(triage.doneAt) &&
+    activityKeys.every((key) => triage.doneActivityKeys.includes(key));
   const queue = isSnoozed
     ? 'snoozed'
-    : !pr.isDraft && reasons.length > 0
-      ? 'attention'
-      : effectiveReview?.state === 'CHANGES_REQUESTED'
-        ? 'waiting'
-        : 'caught_up';
+    : isDone
+      ? 'caught_up'
+      : !pr.isDraft && reasons.length > 0
+        ? 'attention'
+        : effectiveReview?.state === 'CHANGES_REQUESTED'
+          ? 'waiting'
+          : 'caught_up';
 
   return {
     id: pr.id,
@@ -167,6 +175,9 @@ export function deriveItem(
     unreadReplyKeys,
     hasNote: triage.note.trim().length > 0,
     snoozedUntil: isSnoozed ? triage.snoozedUntil : null,
+    doneAt: isDone ? triage.doneAt : null,
+    createdAt: pr.createdAt,
+    headRefName: pr.headRefName,
   };
 }
 

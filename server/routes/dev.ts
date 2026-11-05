@@ -15,4 +15,12 @@ export function registerDevRoutes(
 
     return { label };
   });
+
+  app.post('/api/dev/reset', async () => {
+    fixture.reset();
+    service.store.clearAccount(fixture.scenario.world.viewer.login);
+    await service.sync();
+
+    return { ok: true };
+  });
 }

@@ -15,7 +15,8 @@ const config = loadConfig();
 const demoAnchor = process.env.REVIEW_DESK_DEMO_NOW
   ? Date.parse(process.env.REVIEW_DESK_DEMO_NOW)
   : Date.now();
-const fixture = config.mode === 'demo' ? new FixtureGitHub(defaultScenario(demoAnchor)) : undefined;
+const fixture =
+  config.mode === 'demo' ? new FixtureGitHub(() => defaultScenario(demoAnchor)) : undefined;
 const store = new Store(config.databasePath);
 const service = new SyncService(store, fixture ?? new GitHub(), new EventBus());
 const sessionToken = createSessionToken();

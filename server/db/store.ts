@@ -72,6 +72,14 @@ export class Store {
       .run(account, id, JSON.stringify(state));
   }
 
+  /** Removes cached PRs and local triage for one account (demo reset). */
+  clearAccount(account: string): void {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM snapshots WHERE account = ?').run(account);
+      this.db.prepare('DELETE FROM triage WHERE account = ?').run(account);
+    });
+  }
+
   getSetting<T>(key: string): T | null {
     const row = this.db.prepare('SELECT data FROM settings WHERE key = ?').get(key);
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   Actor,
   PullRequestSnapshot,
@@ -36,10 +37,7 @@ const VIEWER = 'you';
 /** Builds a fictional review workload anchored to `anchor`, so relative times look natural. */
 export function defaultScenario(anchor = Date.now()): Scenario {
   const at = (minutesAgo: number) => new Date(anchor - minutesAgo * 60_000).toISOString();
-  const sha = (seed: string) =>
-    Array.from({ length: 40 }, (_, index) =>
-      ((seed.charCodeAt(index % seed.length) + index * 7) % 16).toString(16),
-    ).join('');
+  const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 
   let commentSequence = 0;
 

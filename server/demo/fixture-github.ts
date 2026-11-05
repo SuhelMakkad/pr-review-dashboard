@@ -6,8 +6,19 @@ import type { Scenario } from './scenario.js';
 /** A GitHub stand-in backed by an in-memory scenario. Used by demo mode and end-to-end tests. */
 export class FixtureGitHub implements GitHubApi {
   private stepIndex = 0;
+  scenario: Scenario;
 
-  constructor(readonly scenario: Scenario) {}
+  constructor(private readonly source: Scenario | (() => Scenario)) {
+    this.scenario = typeof source === 'function' ? source() : source;
+  }
+
+  /** Rebuilds the scenario from scratch (demo reset; requires a factory). */
+  reset(): void {
+    if (typeof this.source !== 'function') throw new Error('Reset needs a scenario factory.');
+
+    this.scenario = this.source();
+    this.stepIndex = 0;
+  }
 
   async identity(): Promise<Actor> {
     return { ...this.scenario.world.viewer };
