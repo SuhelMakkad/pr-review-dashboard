@@ -401,14 +401,16 @@ export function InsightsPage() {
                     },
                   ]}
                 />
-                <div className="mt-2">
-                  <Legend
-                    items={[
-                      { label: 'Needs you', color: 'var(--series-1)', shape: 'line' },
-                      { label: 'Waiting on author', color: 'var(--series-2)', shape: 'line' },
-                    ]}
-                  />
-                </div>
+                {insights.queue.length >= 2 && (
+                  <div className="mt-2">
+                    <Legend
+                      items={[
+                        { label: 'Needs you', color: 'var(--series-1)', shape: 'line' },
+                        { label: 'Waiting on author', color: 'var(--series-2)', shape: 'line' },
+                      ]}
+                    />
+                  </div>
+                )}
               </Card>
 
               <Card
