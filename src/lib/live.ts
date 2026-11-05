@@ -84,6 +84,9 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
       void client.invalidateQueries({ queryKey: queryKeys.mine });
 
       return;
+    case 'draft.updated':
+      void client.invalidateQueries({ queryKey: ['draft', event.id] });
+      return;
     case 'triage.updated':
       void client.invalidateQueries({ queryKey: queryKeys.pulls });
       void client.invalidateQueries({ queryKey: queryKeys.detail(event.id) });

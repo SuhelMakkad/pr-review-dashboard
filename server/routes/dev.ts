@@ -16,6 +16,14 @@ export function registerDevRoutes(
     return { label };
   });
 
+  app.get('/api/dev/writes', async () => ({ writes: fixture.writes }));
+
+  app.post<{ Body: { op?: string } }>('/api/dev/fail', async (request) => {
+    fixture.failNext = typeof request.body?.op === 'string' ? request.body.op : null;
+
+    return { failNext: fixture.failNext };
+  });
+
   app.post('/api/dev/reset', async () => {
     fixture.reset();
     service.store.clearAccount(fixture.scenario.world.viewer.login);

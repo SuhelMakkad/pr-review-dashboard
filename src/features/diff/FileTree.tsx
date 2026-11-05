@@ -24,8 +24,9 @@ export const FileTree = forwardRef<
     selected: string | undefined;
     threadCounts: Map<string, number>;
     onSelect: (path: string) => void;
+    onToggleViewed: (path: string) => void;
   }
->(function FileTree({ files, selected, threadCounts, onSelect }, ref) {
+>(function FileTree({ files, selected, threadCounts, onSelect, onToggleViewed }, ref) {
   const [filter, setFilter] = useState('');
   const selectedRef = useRef<HTMLButtonElement>(null);
   const visible = filter
@@ -105,37 +106,59 @@ export const FileTree = forwardRef<
                   {header}/
                 </div>
               )}
-              <button
-                ref={isSelected ? selectedRef : undefined}
-                type="button"
-                onClick={() => onSelect(file.path)}
-                aria-current={isSelected ? 'true' : undefined}
-                title={file.path}
+              <div
                 className={cn(
-                  'flex h-7 w-full items-center gap-2 pr-2 pl-3 text-left text-xs',
+                  'group flex h-7 items-center pr-1',
                   isSelected ? 'bg-selected text-fg' : 'text-fg-muted hover:bg-hover hover:text-fg',
-                  file.generated && 'italic',
                 )}
               >
-                <span
-                  className="w-3 shrink-0 text-center font-mono text-2xs font-bold"
-                  style={{ color: `var(--${status.tone})` }}
-                  aria-label={status.label}
+                <button
+                  ref={isSelected ? selectedRef : undefined}
+                  type="button"
+                  onClick={() => onSelect(file.path)}
+                  aria-current={isSelected ? 'true' : undefined}
+                  title={file.path}
+                  className={cn(
+                    'flex h-full min-w-0 flex-1 items-center gap-2 pl-3 text-left text-xs',
+                    file.generated && 'italic',
+                  )}
                 >
-                  {status.letter}
-                </span>
-                <span className="min-w-0 flex-1 truncate font-mono">{basename(file.path)}</span>
-                {threads > 0 && (
-                  <span className="rounded-xs bg-reply/15 px-1 text-2xs text-reply">{threads}</span>
-                )}
-                {file.viewed === 'VIEWED' ? (
-                  <CircleCheck size={12} className="shrink-0 text-ok" aria-label="Viewed" />
-                ) : (
+                  <span
+                    className="w-3 shrink-0 text-center font-mono text-2xs font-bold"
+                    style={{ color: `var(--${status.tone})` }}
+                    aria-label={status.label}
+                  >
+                    {status.letter}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-mono">{basename(file.path)}</span>
+                  {threads > 0 && (
+                    <span className="rounded-xs bg-reply/15 px-1 text-2xs text-reply">
+                      {threads}
+                    </span>
+                  )}
                   <span className="shrink-0 text-2xs text-fg-subtle tabular-nums">
                     +{file.additions} −{file.deletions}
                   </span>
-                )}
-              </button>
+                </button>
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={file.viewed === 'VIEWED'}
+                  aria-label={`Viewed ${basename(file.path)}`}
+                  title={file.viewed === 'VIEWED' ? 'Viewed — click to unmark' : 'Mark as viewed'}
+                  onClick={() => onToggleViewed(file.path)}
+                  className="ml-1 grid size-5 shrink-0 place-items-center rounded-xs text-fg-subtle hover:bg-hover hover:text-fg"
+                >
+                  {file.viewed === 'VIEWED' ? (
+                    <CircleCheck size={13} className="text-ok" aria-hidden="true" />
+                  ) : (
+                    <span
+                      className="size-3 rounded-full border border-line-strong"
+                      aria-hidden="true"
+                    />
+                  )}
+                </button>
+              </div>
             </div>
           );
         })}

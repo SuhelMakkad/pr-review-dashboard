@@ -75,8 +75,14 @@ test('workspace is accessible and matches the visual baseline', async ({ page })
   await expect(page.getByText('Good catch, batched in chunks of 5k now.')).toBeVisible();
   await page.waitForTimeout(500);
 
+  await expect(page.getByRole('button', { name: /Finish review/ })).toBeVisible();
+
   // The diff body is a third-party renderer in its own shadow DOM; the chrome around it is ours.
   await expectAccessible(page, ['.diff-surface']);
+
+  // Deterministic frame: diff scrolled to the top and syntax highlighting settled.
+  await page.locator('.diff-scroller').evaluate((element) => element.scrollTo(0, 0));
+  await page.waitForTimeout(1000);
   await expect(page).toHaveScreenshot('workspace-since-review.png', {
     mask: [page.locator('[data-volatile]')],
   });

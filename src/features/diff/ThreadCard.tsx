@@ -1,11 +1,29 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, MessageSquare } from 'lucide-react';
+import { toast } from 'sonner';
+import {
+  CheckCheck,
+  ChevronDown,
+  ChevronRight,
+  MessageSquare,
+  Reply,
+  RotateCcw,
+} from 'lucide-react';
 import type { ReviewThread } from '../../../shared/types';
 import { dateTime, relativePhrase } from '../../lib/time';
 import { Avatar } from '../../ui/Avatar';
 import { cn } from '../../ui/cn';
 import { MarkdownView } from '../../ui/Markdown';
 import { tone } from '../pulls/meta';
+import { Button } from '../../ui/Button';
+import { Composer } from '../review/Composer';
+
+export interface ThreadActions {
+  replying: boolean;
+  setReplying: (replying: boolean) => void;
+  reply: (body: string) => Promise<{ pending: boolean }>;
+  resolve: (resolved: boolean) => Promise<unknown>;
+  busy: boolean;
+}
 
 /** An inline review thread rendered under its line in the diff. Resolved threads start folded. */
 export function ThreadCard({
@@ -13,13 +31,16 @@ export function ThreadCard({
   account,
   unread,
   focused,
+  actions,
 }: {
   thread: ReviewThread;
   account: string;
   unread: Set<string>;
   focused?: boolean;
+  actions?: ThreadActions;
 }) {
   const [open, setOpen] = useState(!thread.isResolved || focused);
+  const [error, setError] = useState<string | null>(null);
   const newCount = thread.comments.filter((comment) =>
     unread.has(`${comment.id}:${comment.updatedAt}`),
   ).length;
@@ -88,6 +109,71 @@ export function ThreadCard({
               </div>
             );
           })}
+          {actions &&
+            (actions.replying ? (
+              <div className="p-2">
+                <Composer
+                  label="Reply to thread"
+                  placeholder="Reply…"
+                  busy={actions.busy}
+                  error={error}
+                  onCancel={() => {
+                    setError(null);
+                    actions.setReplying(false);
+                  }}
+                  primary={{
+                    label: `Reply as @${account}`,
+                    keys: '$mod+Enter',
+                    variant: 'primary',
+                    run: async (body) => {
+                      try {
+                        const result = await actions.reply(body);
+
+                        setError(null);
+                        actions.setReplying(false);
+                        toast(
+                          result.pending
+                            ? 'Reply added to your pending review on GitHub'
+                            : 'Reply posted',
+                        );
+                      } catch (failure) {
+                        setError((failure as Error).message);
+                      }
+                    },
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="flex items-center gap-1 bg-sunken/60 px-2 py-1">
+                {thread.viewerCanReply !== false && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<Reply size={12} />}
+                    onClick={() => actions.setReplying(true)}
+                    shortcut={focused ? 'r' : undefined}
+                  >
+                    Reply
+                  </Button>
+                )}
+                {thread.viewerCanResolve !== false && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={thread.isResolved ? <RotateCcw size={12} /> : <CheckCheck size={12} />}
+                    disabled={actions.busy}
+                    onClick={() =>
+                      void actions
+                        .resolve(!thread.isResolved)
+                        .catch((failure: Error) => toast.error(failure.message))
+                    }
+                    shortcut={focused ? 'Shift+r' : undefined}
+                  >
+                    {thread.isResolved ? 'Unresolve' : 'Resolve'}
+                  </Button>
+                )}
+              </div>
+            ))}
         </div>
       )}
     </div>

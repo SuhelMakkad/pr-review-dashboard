@@ -5,6 +5,7 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly code?: string,
+    readonly details: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -39,7 +40,10 @@ export async function api<T>(
     throw new ApiError('Review Desk is not reachable. Is `pnpm start` still running?', 0);
   }
 
-  const result = (await response.json().catch(() => ({}))) as { error?: string; code?: string };
+  const result = (await response.json().catch(() => ({}))) as Record<string, unknown> & {
+    error?: string;
+    code?: string;
+  };
 
   if (!response.ok) {
     if (result.code === 'SESSION_EXPIRED') window.location.reload();
@@ -48,6 +52,7 @@ export async function api<T>(
       result.error ?? 'The local server could not complete this request.',
       response.status,
       result.code,
+      result,
     );
   }
 

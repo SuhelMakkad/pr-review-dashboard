@@ -3,18 +3,18 @@ import { useNavigate, useSearch } from '@tanstack/react-router';
 import { WorkerPoolContextProvider } from '@pierre/diffs/react';
 import DiffsWorker from '@pierre/diffs/worker/worker.js?worker';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
+import { toast } from 'sonner';
 import {
   CircleAlert,
-  FileWarning,
   GitCompareArrows,
   History,
-  Info,
   PanelRightClose,
   PanelRightOpen,
 } from 'lucide-react';
-import type { DiffFile } from '../../../shared/diff';
+import type { DraftComment } from '../../../shared/review';
 import type { ReviewThread } from '../../../shared/types';
-import { useDiff, usePullDetail } from '../../lib/queries';
+import { refOf } from '../../lib/prRef';
+import { useDiff, usePullDetail, usePulls } from '../../lib/queries';
 import { useShortcuts } from '../../lib/shortcuts';
 import { storage } from '../../lib/storage';
 import { useAppearance } from '../../lib/theme';
@@ -22,11 +22,18 @@ import { Button, IconButton } from '../../ui/Button';
 import { cn } from '../../ui/cn';
 import { EmptyState } from '../../ui/EmptyState';
 import { Kbd } from '../../ui/Kbd';
-import { anchoredThreads, DiffPane } from '../diff/DiffPane';
+import type { Anchor, LineTarget } from '../diff/DiffPane';
 import { FileTree } from '../diff/FileTree';
 import { ThreadCard } from '../diff/ThreadCard';
 import { useCurrentPull } from '../pulls/useCurrentPull';
+import { Composer } from './Composer';
+import { DraftCommentCard } from './DraftCommentCard';
+import { FileView } from './FileView';
+import { FinishSheet } from './FinishSheet';
+import { PendingTray } from './PendingTray';
 import type { FilesSearch } from './search';
+import { ThreadsRail } from './ThreadsRail';
+import { useReview } from './useReview';
 
 const VIEW_KEY = 'review-desk-diff-view';
 
@@ -45,7 +52,7 @@ const resolvedTheme = (theme: string) =>
       : 'light'
     : (theme as 'light' | 'dark');
 
-/** The review workspace: file tree, one file's diff with inline threads, and the threads rail. */
+/** The review workspace: file tree, one file's diff with threads and drafts, threads rail, finish. */
 export function FilesWorkspace() {
   return (
     <WorkerPoolContextProvider
@@ -57,15 +64,24 @@ export function FilesWorkspace() {
   );
 }
 
+type ComposerState = (LineTarget & { path: string }) | { path: string; line: null } | null;
+
 function Workspace() {
   const { item } = useCurrentPull();
   const search = useSearch({ from: '/pr/$owner/$repo/$number/files' });
   const navigate = useNavigate({ from: '/pr/$owner/$repo/$number/files' });
+  const goTo = useNavigate();
+  const pulls = usePulls();
   const { theme } = useAppearance();
   const fileFilterRef = useRef<HTMLInputElement>(null);
   const diffRef = useRef<HTMLDivElement>(null);
   const [railOpen, setRailOpen] = useState(() => storage.get('review-desk-rail') !== 'closed');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [composer, setComposer] = useState<ComposerState>(null);
+  const [composerError, setComposerError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<LineTarget | null>(null);
+  const [replying, setReplying] = useState<string | null>(null);
+  const [finishOpen, setFinishOpen] = useState(false);
   const layout = useDefaultLayout({ id: 'files-workspace', storage: layoutStorage() });
 
   const reviewOid = item?.latestReview?.commitOid ?? null;
@@ -74,6 +90,10 @@ function Workspace() {
   const view = search.view ?? (storage.get(VIEW_KEY) === 'split' ? 'split' : 'unified');
   const diff = useDiff(item?.id ?? null, mode === 'since' ? 'since-review' : 'full');
   const detail = usePullDetail(item?.id ?? null);
+  const account = detail.data?.account ?? pulls.data?.account ?? '';
+  const review = useReview(item?.id ?? null, account);
+  const draft = review.draft.data;
+
   // Generated files (lockfiles, build output) go last and are never opened first.
   const files = useMemo(
     () =>
@@ -88,8 +108,8 @@ function Workspace() {
     files[0];
   const index = current ? files.indexOf(current) : -1;
   const threads = detail.data?.snapshot.threads ?? [];
-  const account = detail.data?.account ?? '';
   const unread = new Set(item?.unreadReplyKeys ?? []);
+  const drafts = draft?.comments ?? [];
 
   const threadsByFile = useMemo(() => {
     const map = new Map<string, ReviewThread[]>();
@@ -112,17 +132,22 @@ function Workspace() {
   const setSearch = (next: Partial<FilesSearch>, replace = true) =>
     navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace });
 
-  const selectFile = (path: string, thread?: string) => setSearch({ file: path, thread });
+  const selectFile = (path: string, thread?: string) => {
+    setComposer(null);
+    setSelection(null);
+    setSearch({ file: path, thread });
+  };
 
   const scrollDiff = (delta: number) => {
-    const scroller = diffRef.current?.querySelector<HTMLElement>('.diff-scroller');
-
-    scroller?.scrollBy({ top: delta, behavior: 'auto' });
+    diffRef.current
+      ?.querySelector<HTMLElement>('.diff-scroller')
+      ?.scrollBy({ top: delta, behavior: 'auto' });
   };
 
   const unresolved = threads.filter(
     (thread) => !thread.isResolved && files.some((file) => file.path === thread.path),
   );
+  const focusedThread = threads.find((thread) => thread.id === search.thread);
 
   const nextUnresolved = (direction: 1 | -1) => {
     if (unresolved.length === 0) return;
@@ -133,27 +158,53 @@ function Workspace() {
     selectFile(next.path, next.id);
   };
 
+  const toggleViewed = (path: string, advance: boolean) => {
+    const file = files.find((candidate) => candidate.path === path);
+
+    if (!file) return;
+
+    const viewed = file.viewed !== 'VIEWED';
+
+    review.setViewed.mutate(
+      { path, viewed },
+      { onError: (error) => toast.error(`Could not update viewed state: ${error.message}`) },
+    );
+
+    if (advance && viewed) {
+      const after = [...files.slice(index + 1), ...files.slice(0, index)].find(
+        (candidate) => candidate.viewed !== 'VIEWED' && candidate.path !== path,
+      );
+
+      if (after) selectFile(after.path);
+    }
+  };
+
+  const startComment = () => {
+    if (!current) return;
+
+    setComposerError(null);
+    setComposer(
+      selection ? { ...selection, path: current.path } : { path: current.path, line: null },
+    );
+  };
+
   // Bring a focused thread into view once its file has rendered.
   useEffect(() => {
     if (!search.thread) return;
 
     const timer = setTimeout(() => {
-      const host = diffRef.current;
-      const target =
-        host?.querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(search.thread!)}"]`) ??
-        [...(host?.querySelectorAll<HTMLElement>('*') ?? [])]
-          .map((element) =>
-            element.shadowRoot?.querySelector<HTMLElement>(
-              `[data-thread-id="${CSS.escape(search.thread!)}"]`,
-            ),
-          )
-          .find(Boolean);
-
-      target?.scrollIntoView({ block: 'center' });
+      diffRef.current
+        ?.querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(search.thread!)}"]`)
+        ?.scrollIntoView({ block: 'center' });
     }, 150);
 
     return () => clearTimeout(timer);
   }, [search.thread, current?.path]);
+
+  const nextAttention = () =>
+    pulls.data?.items.find(
+      (candidate) => candidate.queue === 'attention' && candidate.id !== item?.id,
+    );
 
   useShortcuts([
     {
@@ -181,6 +232,42 @@ function Workspace() {
       label: 'Previous unresolved thread',
       group: 'Pull request',
       run: () => nextUnresolved(-1),
+    },
+    {
+      keys: 'c',
+      label: 'Comment on selected lines (or the file)',
+      group: 'Pull request',
+      run: startComment,
+    },
+    {
+      keys: 'v',
+      label: 'Mark file viewed and go to the next',
+      group: 'Pull request',
+      run: () => current && toggleViewed(current.path, true),
+    },
+    {
+      keys: 'r',
+      label: 'Reply to the focused thread',
+      group: 'Pull request',
+      run: () => focusedThread && setReplying(focusedThread.id),
+    },
+    {
+      keys: 'Shift+r',
+      label: 'Resolve or unresolve the focused thread',
+      group: 'Pull request',
+      run: () =>
+        focusedThread &&
+        review.resolve.mutate(
+          { threadId: focusedThread.id, resolved: !focusedThread.isResolved },
+          { onError: (error) => toast.error(error.message) },
+        ),
+    },
+    {
+      keys: '$mod+Shift+Enter',
+      label: 'Finish review',
+      group: 'Pull request',
+      allowInInput: true,
+      run: () => setFinishOpen(true),
     },
     {
       keys: 't',
@@ -226,6 +313,106 @@ function Workspace() {
 
   if (!item) return null;
 
+  const renderThread = (thread: ReviewThread) => (
+    <ThreadCard
+      key={thread.id}
+      thread={thread}
+      account={account}
+      unread={unread}
+      focused={thread.id === search.thread}
+      actions={{
+        replying: replying === thread.id,
+        setReplying: (value) => setReplying(value ? thread.id : null),
+        reply: (body) => review.reply.mutateAsync({ threadId: thread.id, body }),
+        resolve: (resolved) => review.resolve.mutateAsync({ threadId: thread.id, resolved }),
+        busy: review.reply.isPending || review.resolve.isPending,
+      }}
+    />
+  );
+
+  const renderDraft = (comment: DraftComment) => (
+    <DraftCommentCard
+      key={comment.id}
+      comment={comment}
+      busy={review.editComment.isPending}
+      onEdit={(body) => review.editComment.mutateAsync({ id: comment.id, body })}
+      onDelete={() =>
+        review.deleteComment.mutate(comment.id, { onError: (error) => toast.error(error.message) })
+      }
+    />
+  );
+
+  const composerFor = (target: NonNullable<ComposerState>) => (
+    <Composer
+      label={target.line === null ? `Comment on ${target.path}` : `Comment on line ${target.line}`}
+      busy={review.addComment.isPending || review.commentNow.isPending}
+      error={composerError}
+      onCancel={() => {
+        setComposer(null);
+        setComposerError(null);
+      }}
+      primary={{
+        label: 'Add to review',
+        keys: '$mod+Enter',
+        variant: 'primary',
+        run: async (body) => {
+          try {
+            await review.addComment.mutateAsync({
+              path: target.path,
+              line: target.line,
+              side: target.line === null ? 'RIGHT' : target.side,
+              startLine: target.line === null ? null : target.startLine,
+              body,
+            });
+            setComposer(null);
+            setComposerError(null);
+          } catch (error) {
+            setComposerError((error as Error).message);
+          }
+        },
+      }}
+      alternate={{
+        label: `Comment now as @${account}`,
+        keys: '$mod+Alt+Enter',
+        variant: 'secondary',
+        run: async (body) => {
+          try {
+            await review.commentNow.mutateAsync({
+              path: target.path,
+              line: target.line,
+              side: target.line === null ? 'RIGHT' : target.side,
+              startLine: target.line === null ? null : target.startLine,
+              body,
+            });
+            setComposer(null);
+            setComposerError(null);
+            toast('Comment posted to GitHub');
+          } catch (error) {
+            setComposerError((error as Error).message);
+          }
+        },
+      }}
+    />
+  );
+
+  const renderAnchor = (anchor: Anchor) => {
+    if (anchor.kind === 'thread') {
+      const thread = threads.find((candidate) => candidate.id === anchor.id);
+
+      return thread ? renderThread(thread) : null;
+    }
+
+    if (anchor.kind === 'draft') {
+      const comment = drafts.find((candidate) => candidate.id === anchor.id);
+
+      return comment ? renderDraft(comment) : null;
+    }
+
+    return composer && composer.line !== null ? (
+      <div className="my-2 mr-4 ml-2">{composerFor(composer)}</div>
+    ) : null;
+  };
+
   const kind = diff.data?.kind;
   const banner =
     mode === 'since' && diff.data
@@ -243,6 +430,7 @@ function Workspace() {
               text: diff.data.note ?? '',
             }
       : null;
+  const viewedCount = files.filter((file) => file.viewed === 'VIEWED').length;
 
   return (
     <div className="flex h-full flex-col">
@@ -289,6 +477,16 @@ function Workspace() {
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">
+          {current && (
+            <Button
+              size="sm"
+              variant={current.viewed === 'VIEWED' ? 'secondary' : 'ghost'}
+              onClick={() => toggleViewed(current.path, false)}
+              aria-pressed={current.viewed === 'VIEWED'}
+            >
+              {current.viewed === 'VIEWED' ? 'Viewed' : 'Mark viewed'}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="ghost"
@@ -344,6 +542,7 @@ function Workspace() {
               selected={current?.path}
               threadCounts={threadCounts}
               onSelect={(path) => selectFile(path)}
+              onToggleViewed={(path) => toggleViewed(path, false)}
             />
           ) : (
             <div className="h-full border-r border-line bg-sunken" />
@@ -381,13 +580,30 @@ function Workspace() {
                 expanded={expanded.has(current.path)}
                 onExpand={() => setExpanded(new Set([...expanded, current.path]))}
                 threads={threadsByFile.get(current.path) ?? []}
+                drafts={drafts.filter((comment) => comment.path === current.path)}
+                composer={
+                  composer && composer.path === current.path && composer.line !== null
+                    ? composer
+                    : null
+                }
+                fileComposer={
+                  composer && composer.path === current.path && composer.line === null
+                    ? composerFor(composer)
+                    : null
+                }
                 view={view}
                 theme={resolvedTheme(theme)}
                 leftSideComments={mode === 'all'}
-                account={account}
-                unread={unread}
-                focusedThread={search.thread}
                 prUrl={item.url}
+                renderAnchor={renderAnchor}
+                renderThread={renderThread}
+                renderDraft={renderDraft}
+                onCommentLine={(target) => {
+                  setComposerError(null);
+                  setComposer({ ...target, path: current.path });
+                }}
+                onCommentFile={() => setComposer({ path: current.path, line: null })}
+                onSelectLines={setSelection}
               />
             )}
           </div>
@@ -407,200 +623,64 @@ function Workspace() {
           </>
         )}
       </Group>
-    </div>
-  );
-}
 
-function FileView({
-  file,
-  expanded,
-  onExpand,
-  threads,
-  view,
-  theme,
-  leftSideComments,
-  account,
-  unread,
-  focusedThread,
-  prUrl,
-}: {
-  file: DiffFile;
-  expanded: boolean;
-  onExpand: () => void;
-  threads: ReviewThread[];
-  view: 'unified' | 'split';
-  theme: 'light' | 'dark';
-  leftSideComments: boolean;
-  account: string;
-  unread: Set<string>;
-  focusedThread?: string;
-  prUrl: string;
-}) {
-  const byId = new Map(threads.map((thread) => [thread.id, thread]));
-  const floating = threads.filter(
-    (thread) => !anchoredThreads([thread], { leftSide: leftSideComments }).length,
-  );
-
-  if (!file.patch || (file.generated && !expanded)) {
-    const reason = file.binary
-      ? 'Binary file — not shown.'
-      : file.tooLarge
-        ? 'This diff is too large to show here.'
-        : 'Generated file (lockfile, build output or snapshot) — collapsed.';
-
-    return (
-      <div className="grid h-full place-items-center">
-        <EmptyState
-          icon={<FileWarning size={28} />}
-          title={file.path}
-          hint={reason}
-          action={
-            file.generated && file.patch ? (
-              <Button size="sm" onClick={onExpand} shortcut="x">
-                Load diff
-              </Button>
-            ) : (
-              <a
-                href={`${prUrl}/files`}
-                target="_blank"
-                rel="noreferrer"
-                className="text-sm text-accent underline"
-              >
-                View on GitHub
-              </a>
-            )
+      <PendingTray
+        draft={draft}
+        viewed={viewedCount}
+        total={files.length}
+        onFinish={() => setFinishOpen(true)}
+        onDiscard={() => {
+          if (window.confirm('Discard your pending review and all its comments?')) {
+            review.discard.mutate(undefined, { onError: (error) => toast.error(error.message) });
           }
-        />
-      </div>
-    );
-  }
+        }}
+      />
 
-  return (
-    <div className="flex h-full flex-col">
-      {floating.length > 0 && (
-        <div className="max-h-48 shrink-0 overflow-y-auto border-b border-line bg-sunken px-2 py-1">
-          <p className="flex items-center gap-1.5 px-2 pt-1 text-2xs text-fg-subtle">
-            <Info size={11} aria-hidden="true" />
-            Threads on outdated lines or on the whole file
-          </p>
-          {floating.map((thread) => (
-            <ThreadCard
-              key={thread.id}
-              thread={thread}
-              account={account}
-              unread={unread}
-              focused={thread.id === focusedThread}
-            />
-          ))}
-        </div>
-      )}
-      <div className="min-h-0 flex-1">
-        <DiffPane
-          file={file}
-          threads={threads}
-          view={view}
-          theme={theme}
-          leftSideComments={leftSideComments}
-          renderThread={(threadId) => {
-            const thread = byId.get(threadId);
+      {draft && detail.data && (
+        <FinishSheet
+          open={finishOpen}
+          onOpenChange={setFinishOpen}
+          draft={draft}
+          account={account}
+          ci={item.ci}
+          viewedHeadOid={detail.data.snapshot.headOid}
+          saveMeta={(changes) => review.saveMeta.mutate(changes)}
+          submit={(input) => review.submit.mutateAsync(input)}
+          busy={review.submit.isPending}
+          onReviewNewCommits={() => {
+            setFinishOpen(false);
+            setSearch({ mode: 'since', file: undefined }, false);
+          }}
+          onSubmitted={(result) => {
+            setFinishOpen(false);
+            toast('Review submitted', {
+              description: `${result.submittedComments} ${result.submittedComments === 1 ? 'comment' : 'comments'} posted to GitHub.`,
+              action: {
+                label: 'Open',
+                onClick: () => window.open(result.reviewUrl, '_blank', 'noopener,noreferrer'),
+              },
+            });
 
-            return thread ? (
-              <ThreadCard
-                thread={thread}
-                account={account}
-                unread={unread}
-                focused={thread.id === focusedThread}
-              />
-            ) : null;
+            const next = nextAttention();
+
+            if (next) {
+              const target = refOf(next);
+
+              void goTo({
+                to: '/inbox/$queue/$owner/$repo/$number',
+                params: {
+                  queue: 'attention',
+                  owner: target.owner,
+                  repo: target.repo,
+                  number: String(target.number),
+                },
+              });
+            } else {
+              void goTo({ to: '/inbox/$queue', params: { queue: 'attention' } });
+            }
           }}
         />
-      </div>
+      )}
     </div>
-  );
-}
-
-function ThreadsRail({
-  threads,
-  files,
-  unread,
-  focused,
-  onOpen,
-}: {
-  threads: ReviewThread[];
-  files: DiffFile[];
-  unread: Set<string>;
-  focused?: string;
-  onOpen: (thread: ReviewThread) => void;
-}) {
-  const inDiff = new Set(files.map((file) => file.path));
-  const sorted = [...threads].sort(
-    (left, right) =>
-      Number(left.isResolved) - Number(right.isResolved) || left.path.localeCompare(right.path),
-  );
-  const open = threads.filter((thread) => !thread.isResolved).length;
-
-  return (
-    <aside
-      aria-label="Review threads"
-      className="flex h-full flex-col border-l border-line bg-sunken"
-    >
-      <div className="flex items-center justify-between px-3 pt-3 pb-2 text-xs">
-        <span className="font-semibold text-fg-muted">Threads</span>
-        <span className="text-fg-subtle">
-          {open} open · <Kbd keys="u" />
-        </span>
-      </div>
-      <ol className="scroll-thin min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3">
-        {sorted.length === 0 && (
-          <li className="px-1 py-6 text-center text-xs text-fg-subtle">No review threads yet.</li>
-        )}
-        {sorted.map((thread) => {
-          const first = thread.comments[0];
-          const newCount = thread.comments.filter((comment) =>
-            unread.has(`${comment.id}:${comment.updatedAt}`),
-          ).length;
-
-          return (
-            <li key={thread.id}>
-              <button
-                type="button"
-                onClick={() => onOpen(thread)}
-                disabled={!inDiff.has(thread.path)}
-                title={
-                  inDiff.has(thread.path) ? undefined : 'This file is not part of the current diff'
-                }
-                className={cn(
-                  'w-full rounded-sm border px-2.5 py-2 text-left text-xs disabled:opacity-50',
-                  thread.id === focused
-                    ? 'border-accent bg-selected'
-                    : 'border-transparent hover:bg-hover',
-                  thread.isResolved && 'text-fg-muted',
-                )}
-              >
-                <div className="flex items-center gap-1.5">
-                  <span className="min-w-0 flex-1 truncate font-mono text-2xs text-fg-subtle">
-                    {thread.path.split('/').pop()}
-                    {thread.line ? `:${thread.line}` : ''}
-                  </span>
-                  {newCount > 0 && (
-                    <span className="rounded-xs bg-reply/15 px-1 text-2xs font-semibold text-reply">
-                      {newCount} new
-                    </span>
-                  )}
-                  {thread.isResolved && <span className="text-2xs text-ok">Resolved</span>}
-                  {thread.isOutdated && !thread.isResolved && (
-                    <span className="text-2xs text-fg-subtle">Outdated</span>
-                  )}
-                </div>
-                <p className="mt-0.5 line-clamp-2 text-fg">
-                  <span className="font-medium">{first?.author.login}: </span>
-                  {first?.body}
-                </p>
-              </button>
-            </li>
-          );
-        })}
-      </ol>
-    </aside>
   );
 }

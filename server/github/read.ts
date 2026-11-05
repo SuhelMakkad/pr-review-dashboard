@@ -34,6 +34,8 @@ import {
   type ConnectionKey,
 } from './queries.js';
 import { GhCli, type GitHubTransport } from './transport.js';
+import { createWriter, type GitHubWrites, type ThreadInput } from './write.js';
+import type { ReviewEvent } from '../../shared/review.js';
 
 interface PageInfo {
   hasNextPage: boolean;
@@ -250,7 +252,47 @@ export function fingerprintOf(node: RawDetect): string {
 }
 
 export class GitHub implements GitHubApi {
-  constructor(readonly transport: GitHubTransport = new GhCli()) {}
+  private readonly writes: GitHubWrites;
+
+  constructor(readonly transport: GitHubTransport = new GhCli()) {
+    this.writes = createWriter(transport);
+  }
+
+  addPendingReview(prId: string, commitOid: string) {
+    return this.writes.addPendingReview(prId, commitOid);
+  }
+
+  addReviewThread(reviewId: string, thread: ThreadInput) {
+    return this.writes.addReviewThread(reviewId, thread);
+  }
+
+  submitReview(reviewId: string, event: ReviewEvent, body: string) {
+    return this.writes.submitReview(reviewId, event, body);
+  }
+
+  deleteReview(reviewId: string) {
+    return this.writes.deleteReview(reviewId);
+  }
+
+  commentNow(prId: string, commitOid: string, thread: ThreadInput) {
+    return this.writes.commentNow(prId, commitOid, thread);
+  }
+
+  replyToThread(threadId: string, body: string) {
+    return this.writes.replyToThread(threadId, body);
+  }
+
+  setThreadResolved(threadId: string, resolved: boolean) {
+    return this.writes.setThreadResolved(threadId, resolved);
+  }
+
+  setFileViewed(prId: string, path: string, viewed: boolean) {
+    return this.writes.setFileViewed(prId, path, viewed);
+  }
+
+  addConversationComment(prId: string, body: string) {
+    return this.writes.addConversationComment(prId, body);
+  }
 
   async identity(): Promise<Actor> {
     const result = await this.transport.graphql<{ viewer: Actor }>(identityQuery);

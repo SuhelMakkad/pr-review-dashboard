@@ -98,6 +98,43 @@ export function blobsQuery(count: number): string {
 }`;
 }
 
+/** Review writes. Every write is an explicit user action in the app. */
+export const mutations = {
+  AddPendingReview: `mutation AddPendingReview($pullRequestId: ID!, $commitOID: GitObjectID) {
+  addPullRequestReview(input: { pullRequestId: $pullRequestId, commitOID: $commitOID }) { pullRequestReview { id } }
+}`,
+  AddReviewThread: `mutation AddReviewThread($input: AddPullRequestReviewThreadInput!) {
+  addPullRequestReviewThread(input: $input) { thread { id } }
+}`,
+  SubmitReview: `mutation SubmitReview($id: ID!, $event: PullRequestReviewEvent!, $body: String) {
+  submitPullRequestReview(input: { pullRequestReviewId: $id, event: $event, body: $body }) { pullRequestReview { id url state submittedAt } }
+}`,
+  DeleteReview: `mutation DeleteReview($id: ID!) {
+  deletePullRequestReview(input: { pullRequestReviewId: $id }) { pullRequestReview { id } }
+}`,
+  CommentNow: `mutation CommentNow($pullRequestId: ID!, $commitOID: GitObjectID, $threads: [DraftPullRequestReviewThread]) {
+  addPullRequestReview(input: { pullRequestId: $pullRequestId, commitOID: $commitOID, event: COMMENT, threads: $threads }) { pullRequestReview { id url } }
+}`,
+  ReplyToThread: `mutation ReplyToThread($threadId: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id url state } }
+}`,
+  ResolveThread: `mutation ResolveThread($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } }
+}`,
+  UnresolveThread: `mutation UnresolveThread($threadId: ID!) {
+  unresolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } }
+}`,
+  MarkFileViewed: `mutation MarkFileViewed($pullRequestId: ID!, $path: String!) {
+  markFileAsViewed(input: { pullRequestId: $pullRequestId, path: $path }) { pullRequest { id } }
+}`,
+  UnmarkFileViewed: `mutation UnmarkFileViewed($pullRequestId: ID!, $path: String!) {
+  unmarkFileAsViewed(input: { pullRequestId: $pullRequestId, path: $path }) { pullRequest { id } }
+}`,
+  AddComment: `mutation AddComment($subjectId: ID!, $body: String!) {
+  addComment(input: { subjectId: $subjectId, body: $body }) { commentEdge { node { id url } } }
+}`,
+} as const;
+
 /** All static documents plus each generated page query, for the schema contract test. */
 export function allDocuments(): Record<string, string> {
   const pages = Object.fromEntries(
@@ -116,5 +153,6 @@ export function allDocuments(): Record<string, string> {
     Checks: checksPageQuery,
     Blobs: blobsQuery(2),
     ...pages,
+    ...mutations,
   };
 }

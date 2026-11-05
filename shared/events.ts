@@ -6,6 +6,7 @@ export type ServerEvent =
   | { type: 'resync' }
   | { type: 'status'; status: SyncStatus }
   | { type: 'pulls.changed'; ids: string[] }
-  | { type: 'triage.updated'; id: string };
+  | { type: 'triage.updated'; id: string }
+  | { type: 'draft.updated'; id: string };
 
 export type ServerEventType = ServerEvent['type'];

@@ -45,3 +45,28 @@ export async function expectAccessible(page: Page, exclude: string[] = []) {
     ),
   ).toEqual([]);
 }
+
+export async function demoWrites(
+  page: Page,
+): Promise<{ op: string; details: Record<string, unknown> }[]> {
+  return (await (await page.request.get('/api/dev/writes')).json()).writes;
+}
+
+/** Makes the next GitHub write with this name fail once. */
+export async function failNext(page: Page, op: string) {
+  await page.evaluate(async (name) => {
+    const token = document.querySelector<HTMLMetaElement>(
+      'meta[name="review-desk-session"]',
+    )!.content;
+
+    await fetch('/api/dev/fail', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Review-Desk': '1',
+        'X-Review-Desk-Session': token,
+      },
+      body: JSON.stringify({ op: name }),
+    });
+  }, op);
+}

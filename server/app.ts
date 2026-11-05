@@ -11,6 +11,8 @@ import { registerEventStream } from './http/sse.js';
 import { DiffService } from './diff/service.js';
 import { registerDevRoutes } from './routes/dev.js';
 import { registerDiffRoutes } from './routes/diff.js';
+import { registerReviewRoutes } from './routes/review.js';
+import { ReviewService } from './review/service.js';
 import { registerPullRoutes } from './routes/pulls.js';
 import type { SyncService } from './sync/service.js';
 
@@ -56,7 +58,10 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     keepaliveMs: options.keepaliveMs,
   });
   registerPullRoutes(app, service);
-  registerDiffRoutes(app, service, new DiffService(service.github));
+  const diffs = new DiffService(service.github);
+
+  registerDiffRoutes(app, service, diffs);
+  registerReviewRoutes(app, new ReviewService(service, service.github, diffs, service.events));
 
   if (options.fixture) registerDevRoutes(app, service, options.fixture);
 

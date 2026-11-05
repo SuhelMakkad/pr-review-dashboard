@@ -60,6 +60,29 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'review-drafts',
+    up(db) {
+      db.exec(`
+        CREATE TABLE review_drafts (
+          account TEXT NOT NULL, pr_id TEXT NOT NULL,
+          body TEXT NOT NULL DEFAULT '', event TEXT NOT NULL DEFAULT 'COMMENT',
+          github_review_id TEXT, updated_at TEXT NOT NULL,
+          PRIMARY KEY (account, pr_id)
+        );
+        CREATE TABLE draft_comments (
+          id TEXT PRIMARY KEY, account TEXT NOT NULL, pr_id TEXT NOT NULL,
+          path TEXT NOT NULL, line INTEGER, side TEXT NOT NULL DEFAULT 'RIGHT',
+          start_line INTEGER, start_side TEXT, subject_type TEXT NOT NULL DEFAULT 'LINE',
+          body TEXT NOT NULL, origin TEXT NOT NULL DEFAULT 'user', anchor_oid TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft', github_thread_id TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE INDEX draft_comments_by_pr ON draft_comments (account, pr_id, created_at);
+      `);
+    },
+  },
 ];
 
 export function schemaVersion(db: DatabaseSync): number {

@@ -1,4 +1,5 @@
 import type { Actor, PullRequestSnapshot, Source } from '../../shared/types.js';
+import type { GitHubWrites } from './write.js';
 
 export interface RateBudget {
   limit: number;
@@ -42,7 +43,7 @@ export interface BlobText {
  * Domain-level GitHub access. The real client (`GitHub`) implements it over the gh CLI; demo mode
  * implements it from an in-memory scenario so the UI and services run without GitHub.
  */
-export interface GitHubApi {
+export interface GitHubApi extends GitHubWrites {
   identity(): Promise<Actor>;
   teams(): Promise<string[]>;
   discover(login: string, source: Source): Promise<string[]>;
