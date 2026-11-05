@@ -2,6 +2,8 @@ import type {
   Actor,
   Check,
   CiState,
+  DiffSide,
+  PullFile,
   PullRequestSnapshot,
   RequestEvent,
   Reviewer,
@@ -9,11 +11,14 @@ import type {
   Source,
   ThreadComment,
 } from '../../shared/types.js';
-import type { GitHubApi } from './api.js';
+import { createHash } from 'node:crypto';
+import { SNAPSHOT_VERSION } from '../../shared/snapshot.js';
+import type { DetectResult, GitHubApi, RateBudget } from './api.js';
 import { GitHubError } from './errors.js';
 import {
   checksPageQuery,
   connectionPageQuery,
+  detectQuery,
   discoverQuery,
   identityQuery,
   snapshotQuery,
@@ -46,8 +51,10 @@ interface RawReview {
   url: string;
   commit: { oid: string } | null;
 }
-interface RawComment extends Omit<ThreadComment, 'replyToId'> {
+interface RawComment extends Omit<ThreadComment, 'replyToId' | 'commitOid' | 'originalCommitOid'> {
   replyTo: { id: string } | null;
+  commit?: { oid: string } | null;
+  originalCommit?: { oid: string } | null;
 }
 interface RawThread {
   id: string;
@@ -55,7 +62,34 @@ interface RawThread {
   isOutdated: boolean;
   path: string;
   line: number | null;
+  diffSide?: DiffSide;
+  startLine?: number | null;
+  originalLine?: number | null;
+  subjectType?: 'LINE' | 'FILE';
+  viewerCanReply?: boolean;
+  viewerCanResolve?: boolean;
   comments: Connection<RawComment>;
+}
+interface RawConversationComment {
+  id: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+  author: Actor | null;
+}
+interface RawForcePush {
+  id?: string;
+  createdAt?: string;
+  beforeCommit?: { oid: string } | null;
+  afterCommit?: { oid: string } | null;
+  actor?: { login: string } | null;
+}
+interface RawVerdict {
+  state: string;
+  submittedAt: string | null;
+  author: { login: string } | null;
+  commit: { oid: string } | null;
 }
 interface RawEvent {
   __typename: string;
@@ -85,6 +119,8 @@ interface RawPr {
   createdAt: string;
   updatedAt: string;
   headRefOid: string;
+  baseRefOid?: string | null;
+  mergeStateStatus?: string | null;
   baseRefName: string;
   headRefName: string;
   additions: number;
@@ -97,7 +133,11 @@ interface RawPr {
   reviewRequests: Connection<{ requestedReviewer: RawReviewer | null }>;
   timelineItems: Connection<RawEvent>;
   reviewThreads: Connection<RawThread>;
-  files: Connection<{ path: string; additions: number; deletions: number }>;
+  files: Connection<PullFile>;
+  verdicts?: { nodes: RawVerdict[] };
+  conversation?: { nodes: RawConversationComment[] };
+  pending?: { nodes: { id: string; createdAt: string; comments: { totalCount: number } }[] };
+  forcePushes?: { nodes: RawForcePush[] };
   commits: {
     nodes: {
       commit: {
@@ -144,6 +184,36 @@ export function ciState(state: string): CiState {
   return 'none';
 }
 
+const searchQualifiers: Record<Source, string> = {
+  requested: 'review-requested',
+  assigned: 'assignee',
+  reviewed: 'reviewed-by',
+  authored: 'author',
+  mentioned: 'mentions',
+};
+
+interface RawDetect {
+  id: string;
+  state: PullRequestSnapshot['state'];
+  isDraft: boolean;
+  updatedAt: string;
+  headRefOid: string;
+  baseRefOid: string | null;
+  mergeStateStatus: string | null;
+  mergeable: string;
+  reviewDecision: string | null;
+  commits: { nodes: { commit: { statusCheckRollup: unknown } }[] };
+  timelineItems: { totalCount: number };
+  reviewThreads: { totalCount: number };
+  comments: { totalCount: number };
+  reviews: { totalCount: number };
+}
+
+/** Stable digest of everything Detect returns for one PR. */
+export function fingerprintOf(node: RawDetect): string {
+  return createHash('sha256').update(JSON.stringify(node)).digest('hex').slice(0, 32);
+}
+
 export class GitHub implements GitHubApi {
   constructor(readonly transport: GitHubTransport = new GhCli()) {}
 
@@ -168,12 +238,7 @@ export class GitHub implements GitHubApi {
   }
 
   async discover(login: string, source: Source): Promise<string[]> {
-    const qualifier =
-      source === 'requested'
-        ? 'review-requested'
-        : source === 'assigned'
-          ? 'assignee'
-          : 'reviewed-by';
+    const qualifier = searchQualifiers[source];
     const base = `is:pr is:open ${qualifier}:${login}`;
     const search = async (query: string, start: number, end: number): Promise<string[]> => {
       const ids: string[] = [];
@@ -210,6 +275,33 @@ export class GitHub implements GitHubApi {
     };
 
     return [...new Set(await search(base, Date.UTC(2008, 0, 1), Date.now() + 86_400_000))];
+  }
+
+  async detect(ids: string[]): Promise<{ results: DetectResult[]; budget: RateBudget | null }> {
+    const results: DetectResult[] = [];
+    let budget: RateBudget | null = null;
+
+    for (let start = 0; start < ids.length; start += 50) {
+      const batch = ids.slice(start, start + 50);
+      const data = await this.transport.graphql<{
+        rateLimit: RateBudget | null;
+        nodes: (RawDetect | null)[];
+      }>(detectQuery, { ids: batch });
+
+      budget = data.rateLimit ?? budget;
+
+      batch.forEach((id, index) => {
+        const node = data.nodes[index];
+
+        results.push(
+          node?.id
+            ? { id, state: node.state, fingerprint: fingerprintOf(node) }
+            : { id, state: null, fingerprint: null },
+        );
+      });
+    }
+
+    return { results, budget };
   }
 
   private async collect<T>(
@@ -354,16 +446,53 @@ export class GitHub implements GitHubApi {
         })),
       threads: threads.map((thread) => ({
         ...thread,
-        comments: thread.comments.nodes.filter(Boolean).map((comment) => ({
-          ...comment,
-          author: comment.author ?? { login: 'deleted-user' },
-          replyToId: comment.replyTo?.id ?? null,
-        })),
+        comments: thread.comments.nodes
+          .filter(Boolean)
+          .map(({ replyTo, commit, originalCommit, ...comment }) => ({
+            ...comment,
+            author: comment.author ?? { login: 'deleted-user' },
+            replyToId: replyTo?.id ?? null,
+            commitOid: commit?.oid ?? null,
+            originalCommitOid: originalCommit?.oid ?? null,
+          })),
       })),
       files,
       checks: rawChecks.filter(Boolean).map(check),
       ci: ciState(commit?.statusCheckRollup?.state ?? ''),
       fetchedAt: now,
+      version: SNAPSHOT_VERSION,
+      baseOid: raw.baseRefOid ?? null,
+      mergeStateStatus: raw.mergeStateStatus ?? null,
+      conversation: (raw.conversation?.nodes ?? []).filter(Boolean).map((comment) => ({
+        ...comment,
+        author: comment.author ?? { login: 'deleted-user' },
+      })),
+      forcePushes: (raw.forcePushes?.nodes ?? [])
+        .filter((event): event is Required<Pick<RawForcePush, 'id' | 'createdAt'>> & RawForcePush =>
+          Boolean(event?.id),
+        )
+        .map((event) => ({
+          id: event.id,
+          createdAt: event.createdAt,
+          beforeOid: event.beforeCommit?.oid ?? null,
+          afterOid: event.afterCommit?.oid ?? null,
+          actor: event.actor?.login ?? null,
+        })),
+      verdicts: (raw.verdicts?.nodes ?? [])
+        .filter((verdict) => verdict?.author && verdict.submittedAt)
+        .map((verdict) => ({
+          login: verdict.author!.login,
+          state: verdict.state as ReviewState,
+          submittedAt: verdict.submittedAt!,
+          commitOid: verdict.commit?.oid ?? null,
+        })),
+      pendingReview: raw.pending?.nodes[0]
+        ? {
+            id: raw.pending.nodes[0].id,
+            createdAt: raw.pending.nodes[0].createdAt,
+            commentCount: raw.pending.nodes[0].comments.totalCount,
+          }
+        : null,
     };
   }
 }

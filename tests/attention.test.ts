@@ -269,3 +269,52 @@ describe('done until new activity', () => {
     expect(item.doneAt).toBeNull();
   });
 });
+
+describe('mentions', () => {
+  const mention = (
+    overrides: Partial<{ id: string; body: string; at: string; login: string }> = {},
+  ) => ({
+    id: overrides.id ?? 'c1',
+    author: { login: overrides.login ?? 'ana' },
+    body: overrides.body ?? 'Thoughts, @me?',
+    createdAt: overrides.at ?? t(9),
+    updatedAt: overrides.at ?? t(9),
+    url: 'https://github.com/c1',
+  });
+
+  it('surfaces a conversation mention newer than your last activity', () => {
+    const item = deriveItem(
+      snapshot({ conversation: [mention()], reviews: [review({ submittedAt: t(8) })] }),
+      emptyTriage(),
+      'me',
+      [],
+    );
+
+    expect(item.reasons.map((reason) => reason.kind)).toEqual(['mention']);
+    expect(item.unreadReplyKeys).toEqual([`mention:c1:${t(9)}`]);
+    expect(item.queue).toBe('attention');
+  });
+
+  it('ignores mentions you already responded to, your own text, and look-alike handles', () => {
+    const answered = snapshot({
+      conversation: [
+        mention({ at: t(8) }),
+        mention({ id: 'mine', login: 'me', at: t(9), body: 'Done' }),
+      ],
+    });
+    const ownText = snapshot({ conversation: [mention({ login: 'me' })] });
+    const lookAlike = snapshot({ conversation: [mention({ body: 'cc @mega and mail@me.com' })] });
+
+    for (const pr of [answered, ownText, lookAlike]) {
+      expect(deriveItem(pr, emptyTriage(), 'me', []).reasons).toEqual([]);
+    }
+  });
+
+  it('acknowledges a mention through the seen keys', () => {
+    const triage = { ...emptyTriage(), seenReplyKeys: [`mention:c1:${t(9)}`] };
+
+    expect(deriveItem(snapshot({ conversation: [mention()] }), triage, 'me', []).reasons).toEqual(
+      [],
+    );
+  });
+});

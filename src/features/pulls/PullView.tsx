@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   AlarmClock,
   ArrowUpRight,
@@ -16,6 +16,7 @@ import type {
   PullRequestSnapshot,
   ReviewThread,
 } from '../../../shared/types';
+import { api } from '../../lib/api';
 import { usePullDetail, useTriage } from '../../lib/queries';
 import { useShortcuts } from '../../lib/shortcuts';
 import { dateTime, relativePhrase, shortDateTime } from '../../lib/time';
@@ -75,7 +76,9 @@ function whyLines(
             ? 'Review requested again after your last review'
             : reason.kind === 'reply'
               ? `${replies.length} new ${replies.length === 1 ? 'reply' : 'replies'} in threads you joined`
-              : 'Your latest review was dismissed';
+              : reason.kind === 'mention'
+                ? 'You were mentioned in the conversation'
+                : 'Your latest review was dismissed';
 
     lines.push({
       kind: reason.kind,
@@ -188,6 +191,16 @@ function PullDetailView({
   );
   const latest = item.latestReview;
   const why = whyLines(item, pr);
+  const conversation = pr.conversation.slice(-10);
+
+  // Opening a PR refreshes it when the cached copy is more than two minutes old.
+  useEffect(() => {
+    if (Date.now() - Date.parse(pr.fetchedAt) > 120_000) {
+      void api(`/api/pulls/${encodeURIComponent(item.id)}/refresh`, { method: 'POST' }).catch(
+        () => undefined,
+      );
+    }
+  }, [item.id]);
   const files = showAllFiles ? pr.files : pr.files.slice(0, 12);
 
   const leaveQueue = (action: () => void) => {
@@ -426,6 +439,49 @@ function PullDetailView({
             </p>
           )}
         </Section>
+
+        {conversation.length > 0 && (
+          <Section title={`Conversation · ${pr.conversation.length}`}>
+            <ol className="space-y-3">
+              {conversation.map((comment) => {
+                const isUnread = unread.has(`mention:${comment.id}:${comment.updatedAt}`);
+
+                return (
+                  <li
+                    key={comment.id}
+                    className={cn(
+                      'rounded-md border border-line px-3 py-2.5',
+                      isUnread && 'border-mention/40 bg-mention/5',
+                    )}
+                  >
+                    <div className="mb-1 flex items-center gap-2 text-xs">
+                      <Avatar login={comment.author.login} size={16} />
+                      <span className="font-medium">{comment.author.login}</span>
+                      {isUnread && (
+                        <span
+                          className="tone rounded-xs px-1 text-2xs font-semibold"
+                          style={tone('mention')}
+                        >
+                          Mentions you
+                        </span>
+                      )}
+                      <a
+                        href={comment.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ml-auto text-fg-subtle hover:text-fg"
+                        title={dateTime(comment.createdAt)}
+                      >
+                        {relativePhrase(comment.createdAt)}
+                      </a>
+                    </div>
+                    <MarkdownView>{comment.body}</MarkdownView>
+                  </li>
+                );
+              })}
+            </ol>
+          </Section>
+        )}
 
         <Section title="Description">
           {pr.body.trim() ? (

@@ -1,7 +1,11 @@
 export type CiState = 'success' | 'failure' | 'pending' | 'none';
 export type ReviewState = 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED';
-export type Source = 'requested' | 'assigned' | 'reviewed';
-export type AttentionKind = 'first_review' | 'changed' | 'requested_again' | 'reply' | 'dismissed';
+export type Source = 'requested' | 'assigned' | 'reviewed' | 'authored' | 'mentioned';
+
+/** Feeds that put a PR in the reviewer inbox (authored PRs live in the author view). */
+export const REVIEW_SOURCES: Source[] = ['requested', 'assigned', 'reviewed', 'mentioned'];
+export type AttentionKind =
+  'first_review' | 'changed' | 'requested_again' | 'reply' | 'dismissed' | 'mention';
 export type Queue = 'attention' | 'waiting' | 'caught_up' | 'snoozed' | 'all';
 
 export interface Actor {
@@ -40,7 +44,12 @@ export interface ThreadComment {
   updatedAt: string;
   url: string;
   replyToId: string | null;
+  diffHunk?: string;
+  commitOid?: string | null;
+  originalCommitOid?: string | null;
 }
+
+export type DiffSide = 'LEFT' | 'RIGHT';
 
 export interface ReviewThread {
   id: string;
@@ -49,6 +58,46 @@ export interface ReviewThread {
   path: string;
   line: number | null;
   comments: ThreadComment[];
+  diffSide?: DiffSide;
+  startLine?: number | null;
+  originalLine?: number | null;
+  subjectType?: 'LINE' | 'FILE';
+  viewerCanReply?: boolean;
+  viewerCanResolve?: boolean;
+}
+
+/** A top-level PR conversation comment (not attached to code). */
+export interface ConversationComment {
+  id: string;
+  author: Actor;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+}
+
+export interface ForcePush {
+  id: string;
+  createdAt: string;
+  beforeOid: string | null;
+  afterOid: string | null;
+  actor: string | null;
+}
+
+/** Latest approve / request-changes per reviewer (any reviewer, not only the viewer). */
+export interface ReviewerVerdict {
+  login: string;
+  state: ReviewState;
+  submittedAt: string;
+  commitOid: string | null;
+}
+
+export interface PullFile {
+  path: string;
+  additions: number;
+  deletions: number;
+  changeType?: string;
+  viewerViewedState?: 'VIEWED' | 'UNVIEWED' | 'DISMISSED';
 }
 
 export interface Check {
@@ -84,10 +133,20 @@ export interface PullRequestSnapshot {
   requestEvents: RequestEvent[];
   reviews: Review[];
   threads: ReviewThread[];
-  files: { path: string; additions: number; deletions: number }[];
+  files: PullFile[];
   checks: Check[];
   ci: CiState;
   fetchedAt: string;
+  /** Snapshot format version; absent on v1 blobs. */
+  version?: number;
+  /** Fields below arrived with snapshot v2; older cached blobs are normalised on read. */
+  baseOid: string | null;
+  mergeStateStatus: string | null;
+  conversation: ConversationComment[];
+  forcePushes: ForcePush[];
+  verdicts: ReviewerVerdict[];
+  /** The viewer's own pending (unsubmitted) review on GitHub, if any. */
+  pendingReview: { id: string; createdAt: string; commentCount: number } | null;
 }
 
 export interface LocalTriageState {

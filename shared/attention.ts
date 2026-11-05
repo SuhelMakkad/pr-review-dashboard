@@ -16,6 +16,13 @@ export const emptyTriage = (): LocalTriageState => ({
 });
 
 const sameLogin = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+
+/** Matches "@login" as a whole handle (not inside emails or longer handles). */
+export function mentionPattern(login: string): RegExp {
+  const escaped = login.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  return new RegExp(`(^|[^\\w@./-])@${escaped}(?![\\w-])`, 'i');
+}
 const later = (left: string, right: string) => Date.parse(left) > Date.parse(right);
 
 export function deriveItem(
@@ -127,6 +134,45 @@ export function deriveItem(
         });
       }
     }
+  }
+
+  // Mentions in the conversation, or in review threads the viewer has not joined.
+  const mentioned = mentionPattern(login);
+  const joinedThreads = new Set(
+    pr.threads
+      .filter((thread) => thread.comments.some((comment) => sameLogin(comment.author.login, login)))
+      .map((thread) => thread.id),
+  );
+  const ownActivity = [
+    ...(latestReview ? [latestReview.submittedAt] : []),
+    ...pr.conversation
+      .filter((comment) => sameLogin(comment.author.login, login))
+      .map((comment) => comment.createdAt),
+  ].sort();
+  const lastOwnActivity = ownActivity.at(-1) ?? null;
+  const mentionCandidates = [
+    ...pr.conversation,
+    ...pr.threads
+      .filter((thread) => !joinedThreads.has(thread.id))
+      .flatMap((thread) => thread.comments),
+  ];
+
+  for (const comment of mentionCandidates) {
+    if (sameLogin(comment.author.login, login) || !mentioned.test(comment.body)) continue;
+    if (lastOwnActivity && !later(comment.updatedAt, lastOwnActivity)) continue;
+
+    const key = `mention:${comment.id}:${comment.updatedAt}`;
+
+    if (seen.has(key)) continue;
+
+    unreadReplyKeys.push(key);
+    reasons.push({
+      kind: 'mention',
+      label: 'Mentioned',
+      at: comment.updatedAt,
+      key,
+      url: comment.url,
+    });
   }
 
   const activityKeys = reasons.map((reason) => reason.key);

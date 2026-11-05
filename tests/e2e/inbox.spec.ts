@@ -50,16 +50,28 @@ test('triages from the keyboard: select, mark done, undo', async ({ page }) => {
 
   const heading = page.getByRole('heading', { level: 2 });
 
+  // Follow-ups first (oldest pending activity), then first reviews.
+  await expect(heading).toHaveText('Rate-limit the public search endpoint');
+  await page.keyboard.press('j');
   await expect(heading).toHaveText('Collection filter editor with live validation');
   await page.keyboard.press('j');
   await expect(heading).toHaveText('Product metadata schema with versioned migrations');
 
   await page.keyboard.press('e');
-  await expect(heading).toHaveText('Rate-limit the public search endpoint');
+  await expect(heading).toHaveText('Calendar settings use the design-system tab buttons');
   await expect(page.getByRole('option', { name: /Product metadata schema/ })).toHaveCount(0);
 
   await page.keyboard.press('z');
   await expect(page.getByRole('option', { name: /Product metadata schema/ })).toHaveCount(1);
+});
+
+test('shows mentions in the conversation', async ({ page }) => {
+  await open(page, '/inbox/attention/acme/api/2050');
+  await expect(page.getByText('You were mentioned in the conversation')).toBeVisible();
+  await expect(page.getByText('Mentions you')).toBeVisible();
+
+  await page.keyboard.press('m');
+  await expect(page.getByText('Mentions you')).toHaveCount(0);
 });
 
 test('receives live updates over server-sent events', async ({ page }) => {

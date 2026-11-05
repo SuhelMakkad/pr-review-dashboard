@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,7 +21,14 @@ function fakeGitHub() {
 
   vi.spyOn(github, 'identity').mockResolvedValue({ login: 'me' });
   vi.spyOn(github, 'teams').mockResolvedValue(['acme/reviewers']);
-  vi.spyOn(github, 'discover').mockResolvedValue(['pr-1']);
+  vi.spyOn(github, 'discover').mockImplementation(async (_login, source) =>
+    ['requested', 'assigned', 'reviewed'].includes(source) ? ['pr-1'] : [],
+  );
+  // Every run looks changed, so these tests exercise the full-snapshot path.
+  vi.spyOn(github, 'detect').mockImplementation(async (ids) => ({
+    results: ids.map((id) => ({ id, state: 'OPEN' as const, fingerprint: randomUUID() })),
+    budget: null,
+  }));
   vi.spyOn(github, 'snapshot').mockImplementation(async (_id, _login, sources) =>
     snapshot({ sources }),
   );
@@ -90,7 +98,8 @@ describe('sync and local persistence', () => {
     vi.mocked(github.snapshot).mockRejectedValue(new Error('Access unavailable'));
     await service.sync();
 
-    expect(service.status.warnings).toHaveLength(4);
+    // One warning per failed feed (five) plus the PR that could not be refreshed.
+    expect(service.status.warnings).toHaveLength(6);
     expect(service.status.lastSuccessfulSync).toBe(lastSuccessful);
     expect(service.list().items).toHaveLength(1);
   });

@@ -11,9 +11,9 @@ const reviewerFields =
 const reviewFields = 'id state submittedAt updatedAt body url commit { oid }';
 
 export const commentFields =
-  'id body createdAt updatedAt url author { login avatarUrl } replyTo { id }';
+  'id body createdAt updatedAt url author { login avatarUrl } replyTo { id } diffHunk commit { oid } originalCommit { oid }';
 
-const threadFields = `id isResolved isOutdated path line comments(first: 100) { nodes { ${commentFields} } ${pageInfo} }`;
+const threadFields = `id isResolved isOutdated path line diffSide startLine originalLine subjectType viewerCanReply viewerCanResolve comments(first: 100) { nodes { ${commentFields} } ${pageInfo} }`;
 
 export const checkFields =
   '__typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl }';
@@ -23,7 +23,7 @@ export const connections = {
   reviewRequests: `reviewRequests(first: 100, after: $cursor) { nodes { requestedReviewer { ${reviewerFields} } } ${pageInfo} }`,
   timelineItems: `timelineItems(first: 100, after: $cursor, itemTypes: [REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) { nodes { __typename ... on ReviewRequestedEvent { id createdAt requestedReviewer { ${reviewerFields} } } ... on ReviewRequestRemovedEvent { id createdAt requestedReviewer { ${reviewerFields} } } } ${pageInfo} }`,
   reviewThreads: `reviewThreads(first: 50, after: $cursor) { nodes { ${threadFields} } ${pageInfo} }`,
-  files: `files(first: 100, after: $cursor) { nodes { path additions deletions } ${pageInfo} }`,
+  files: `files(first: 100, after: $cursor) { nodes { path additions deletions changeType viewerViewedState } ${pageInfo} }`,
 } as const;
 
 export type ConnectionKey = keyof typeof connections;
@@ -37,8 +37,12 @@ export const discoverQuery = `query Discover($query: String!, $cursor: String) {
 export const snapshotQuery = `query Snapshot($id: ID!, $login: String!, $cursor: String) {
   node(id: $id) { ... on PullRequest {
     id number title url body author { login avatarUrl } repository { nameWithOwner }
-    isDraft state createdAt updatedAt headRefOid baseRefName headRefName additions deletions changedFiles reviewDecision mergeable
+    isDraft state createdAt updatedAt headRefOid baseRefOid baseRefName headRefName additions deletions changedFiles reviewDecision mergeable mergeStateStatus
     ${Object.values(connections).join('\n')}
+    verdicts: latestOpinionatedReviews(first: 50) { nodes { state submittedAt author { login } commit { oid } } }
+    conversation: comments(last: 50) { nodes { id body createdAt updatedAt url author { login avatarUrl } } }
+    pending: reviews(first: 1, author: $login, states: [PENDING]) { nodes { id createdAt comments { totalCount } } }
+    forcePushes: timelineItems(last: 20, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { id createdAt beforeCommit { oid } afterCommit { oid } actor { login } } } }
     commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes { ${checkFields} } ${pageInfo} } } } } }
   } }
 }`;
@@ -51,6 +55,24 @@ export function connectionPageQuery(key: ConnectionKey): string {
   node(id: $id) { ... on PullRequest { ${connections[key]} } }
 }`;
 }
+
+/**
+ * Cheap change detection for up to 100 PRs: everything that should trigger a full snapshot when it
+ * changes. Check-run counts are included because CI results do not bump `updatedAt`.
+ */
+export const detectQuery = `query Detect($ids: [ID!]!) {
+  rateLimit { limit remaining resetAt cost }
+  nodes(ids: $ids) { ... on PullRequest {
+    id state isDraft updatedAt headRefOid baseRefOid mergeStateStatus mergeable reviewDecision
+    commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 1) {
+      checkRunCountsByState { state count } statusContextCountsByState { state count }
+    } } } } }
+    timelineItems(first: 1) { totalCount }
+    reviewThreads(first: 1) { totalCount }
+    comments(first: 1) { totalCount }
+    reviews(first: 1) { totalCount }
+  } }
+}`;
 
 export const threadCommentsQuery = `query Comments($id: ID!, $cursor: String) {
   node(id: $id) { ... on PullRequestReviewThread { comments(first: 100, after: $cursor) { nodes { ${commentFields} } ${pageInfo} } } }
@@ -73,6 +95,7 @@ export function allDocuments(): Record<string, string> {
     Identity: identityQuery,
     Discover: discoverQuery,
     Snapshot: snapshotQuery,
+    Detect: detectQuery,
     Comments: threadCommentsQuery,
     Checks: checksPageQuery,
     ...pages,

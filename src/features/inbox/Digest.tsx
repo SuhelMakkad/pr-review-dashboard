@@ -3,13 +3,21 @@ import { reasonMeta } from '../pulls/meta';
 import type { InboxSearch } from './filters';
 
 const DAY = 24 * 60 * 60_000;
-const order: AttentionKind[] = ['first_review', 'changed', 'requested_again', 'reply', 'dismissed'];
+const order: AttentionKind[] = [
+  'first_review',
+  'changed',
+  'requested_again',
+  'reply',
+  'mention',
+  'dismissed',
+];
 const phrases: Record<AttentionKind, (count: number) => string> = {
   first_review: (count) => `${count} new ${count === 1 ? 'request' : 'requests'}`,
   changed: (count) => `${count} pushed`,
   requested_again: (count) => `${count} re-requested`,
   reply: (count) => `${count} ${count === 1 ? 'reply' : 'replies'}`,
   dismissed: (count) => `${count} dismissed`,
+  mention: (count) => `${count} ${count === 1 ? 'mention' : 'mentions'}`,
 };
 
 /** One line summarising what arrived in the last 24 hours; each part filters the queue. */

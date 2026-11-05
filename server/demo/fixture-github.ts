@@ -1,5 +1,7 @@
+import { SNAPSHOT_VERSION } from '../../shared/snapshot.js';
 import type { Actor, PullRequestSnapshot, Source } from '../../shared/types.js';
-import type { GitHubApi } from '../github/api.js';
+import { createHash } from 'node:crypto';
+import type { DetectResult, GitHubApi, RateBudget } from '../github/api.js';
 import { GitHubError } from '../github/errors.js';
 import type { Scenario } from './scenario.js';
 
@@ -34,6 +36,33 @@ export class FixtureGitHub implements GitHubApi {
       .map((pull) => pull.snapshot.id);
   }
 
+  async detect(ids: string[]): Promise<{ results: DetectResult[]; budget: RateBudget | null }> {
+    const results = ids.map((id): DetectResult => {
+      const pull = this.scenario.world.pulls.find((item) => item.snapshot.id === id);
+
+      return pull
+        ? {
+            id,
+            state: pull.snapshot.state,
+            fingerprint: createHash('sha256')
+              .update(JSON.stringify(pull.snapshot))
+              .digest('hex')
+              .slice(0, 32),
+          }
+        : { id, state: null, fingerprint: null };
+    });
+
+    return {
+      results,
+      budget: {
+        limit: 5000,
+        remaining: 4900,
+        resetAt: new Date(this.scenario.world.now() + 3_600_000).toISOString(),
+        cost: 1,
+      },
+    };
+  }
+
   async snapshot(
     id: string,
     _login: string,
@@ -52,6 +81,7 @@ export class FixtureGitHub implements GitHubApi {
 
     return {
       ...snapshot,
+      version: SNAPSHOT_VERSION,
       sources,
       fetchedAt: now,
       headObservedAt:

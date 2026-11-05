@@ -78,6 +78,13 @@ export function snapshot(overrides: Partial<PullRequestSnapshot> = {}): PullRequ
     checks: [{ name: 'Unit tests', state: 'success', url: null }],
     ci: 'success',
     fetchedAt: t(10),
+    version: 2,
+    baseOid: 'base-1',
+    mergeStateStatus: 'CLEAN',
+    conversation: [],
+    forcePushes: [],
+    verdicts: [],
+    pendingReview: null,
     ...overrides,
   };
 }

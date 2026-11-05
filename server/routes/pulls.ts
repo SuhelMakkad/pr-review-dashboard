@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { safeError } from '../github/errors.js';
 import type { SyncService } from '../sync/service.js';
 
 const updateSchema = z
@@ -15,6 +16,7 @@ const updateSchema = z
 export function registerPullRoutes(app: FastifyInstance, service: SyncService): void {
   app.get('/api/status', async () => service.status);
   app.get('/api/pulls', async () => service.list());
+  app.get('/api/mine', async () => service.mine());
 
   app.get<{ Params: { id: string } }>('/api/pulls/:id', async (request, reply) => {
     const detail = service.detail(request.params.id);
@@ -23,6 +25,16 @@ export function registerPullRoutes(app: FastifyInstance, service: SyncService): 
       detail ??
       reply.code(404).send({ error: 'This PR is no longer tracked for the active account.' })
     );
+  });
+
+  app.post<{ Params: { id: string } }>('/api/pulls/:id/refresh', async (request, reply) => {
+    try {
+      const detail = await service.refresh(request.params.id);
+
+      return detail ?? reply.code(404).send({ error: 'PR not found.' });
+    } catch (error) {
+      return reply.code(502).send({ error: safeError(error) });
+    }
   });
 
   app.post('/api/sync', async (_request, reply) => {

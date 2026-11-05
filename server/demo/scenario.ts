@@ -128,8 +128,27 @@ export function defaultScenario(anchor = Date.now()): Scenario {
       { name: 'unit-tests', state: 'success', url: null },
     ],
     ci: 'success',
+    baseOid: sha(`${repository}base`),
+    mergeStateStatus: 'BLOCKED',
+    conversation: [],
+    forcePushes: [],
+    verdicts: [],
+    pendingReview: null,
     ...overrides,
   });
+
+  const conversationComment = (login: string, body: string, minutesAgo: number) => {
+    commentSequence += 1;
+
+    return {
+      id: `conversation-${commentSequence}`,
+      author: { login },
+      body,
+      createdAt: at(minutesAgo),
+      updatedAt: at(minutesAgo),
+      url: `https://github.com/acme/conversation-${commentSequence}`,
+    };
+  };
 
   const direct = { kind: 'user' as const, login: VIEWER, name: VIEWER };
   const platformTeam = { kind: 'team' as const, login: 'acme/platform', name: 'Platform' };
@@ -159,6 +178,15 @@ export function defaultScenario(anchor = Date.now()): Scenario {
           requestEvents: [
             { id: 'req-2041-1', createdAt: at(60 * 13), removed: false, reviewer: direct },
             { id: 'req-2041-2', createdAt: at(65), removed: false, reviewer: direct },
+          ],
+          forcePushes: [
+            {
+              id: 'fp-2041',
+              createdAt: at(70),
+              beforeOid: forcePushedOld,
+              afterOid: sha('acme/api2041head'),
+              actor: 'alex',
+            },
           ],
           reviews: [
             review(
@@ -239,9 +267,17 @@ export function defaultScenario(anchor = Date.now()): Scenario {
       ),
     },
     {
-      feeds: ['requested'],
+      feeds: ['requested', 'mentioned'],
       snapshot: base(2050, 'acme/api', 'Rate-limit the public search endpoint', 'jonas', {
         body: 'Adds a token-bucket limiter in front of `/v1/search`.',
+        conversation: [
+          conversationComment('priya', 'Do we need per-tenant buckets here?', 60 * 4),
+          conversationComment(
+            'jonas',
+            '@you could you sanity-check the default burst size? I picked 20 somewhat arbitrarily.',
+            60 * 3,
+          ),
+        ],
         additions: 230,
         deletions: 12,
         changedFiles: 5,
@@ -300,6 +336,87 @@ export function defaultScenario(anchor = Date.now()): Scenario {
       }),
     },
   ];
+
+  const mine = (
+    number: number,
+    repository: string,
+    title: string,
+    overrides: Partial<ScenarioPull['snapshot']>,
+  ) => base(number, repository, title, VIEWER, overrides);
+  const jonas = { kind: 'user' as const, login: 'jonas', name: 'jonas' };
+
+  pulls.push(
+    {
+      feeds: ['authored'],
+      snapshot: mine(3001, 'acme/api', 'Retry webhooks with exponential backoff', {
+        headRefName: 'feat/DEMO-104/webhook-retries',
+        additions: 342,
+        deletions: 57,
+        changedFiles: 6,
+        createdAt: at(60 * 40),
+        verdicts: [
+          {
+            login: 'mara',
+            state: 'CHANGES_REQUESTED',
+            submittedAt: at(60 * 5),
+            commitOid: sha('acme/api3001head'),
+          },
+        ],
+        threads: [
+          thread('t-3001-1', 'src/webhooks/retry.ts', 31, [
+            comment('mara', 'Cap the backoff; at attempt 12 this waits over an hour.', 60 * 5),
+          ]),
+        ],
+        checks: [
+          { name: 'build', state: 'success', url: null },
+          { name: 'unit-tests', state: 'failure', url: null },
+        ],
+        ci: 'failure',
+        reviewDecision: 'CHANGES_REQUESTED',
+      }),
+    },
+    {
+      feeds: ['authored'],
+      snapshot: mine(882, 'acme/web', 'Keyboard shortcuts for the product list', {
+        additions: 188,
+        deletions: 20,
+        changedFiles: 5,
+        createdAt: at(60 * 30),
+        reviewRequests: [jonas],
+        requestEvents: [{ id: 'req-882', createdAt: at(60 * 29), removed: false, reviewer: jonas }],
+      }),
+    },
+    {
+      feeds: ['authored'],
+      snapshot: mine(2058, 'acme/api', 'Bump Node to 24.11 in CI and Docker images', {
+        additions: 12,
+        deletions: 12,
+        changedFiles: 4,
+        verdicts: [
+          {
+            login: 'priya',
+            state: 'APPROVED',
+            submittedAt: at(90),
+            commitOid: sha('acme/api2058head'),
+          },
+        ],
+        reviewDecision: 'APPROVED',
+        mergeStateStatus: 'CLEAN',
+      }),
+    },
+    {
+      feeds: ['authored'],
+      snapshot: mine(45, 'acme/infra', 'Spike: cost alerts for idle preview environments', {
+        isDraft: true,
+        additions: 96,
+        deletions: 0,
+        changedFiles: 3,
+        checks: [],
+        ci: 'none',
+        mergeStateStatus: 'DRAFT',
+      }),
+    },
+  );
 
   const world: ScenarioWorld = {
     viewer: { login: VIEWER },

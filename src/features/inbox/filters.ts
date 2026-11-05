@@ -7,7 +7,7 @@ export const inboxSearchSchema = z.object({
   repo: z.string().max(200).optional().catch(undefined),
   author: z.string().max(100).optional().catch(undefined),
   reason: z
-    .enum(['first_review', 'changed', 'requested_again', 'reply', 'dismissed'])
+    .enum(['first_review', 'changed', 'requested_again', 'reply', 'mention', 'dismissed'])
     .optional()
     .catch(undefined),
   ci: z.enum(['success', 'failure', 'pending', 'none']).optional().catch(undefined),

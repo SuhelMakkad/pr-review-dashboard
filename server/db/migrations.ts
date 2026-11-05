@@ -30,6 +30,36 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 2,
+    name: 'sync-v2-and-activity',
+    up(db) {
+      db.exec(`
+        CREATE TABLE pr_sync (
+          account TEXT NOT NULL, id TEXT NOT NULL,
+          fingerprint TEXT, last_full_at TEXT, next_full_at TEXT,
+          PRIMARY KEY (account, id)
+        );
+        CREATE TABLE feed_membership (
+          account TEXT NOT NULL, id TEXT NOT NULL, feed TEXT NOT NULL, seen_at TEXT NOT NULL,
+          PRIMARY KEY (account, id, feed)
+        );
+        CREATE TABLE activity_events (
+          account TEXT NOT NULL, key TEXT NOT NULL, pr_id TEXT NOT NULL,
+          repository TEXT NOT NULL, number INTEGER NOT NULL, kind TEXT NOT NULL,
+          actor TEXT, at TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}',
+          PRIMARY KEY (account, key)
+        );
+        CREATE INDEX activity_events_by_time ON activity_events (account, at);
+        CREATE TABLE queue_samples (
+          account TEXT NOT NULL, at TEXT NOT NULL,
+          attention INTEGER NOT NULL, waiting INTEGER NOT NULL, authored_blocked INTEGER NOT NULL,
+          oldest_attention_at TEXT,
+          PRIMARY KEY (account, at)
+        );
+      `);
+    },
+  },
 ];
 
 export function schemaVersion(db: DatabaseSync): number {
