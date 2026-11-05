@@ -7,7 +7,6 @@ import {
   CircleAlert,
   Clock3,
   Command,
-  Github,
   GitPullRequest,
   Inbox,
   Layers3,
@@ -24,6 +23,7 @@ import {
 import type { AttentionKind, CiState, PullRequestList, Queue, SyncStatus } from '../shared/types';
 import { api, dateTime, relativeTime } from './api';
 import { CiBadge, ReasonBadges } from './components';
+import { GitHubMark } from './ui/brand-icons';
 import { Detail, reviewLabels } from './Detail';
 
 const views: { id: Queue; label: string; icon: typeof Inbox }[] = [
@@ -239,7 +239,7 @@ export function App() {
             ))}
           </div>
           <div className="sidebar-footer">
-            <Github size={14} />
+            <GitHubMark size={14} />
             <span>Connected with GitHub CLI</span>
           </div>
         </div>

@@ -1,29 +1,38 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { emptyTriage } from '../shared/attention.js';
-import type { LocalTriageState, PullRequestSnapshot, SyncStatus } from '../shared/types.js';
+import { emptyTriage } from '../../shared/attention.js';
+import type { LocalTriageState, PullRequestSnapshot, SyncStatus } from '../../shared/types.js';
+import { migrate } from './migrations.js';
 
 export class Store {
-  private readonly db: DatabaseSync;
+  readonly db: DatabaseSync;
 
-  constructor(path: string) {
+  constructor(readonly path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 
     this.db = new DatabaseSync(path);
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      CREATE TABLE IF NOT EXISTS snapshots (
-        account TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL,
-        PRIMARY KEY (account, id)
-      );
-      CREATE TABLE IF NOT EXISTS triage (
-        account TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL,
-        PRIMARY KEY (account, id)
-      );
-      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, data TEXT NOT NULL);
-      PRAGMA user_version = 1;
-    `);
+    this.db.exec(
+      'PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;',
+    );
+    migrate(this.db, path);
+  }
+
+  /** Runs `work` in one immediate transaction, rolling back if it throws. */
+  transaction<T>(work: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+
+    try {
+      const result = work();
+
+      this.db.exec('COMMIT');
+
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+
+      throw error;
+    }
   }
 
   snapshots(account: string): PullRequestSnapshot[] {

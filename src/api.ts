@@ -1,3 +1,6 @@
+const sessionToken = () =>
+  document.querySelector<HTMLMetaElement>('meta[name="review-desk-session"]')?.content ?? '';
+
 export async function api<T>(path: string, body?: unknown, method = 'POST'): Promise<T> {
   const response = await fetch(
     path,
@@ -5,7 +8,11 @@ export async function api<T>(path: string, body?: unknown, method = 'POST'): Pro
       ? {}
       : {
           method,
-          headers: { 'Content-Type': 'application/json', 'X-Review-Desk': '1' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Review-Desk': '1',
+            'X-Review-Desk-Session': sessionToken(),
+          },
           body: JSON.stringify(body),
         },
   );

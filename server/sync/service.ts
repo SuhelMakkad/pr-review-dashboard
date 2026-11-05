@@ -1,13 +1,16 @@
-import { deriveItem, sortItems } from '../shared/attention.js';
+import { deriveItem, sortItems } from '../../shared/attention.js';
 import type {
   PullRequestDetail,
   PullRequestList,
   Source,
   SyncStatus,
   TriageUpdate,
-} from '../shared/types.js';
-import { GitHub, GitHubError, safeError } from './github.js';
-import { Store } from './store.js';
+} from '../../shared/types.js';
+import type { Store } from '../db/store.js';
+import { EventBus } from '../events.js';
+import type { GitHubApi } from '../github/api.js';
+import { GitHubError, safeError } from '../github/errors.js';
+import { GitHub } from '../github/read.js';
 
 export const initialStatus = (): SyncStatus => ({
   account: null,
@@ -29,7 +32,8 @@ export class SyncService {
 
   constructor(
     readonly store: Store,
-    readonly github = new GitHub(),
+    readonly github: GitHubApi = new GitHub(),
+    readonly events = new EventBus(),
   ) {
     const lastAccount = store.getSetting<string>('lastAccount');
 
@@ -71,7 +75,10 @@ export class SyncService {
       warnings: [],
       lastAttemptAt: new Date().toISOString(),
     };
+    this.emitStatus();
+
     let retryAt: string | null = null;
+    const changed = new Set<string>();
 
     try {
       const account = await this.github.identity();
@@ -142,6 +149,7 @@ export class SyncService {
             const snapshot = await this.github.snapshot(id, account.login, prSources, cached);
 
             this.store.saveSnapshot(account.login, snapshot);
+            changed.add(id);
 
             const triage = this.store.triage(account.login, id);
             const item = deriveItem(snapshot, triage, account.login, this.status.teams);
@@ -184,7 +192,14 @@ export class SyncService {
         nextSyncAt: retryAt ?? new Date(Date.now() + 60_000).toISOString(),
       };
       this.store.saveStatus(this.status);
+      this.emitStatus();
+
+      if (changed.size > 0) this.events.emit({ type: 'pulls.changed', ids: [...changed] });
     }
+  }
+
+  private emitStatus(): void {
+    this.events.emit({ type: 'status', status: structuredClone(this.status) });
   }
 
   list(): PullRequestList {
@@ -248,6 +263,7 @@ export class SyncService {
     }
 
     this.store.saveTriage(update.account, id, triage);
+    this.events.emit({ type: 'triage.updated', id });
 
     return this.detail(id);
   }

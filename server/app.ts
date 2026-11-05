@@ -1,114 +1,77 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyReply } from 'fastify';
 import fastifyStatic from '@fastify/static';
-import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import type { SyncService } from './sync.js';
+import type { ServerEvent } from '../shared/events.js';
+import type { FixtureGitHub } from './demo/fixture-github.js';
+import { registerSecret } from './github/errors.js';
+import { loadIndexHtml } from './http/html.js';
+import { createSessionToken, registerSecurity } from './http/security.js';
+import { registerEventStream } from './http/sse.js';
+import { registerDevRoutes } from './routes/dev.js';
+import { registerPullRoutes } from './routes/pulls.js';
+import type { SyncService } from './sync/service.js';
 
-const updateSchema = z
-  .object({
-    account: z.string().min(1).max(100),
-    note: z.string().max(30_000).optional(),
-    seenReplyKeys: z.array(z.string().max(250)).max(10_000).optional(),
-    snoozeUntil: z.iso.datetime().nullable().optional(),
-  })
-  .strict();
+export interface AppOptions {
+  /** Built web assets to serve; omitted when Vite serves the UI. */
+  webRoot?: string | null;
+  /** Ports the browser may use (host/origin allowlist). */
+  ports?: number[];
+  sessionToken?: string;
+  bootId?: string;
+  /** Demo-mode GitHub stand-in; enables the scenario controls under /api/dev. */
+  fixture?: FixtureGitHub;
+  keepaliveMs?: number;
+}
 
-export async function createApp(service: SyncService, webRoot?: string) {
-  const app = Fastify({ logger: false, bodyLimit: 100_000 });
+export async function createApp(service: SyncService, options: AppOptions = {}) {
+  const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
+  const sessionToken = options.sessionToken ?? createSessionToken();
+  const bootId = options.bootId ?? randomUUID();
+  const demo = Boolean(options.fixture);
+  const webRoot = options.webRoot && existsSync(options.webRoot) ? options.webRoot : null;
+  const index = webRoot ? loadIndexHtml(webRoot, { token: sessionToken, bootId, demo }) : null;
 
-  app.addHook('onRequest', async (request, reply) => {
-    const host = request.headers.host;
-    const allowedHosts = new Set([
-      '127.0.0.1:4317',
-      '127.0.0.1:4318',
-      'localhost:4317',
-      'localhost:4318',
-    ]);
-
-    if (!host || !allowedHosts.has(host.toLowerCase())) {
-      await reply.code(403).send({ error: 'Review Desk accepts local requests only.' });
-      return;
-    }
-
-    const origin = request.headers.origin;
-
-    if (
-      origin &&
-      ![
-        'http://127.0.0.1:4317',
-        'http://localhost:4317',
-        'http://127.0.0.1:4318',
-        'http://localhost:4318',
-      ].includes(origin)
-    ) {
-      await reply.code(403).send({ error: 'Cross-origin requests are not allowed.' });
-      return;
-    }
-
-    if (
-      ['POST', 'PATCH'].includes(request.method) &&
-      (!request.headers['content-type']?.startsWith('application/json') ||
-        request.headers['x-review-desk'] !== '1')
-    ) {
-      await reply.code(403).send({ error: 'A local JSON request is required.' });
-    }
+  registerSecret(sessionToken);
+  registerSecurity(app, {
+    ports: options.ports ?? [4317, 4318],
+    sessionToken,
+    canonicalRedirect: Boolean(webRoot),
+    scriptHashes: () => index?.hashes ?? [],
   });
 
-  app.addHook('onSend', async (request, reply) => {
-    reply.header('X-Content-Type-Options', 'nosniff');
-    reply.header('Referrer-Policy', 'no-referrer');
-
-    if (request.url.startsWith('/api/')) reply.header('Cache-Control', 'no-store');
+  const hello = (): ServerEvent => ({
+    type: 'hello',
+    bootId,
+    account: service.status.account?.login ?? null,
+    demo,
   });
 
-  app.get('/api/status', async () => service.status);
-  app.get('/api/pulls', async () => service.list());
-  app.get<{ Params: { id: string } }>('/api/pulls/:id', async (request, reply) => {
-    const detail = service.detail(request.params.id);
-
-    return (
-      detail ??
-      reply.code(404).send({ error: 'This PR is no longer tracked for the active account.' })
-    );
+  registerEventStream(app, {
+    bus: service.events,
+    bootId,
+    hello,
+    keepaliveMs: options.keepaliveMs,
   });
+  registerPullRoutes(app, service);
 
-  app.post('/api/sync', async (_request, reply) => {
-    void service.sync();
+  if (options.fixture) registerDevRoutes(app, service, options.fixture);
 
-    return reply.code(202).send(service.status);
-  });
+  if (webRoot && index) {
+    const sendIndex = (reply: FastifyReply) =>
+      reply.header('Cache-Control', 'no-store').type('text/html; charset=utf-8').send(index.html);
 
-  app.patch<{ Params: { id: string } }>('/api/pulls/:id/triage', async (request, reply) => {
-    const parsed = updateSchema.safeParse(request.body);
+    await app.register(fastifyStatic, {
+      root: webRoot,
+      index: false,
+      allowedPath: (path) => path !== '/index.html',
+    });
 
-    if (!parsed.success)
-      return reply
-        .code(400)
-        .send({ error: 'Invalid triage update.', details: parsed.error.flatten() });
-    if (parsed.data.snoozeUntil && Date.parse(parsed.data.snoozeUntil) <= Date.now()) {
-      return reply.code(400).send({ error: 'Choose a snooze time in the future.' });
-    }
-
-    try {
-      const result = service.update(request.params.id, parsed.data);
-
-      return result ?? reply.code(404).send({ error: 'PR not found.' });
-    } catch (error) {
-      if (error instanceof Error && error.message === 'ACCOUNT_CHANGED')
-        return reply
-          .code(409)
-          .send({ error: 'GitHub account changed. Refresh before updating this PR.' });
-
-      throw error;
-    }
-  });
-
-  if (webRoot && existsSync(webRoot)) {
-    await app.register(fastifyStatic, { root: webRoot });
+    app.get('/', (_request, reply) => sendIndex(reply));
     app.setNotFoundHandler((request, reply) =>
-      request.url.startsWith('/api/')
+      request.url.startsWith('/api/') || request.method !== 'GET'
         ? reply.code(404).send({ error: 'Unknown API route.' })
-        : reply.sendFile('index.html'),
+        : sendIndex(reply),
     );
   }
 

@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import type {
   Actor,
   Check,
@@ -9,7 +8,19 @@ import type {
   ReviewState,
   Source,
   ThreadComment,
-} from '../shared/types.js';
+} from '../../shared/types.js';
+import type { GitHubApi } from './api.js';
+import { GitHubError } from './errors.js';
+import {
+  checksPageQuery,
+  connectionPageQuery,
+  discoverQuery,
+  identityQuery,
+  snapshotQuery,
+  threadCommentsQuery,
+  type ConnectionKey,
+} from './queries.js';
+import { GhCli, type GitHubTransport } from './transport.js';
 
 interface PageInfo {
   hasNextPage: boolean;
@@ -97,129 +108,6 @@ interface RawPr {
   };
 }
 
-export class GitHubError extends Error {
-  constructor(
-    message: string,
-    readonly retryAt: string | null = null,
-  ) {
-    super(message);
-  }
-}
-
-export interface GitHubTransport {
-  graphql<T>(query: string, variables?: Record<string, unknown>): Promise<T>;
-  rest<T>(path: string): Promise<T>;
-}
-
-export function safeError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-
-  return message.replace(/gh[opusr]_[A-Za-z0-9_]+/g, '[redacted]').slice(0, 600);
-}
-
-export class GhCli implements GitHubTransport {
-  private run(args: string[], input?: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const child = spawn('gh', args, { stdio: ['pipe', 'pipe', 'pipe'], shell: false });
-      let stdout = '';
-      let stderr = '';
-      let timedOut = false;
-
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGTERM');
-      }, 35_000);
-
-      child.stdout.setEncoding('utf8').on('data', (chunk) => {
-        stdout += chunk;
-      });
-      child.stderr.setEncoding('utf8').on('data', (chunk) => {
-        stderr += chunk;
-      });
-      child.on('error', (error) => {
-        clearTimeout(timeout);
-        reject(
-          new GitHubError(
-            `GitHub CLI unavailable: ${safeError(error)}. Install gh and run gh auth login.`,
-          ),
-        );
-      });
-      child.on('close', (code) => {
-        clearTimeout(timeout);
-
-        if (code !== 0) {
-          const message = timedOut
-            ? 'GitHub request timed out; cached data is still available.'
-            : safeError(stderr.trim() || 'GitHub request failed. Check gh auth status.');
-          const rateLimited = /rate limit|secondary rate|abuse|HTTP 429/i.test(message);
-
-          reject(
-            new GitHubError(
-              message,
-              rateLimited ? new Date(Date.now() + 5 * 60_000).toISOString() : null,
-            ),
-          );
-          return;
-        }
-
-        resolve(stdout);
-      });
-
-      child.stdin.end(input);
-    });
-  }
-
-  async graphql<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-    const raw = await this.run(
-      ['api', '--hostname', 'github.com', 'graphql', '--input', '-'],
-      JSON.stringify({ query, variables }),
-    );
-    const result = JSON.parse(raw) as { data: T; errors?: { message: string; type?: string }[] };
-
-    if (result.errors?.length) {
-      const message = result.errors.map((error) => error.message).join('; ');
-
-      throw new GitHubError(
-        message,
-        /rate.limit/i.test(message) ? new Date(Date.now() + 5 * 60_000).toISOString() : null,
-      );
-    }
-
-    return result.data;
-  }
-
-  async rest<T>(path: string): Promise<T> {
-    return JSON.parse(
-      await this.run(['api', '--hostname', 'github.com', '--method', 'GET', path]),
-    ) as T;
-  }
-}
-
-const pageInfo = 'pageInfo { hasNextPage endCursor }';
-const reviewerFields =
-  '__typename ... on User { login } ... on Team { name slug organization { login } }';
-const reviewFields = 'id state submittedAt updatedAt body url commit { oid }';
-const commentFields = 'id body createdAt updatedAt url author { login avatarUrl } replyTo { id }';
-const threadFields = `id isResolved isOutdated path line comments(first: 100) { nodes { ${commentFields} } ${pageInfo} }`;
-const checkFields =
-  '__typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl }';
-const connections: Record<string, string> = {
-  reviews: `reviews(first: 100, after: $cursor, author: $login) { nodes { ${reviewFields} } ${pageInfo} }`,
-  reviewRequests: `reviewRequests(first: 100, after: $cursor) { nodes { requestedReviewer { ${reviewerFields} } } ${pageInfo} }`,
-  timelineItems: `timelineItems(first: 100, after: $cursor, itemTypes: [REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) { nodes { __typename ... on ReviewRequestedEvent { id createdAt requestedReviewer { ${reviewerFields} } } ... on ReviewRequestRemovedEvent { id createdAt requestedReviewer { ${reviewerFields} } } } ${pageInfo} }`,
-  reviewThreads: `reviewThreads(first: 50, after: $cursor) { nodes { ${threadFields} } ${pageInfo} }`,
-  files: `files(first: 100, after: $cursor) { nodes { path additions deletions } ${pageInfo} }`,
-};
-
-const baseQuery = `query Snapshot($id: ID!, $login: String!, $cursor: String) {
-  node(id: $id) { ... on PullRequest {
-    id number title url body author { login avatarUrl } repository { nameWithOwner }
-    isDraft state createdAt updatedAt headRefOid baseRefName headRefName additions deletions changedFiles reviewDecision mergeable
-    ${Object.values(connections).join('\n')}
-    commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes { ${checkFields} } ${pageInfo} } } } } }
-  } }
-}`;
-
 function reviewer(raw: RawReviewer | null): Reviewer | null {
   if (!raw) return null;
 
@@ -256,13 +144,11 @@ export function ciState(state: string): CiState {
   return 'none';
 }
 
-export class GitHub {
+export class GitHub implements GitHubApi {
   constructor(readonly transport: GitHubTransport = new GhCli()) {}
 
   async identity(): Promise<Actor> {
-    const result = await this.transport.graphql<{ viewer: Actor }>(
-      'query Identity { viewer { login avatarUrl } }',
-    );
+    const result = await this.transport.graphql<{ viewer: Actor }>(identityQuery);
 
     return result.viewer;
   }
@@ -295,12 +181,7 @@ export class GitHub {
 
       do {
         const result: { search: Connection<{ id: string }> & { issueCount: number } } =
-          await this.transport.graphql(
-            `query Discover($query: String!, $cursor: String) {
-          search(query: $query, type: ISSUE, first: 100, after: $cursor) { issueCount nodes { ... on PullRequest { id } } ${pageInfo} }
-        }`,
-            { query, cursor },
-          );
+          await this.transport.graphql(discoverQuery, { query, cursor });
 
         if (result.search.issueCount > 1000) {
           const middle = Math.floor((start + end) / 2000) * 1000;
@@ -334,7 +215,7 @@ export class GitHub {
   private async collect<T>(
     id: string,
     login: string,
-    key: keyof typeof connections,
+    key: ConnectionKey,
     first: Connection<T>,
   ): Promise<T[]> {
     const nodes = [...first.nodes];
@@ -343,14 +224,8 @@ export class GitHub {
     while (page.hasNextPage) {
       if (!page.endCursor) throw new GitHubError(`Incomplete ${key} pagination.`);
 
-      const declarations =
-        key === 'reviews'
-          ? '$id: ID!, $login: String!, $cursor: String'
-          : '$id: ID!, $cursor: String';
       const result = await this.transport.graphql<{ node: Record<string, Connection<T>> }>(
-        `query Page(${declarations}) {
-        node(id: $id) { ... on PullRequest { ${connections[key]} } }
-      }`,
+        connectionPageQuery(key),
         { id, login, cursor: page.endCursor },
       );
       const next = result.node?.[key];
@@ -370,7 +245,7 @@ export class GitHub {
     sources: Source[],
     previous?: PullRequestSnapshot,
   ): Promise<PullRequestSnapshot> {
-    const result = await this.transport.graphql<{ node: RawPr | null }>(baseQuery, {
+    const result = await this.transport.graphql<{ node: RawPr | null }>(snapshotQuery, {
       id,
       login,
       cursor: null,
@@ -391,9 +266,7 @@ export class GitHub {
     for (const thread of threads) {
       while (thread.comments.pageInfo.hasNextPage) {
         const page = await this.transport.graphql<{ node: { comments: Connection<RawComment> } }>(
-          `query Comments($id: ID!, $cursor: String) {
-          node(id: $id) { ... on PullRequestReviewThread { comments(first: 100, after: $cursor) { nodes { ${commentFields} } ${pageInfo} } } }
-        }`,
+          threadCommentsQuery,
           { id: thread.id, cursor: thread.comments.pageInfo.endCursor },
         );
 
@@ -409,9 +282,7 @@ export class GitHub {
 
     while (checkPage?.hasNextPage) {
       const page = await this.transport.graphql<{ node: { commits: RawPr['commits'] } }>(
-        `query Checks($id: ID!, $cursor: String) {
-        node(id: $id) { ... on PullRequest { commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100, after: $cursor) { nodes { ${checkFields} } ${pageInfo} } } } } } } }
-      }`,
+        checksPageQuery,
         { id, cursor: checkPage.endCursor },
       );
       const next = page.node.commits.nodes[0]?.commit.statusCheckRollup?.contexts;

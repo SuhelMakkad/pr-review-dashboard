@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Store } from '../server/store';
+import { Store } from '../server/db/store';
 import { SyncService } from '../server/sync';
 import { GitHub, GitHubError } from '../server/github';
 import { createApp } from '../server/app';
@@ -202,11 +202,12 @@ describe('local API', () => {
 
     await service.sync();
 
-    const app = await createApp(service);
+    const app = await createApp(service, { sessionToken: 'test-session-token' });
     const headers = {
       host: '127.0.0.1:4317',
       'content-type': 'application/json',
       'x-review-desk': '1',
+      'x-review-desk-session': 'test-session-token',
     };
     const read = await app.inject({ method: 'GET', url: '/api/pulls', headers });
 
