@@ -1,17 +1,64 @@
-import type { LinearIssue, LinearStatus } from '../../shared/tickets.js';
+import { randomBytes } from 'node:crypto';
+import type { LinearIssue, LinearMethod, LinearStatus } from '../../shared/tickets.js';
 import { extractTickets } from '../../shared/tickets.js';
 import type { PullRequestSnapshot } from '../../shared/types.js';
 import { safeError } from '../github/errors.js';
 import { SETUP_COMMAND, type KeySource } from './keychain.js';
+import { LinearAuthError, type CallbackParams, type LinearConnector } from './oauth.js';
 
 const CACHE_MS = 10 * 60_000;
 const ENDPOINT = 'https://api.linear.app/graphql';
 
-/** Linear access: the real API with a Keychain key, or a fixture in demo mode and tests. */
+/**
+ * Linear access: a Linear sign-in through its MCP server, the GraphQL API with a Keychain key, or a
+ * fixture in demo mode and tests.
+ */
 export interface LinearSource {
+  readonly method?: LinearMethod;
   configured(): Promise<boolean>;
   workspace(): Promise<{ name: string | null; teamKeys: string[] }>;
   issues(identifiers: string[]): Promise<LinearIssue[]>;
+  /** Re-reads stored credentials on the next use (after the user changed them outside the app). */
+  refresh?(): void;
+  /** Demo mode only: back to the initial state. */
+  reset?(): void;
+}
+
+/** Uses the first source that is set up: the Linear sign-in, then a personal API key. */
+export class PreferredLinear implements LinearSource {
+  constructor(private readonly sources: LinearSource[]) {}
+
+  private async active(): Promise<LinearSource | null> {
+    for (const source of this.sources) if (await source.configured()) return source;
+
+    return null;
+  }
+
+  async activeMethod(): Promise<LinearMethod | null> {
+    return (await this.active())?.method ?? null;
+  }
+
+  async configured() {
+    return Boolean(await this.active());
+  }
+
+  async workspace() {
+    const source = await this.active();
+
+    if (!source) throw new Error('Linear is not connected.');
+
+    return source.workspace();
+  }
+
+  async issues(identifiers: string[]) {
+    const source = await this.active();
+
+    return source ? source.issues(identifiers) : [];
+  }
+
+  refresh() {
+    for (const source of this.sources) source.refresh?.();
+  }
 }
 
 const issueFields =
@@ -30,10 +77,16 @@ interface RawIssue {
 }
 
 export class LinearApi implements LinearSource {
+  readonly method = 'api_key' as const;
+
   constructor(private readonly keys: KeySource) {}
 
   async configured(): Promise<boolean> {
     return Boolean(await this.keys.read());
+  }
+
+  refresh(): void {
+    this.keys.forget?.();
   }
 
   private async query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
@@ -120,44 +173,115 @@ export class LinearService {
   } | null = null;
   private readonly issueCache = new Map<string, { at: number; issue: LinearIssue | null }>();
   private lastError: string | null = null;
+  /** Why the last sign-in failed, shown in Settings until the next attempt. */
+  private connectError: string | null = null;
 
-  constructor(private readonly source: LinearSource) {}
+  constructor(
+    private readonly source: LinearSource,
+    private readonly connector: LinearConnector | null = null,
+  ) {}
+
+  private async method(): Promise<LinearMethod | null> {
+    if (this.source instanceof PreferredLinear) return this.source.activeMethod();
+
+    return (await this.source.configured()) ? (this.source.method ?? null) : null;
+  }
+
+  private clearCaches(): void {
+    this.workspaceCache = null;
+    this.issueCache.clear();
+    this.lastError = null;
+  }
 
   async status(): Promise<LinearStatus> {
+    // Settings asks rarely and should reflect a key added or removed in the Keychain since.
+    this.source.refresh?.();
+
+    const base = {
+      canSignIn: Boolean(this.connector),
+      setupCommand: SETUP_COMMAND,
+    };
     const configured = await this.source.configured();
 
     if (!configured) {
       return {
+        ...base,
         configured: false,
         connected: false,
+        method: null,
         workspace: null,
         teamKeys: [],
-        error: null,
-        setupCommand: SETUP_COMMAND,
+        error: this.connectError,
       };
     }
+
+    const method = await this.method();
 
     try {
       const workspace = await this.workspace(true);
 
       return {
+        ...base,
         configured,
         connected: true,
+        method,
         workspace: workspace.name,
         teamKeys: workspace.teamKeys,
         error: null,
-        setupCommand: SETUP_COMMAND,
       };
     } catch (error) {
       return {
-        configured,
+        ...base,
+        configured: await this.source.configured(),
         connected: false,
+        method,
         workspace: null,
         teamKeys: [],
         error: safeError(error),
-        setupCommand: SETUP_COMMAND,
       };
     }
+  }
+
+  /** Starts a Linear sign-in and returns the page to send the browser to. */
+  async connect(redirectUri: string): Promise<string> {
+    if (!this.connector) throw new Error('Signing in to Linear is not available here.');
+
+    this.connectError = null;
+
+    return this.connector.begin(redirectUri);
+  }
+
+  /** Finishes a sign-in from Linear's redirect; false (with the reason kept for Settings) on failure. */
+  async callback(params: CallbackParams): Promise<boolean> {
+    if (!this.connector) return false;
+
+    try {
+      await this.connector.complete(params);
+      this.connectError = null;
+      this.clearCaches();
+      this.source.refresh?.();
+
+      return true;
+    } catch (error) {
+      this.connectError =
+        error instanceof LinearAuthError ? error.message : `Could not sign in: ${safeError(error)}`;
+
+      return false;
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    await this.connector?.disconnect();
+    this.connectError = null;
+    this.clearCaches();
+    this.source.refresh?.();
+  }
+
+  /** Demo mode: forget caches and put the fixture back as it started. */
+  reset(): void {
+    this.connectError = null;
+    this.clearCaches();
+    this.source.reset?.();
   }
 
   private async workspace(force = false) {
@@ -224,12 +348,51 @@ export class LinearService {
   }
 }
 
-/** Demo-mode Linear with a handful of fictional issues. */
-export class FixtureLinear implements LinearSource {
-  constructor(private readonly connected = true) {}
+/**
+ * Demo-mode Linear with a handful of fictional issues. Its sign-in never leaves the app: the
+ * "Linear" page is the local callback itself.
+ */
+export class FixtureLinear implements LinearSource, LinearConnector {
+  readonly method = 'oauth' as const;
+  private connected: boolean;
+  private readonly states = new Set<string>();
+
+  constructor(private readonly initiallyConnected = true) {
+    this.connected = initiallyConnected;
+  }
 
   async configured() {
     return this.connected;
+  }
+
+  async begin(redirectUri: string) {
+    const state = randomBytes(12).toString('base64url');
+    const url = new URL(redirectUri);
+
+    this.states.add(state);
+
+    return `${url.pathname}?${new URLSearchParams({ code: 'demo-code', state })}`;
+  }
+
+  async complete(params: CallbackParams) {
+    if (!params.state || !this.states.delete(params.state)) {
+      throw new LinearAuthError(
+        'This Linear sign-in has expired or was already used. Start again from Settings.',
+      );
+    }
+
+    if (params.error) throw new LinearAuthError('Linear sign-in was cancelled.');
+
+    this.connected = true;
+  }
+
+  async disconnect() {
+    this.connected = false;
+  }
+
+  reset() {
+    this.connected = this.initiallyConnected;
+    this.states.clear();
   }
 
   async workspace() {

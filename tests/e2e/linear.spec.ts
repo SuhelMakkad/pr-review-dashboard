@@ -22,6 +22,27 @@ test('settings show AI agents and the Linear connection', async ({ page }) => {
 
   await expect(page.getByRole('radio', { name: 'Codex' })).toHaveAttribute('aria-checked', 'true');
   await expect(page.getByText('Codex: demo')).toBeVisible();
-  await expect(page.getByText('Connected to Acme. Teams: DEMO.')).toBeVisible();
+  await expect(
+    page.getByText('Connected to Acme with your Linear sign-in. Teams: DEMO.'),
+  ).toBeVisible();
   await expectAccessible(page);
+});
+
+test('signs in to Linear from settings and signs out again', async ({ page }) => {
+  await openFresh(page, '/settings');
+
+  const linear = page.getByRole('region', { name: 'Linear' });
+
+  await linear.getByRole('button', { name: 'Disconnect' }).click();
+  await expect(page.getByText('Disconnected from Linear')).toBeVisible();
+  await expect(linear.getByText('Use a personal API key instead')).toBeVisible();
+  await expectAccessible(page);
+
+  // Demo mode's "Linear" page is the local callback, so the whole round trip stays in the app.
+  await linear.getByRole('button', { name: 'Connect Linear' }).click();
+  await expect(page.getByText('Linear connected')).toBeVisible();
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(
+    linear.getByText('Connected to Acme with your Linear sign-in. Teams: DEMO.'),
+  ).toBeVisible();
 });

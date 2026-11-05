@@ -51,7 +51,7 @@ Replacing `github.com` with `127.0.0.1:4317` in any PR URL opens that PR here.
 
 **AI.** Install and log in to the Codex CLI (`codex`) and/or Claude Code (`claude`). Settings shows which are found. Agents run headless in a private scratch folder with no GitHub credentials; full reviews include repository snapshots that are removed when the run finishes or is stopped. Codex runs read-only with its connectors, plugins, browser and web search turned off and ignores your personal Codex config (its configured model is not available to headless runs on a ChatGPT login). Claude runs with no tools, no MCP servers and your user settings only. PR content is sent to the agent's own service under your subscription.
 
-**Linear.** Create a personal API key in Linear (Settings → Security & access → Personal API keys) and store it in your macOS Keychain from a terminal; the key never passes through the app:
+**Linear.** In Settings → Linear, click _Connect Linear_ and approve read-only access in Linear. This signs in through Linear's MCP server (OAuth with PKCE), so it works in workspaces where personal API keys are turned off. The sign-in is kept in your macOS Keychain (item `review-desk.linear-oauth`), refreshes itself, and _Disconnect_ removes it. Where personal API keys are allowed (Linear Settings → Security & access → Personal API keys) you can use one instead; store it in the Keychain from a terminal so the key never passes through the app:
 
 ```bash
 security add-generic-password -U -s review-desk.linear -a api-key -w

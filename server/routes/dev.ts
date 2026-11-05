@@ -4,6 +4,7 @@ import type { Notifier } from '../notify/notifier.js';
 import type { FixtureProvider } from '../ai/fixture.js';
 import type { FixtureGitHub } from '../demo/fixture-github.js';
 import { seedDemoQueue } from '../demo/history.js';
+import type { LinearService } from '../linear/service.js';
 import type { SyncService } from '../sync/service.js';
 
 /** Demo-only controls for stepping the scripted scenario. Never registered against real GitHub. */
@@ -13,6 +14,7 @@ export function registerDevRoutes(
   fixture: FixtureGitHub,
   runner: AiRunner,
   notifier: Notifier,
+  linear: LinearService,
 ): void {
   app.post('/api/dev/advance', async () => {
     const label = fixture.advance();
@@ -43,6 +45,7 @@ export function registerDevRoutes(
     fixture.reset();
     service.store.clearAccount(fixture.scenario.world.viewer.login);
     notifier.reset(fixture.scenario.world.viewer.login);
+    linear.reset();
 
     for (const key of [
       'notification-settings',

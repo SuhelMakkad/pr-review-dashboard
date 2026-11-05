@@ -9,6 +9,7 @@ const TTL_MS = 10 * 60_000;
 
 export interface KeySource {
   read(): Promise<string | null>;
+  forget?(): void;
 }
 
 /**

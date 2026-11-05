@@ -8,6 +8,9 @@ import { cn } from '../../ui/cn';
 import { aiTaskLabels, type AiEffort, type AiProvider, type AiTask } from '../../../shared/ai';
 import { useAiOverview, useAiSettings } from '../ai/useAi';
 import { useLinearStatus } from '../linear/useLinear';
+import type { LinearStatus } from '../../../shared/tickets';
+import { Button } from '../../ui/Button';
+import { useNavigate, useSearch } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
@@ -242,68 +245,125 @@ function AiSection({ account }: { account: string }) {
 
 function LinearSection() {
   const status = useLinearStatus();
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const search = useSearch({ strict: false }) as { linear?: string };
   const data = status.data;
+
+  const connect = useMutation({
+    mutationFn: () => api<{ url: string }>('/api/linear/connect', { method: 'POST' }),
+    // Linear's sign-in page sends the browser back to Settings when it is done.
+    onSuccess: ({ url }) => window.location.assign(url),
+    onError: (error) => toast.error(error.message),
+  });
+  const disconnect = useMutation({
+    mutationFn: () => api<LinearStatus>('/api/linear/disconnect', { method: 'POST' }),
+    onSuccess: (next) => {
+      queryClient.setQueryData(['linear-status'], next);
+      void queryClient.invalidateQueries({ queryKey: ['tickets'] });
+      toast('Disconnected from Linear');
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  useEffect(() => {
+    if (search.linear !== 'connected' && search.linear !== 'failed') return;
+
+    if (search.linear === 'connected') toast.success('Linear connected');
+    else toast.error('Linear sign-in did not finish');
+
+    void queryClient.invalidateQueries({ queryKey: ['linear-status'] });
+    void queryClient.invalidateQueries({ queryKey: ['tickets'] });
+    void navigate({ to: '/settings', search: {}, replace: true });
+  }, [search.linear, navigate, queryClient]);
 
   if (!data) return null;
 
+  const via = data.method === 'oauth' ? 'your Linear sign-in' : 'a personal API key';
+
   return (
-    <>
-      <h2 className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase">Linear</h2>
+    <section aria-labelledby="settings-linear">
+      <h2
+        id="settings-linear"
+        className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase"
+      >
+        Linear
+      </h2>
       <Row
         label="Connection"
         hint={
           data.connected
-            ? `Connected to ${data.workspace}. Teams: ${data.teamKeys.join(', ')}.`
+            ? `Connected to ${data.workspace} with ${via}. Teams: ${data.teamKeys.join(', ')}.`
             : 'Shows the status, owner and priority of tickets your PRs reference.'
         }
       >
-        <span
-          className={cn(
-            'text-sm',
-            data.connected ? 'text-ok' : data.error ? 'text-fail' : 'text-fg-muted',
-          )}
-        >
-          {data.connected ? 'Connected' : data.error ? 'Key rejected' : 'Not connected'}
-        </span>
+        {data.connected ? (
+          <span className="flex items-center gap-3">
+            <span className="text-sm text-ok">Connected</span>
+            {data.method === 'oauth' && data.canSignIn && (
+              <Button size="sm" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>
+                Disconnect
+              </Button>
+            )}
+          </span>
+        ) : data.canSignIn ? (
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={connect.isPending}
+            onClick={() => connect.mutate()}
+          >
+            {connect.isPending ? 'Opening Linear…' : 'Connect Linear'}
+          </Button>
+        ) : (
+          <span className={cn('text-sm', data.error ? 'text-fail' : 'text-fg-muted')}>
+            {data.error ? 'Key rejected' : 'Not connected'}
+          </span>
+        )}
       </Row>
       {!data.connected && (
-        <div className="space-y-2 border-b border-line py-4 text-sm text-fg-muted">
-          <p>
-            Create a personal API key in Linear (Settings → Security & access → Personal API keys),
-            then store it in your macOS Keychain by running this in a terminal and pasting the key
-            when asked:
-          </p>
-          <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-sm border border-line bg-sunken px-2 py-1.5 text-xs text-fg">
-              {data.setupCommand}
-            </code>
-            <button
-              type="button"
-              className="h-7 rounded-sm border border-line px-2 text-xs hover:bg-hover"
-              onClick={() =>
-                void navigator.clipboard
-                  .writeText(data.setupCommand)
-                  .then(() => toast('Command copied'))
-              }
-            >
-              Copy
-            </button>
-            <button
-              type="button"
-              className="h-7 rounded-sm border border-line px-2 text-xs hover:bg-hover"
-              onClick={() => void status.refetch()}
-            >
-              Check again
-            </button>
-          </div>
-          <p className="text-xs">
-            The key never passes through this app’s pages or API; the server reads it from the
-            Keychain when needed.
-          </p>
+        <div className="space-y-3 border-b border-line py-4 text-sm text-fg-muted">
           {data.error && <p className="text-xs text-fail">{data.error}</p>}
+          {data.canSignIn && (
+            <p className="text-xs">
+              Connect opens Linear, where you approve read-only access for Review Desk. It goes
+              through Linear’s MCP server, so it works even where personal API keys are turned off.
+              The sign-in is kept in your macOS Keychain, never in this app’s pages or data folder.
+            </p>
+          )}
+          <details className="group text-xs" open={!data.canSignIn}>
+            <summary className="cursor-default select-none hover:text-fg">
+              {data.canSignIn ? 'Use a personal API key instead' : 'Use a personal API key'}
+            </summary>
+            <div className="mt-2 space-y-2">
+              <p>
+                If your workspace allows personal API keys (Linear Settings → Security & access →
+                Personal API keys), create one and store it in your macOS Keychain by running this
+                in a terminal and pasting the key when asked:
+              </p>
+              <div className="flex items-center gap-2">
+                <code className="min-w-0 flex-1 truncate rounded-sm border border-line bg-sunken px-2 py-1.5 text-xs text-fg">
+                  {data.setupCommand}
+                </code>
+                <Button
+                  size="sm"
+                  onClick={() =>
+                    void navigator.clipboard
+                      .writeText(data.setupCommand)
+                      .then(() => toast('Command copied'))
+                  }
+                >
+                  Copy
+                </Button>
+                <Button size="sm" onClick={() => void status.refetch()}>
+                  Check again
+                </Button>
+              </div>
+            </div>
+          </details>
         </div>
       )}
-    </>
+    </section>
   );
 }
 

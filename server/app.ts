@@ -20,6 +20,7 @@ import { Backfill } from './insights/backfill.js';
 import { Notifier } from './notify/notifier.js';
 import { macosNotify } from './notify/macos.js';
 import { FixtureLinear, LinearService, type LinearSource } from './linear/service.js';
+import type { LinearConnector } from './linear/oauth.js';
 import { AiRunner } from './ai/runner.js';
 import { downloadRepository, type RepositoryExporter } from './ai/workspace.js';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -47,8 +48,10 @@ export interface AppOptions {
   /** Private scratch directory for agent runs. */
   aiWorkRoot?: string;
   exportRepository?: RepositoryExporter;
-  /** Linear access (Keychain-backed API normally, a fixture in demo mode and tests). */
+  /** Linear access (Linear sign-in or a Keychain key normally, a fixture in demo mode and tests). */
   linear?: LinearSource;
+  /** Signs in to Linear from Settings; a fixture source acts as its own. */
+  linearConnector?: LinearConnector | null;
   /** Native notification sender used when no window is open (macOS by default). */
   nativeNotify?: (title: string, body: string) => Promise<void>;
   keepaliveMs?: number;
@@ -120,7 +123,17 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   registerReviewRoutes(app, reviews);
   registerAiRoutes(app, runner);
   app.addHook('onClose', () => runner.close());
-  registerLinearRoutes(app, service, new LinearService(options.linear ?? new FixtureLinear(false)));
+  const linearSource = options.linear ?? new FixtureLinear(false);
+  const linear = new LinearService(
+    linearSource,
+    options.linearConnector !== undefined
+      ? options.linearConnector
+      : linearSource instanceof FixtureLinear
+        ? linearSource
+        : null,
+  );
+
+  registerLinearRoutes(app, service, linear);
 
   const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);
 
@@ -135,7 +148,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   registerNotifyRoutes(app, service, notifier);
   registerInsightsRoutes(app, service, backfill);
 
-  if (options.fixture) registerDevRoutes(app, service, options.fixture, runner, notifier);
+  if (options.fixture) registerDevRoutes(app, service, options.fixture, runner, notifier, linear);
 
   if (webRoot && index) {
     const sendIndex = (reply: FastifyReply) =>

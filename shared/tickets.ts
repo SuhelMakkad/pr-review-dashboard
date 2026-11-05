@@ -137,12 +137,18 @@ export interface LinearIssue {
   dueDate: string | null;
 }
 
+/** How Review Desk reaches Linear: a Linear sign-in (OAuth through Linear's MCP server) or a personal API key. */
+export type LinearMethod = 'oauth' | 'api_key';
+
 export interface LinearStatus {
   configured: boolean;
   connected: boolean;
+  method: LinearMethod | null;
   workspace: string | null;
   teamKeys: string[];
   error: string | null;
-  /** Command the user runs in a terminal to store their key in the macOS Keychain. */
+  /** Whether "Connect Linear" (OAuth sign-in) is offered. */
+  canSignIn: boolean;
+  /** Command the user runs in a terminal to store a personal API key in the macOS Keychain. */
   setupCommand: string;
 }

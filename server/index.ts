@@ -13,8 +13,11 @@ import { createSessionToken } from './http/security.js';
 import { ClaudeProvider } from './ai/claude.js';
 import { CodexProvider } from './ai/codex.js';
 import { FixtureProvider } from './ai/fixture.js';
+import { KeychainCredentialStore } from './linear/credentials.js';
 import { KeychainKeySource } from './linear/keychain.js';
-import { FixtureLinear, LinearApi } from './linear/service.js';
+import { LinearMcp } from './linear/mcp.js';
+import { LinearOAuth } from './linear/oauth.js';
+import { FixtureLinear, LinearApi, PreferredLinear } from './linear/service.js';
 import { SyncService } from './sync/service.js';
 
 const config = loadConfig();
@@ -27,6 +30,7 @@ const store = new Store(config.databasePath);
 const service = new SyncService(store, fixture ?? new GitHub(), new EventBus());
 const sessionToken = createSessionToken();
 const bootId = randomUUID();
+const linearOAuth = fixture ? null : new LinearOAuth(new KeychainCredentialStore());
 
 if (config.viteDev) {
   // Vite injects the session into index.html during development; only this user can read it.
@@ -50,7 +54,11 @@ const app = await createApp(service, {
     ? { codex: new FixtureProvider('codex'), claude: new FixtureProvider('claude') }
     : { codex: new CodexProvider(), claude: new ClaudeProvider() },
   aiWorkRoot: join(config.dataDir, 'ai-runs'),
-  linear: fixture ? new FixtureLinear() : new LinearApi(new KeychainKeySource()),
+  // A Linear sign-in comes first; a personal API key in the Keychain still works where allowed.
+  linear: linearOAuth
+    ? new PreferredLinear([new LinearMcp(linearOAuth), new LinearApi(new KeychainKeySource())])
+    : new FixtureLinear(),
+  linearConnector: linearOAuth ?? undefined,
 });
 
 try {
