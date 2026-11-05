@@ -82,6 +82,22 @@ export const checksPageQuery = `query Checks($id: ID!, $cursor: String) {
   node(id: $id) { ... on PullRequest { commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100, after: $cursor) { nodes { ${checkFields} } ${pageInfo} } } } } } } }
 }`;
 
+/** Fetches file contents at specific commits; one aliased `object` per expression variable. */
+export function blobsQuery(count: number): string {
+  const variables = Array.from({ length: count }, (_, index) => `$e${index}: String!`).join(', ');
+  const fields = Array.from(
+    { length: count },
+    (_, index) =>
+      `b${index}: object(expression: $e${index}) { ... on Blob { text isBinary isTruncated byteSize } }`,
+  ).join('\n    ');
+
+  return `query Blobs($owner: String!, $name: String!, ${variables}) {
+  repository(owner: $owner, name: $name) {
+    ${fields}
+  }
+}`;
+}
+
 /** All static documents plus each generated page query, for the schema contract test. */
 export function allDocuments(): Record<string, string> {
   const pages = Object.fromEntries(
@@ -98,6 +114,7 @@ export function allDocuments(): Record<string, string> {
     Detect: detectQuery,
     Comments: threadCommentsQuery,
     Checks: checksPageQuery,
+    Blobs: blobsQuery(2),
     ...pages,
   };
 }

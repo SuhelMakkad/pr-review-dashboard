@@ -8,7 +8,9 @@ import { registerSecret } from './github/errors.js';
 import { loadIndexHtml } from './http/html.js';
 import { createSessionToken, registerSecurity } from './http/security.js';
 import { registerEventStream } from './http/sse.js';
+import { DiffService } from './diff/service.js';
 import { registerDevRoutes } from './routes/dev.js';
+import { registerDiffRoutes } from './routes/diff.js';
 import { registerPullRoutes } from './routes/pulls.js';
 import type { SyncService } from './sync/service.js';
 
@@ -54,6 +56,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     keepaliveMs: options.keepaliveMs,
   });
   registerPullRoutes(app, service);
+  registerDiffRoutes(app, service, new DiffService(service.github));
 
   if (options.fixture) registerDevRoutes(app, service, options.fixture);
 

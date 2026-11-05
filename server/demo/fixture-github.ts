@@ -1,7 +1,14 @@
 import { SNAPSHOT_VERSION } from '../../shared/snapshot.js';
 import type { Actor, PullRequestSnapshot, Source } from '../../shared/types.js';
 import { createHash } from 'node:crypto';
-import type { DetectResult, GitHubApi, RateBudget } from '../github/api.js';
+import type {
+  BlobText,
+  CompareResult,
+  DetectResult,
+  GitHubApi,
+  RateBudget,
+  RemoteFile,
+} from '../github/api.js';
 import { GitHubError } from '../github/errors.js';
 import type { Scenario } from './scenario.js';
 
@@ -78,6 +85,19 @@ export class FixtureGitHub implements GitHubApi {
 
     const now = new Date(this.scenario.world.now()).toISOString();
     const snapshot = structuredClone(pull.snapshot);
+    const files = this.pullFilesSync(snapshot.repository, snapshot.number);
+    const viewed = this.scenario.world.viewed.get(id);
+
+    snapshot.files = files.map((file) => ({
+      path: file.path,
+      additions: file.additions,
+      deletions: file.deletions,
+      changeType: file.status.toUpperCase(),
+      viewerViewedState: viewed?.get(file.path) ?? 'UNVIEWED',
+    }));
+    snapshot.changedFiles = files.length;
+    snapshot.additions = files.reduce((sum, file) => sum + file.additions, 0);
+    snapshot.deletions = files.reduce((sum, file) => sum + file.deletions, 0);
 
     return {
       ...snapshot,
@@ -91,6 +111,35 @@ export class FixtureGitHub implements GitHubApi {
             ? now
             : snapshot.headCommittedAt,
     };
+  }
+
+  private pullFilesSync(repository: string, number: number): RemoteFile[] {
+    const pull = this.scenario.world.pulls.find(
+      (item) => item.snapshot.repository === repository && item.snapshot.number === number,
+    );
+
+    if (!pull) throw new GitHubError(`No demo PR ${repository}#${number}.`);
+
+    return (
+      this.scenario.world.repos.compare(repository, 'main', pull.snapshot.headOid)?.files ?? []
+    );
+  }
+
+  async pullFiles(repository: string, number: number): Promise<RemoteFile[]> {
+    return this.pullFilesSync(repository, number);
+  }
+
+  async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {
+    return this.scenario.world.repos.compare(repository, base, head);
+  }
+
+  async blobs(
+    repository: string,
+    requests: { oid: string; path: string }[],
+  ): Promise<(BlobText | null)[]> {
+    return requests.map((request) =>
+      this.scenario.world.repos.blob(repository, request.oid, request.path),
+    );
   }
 
   /** Applies the next scripted change. Returns its label, or null when the script is finished. */

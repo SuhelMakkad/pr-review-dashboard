@@ -2,6 +2,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   redirect,
   type RouterHistory,
 } from '@tanstack/react-router';
@@ -9,7 +10,9 @@ import { inboxSearchSchema } from './features/inbox/filters';
 import { InboxPage } from './features/inbox/InboxPage';
 import { InboxReader } from './features/inbox/InboxReader';
 import { queueSlugs, type QueueSlug } from './features/pulls/meta';
-import { PullPage } from './features/pulls/PullPage';
+import { PullLayout } from './features/pulls/PullLayout';
+import { PullOverview } from './features/pulls/PullOverview';
+import { filesSearchSchema } from './features/review/search';
 import { SettingsPage } from './features/settings/SettingsPage';
 import { NotFound } from './features/shell/NotFound';
 import { Shell } from './features/shell/Shell';
@@ -45,7 +48,21 @@ const inboxPullRoute = createRoute({
 const pullRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'pr/$owner/$repo/$number',
-  component: PullPage,
+  component: PullLayout,
+});
+
+const pullOverviewRoute = createRoute({
+  getParentRoute: () => pullRoute,
+  path: '/',
+  component: PullOverview,
+});
+
+const pullFilesRoute = createRoute({
+  getParentRoute: () => pullRoute,
+  path: 'files',
+  validateSearch: filesSearchSchema,
+  // The diff renderer and syntax highlighter load only when a diff is opened.
+  component: lazyRouteComponent(() => import('./features/review/FilesWorkspace'), 'FilesWorkspace'),
 });
 
 /** Swap github.com for this app's host in any PR URL and it opens here. */
@@ -61,10 +78,12 @@ const githubPullTabRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '$owner/$repo/pull/$number/$tab',
   beforeLoad: ({ params }) => {
-    throw redirect({
-      to: '/pr/$owner/$repo/$number',
-      params: { owner: params.owner, repo: params.repo, number: params.number },
-    });
+    const target = { owner: params.owner, repo: params.repo, number: params.number };
+
+    if (params.tab === 'files')
+      throw redirect({ to: '/pr/$owner/$repo/$number/files', params: target });
+
+    throw redirect({ to: '/pr/$owner/$repo/$number', params: target });
   },
 });
 
@@ -77,7 +96,7 @@ const settingsRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   inboxRoute.addChildren([inboxPullRoute]),
-  pullRoute,
+  pullRoute.addChildren([pullOverviewRoute, pullFilesRoute]),
   githubPullRoute,
   githubPullTabRoute,
   settingsRoute,

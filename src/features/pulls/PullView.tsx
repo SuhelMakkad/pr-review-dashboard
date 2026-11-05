@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Link } from '@tanstack/react-router';
 import {
   AlarmClock,
   ArrowUpRight,
@@ -6,6 +7,7 @@ import {
   ChevronRight,
   Copy,
   FileCode2,
+  FileDiff,
   GitBranch,
   GitCommitHorizontal,
   MessageSquare,
@@ -23,6 +25,7 @@ import { dateTime, relativePhrase, shortDateTime } from '../../lib/time';
 import { Avatar } from '../../ui/Avatar';
 import { Button } from '../../ui/Button';
 import { cn } from '../../ui/cn';
+import { Kbd } from '../../ui/Kbd';
 import { MarkdownView } from '../../ui/Markdown';
 import { useInboxNavigation } from '../inbox/InboxContext';
 import { usePullActions } from './actions';
@@ -324,14 +327,34 @@ function PullDetailView({
         )}
 
         <div className="flex flex-wrap items-center gap-2 px-6 pb-4">
+          <Link
+            to="/pr/$owner/$repo/$number/files"
+            params={{
+              owner: pr.repository.split('/')[0],
+              repo: pr.repository.split('/')[1],
+              number: String(pr.number),
+            }}
+            search={{}}
+            className="inline-flex h-7 items-center gap-1.5 rounded-sm bg-accent px-2.5 text-xs font-medium text-accent-fg hover:bg-accent-hover"
+          >
+            <FileDiff size={13} aria-hidden="true" />
+            Review changes
+            {variant === 'pane' && (
+              <Kbd
+                keys="Enter"
+                className="opacity-80 [&_kbd]:border-accent-fg/30 [&_kbd]:bg-transparent [&_kbd]:text-accent-fg"
+              />
+            )}
+          </Link>
           <a
             href={pr.url}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex h-7 items-center gap-1.5 rounded-sm bg-accent px-2.5 text-xs font-medium text-accent-fg hover:bg-accent-hover"
+            className="inline-flex h-7 items-center gap-1.5 rounded-sm border border-line-strong px-2.5 text-xs font-medium hover:bg-hover"
           >
-            Review on GitHub
+            GitHub
             <ArrowUpRight size={13} aria-hidden="true" />
+            <Kbd keys="o" />
           </a>
           <SnoozeMenu
             item={item}

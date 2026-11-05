@@ -76,7 +76,12 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
     case 'pulls.changed':
       void client.invalidateQueries({ queryKey: queryKeys.pulls });
 
-      for (const id of event.ids) void client.invalidateQueries({ queryKey: queryKeys.detail(id) });
+      for (const id of event.ids) {
+        void client.invalidateQueries({ queryKey: queryKeys.detail(id) });
+        void client.invalidateQueries({ queryKey: ['diff', id] });
+      }
+
+      void client.invalidateQueries({ queryKey: queryKeys.mine });
 
       return;
     case 'triage.updated':

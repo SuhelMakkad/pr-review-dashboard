@@ -18,12 +18,19 @@ const sizes: Record<Size, string> = {
   md: 'h-8 px-3 text-sm gap-2 rounded-sm',
 };
 
+/** Square, padding-free sizes for icon-only buttons (no conflicting padding classes). */
+const iconSizes: Record<Size, string> = {
+  sm: 'size-7 text-xs rounded-sm',
+  md: 'size-8 text-sm rounded-sm',
+};
+
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
   size?: Size;
   icon?: ReactNode;
   /** Keyboard shortcut shown inside the button, in tinykeys syntax. */
   shortcut?: string;
+  iconOnly?: boolean;
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
@@ -32,6 +39,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     size = 'md',
     icon,
     shortcut,
+    iconOnly = false,
     className,
     children,
     type = 'button',
@@ -46,7 +54,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       className={cn(
         'inline-flex shrink-0 items-center justify-center font-medium whitespace-nowrap transition-colors select-none disabled:cursor-default disabled:opacity-50',
         variants[variant],
-        sizes[size],
+        iconOnly ? iconSizes[size] : sizes[size],
         className,
       )}
       {...props}
@@ -67,7 +75,8 @@ export const IconButton = forwardRef<HTMLButtonElement, ButtonProps & { label: s
         title={label}
         variant={variant}
         size={size}
-        className={cn(size === 'sm' ? 'w-7 px-0' : 'w-8 px-0', className)}
+        iconOnly
+        className={className}
         {...props}
       />
     );

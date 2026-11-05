@@ -94,7 +94,9 @@ export const FilterBar = forwardRef<
   const authors = [...new Set(items.map((item) => item.author.login))].sort();
   const count = activeFilterCount(search);
 
-  useEffect(() => setText(search.q ?? ''), [search.q]);
+  useEffect(() => {
+    setText(search.q ?? '');
+  }, [search.q]);
 
   useEffect(() => {
     const timer = setTimeout(() => {

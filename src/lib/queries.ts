@@ -6,6 +6,13 @@ import type {
   SyncStatus,
   TriageUpdate,
 } from '../../shared/types';
+import type { AuthorItem } from '../../shared/author';
+import type { DiffManifest, DiffMode } from '../../shared/diff';
+
+export interface MineList {
+  account: string | null;
+  items: AuthorItem[];
+}
 import { api } from './api';
 import { fallbackInterval, useLive } from './live';
 import { queryKeys } from './queryKeys';
@@ -32,6 +39,17 @@ export function usePulls() {
   });
 }
 
+export function useMine() {
+  const live = useLive();
+
+  return useQuery({
+    queryKey: queryKeys.mine,
+    queryFn: () => api<MineList>('/api/mine'),
+    refetchInterval: fallbackInterval(live),
+    staleTime: live.connected ? Infinity : 0,
+  });
+}
+
 export function usePullDetail(id: string | null) {
   const live = useLive();
 
@@ -41,6 +59,15 @@ export function usePullDetail(id: string | null) {
     enabled: Boolean(id),
     refetchInterval: fallbackInterval(live),
     staleTime: live.connected ? Infinity : 0,
+  });
+}
+
+export function useDiff(id: string | null, mode: DiffMode) {
+  return useQuery({
+    queryKey: queryKeys.diff(id ?? 'none', mode),
+    queryFn: () => api<DiffManifest>(`/api/pulls/${encodeURIComponent(id!)}/diff?mode=${mode}`),
+    enabled: Boolean(id),
+    staleTime: 30_000,
   });
 }
 

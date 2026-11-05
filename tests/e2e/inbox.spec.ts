@@ -1,46 +1,9 @@
-import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
-
-const NOW = new Date('2026-11-05T10:00:00.000Z');
-
-/** Restores the scenario and clears local triage so every test starts from the same state. */
-async function resetDemo(page: Page) {
-  await page.goto('/settings');
-  await page.evaluate(async () => {
-    const token = document.querySelector<HTMLMetaElement>(
-      'meta[name="review-desk-session"]',
-    )!.content;
-
-    await fetch('/api/dev/reset', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Review-Desk': '1',
-        'X-Review-Desk-Session': token,
-      },
-      body: '{}',
-    });
-  });
-}
+import { expectAccessible, openFresh } from './helpers';
 
 async function open(page: Page, path = '/') {
-  await page.clock.setFixedTime(NOW);
-  await resetDemo(page);
-  await page.goto(path);
+  await openFresh(page, path);
   await expect(page.getByRole('listbox', { name: /pull requests/i })).toBeVisible();
-}
-
-async function expectAccessible(page: Page) {
-  const results = await new AxeBuilder({ page }).analyze();
-  const serious = results.violations.filter((violation) =>
-    ['serious', 'critical'].includes(violation.impact ?? ''),
-  );
-
-  expect(
-    serious.map(
-      (violation) => `${violation.id}: ${violation.nodes.map((node) => node.target).join(', ')}`,
-    ),
-  ).toEqual([]);
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -112,7 +75,7 @@ test('deep links, palette navigation and GitHub-style paths', async ({ page }) =
   );
 
   await page.goto('/acme/web/pull/1839/files');
-  await expect(page).toHaveURL(/\/pr\/acme\/web\/1839$/);
+  await expect(page).toHaveURL(/\/pr\/acme\/web\/1839\/files$/);
 });
 
 test('has no serious accessibility violations', async ({ page }) => {

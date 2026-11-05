@@ -13,9 +13,17 @@ import type {
 } from '../../shared/types.js';
 import { createHash } from 'node:crypto';
 import { SNAPSHOT_VERSION } from '../../shared/snapshot.js';
-import type { DetectResult, GitHubApi, RateBudget } from './api.js';
+import type {
+  BlobText,
+  CompareResult,
+  DetectResult,
+  GitHubApi,
+  RateBudget,
+  RemoteFile,
+} from './api.js';
 import { GitHubError } from './errors.js';
 import {
+  blobsQuery,
   checksPageQuery,
   connectionPageQuery,
   detectQuery,
@@ -184,6 +192,33 @@ export function ciState(state: string): CiState {
   return 'none';
 }
 
+interface RawRestFile {
+  filename: string;
+  previous_filename?: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+  sha: string | null;
+}
+
+interface RawCompare {
+  status: CompareResult['status'];
+  merge_base_commit?: { sha: string };
+  files?: RawRestFile[];
+  commits?: { sha: string; parents: { sha: string }[] }[];
+}
+
+const restFile = (file: RawRestFile): RemoteFile => ({
+  path: file.filename,
+  previousPath: file.previous_filename,
+  status: file.status,
+  additions: file.additions,
+  deletions: file.deletions,
+  patch: file.patch,
+  sha: file.sha,
+});
+
 const searchQualifiers: Record<Source, string> = {
   requested: 'review-requested',
   assigned: 'assignee',
@@ -302,6 +337,91 @@ export class GitHub implements GitHubApi {
     }
 
     return { results, budget };
+  }
+
+  private requireRequest() {
+    if (!this.transport.request) throw new GitHubError('This GitHub transport cannot fetch diffs.');
+
+    return this.transport.request.bind(this.transport);
+  }
+
+  async pullFiles(repository: string, number: number): Promise<RemoteFile[]> {
+    const request = this.requireRequest();
+    const files: RemoteFile[] = [];
+
+    // GitHub caps this endpoint at 3,000 files (30 pages of 100).
+    for (let page = 1; page <= 30; page++) {
+      const response = await request<RawRestFile[]>({
+        path: `repos/${repository}/pulls/${number}/files?per_page=100&page=${page}`,
+      });
+
+      if (response.status >= 400)
+        throw new GitHubError(
+          `Could not load files (HTTP ${response.status}).`,
+          null,
+          response.status,
+        );
+
+      files.push(...response.data.map(restFile));
+
+      if (response.data.length < 100 || !/rel="next"/.test(response.headers.link ?? '')) break;
+    }
+
+    return files;
+  }
+
+  async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {
+    const request = this.requireRequest();
+    const response = await request<RawCompare>({
+      path: `repos/${repository}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?per_page=100`,
+    });
+
+    if (response.status === 404 || response.status === 422) return null;
+    if (response.status >= 400)
+      throw new GitHubError(
+        `Could not compare commits (HTTP ${response.status}).`,
+        null,
+        response.status,
+      );
+
+    return {
+      status: response.data.status,
+      mergeBaseOid: response.data.merge_base_commit?.sha ?? null,
+      files: (response.data.files ?? []).map(restFile),
+      commits: (response.data.commits ?? []).map((commit) => ({
+        oid: commit.sha,
+        parents: commit.parents.map((parent) => parent.sha),
+      })),
+    };
+  }
+
+  async blobs(
+    repository: string,
+    requests: { oid: string; path: string }[],
+  ): Promise<(BlobText | null)[]> {
+    const [owner, name] = repository.split('/');
+    const results: (BlobText | null)[] = [];
+
+    for (let start = 0; start < requests.length; start += 25) {
+      const batch = requests.slice(start, start + 25);
+      const variables: Record<string, string> = { owner, name };
+
+      batch.forEach((item, index) => {
+        variables[`e${index}`] = `${item.oid}:${item.path}`;
+      });
+
+      const data = await this.transport.graphql<{
+        repository: Record<string, BlobText | null> | null;
+      }>(blobsQuery(batch.length), variables);
+
+      batch.forEach((_, index) => {
+        const blob = data.repository?.[`b${index}`];
+
+        results.push(blob && 'byteSize' in blob ? blob : null);
+      });
+    }
+
+    return results;
   }
 
   private async collect<T>(

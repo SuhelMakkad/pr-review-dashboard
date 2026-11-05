@@ -60,6 +60,8 @@ export default defineConfig({
     proxy: { '/api': `http://127.0.0.1:${apiPort}` },
   },
   build: { outDir: 'dist/web' },
+  // The diff renderer highlights code in module workers.
+  worker: { format: 'es' },
   test: {
     environment: 'node',
     include: ['tests/**/*.test.{ts,tsx}'],

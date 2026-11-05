@@ -94,8 +94,9 @@ export function InboxPage() {
     const target = refOf(item);
 
     void navigate({
-      to: '/pr/$owner/$repo/$number',
+      to: '/pr/$owner/$repo/$number/files',
       params: { owner: target.owner, repo: target.repo, number: String(target.number) },
+      search: {},
     });
   };
 
@@ -135,7 +136,7 @@ export function InboxPage() {
     { keys: 'k', label: 'Previous PR', group: 'Queue', run: () => move(-1) },
     { keys: 'ArrowDown', label: 'Next PR', group: 'Queue', run: () => move(1), hidden: true },
     { keys: 'ArrowUp', label: 'Previous PR', group: 'Queue', run: () => move(-1), hidden: true },
-    { keys: 'Enter', label: 'Open PR', group: 'Queue', run: () => open(current) },
+    { keys: 'Enter', label: 'Review changes', group: 'Queue', run: () => open(current) },
     { keys: 'Escape', label: 'Close reading pane', group: 'Queue', run: () => ref && void close() },
     {
       keys: '/',

@@ -263,11 +263,17 @@ describe('shell', () => {
   });
 
   it('redirects GitHub-style PR paths to the PR page', async () => {
-    const { router } = mount('/acme/repo/pull/3/files');
+    const { router } = mount('/acme/repo/pull/3');
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/pr/acme/repo/3'));
     expect(
       await screen.findByRole('heading', { name: /Already approved and quiet/ }),
     ).toBeInTheDocument();
+  });
+
+  it('sends GitHub "files changed" paths to the review workspace', async () => {
+    const { router } = mount('/acme/repo/pull/3/files');
+
+    await waitFor(() => expect(router.state.location.pathname).toBe('/pr/acme/repo/3/files'));
   });
 });

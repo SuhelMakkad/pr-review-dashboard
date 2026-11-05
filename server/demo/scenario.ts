@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { buildDemoRepos } from './content.js';
+import type { FixtureRepos } from './repo.js';
 import type {
   Actor,
   PullRequestSnapshot,
@@ -24,6 +26,10 @@ export interface ScenarioWorld {
   teams: string[];
   now: () => number;
   pulls: ScenarioPull[];
+  /** Commit graphs and file contents behind every PR's diff. */
+  repos: FixtureRepos;
+  /** Per-PR, per-path viewed state as GitHub would report it. */
+  viewed: Map<string, Map<string, 'VIEWED' | 'UNVIEWED' | 'DISMISSED'>>;
 }
 
 export interface Scenario {
@@ -418,7 +424,68 @@ export function defaultScenario(anchor = Date.now()): Scenario {
     },
   );
 
+  const generatedFiles: Record<number, { path: string; added?: boolean; lines?: number }[]> = {
+    1839: [
+      { path: 'src/scheduling/CalendarTabs.tsx' },
+      { path: 'src/scheduling/CalendarSettings.tsx', lines: 40 },
+      { path: 'src/scheduling/styles.css', lines: 12 },
+    ],
+    2050: [
+      { path: 'src/search/rateLimit.ts', added: true, lines: 36 },
+      { path: 'src/search/routes.ts' },
+      { path: 'tests/search/rateLimit.test.ts', added: true, lines: 20 },
+    ],
+    870: [
+      { path: 'src/catalog/SavedSearches.tsx', added: true, lines: 48 },
+      { path: 'src/catalog/api.ts' },
+    ],
+    2033: [
+      { path: 'src/indexing/worker.ts', lines: 30 },
+      { path: 'src/logging.ts', lines: 16 },
+      // Large generated file: collapsed by default, and the diff performance check.
+      { path: 'src/indexing/weights.generated.ts', added: true, lines: 5000 },
+    ],
+    42: [
+      { path: 'infra/staging/vpc.tf', lines: 28 },
+      { path: 'infra/staging/main.tf', lines: 20 },
+    ],
+    3001: [
+      { path: 'src/webhooks/retry.ts', added: true, lines: 44 },
+      { path: 'src/webhooks/dispatcher.ts' },
+      { path: 'tests/webhooks/retry.test.ts', added: true, lines: 18 },
+    ],
+    882: [
+      { path: 'src/products/useListShortcuts.ts', added: true, lines: 32 },
+      { path: 'src/products/ProductList.tsx' },
+    ],
+    2058: [
+      { path: '.github/workflows/ci.yml', lines: 14 },
+      { path: 'Dockerfile', lines: 10 },
+    ],
+    45: [{ path: 'infra/alerts/preview-costs.tf', added: true, lines: 22 }],
+  };
+  const repos = buildDemoRepos(
+    sha,
+    pulls.map((pull) => {
+      const reviewedOid =
+        [...pull.snapshot.reviews].sort(
+          (a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt),
+        )[0]?.commitOid ?? undefined;
+
+      return {
+        number: pull.snapshot.number,
+        repository: pull.snapshot.repository,
+        baseOid: pull.snapshot.baseOid ?? sha(`${pull.snapshot.repository}base`),
+        headOid: pull.snapshot.headOid,
+        reviewedOid,
+        files: generatedFiles[pull.snapshot.number] ?? [],
+      };
+    }),
+  );
+
   const world: ScenarioWorld = {
+    repos,
+    viewed: new Map(),
     viewer: { login: VIEWER },
     teams: ['acme/platform'],
     now: () => Date.now(),
