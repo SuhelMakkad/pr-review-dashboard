@@ -12,6 +12,13 @@ import { DiffService } from './diff/service.js';
 import { registerDevRoutes } from './routes/dev.js';
 import { registerDiffRoutes } from './routes/diff.js';
 import { registerReviewRoutes } from './routes/review.js';
+import { registerAiRoutes } from './routes/ai.js';
+import { AiRunner } from './ai/runner.js';
+import { FixtureProvider } from './ai/fixture.js';
+import type { AgentProvider } from './ai/provider.js';
+import type { AiProvider } from '../shared/ai.js';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ReviewService } from './review/service.js';
 import { registerPullRoutes } from './routes/pulls.js';
 import type { SyncService } from './sync/service.js';
@@ -25,6 +32,10 @@ export interface AppOptions {
   bootId?: string;
   /** Demo-mode GitHub stand-in; enables the scenario controls under /api/dev. */
   fixture?: FixtureGitHub;
+  /** AI agents (real CLIs normally, deterministic stand-ins in demo mode and tests). */
+  aiProviders?: Record<AiProvider, AgentProvider>;
+  /** Private scratch directory for agent runs. */
+  aiWorkRoot?: string;
   keepaliveMs?: number;
 }
 
@@ -61,9 +72,23 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   const diffs = new DiffService(service.github);
 
   registerDiffRoutes(app, service, diffs);
-  registerReviewRoutes(app, new ReviewService(service, service.github, diffs, service.events));
+  const reviews = new ReviewService(service, service.github, diffs, service.events);
+  const runner = new AiRunner(
+    service,
+    diffs,
+    reviews,
+    service.events,
+    options.aiProviders ?? {
+      codex: new FixtureProvider('codex'),
+      claude: new FixtureProvider('claude'),
+    },
+    options.aiWorkRoot ?? join(tmpdir(), 'review-desk-ai'),
+  );
 
-  if (options.fixture) registerDevRoutes(app, service, options.fixture);
+  registerReviewRoutes(app, reviews);
+  registerAiRoutes(app, runner);
+
+  if (options.fixture) registerDevRoutes(app, service, options.fixture, runner);
 
   if (webRoot && index) {
     const sendIndex = (reply: FastifyReply) =>

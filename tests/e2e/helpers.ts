@@ -70,3 +70,22 @@ export async function failNext(page: Page, op: string) {
     });
   }, op);
 }
+
+/** Makes the next demo AI run fail with this message. */
+export async function failNextAi(page: Page, message: string) {
+  await page.evaluate(async (text) => {
+    const token = document.querySelector<HTMLMetaElement>(
+      'meta[name="review-desk-session"]',
+    )!.content;
+
+    await fetch('/api/dev/fail', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Review-Desk': '1',
+        'X-Review-Desk-Session': token,
+      },
+      body: JSON.stringify({ ai: text }),
+    });
+  }, message);
+}

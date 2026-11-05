@@ -7,6 +7,7 @@ export type ServerEvent =
   | { type: 'status'; status: SyncStatus }
   | { type: 'pulls.changed'; ids: string[] }
   | { type: 'triage.updated'; id: string }
-  | { type: 'draft.updated'; id: string };
+  | { type: 'draft.updated'; id: string }
+  | { type: 'ai.updated'; prId: string; runId: string };
 
 export type ServerEventType = ServerEvent['type'];

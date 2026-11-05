@@ -232,7 +232,15 @@ export class Store {
       this.db.prepare('DELETE FROM snapshots WHERE account = ?').run(account);
       this.db.prepare('DELETE FROM triage WHERE account = ?').run(account);
 
-      for (const table of ['pr_sync', 'feed_membership', 'activity_events', 'queue_samples']) {
+      for (const table of [
+        'pr_sync',
+        'feed_membership',
+        'activity_events',
+        'queue_samples',
+        'draft_comments',
+        'review_drafts',
+        'ai_runs',
+      ]) {
         this.db.prepare(`DELETE FROM ${table} WHERE account = ?`).run(account);
       }
     });

@@ -9,6 +9,9 @@ import { defaultScenario } from './demo/scenario.js';
 import { EventBus } from './events.js';
 import { GitHub } from './github/read.js';
 import { createSessionToken } from './http/security.js';
+import { ClaudeProvider } from './ai/claude.js';
+import { CodexProvider } from './ai/codex.js';
+import { FixtureProvider } from './ai/fixture.js';
 import { SyncService } from './sync/service.js';
 
 const config = loadConfig();
@@ -40,6 +43,10 @@ const app = await createApp(service, {
   sessionToken,
   bootId,
   fixture,
+  aiProviders: fixture
+    ? { codex: new FixtureProvider('codex'), claude: new FixtureProvider('claude') }
+    : { codex: new CodexProvider(), claude: new ClaudeProvider() },
+  aiWorkRoot: join(config.dataDir, 'ai-runs'),
 });
 
 try {

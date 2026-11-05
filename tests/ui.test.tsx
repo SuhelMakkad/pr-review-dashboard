@@ -9,6 +9,7 @@ import { createAppRouter } from '../src/router';
 import { resetInboxAutoSelect } from '../src/features/inbox/InboxPage';
 import { initialStatus } from '../server/sync';
 import { deriveItem, emptyTriage } from '../shared/attention';
+import { defaultAiSettings } from '../shared/ai';
 import type { LocalTriageState } from '../shared/types';
 import { review, snapshot } from './fixtures';
 
@@ -64,7 +65,13 @@ beforeEach(() => {
       const state = (id: string) => triage[id] ?? emptyTriage();
       let data: unknown;
 
-      if (path === '/api/status') {
+      if (path === '/api/mine') {
+        data = { account: 'me', items: [] };
+      } else if (path === '/api/ai') {
+        data = { settings: defaultAiSettings(), providers: [] };
+      } else if (/^\/api\/pulls\/[^/]+\/ai/.test(path)) {
+        data = { runs: [] };
+      } else if (path === '/api/status') {
         data = {
           ...initialStatus(),
           account: { login: 'me' },

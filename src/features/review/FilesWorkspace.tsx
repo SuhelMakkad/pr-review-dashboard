@@ -33,6 +33,9 @@ import { FinishSheet } from './FinishSheet';
 import { PendingTray } from './PendingTray';
 import type { FilesSearch } from './search';
 import { ThreadsRail } from './ThreadsRail';
+import { AssistPanel } from '../ai/AssistPanel';
+import { Suggestions } from '../ai/Suggestions';
+import { useAi } from '../ai/useAi';
 import { useReview } from './useReview';
 
 const VIEW_KEY = 'review-desk-diff-view';
@@ -82,6 +85,7 @@ function Workspace() {
   const [selection, setSelection] = useState<LineTarget | null>(null);
   const [replying, setReplying] = useState<string | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
+  const [railTab, setRailTab] = useState<'threads' | 'assist'>('threads');
   const layout = useDefaultLayout({ id: 'files-workspace', storage: layoutStorage() });
 
   const reviewOid = item?.latestReview?.commitOid ?? null;
@@ -92,6 +96,7 @@ function Workspace() {
   const detail = usePullDetail(item?.id ?? null);
   const account = detail.data?.account ?? pulls.data?.account ?? '';
   const review = useReview(item?.id ?? null, account);
+  const ai = useAi(item?.id ?? null, account);
   const draft = review.draft.data;
 
   // Generated files (lockfiles, build output) go last and are never opened first.
@@ -274,6 +279,31 @@ function Workspace() {
       label: 'Go to file',
       group: 'Pull request',
       run: () => fileFilterRef.current?.focus(),
+    },
+    {
+      keys: 'b',
+      label: 'Run the AI brief',
+      group: 'Pull request',
+      run: () => {
+        setRailOpen(true);
+        setRailTab('assist');
+
+        if (ai.latest('brief')?.status !== 'running') {
+          ai.start.mutate({ task: 'brief', force: Boolean(ai.latest('brief')) });
+        }
+      },
+    },
+    {
+      keys: 'Shift+b',
+      label: 'Suggest review comments with AI',
+      group: 'Pull request',
+      run: () => {
+        setRailOpen(true);
+        setRailTab('assist');
+
+        if (ai.latest('draft_comments')?.status !== 'running')
+          ai.start.mutate({ task: 'draft_comments' });
+      },
     },
     {
       keys: 'd',
@@ -612,13 +642,82 @@ function Workspace() {
           <>
             <Separator className="w-px bg-line outline-none hover:bg-accent data-[separator=active]:bg-accent" />
             <Panel id="rail" defaultSize="24" minSize="16" maxSize="40">
-              <ThreadsRail
-                threads={threads}
-                files={files}
-                unread={unread}
-                focused={search.thread}
-                onOpen={(thread) => selectFile(thread.path, thread.id)}
-              />
+              <div className="flex h-full flex-col border-l border-line bg-sunken">
+                <div
+                  role="tablist"
+                  aria-label="Side panel"
+                  className="flex shrink-0 gap-1 border-b border-line px-2 pt-2"
+                >
+                  {(
+                    [
+                      ['threads', `Threads${unresolved.length ? ` · ${unresolved.length}` : ''}`],
+                      ['assist', '✦ Assist'],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="tab"
+                      aria-selected={railTab === value}
+                      onClick={() => setRailTab(value)}
+                      className={cn(
+                        '-mb-px border-b-2 px-2 pb-1.5 text-xs',
+                        railTab === value
+                          ? 'border-accent font-medium text-fg'
+                          : 'border-transparent text-fg-muted hover:text-fg',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div className="min-h-0 flex-1">
+                  {railTab === 'threads' ? (
+                    <ThreadsRail
+                      threads={threads}
+                      files={files}
+                      unread={unread}
+                      focused={search.thread}
+                      onOpen={(thread) => selectFile(thread.path, thread.id)}
+                    />
+                  ) : (
+                    <div className="scroll-thin h-full space-y-3 overflow-y-auto p-3">
+                      <AssistPanel
+                        prId={item.id}
+                        account={account}
+                        bindShortcuts={false}
+                        compact
+                        tasks={[
+                          'brief',
+                          ...(reviewOid && changedSinceReview ? (['since_review'] as const) : []),
+                        ]}
+                        threadLabel={(threadId) => {
+                          const thread = threads.find((candidate) => candidate.id === threadId);
+
+                          return thread
+                            ? `${thread.path.split('/').pop()}${thread.line ? `:${thread.line}` : ''}`
+                            : threadId;
+                        }}
+                        onOpenFile={(path) =>
+                          files.some((file) => file.path === path) && selectFile(path)
+                        }
+                        onOpenThread={(threadId) => {
+                          const thread = threads.find((candidate) => candidate.id === threadId);
+
+                          if (thread) selectFile(thread.path, thread.id);
+                        }}
+                      />
+                      <Suggestions
+                        prId={item.id}
+                        account={account}
+                        onOpenLine={(path) =>
+                          files.some((file) => file.path === path) && selectFile(path)
+                        }
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
             </Panel>
           </>
         )}

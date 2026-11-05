@@ -27,6 +27,7 @@ import { Button } from '../../ui/Button';
 import { cn } from '../../ui/cn';
 import { Kbd } from '../../ui/Kbd';
 import { MarkdownView } from '../../ui/Markdown';
+import { AssistPanel } from '../ai/AssistPanel';
 import { useInboxNavigation } from '../inbox/InboxContext';
 import { usePullActions } from './actions';
 import { CiIndicator, ciMeta, reasonMeta, reviewMeta, tone } from './meta';
@@ -402,6 +403,27 @@ function PullDetailView({
               : `Marked done ${relativePhrase(item.doneAt!)}. It returns when there is new activity.`}
           </p>
         )}
+
+        <Section title="✦ Assist">
+          <AssistPanel
+            prId={item.id}
+            account={account}
+            tasks={[
+              'brief',
+              ...(latest?.commitOid && latest.commitOid !== pr.headOid
+                ? (['since_review'] as const)
+                : []),
+              ...(item.sources.includes('authored') ? (['author_feedback'] as const) : []),
+            ]}
+            threadLabel={(threadId) => {
+              const thread = pr.threads.find((candidate) => candidate.id === threadId);
+
+              return thread
+                ? `${thread.path.split('/').pop()}${thread.line ? `:${thread.line}` : ''}`
+                : threadId;
+            }}
+          />
+        </Section>
 
         <Section
           title="Your review"

@@ -84,6 +84,9 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
       void client.invalidateQueries({ queryKey: queryKeys.mine });
 
       return;
+    case 'ai.updated':
+      void client.invalidateQueries({ queryKey: ['ai', event.prId] });
+      return;
     case 'draft.updated':
       void client.invalidateQueries({ queryKey: ['draft', event.id] });
       return;

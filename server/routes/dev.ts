@@ -1,4 +1,6 @@
 import type { FastifyInstance } from 'fastify';
+import type { AiRunner } from '../ai/runner.js';
+import type { FixtureProvider } from '../ai/fixture.js';
 import type { FixtureGitHub } from '../demo/fixture-github.js';
 import type { SyncService } from '../sync/service.js';
 
@@ -7,6 +9,7 @@ export function registerDevRoutes(
   app: FastifyInstance,
   service: SyncService,
   fixture: FixtureGitHub,
+  runner: AiRunner,
 ): void {
   app.post('/api/dev/advance', async () => {
     const label = fixture.advance();
@@ -18,8 +21,14 @@ export function registerDevRoutes(
 
   app.get('/api/dev/writes', async () => ({ writes: fixture.writes }));
 
-  app.post<{ Body: { op?: string } }>('/api/dev/fail', async (request) => {
+  app.post<{ Body: { op?: string; ai?: string } }>('/api/dev/fail', async (request) => {
     fixture.failNext = typeof request.body?.op === 'string' ? request.body.op : null;
+
+    if (typeof request.body?.ai === 'string') {
+      for (const provider of Object.values(runner.providers)) {
+        if (provider.demo) (provider as FixtureProvider).failNext = request.body.ai;
+      }
+    }
 
     return { failNext: fixture.failNext };
   });

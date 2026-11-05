@@ -5,6 +5,8 @@ import { useLive } from '../../lib/live';
 import { useStatus } from '../../lib/queries';
 import { dateTime } from '../../lib/time';
 import { cn } from '../../ui/cn';
+import { aiTaskLabels, type AiEffort, type AiProvider, type AiTask } from '../../../shared/ai';
+import { useAiOverview, useAiSettings } from '../ai/useAi';
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
@@ -118,5 +120,103 @@ export function SettingsPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+const efforts: AiEffort[] = ['low', 'medium', 'high', 'xhigh'];
+
+function AiSection({ account }: { account: string }) {
+  const overview = useAiOverview();
+  const save = useAiSettings(account);
+  const settings = overview.data?.settings;
+  const providers = overview.data?.providers ?? [];
+
+  if (!settings) return null;
+
+  const update = (next: typeof settings) => save.mutate(next);
+
+  return (
+    <>
+      <h2 className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
+        AI assist
+      </h2>
+      <Row label="Default agent" hint="Used for every task unless a task says otherwise.">
+        <Segmented<AiProvider>
+          label="Default agent"
+          value={settings.defaultProvider}
+          onChange={(defaultProvider) => update({ ...settings, defaultProvider })}
+          options={[
+            { value: 'codex', label: 'Codex' },
+            { value: 'claude', label: 'Claude Code' },
+          ]}
+        />
+      </Row>
+      <Row
+        label="Installed agents"
+        hint="Runs locally through each CLI's own login; no API keys are stored here."
+      >
+        <ul className="text-right text-xs">
+          {providers.map((provider) => (
+            <li key={provider.id} className={provider.available ? 'text-fg' : 'text-fail'}>
+              {provider.label}:{' '}
+              {provider.available
+                ? (provider.version ?? 'available')
+                : (provider.reason ?? 'unavailable')}
+            </li>
+          ))}
+        </ul>
+      </Row>
+      {(Object.keys(settings.tasks) as AiTask[]).map((task) => (
+        <Row
+          key={task}
+          label={aiTaskLabels[task]}
+          hint="Higher effort is slower and uses more of your plan."
+        >
+          <span className="flex items-center gap-2">
+            <select
+              aria-label={`${aiTaskLabels[task]} agent`}
+              value={settings.tasks[task].provider ?? ''}
+              onChange={(event) =>
+                update({
+                  ...settings,
+                  tasks: {
+                    ...settings.tasks,
+                    [task]: {
+                      ...settings.tasks[task],
+                      provider: (event.target.value || null) as AiProvider | null,
+                    },
+                  },
+                })
+              }
+              className="h-7 rounded-sm border border-line bg-sunken px-2 text-xs"
+            >
+              <option value="">Default agent</option>
+              <option value="codex">Codex</option>
+              <option value="claude">Claude Code</option>
+            </select>
+            <select
+              aria-label={`${aiTaskLabels[task]} effort`}
+              value={settings.tasks[task].effort}
+              onChange={(event) =>
+                update({
+                  ...settings,
+                  tasks: {
+                    ...settings.tasks,
+                    [task]: { ...settings.tasks[task], effort: event.target.value as AiEffort },
+                  },
+                })
+              }
+              className="h-7 rounded-sm border border-line bg-sunken px-2 text-xs"
+            >
+              {efforts.map((effort) => (
+                <option key={effort} value={effort}>
+                  {effort} effort
+                </option>
+              ))}
+            </select>
+          </span>
+        </Row>
+      ))}
+    </>
   );
 }

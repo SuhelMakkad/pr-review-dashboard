@@ -10,6 +10,9 @@ import {
 } from '../../../shared/review';
 import { ApiError } from '../../lib/api';
 import { Button, IconButton } from '../../ui/Button';
+import { RunButton } from '../ai/AssistPanel';
+import { useAi } from '../ai/useAi';
+import type { DraftSummaryResult } from '../../../shared/ai';
 import { cn } from '../../ui/cn';
 import { Kbd } from '../../ui/Kbd';
 
@@ -81,6 +84,9 @@ export function FinishSheet({
   const [body, setBody] = useState(draft.body);
   const [problem, setProblem] = useState<{ code?: string; message: string } | null>(null);
   const lastSaved = useRef(draft.body);
+  const ai = useAi(draft.prId, account);
+  const summaryRun = ai.latest('draft_summary');
+  const requestedAt = useRef<string | null>(null);
   const pending = draft.comments.filter((comment) => comment.status !== 'stale');
   const stale = draft.comments.filter((comment) => comment.status === 'stale');
 
@@ -103,6 +109,19 @@ export function FinishSheet({
 
     return () => clearTimeout(timer);
   }, [body, open]);
+
+  // Fill the summary with an AI draft once the requested run finishes.
+  useEffect(() => {
+    if (
+      !requestedAt.current ||
+      summaryRun?.status !== 'done' ||
+      summaryRun.createdAt < requestedAt.current
+    )
+      return;
+
+    requestedAt.current = null;
+    setBody((summaryRun.result as DraftSummaryResult).body);
+  }, [summaryRun?.status, summaryRun?.id]);
 
   const choose = (next: ReviewEvent) => {
     setEvent(next);
@@ -195,10 +214,22 @@ export function FinishSheet({
               ))}
             </div>
 
-            <label className="block">
-              <span className="mb-1 block text-xs font-medium text-fg-muted">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs font-medium text-fg-muted">
                 Summary (optional, Markdown)
               </span>
+              <RunButton
+                label="Draft summary"
+                running={summaryRun?.status === 'running' || summaryRun?.status === 'queued'}
+                onRun={(provider) => {
+                  saveMeta({ event });
+                  requestedAt.current = new Date(Date.now() - 1000).toISOString();
+                  ai.start.mutate({ task: 'draft_summary', provider, force: true });
+                }}
+              />
+            </div>
+            <label className="block">
+              <span className="sr-only">Summary (optional, Markdown)</span>
               <textarea
                 value={body}
                 onChange={(change) => setBody(change.target.value)}

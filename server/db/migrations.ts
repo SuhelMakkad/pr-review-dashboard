@@ -83,6 +83,23 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    name: 'ai-runs',
+    up(db) {
+      db.exec(`
+        CREATE TABLE ai_runs (
+          id TEXT PRIMARY KEY, account TEXT NOT NULL, pr_id TEXT NOT NULL, task TEXT NOT NULL,
+          provider TEXT NOT NULL, model TEXT, effort TEXT NOT NULL, head_oid TEXT NOT NULL,
+          prompt_version INTEGER NOT NULL, cache_key TEXT NOT NULL, status TEXT NOT NULL,
+          progress TEXT, result TEXT, error TEXT, usage TEXT,
+          created_at TEXT NOT NULL, finished_at TEXT
+        );
+        CREATE INDEX ai_runs_by_pr ON ai_runs (account, pr_id, task, created_at);
+        CREATE INDEX ai_runs_by_key ON ai_runs (cache_key, created_at);
+      `);
+    },
+  },
 ];
 
 export function schemaVersion(db: DatabaseSync): number {
