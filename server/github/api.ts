@@ -58,6 +58,10 @@ export interface GitHubApi extends GitHubWrites {
   pullFiles(repository: string, number: number): Promise<RemoteFile[]>;
   /** Three-dot comparison; null when either commit is unknown to GitHub. */
   compare(repository: string, base: string, head: string): Promise<CompareResult | null>;
+  /** PR node ids matching a search (open or closed); used to backfill history. */
+  searchPullIds(query: string): Promise<string[]>;
+  /** Light snapshots (requests, your reviews, verdicts) for many PRs, for review history. */
+  history(ids: string[], login: string): Promise<PullRequestSnapshot[]>;
   /** File contents at commits; null entries for paths that do not exist there. */
   blobs(
     repository: string,

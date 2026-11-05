@@ -98,6 +98,21 @@ export function blobsQuery(count: number): string {
 }`;
 }
 
+/** Light review history for many PRs at once (insights backfill). */
+export const historyQuery = `query History($ids: [ID!]!, $login: String!) {
+  nodes(ids: $ids) { ... on PullRequest {
+    id number title url repository { nameWithOwner } author { login } state isDraft createdAt updatedAt
+    headRefName baseRefName headRefOid
+    timelineItems(first: 100, itemTypes: [REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) { nodes { __typename ... on ReviewRequestedEvent { id createdAt requestedReviewer { ${reviewerFields} } } ... on ReviewRequestRemovedEvent { id createdAt requestedReviewer { ${reviewerFields} } } } }
+    reviews(first: 100, author: $login) { nodes { ${reviewFields} } }
+    verdicts: latestOpinionatedReviews(first: 30) { nodes { state submittedAt author { login } commit { oid } } }
+  } }
+}`;
+
+export const searchQuery = `query Search($query: String!, $cursor: String) {
+  search(query: $query, type: ISSUE, first: 100, after: $cursor) { issueCount nodes { ... on PullRequest { id } } ${pageInfo} }
+}`;
+
 /** Review writes. Every write is an explicit user action in the app. */
 export const mutations = {
   AddPendingReview: `mutation AddPendingReview($pullRequestId: ID!, $commitOID: GitObjectID) {
@@ -155,6 +170,8 @@ export function allDocuments(): Record<string, string> {
     Comments: threadCommentsQuery,
     Checks: checksPageQuery,
     Blobs: blobsQuery(2),
+    History: historyQuery,
+    Search: searchQuery,
     ...pages,
     ...mutations,
   };

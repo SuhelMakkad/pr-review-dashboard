@@ -10,6 +10,7 @@ export type ServerEvent =
   | { type: 'triage.updated'; id: string }
   | { type: 'draft.updated'; id: string }
   | { type: 'ai.updated'; prId: string; runId: string }
-  | { type: 'notify'; notifications: ReviewNotification[] };
+  | { type: 'notify'; notifications: ReviewNotification[] }
+  | { type: 'insights.updated' };
 
 export type ServerEventType = ServerEvent['type'];

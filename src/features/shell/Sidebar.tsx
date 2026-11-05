@@ -1,5 +1,13 @@
 import { Link, useRouterState } from '@tanstack/react-router';
-import { GitPullRequest, GitPullRequestArrow, Monitor, Moon, Settings, Sun } from 'lucide-react';
+import {
+  ChartColumn,
+  GitPullRequest,
+  GitPullRequestArrow,
+  Monitor,
+  Moon,
+  Settings,
+  Sun,
+} from 'lucide-react';
 import { appearance, useAppearance } from '../../lib/theme';
 import { useMine, usePulls, useStatus } from '../../lib/queries';
 import { Avatar } from '../../ui/Avatar';
@@ -104,6 +112,28 @@ export function Sidebar() {
             >
               {needsYou > 0 ? needsYou : (mine.data?.items.length ?? 0)}
             </span>
+          </Link>
+        </Tooltip>
+      </nav>
+
+      <nav aria-label="Insights" className="mt-4 flex flex-col gap-px px-2">
+        <Tooltip label="Your review speed, volume and queue over time" shortcut="g t" side="right">
+          <Link
+            to="/insights"
+            aria-current={pathname.startsWith('/insights') ? 'page' : undefined}
+            className={cn(
+              'flex h-8 items-center gap-2.5 rounded-sm px-2 text-sm transition-colors',
+              pathname.startsWith('/insights')
+                ? 'bg-selected font-medium text-fg'
+                : 'text-fg-muted hover:bg-hover hover:text-fg',
+            )}
+          >
+            <ChartColumn
+              size={15}
+              aria-hidden="true"
+              className={pathname.startsWith('/insights') ? 'text-accent' : ''}
+            />
+            <span className="flex-1 truncate">Insights</span>
           </Link>
         </Tooltip>
       </nav>

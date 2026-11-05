@@ -1,26 +1,7 @@
+import type { ActivityEvent } from '../../shared/insights.js';
 import type { PullRequestSnapshot, Reviewer } from '../../shared/types.js';
 
-export type ActivityKind =
-  | 'request_received'
-  | 'request_removed'
-  | 'review_submitted'
-  | 'comment_posted'
-  | 'pr_closed'
-  | 'pr_merged'
-  | 'authored_opened'
-  | 'authored_review_received';
-
-export interface ActivityEvent {
-  /** Unique per account; re-extracting the same snapshot yields the same keys. */
-  key: string;
-  prId: string;
-  repository: string;
-  number: number;
-  kind: ActivityKind;
-  actor: string | null;
-  at: string;
-  data?: Record<string, unknown>;
-}
+export type { ActivityEvent, ActivityKind } from '../../shared/insights.js';
 
 const same = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
 

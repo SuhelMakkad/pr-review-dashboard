@@ -15,6 +15,8 @@ import { registerReviewRoutes } from './routes/review.js';
 import { registerAiRoutes } from './routes/ai.js';
 import { registerLinearRoutes } from './routes/linear.js';
 import { registerNotifyRoutes } from './routes/notify.js';
+import { registerInsightsRoutes } from './routes/insights.js';
+import { Backfill } from './insights/backfill.js';
 import { Notifier } from './notify/notifier.js';
 import { macosNotify } from './notify/macos.js';
 import { FixtureLinear, LinearService, type LinearSource } from './linear/service.js';
@@ -100,9 +102,16 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
 
   const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);
 
-  service.afterSync = (login) =>
-    notifier.afterSync(login, service.list().items, service.mine().items);
+  const backfill = new Backfill(service, service.events);
+
+  service.afterSync = async (login) => {
+    await notifier.afterSync(login, service.list().items, service.mine().items);
+
+    // History fills in the background; it never delays a sync.
+    void backfill.start(login);
+  };
   registerNotifyRoutes(app, service, notifier);
+  registerInsightsRoutes(app, service, backfill);
 
   if (options.fixture) registerDevRoutes(app, service, options.fixture, runner, notifier);
 

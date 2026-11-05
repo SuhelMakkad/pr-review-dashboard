@@ -101,6 +101,12 @@ const minePullRoute = createRoute({
   component: MineReader,
 });
 
+const insightsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: 'insights',
+  component: lazyRouteComponent(() => import('./features/insights/InsightsPage'), 'InsightsPage'),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'settings',
@@ -114,6 +120,7 @@ const routeTree = rootRoute.addChildren([
   githubPullRoute,
   githubPullTabRoute,
   mineRoute.addChildren([minePullRoute]),
+  insightsRoute,
   settingsRoute,
 ]);
 

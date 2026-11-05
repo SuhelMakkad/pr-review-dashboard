@@ -87,6 +87,12 @@ export function Shell() {
     ...goTo,
     { keys: 'g m', label: 'Go to my PRs', group: 'Navigate', run: () => navigate({ to: '/mine' }) },
     {
+      keys: 'g t',
+      label: 'Go to insights',
+      group: 'Navigate',
+      run: () => navigate({ to: '/insights' }),
+    },
+    {
       keys: 'g s',
       label: 'Go to settings',
       group: 'Navigate',

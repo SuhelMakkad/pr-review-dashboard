@@ -88,6 +88,9 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
     case 'notify':
       void present(event.notifications);
       return;
+    case 'insights.updated':
+      void client.invalidateQueries({ queryKey: ['insights'] });
+      return;
     case 'ai.updated':
       void client.invalidateQueries({ queryKey: ['ai', event.prId] });
       return;

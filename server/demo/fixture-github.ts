@@ -12,6 +12,7 @@ import type {
   RemoteFile,
 } from '../github/api.js';
 import { GitHubError } from '../github/errors.js';
+import { demoHistory } from './history.js';
 import type { Scenario } from './scenario.js';
 
 /** A GitHub stand-in backed by an in-memory scenario. Used by demo mode and end-to-end tests. */
@@ -40,9 +41,11 @@ export class FixtureGitHub implements GitHubApi {
     { prId: string; commitOid: string; threads: ThreadInput[] }
   >();
   scenario: Scenario;
+  private history_: PullRequestSnapshot[] = [];
 
   constructor(private readonly source: Scenario | (() => Scenario)) {
     this.scenario = typeof source === 'function' ? source() : source;
+    this.history_ = demoHistory(this.scenario.world.now(), this.scenario.world.viewer.login);
   }
 
   /** Rebuilds the scenario from scratch (demo reset; requires a factory). */
@@ -387,6 +390,40 @@ export class FixtureGitHub implements GitHubApi {
     pull.snapshot.updatedAt = now;
 
     return { id, url: `${pull.snapshot.url}#issuecomment-${id}` };
+  }
+
+  /** Answers the backfill's searches from the scenario plus fictional history. */
+  async searchPullIds(query: string): Promise<string[]> {
+    const login = this.scenario.world.viewer.login;
+    const range = /(updated|created):(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})/.exec(query);
+    const from = range ? Date.parse(range[2]) : 0;
+    const to = range ? Date.parse(range[3]) + 24 * 3_600_000 : Infinity;
+    const field = range?.[1] === 'created' ? 'createdAt' : 'updatedAt';
+    const reviewer = query.includes('reviewed-by:');
+    const all = [
+      ...this.history_,
+      ...this.scenario.world.pulls.map((pull) => pull.snapshot as PullRequestSnapshot),
+    ];
+
+    return all
+      .filter((pull) =>
+        reviewer
+          ? pull.reviews.length > 0 && pull.author.login !== login
+          : pull.author.login === login,
+      )
+      .filter((pull) => Date.parse(pull[field]) >= from && Date.parse(pull[field]) < to)
+      .map((pull) => pull.id);
+  }
+
+  async history(ids: string[]): Promise<PullRequestSnapshot[]> {
+    const all = [
+      ...this.history_,
+      ...this.scenario.world.pulls.map((pull) => pull.snapshot as PullRequestSnapshot),
+    ];
+
+    return all
+      .filter((pull) => ids.includes(pull.id))
+      .map((pull) => structuredClone({ ...pull, sources: pull.sources ?? [] }));
   }
 
   /** Applies the next scripted change. Returns its label, or null when the script is finished. */

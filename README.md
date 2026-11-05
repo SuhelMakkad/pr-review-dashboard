@@ -1,79 +1,83 @@
 # Review Desk
 
-A private, local dashboard for your GitHub review workload. It brings together open PRs requesting your review, assigned to you, and previously reviewed by you across every repository your current GitHub CLI account can access.
+A keyboard-first, local workspace for your GitHub code reviews. It shows what needs you, lets you review the change (including exactly what changed since your last review, across rebases and force pushes), and posts comments, replies and reviews through your own GitHub CLI login. Optional AI help runs through the Codex or Claude Code CLI on your machine. Everything runs on `127.0.0.1`; there is no hosted service and no GitHub App.
 
 ## Start
 
-Requires Node.js **24.x**, pnpm **10**, and the GitHub CLI (`gh`) on your PATH. The installed dependencies and first production build are already prepared in this checkout.
+Requires Node.js 24, pnpm 10 and the GitHub CLI (`gh`) logged in. Codex, Claude Code and a Linear key are optional.
 
 ```bash
 cd pr-review-dashboard
-pnpm start
-```
-
-Open **http://127.0.0.1:4317**. Keep the process running while using the dashboard; press Ctrl-C to stop it. It syncs at startup and every 60 seconds while the server runs, even when the browser is closed. There is no cloud deployment, separate database service, Docker requirement, or GitHub app registration.
-
-For a fresh installation or after changing dependencies/source:
-
-```bash
 pnpm install --frozen-lockfile
 pnpm build
 pnpm start
 ```
 
-For development, `pnpm dev` starts Vite on loopback port 4317 and the API on loopback port 4318. Stop the production server before using development mode; the UI port is intentionally fixed. On narrower screens the detail panel moves below the horizontally scrollable table.
+Open **http://127.0.0.1:4317**. Keep the process running; it syncs in the background. In Chrome or Edge, use _Install Review Desk_ in the address bar to get a dock icon with a badge and desktop notifications.
 
-## GitHub account and access
+`pnpm demo` runs the same app on **http://127.0.0.1:4319** against a fictional scenario (no GitHub, no AI quota, nothing posted anywhere). `pnpm dev` and `pnpm dev:demo` run Vite with hot reload (UI on 4317 / 4319, API on 4318 / 4320).
 
-The backend executes read-only `gh api` queries using the CLI’s existing authentication. It never extracts, stores, or sends a token to the browser. The sidebar identifies the account returned by GitHub. Switching the CLI account is detected on the next sync; each account has separate cached PRs and notes.
+## What it does
+
+**Inbox.** Pull requests that need you, grouped into follow-ups (new commits since your review, review re-requested, replies in your threads, @mentions, dismissed reviews) and first reviews. _Waiting on author_, _Caught up_ and _Snoozed_ hold the rest. `E` marks a PR done until something new happens; `S` snoozes it (presets, or type "fri 2pm"); new activity always brings a PR back. The URL holds the queue, filters and selected PR, so views are linkable and Back works.
+
+**Review workspace.** `Enter` opens the diff: a file tree with viewed state (synced with GitHub), one file at a time with syntax highlighting, unified or split, and review threads inline under their lines. When the branch moved after your review, it opens _Since your review_ automatically: an exact diff for new commits, or a file-by-file comparison of what you reviewed against what is there now after a rebase or force push. Select lines and press `C` to comment; comments stay as local drafts until you finish the review. `R` replies to a thread and `Shift+R` resolves it; both post immediately and say so. `⌘⇧↵` opens the Finish sheet: pick Comment, Approve or Request changes, add a summary, and submit. It warns when new commits arrived while you were reviewing, re-anchors your draft comments to the new code, and flags any that sit on changed lines.
+
+**My PRs.** Your own open PRs grouped by whose move it is (needs you, waiting on reviewers, ready to merge, drafts), each with a checklist of what blocks it and the next step, including re-requesting a review in place. Waits longer than a day are flagged.
+
+**AI assist.** `B` writes a brief (summary, risk, files to read closely, questions); on PRs you already reviewed it also judges whether each of your threads was addressed. `Shift+B` in the workspace suggests review comments anchored to real lines; you accept them one at a time into your draft, and nothing is ever posted for you. The Finish sheet can draft your review summary. Codex is the default; pick Claude Code per run or per task in Settings, along with how much effort each task uses. Results are cached per commit and marked out of date when the branch moves.
+
+**Linear.** Ticket ids in branches (`fix/APP-123/...`), titles (`fix(APP-123): ...`) and Linear links show as chips, and the PR view shows each issue's state, priority and owner.
+
+**Notifications and badge.** New review requests, pushes after your review, replies, mentions, and approvals or failing checks on your own PRs. You get a toast while you are looking at the app and a desktop notification otherwise, with per-kind toggles and quiet hours. Optional native macOS notifications cover the time no window is open. The badge shows how many PRs need you.
+
+**Insights.** Median and 90th-percentile time to review, reviews per day or week, how many waited past your target, your queue over time, your verdict mix, per-repository numbers, and how long your own PRs wait for a first review. History is read from GitHub for the last 90 days, then recorded as you work.
+
+## Keyboard
+
+Press `?` anywhere for the shortcuts available on that screen, or `⌘K` for the command palette (it also opens pasted GitHub PR links). The essentials:
+
+| Where | Keys |
+| --- | --- |
+| Anywhere | `⌘K` palette · `?` shortcuts · `g i` inbox · `g m` my PRs · `g t` insights · `g s` settings · `z` undo |
+| Lists | `j`/`k` move · `Enter` review · `o` open on GitHub · `e` done · `s` snooze · `m` mark replies seen · `n` note · `/` filter · `b` AI brief |
+| Workspace | `n`/`p` files · `j`/`k` scroll · `c` comment · `v` viewed and next · `u` next unresolved thread · `r` reply · `Shift+R` resolve · `d` full diff vs since review · `Shift+D` split view · `t` go to file · `Shift+B` suggest comments · `⌘⇧↵` finish review |
+
+Replacing `github.com` with `127.0.0.1:4317` in any PR URL opens that PR here.
+
+## Setup for the optional parts
+
+**AI.** Install and log in to the Codex CLI (`codex`) and/or Claude Code (`claude`). Settings shows which are found. Agents run headless in an empty scratch folder with no GitHub credentials. Codex runs read-only with its connectors, plugins, browser and web search turned off and ignores your personal Codex config (its configured model is not available to headless runs on a ChatGPT login). Claude runs with no tools, no MCP servers and your user settings only. PR content is sent to the agent's own service under your subscription.
+
+**Linear.** Create a personal API key in Linear (Settings → Security & access → Personal API keys) and store it in your macOS Keychain from a terminal; the key never passes through the app:
 
 ```bash
-gh auth status
-gh api user --jq .login
-gh auth login --hostname github.com
+security add-generic-password -U -s review-desk.linear -a api-key -w
 ```
 
-To select another existing login, use `gh auth switch --hostname github.com --user YOUR_LOGIN`, then click **Sync now**. Private repository access and team requests depend on your account’s GitHub permissions and organisation SSO authorisation. Existing `GH_TOKEN`/`GITHUB_TOKEN` environment overrides behave as they do in `gh` itself. No credentials belong in this project.
+**Notifications.** In Settings → Notifications, click _Allow notifications_. Native macOS notifications for when no window is open are opt-in; clicking one opens Script Editor rather than the PR.
 
-## Review workflow
+## GitHub account and safety
 
-- **Needs attention:** first reviews, changes since your review, re-requests (including requests at an unchanged head), new replies in threads you joined, and dismissed reviews.
-- **Waiting on author:** your latest effective review requests changes, with no new follow-up signal.
-- **Caught up:** reviewed PRs without a fresh signal. CI failures and unresolved threads remain visible as context without automatically creating a review task.
-- **Snoozed:** paused until the selected time; a new relevant signal wakes the PR early. “Tomorrow” means 09:00 in your browser’s local timezone.
-- **All tracked:** every tracked open PR, including drafts. Drafts stay out of the default attention queue.
+The server calls `gh api` with your existing login; no token is extracted, stored or sent to the browser. Every write is an explicit action in the UI and states who it posts as. Before any write the server re-checks the live `gh` login and refuses if it changed. Writes are rate-limited, comment lines are checked against the PR's diff, and a review is never submitted on a head you did not see unless you confirm. Submitting is resumable: if GitHub fails part-way, retrying never duplicates comments.
 
-Follow-ups sort ahead of first reviews, then by oldest pending activity. Search titles, repository names, authors, or PR numbers; filter by repository, author, attention reason, checks, and drafts. Use Cmd/Ctrl-K to focus search, Escape to close details, and arrow keys to move between detail tabs.
+The app binds to `127.0.0.1` only, rejects unexpected hosts and origins, and requires a per-launch session token on every write. Pages cannot be framed, user Markdown renders without raw HTML or remote images, and errors are scrubbed of tokens and keys. To switch account, run `gh auth switch --hostname github.com --user LOGIN`; each account keeps separate data.
 
-Select a PR for its description, your review history, current CI jobs, branch information, files, and review conversations. Discussion includes inline review threads you started or participated in, including resolved threads. Use **Review on GitHub** or **View diff** to inspect code or submit feedback; the dashboard never submits a review, comment, merge, or thread resolution.
+## Data, backup and recovery
 
-**Mark seen** acknowledges only the reply versions displayed when clicked. New replies or edits remain unread, and code changes/review requests remain pending. Your own reply or a later submitted review also updates the discussion baseline. On first launch, replies are reconstructed relative to your latest review and last comment in each thread; subsequent acknowledgements are persisted locally.
+Everything lives in `.data/` (SQLite: cached PRs, notes, drafts, triage, AI results, history). Schema upgrades back up the previous database first (`.data/backup-v<N>.sqlite`). To back up, stop the app and copy `.data/`. To start fresh, stop the app and rename `.data/`. Notes and drafts are stored locally but not encrypted, so protect the folder like other work data.
 
-Head SHA differences are deliberately treated as changes, including rebases and force pushes. On first sync, the activity age uses GitHub’s commit/update time as an approximation; later head changes use the time first observed locally. “Dismissed” describes the state of your review, not who dismissed it.
+Syncing is incremental: a cheap fingerprint per PR decides when a full refresh is needed, with a full check every 30 minutes and on opening a PR. Search failures never drop a PR, and a PR leaves the list only once GitHub confirms it was closed or merged.
 
-Notes save only when you click **Save note**. Unsaved drafts survive PR/tab switching within the current browser tab through session storage. Save notes before closing that tab. Theme defaults to your OS preference and supports a saved light/dark override.
+## Development
 
-## Local storage and recovery
-
-The backend stores cached GitHub content, notes, acknowledgements, and snoozes in `.data/review-desk.sqlite` using Node’s built-in SQLite. The private directory is created with owner-only directory permissions and is ignored by Git alongside build output. Notes are local, but are not encrypted; protect this directory as you would other local work data.
-
-For a backup, **stop the app**, then copy the entire `.data/` directory to a private local backup location. Restore by stopping the app and replacing `.data/` with that backup. To reset without losing your current state, stop the app and rename `.data/` to `.data.backup/`; the next start creates a fresh cache. The reset also resets local notes and triage state in the new database. Restore the original directory to recover them. Do not commit or upload either directory.
-
-GitHub errors retain cached records and show a stale/coverage banner with the last successful sync. Retry runs automatically; rate-limit responses impose a five-minute minimum cooldown. Search and nested connections are paginated, and searches above GitHub’s 1,000-result cap are partitioned by creation time. Failed partitions, missing permissions, or unavailable PRs are reported as incomplete coverage rather than silently disappearing. A cached PR leaves the list only after its closed/merged state is confirmed. GitHub search indexing can briefly lag live changes.
-
-Both servers bind to `127.0.0.1`. The local API rejects unexpected Host/Origin values and requires an application-specific header for writes. GitHub Markdown renders without raw HTML or remote images. No telemetry, external fonts, desktop notifications, or background system service is installed.
-
-## Implementation and checks
-
-React/TypeScript/Vite render the UI; Fastify serves the local API and production assets. Shared types and pure attention rules live in `shared/`; GitHub retrieval, sync, and SQLite persistence live in `server/`. This is a standalone project.
+React, TypeScript and Vite (TanStack Router and Query, Tailwind CSS, Radix primitives, `@pierre/diffs`) on the front end; Fastify and Node's built-in SQLite on the server. `shared/` holds the pure rules (attention, author blockers, diffs, tickets, insights), `server/` the GitHub layer, sync, reviews, AI, Linear, notifications and insights, and `src/features/` the UI.
 
 ```bash
-pnpm test
+pnpm test          # unit and component tests (Vitest)
+pnpm e2e           # builds, then Playwright against demo mode in light and dark, with axe scans and visual baselines
 pnpm typecheck
-pnpm build
 pnpm format:check
 ```
 
-Tests use synthetic fixtures and temporary databases, with no GitHub writes. They cover attention classification, re-requests, force pushes, resolved-thread replies, snoozes, restart persistence, account isolation, pagination/search partitioning, rate limits, partial failures, merged PRs, local API validation, filters, keyboard tabs, themes, and saving notes. Live GitHub smoke verification is read-only.
-
-The local API exposes `GET /api/status`, `GET /api/pulls`, `GET /api/pulls/:id`, `POST /api/sync`, and `PATCH /api/pulls/:id/triage`. POST/PATCH requests use JSON and `X-Review-Desk: 1`; triage updates include the expected account to prevent writes after an account switch.
+Every GraphQL document is validated against GitHub's published schema (`tests/schema/github.graphql`). Demo mode (`server/demo/`) models commit graphs, force pushes, GitHub writes with a write log and failure injection, Linear issues, AI answers and review history, so end-to-end tests never touch GitHub or spend AI quota.

@@ -5,6 +5,7 @@ import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { Store } from './db/store.js';
 import { FixtureGitHub } from './demo/fixture-github.js';
+import { seedDemoQueue } from './demo/history.js';
 import { defaultScenario } from './demo/scenario.js';
 import { EventBus } from './events.js';
 import { GitHub } from './github/read.js';
@@ -58,6 +59,8 @@ try {
   const label = config.mode === 'demo' ? 'Review Desk (demo)' : 'Review Desk';
 
   console.log(`${label}${config.viteDev ? ' API' : ''} → http://127.0.0.1:${config.port}`);
+  if (fixture) seedDemoQueue(store, fixture.scenario.world.viewer.login, Date.now());
+
   service.start();
 } catch (error) {
   console.error(

@@ -28,6 +28,8 @@ import {
   connectionPageQuery,
   detectQuery,
   discoverQuery,
+  historyQuery,
+  searchQuery,
   identityQuery,
   snapshotQuery,
   threadCommentsQuery,
@@ -221,6 +223,91 @@ const restFile = (file: RawRestFile): RemoteFile => ({
   sha: file.sha,
 });
 
+interface RawHistory {
+  id: string;
+  number: number;
+  title: string;
+  url: string;
+  repository: { nameWithOwner: string };
+  author: Actor | null;
+  state: PullRequestSnapshot['state'];
+  isDraft: boolean;
+  createdAt: string;
+  updatedAt: string;
+  headRefName: string;
+  baseRefName: string;
+  headRefOid: string;
+  timelineItems: { nodes: RawEvent[] };
+  reviews: { nodes: RawReview[] };
+  verdicts: { nodes: RawVerdict[] };
+}
+
+/** A partial snapshot with only what review history needs; everything else is empty. */
+function historySnapshot(raw: RawHistory): PullRequestSnapshot {
+  return {
+    id: raw.id,
+    number: raw.number,
+    title: raw.title,
+    url: raw.url,
+    body: '',
+    repository: raw.repository.nameWithOwner,
+    author: raw.author ?? { login: 'deleted-user' },
+    isDraft: raw.isDraft,
+    state: raw.state,
+    createdAt: raw.createdAt,
+    updatedAt: raw.updatedAt,
+    headOid: raw.headRefOid,
+    headCommittedAt: raw.updatedAt,
+    headObservedAt: raw.updatedAt,
+    baseRefName: raw.baseRefName,
+    headRefName: raw.headRefName,
+    additions: 0,
+    deletions: 0,
+    changedFiles: 0,
+    reviewDecision: null,
+    mergeable: 'UNKNOWN',
+    sources: [],
+    reviewRequests: [],
+    requestEvents: raw.timelineItems.nodes
+      .filter((event) => event?.id)
+      .map((event) => ({
+        id: event.id,
+        createdAt: event.createdAt,
+        removed: event.__typename === 'ReviewRequestRemovedEvent',
+        reviewer: reviewer(event.requestedReviewer),
+      })),
+    reviews: raw.reviews.nodes
+      .filter((review) => review.submittedAt && review.state !== 'PENDING')
+      .map((review) => ({
+        id: review.id,
+        state: review.state as ReviewState,
+        submittedAt: review.submittedAt!,
+        updatedAt: review.updatedAt,
+        commitOid: review.commit?.oid ?? null,
+        body: '',
+        url: review.url,
+      })),
+    threads: [],
+    files: [],
+    checks: [],
+    ci: 'none',
+    fetchedAt: new Date().toISOString(),
+    baseOid: null,
+    mergeStateStatus: null,
+    conversation: [],
+    forcePushes: [],
+    verdicts: raw.verdicts.nodes
+      .filter((verdict) => verdict?.author && verdict.submittedAt)
+      .map((verdict) => ({
+        login: verdict.author!.login,
+        state: verdict.state as ReviewState,
+        submittedAt: verdict.submittedAt!,
+        commitOid: verdict.commit?.oid ?? null,
+      })),
+    pendingReview: null,
+  };
+}
+
 const searchQualifiers: Record<Source, string> = {
   requested: 'review-requested',
   assigned: 'assignee',
@@ -383,6 +470,39 @@ export class GitHub implements GitHubApi {
     }
 
     return { results, budget };
+  }
+
+  async searchPullIds(query: string): Promise<string[]> {
+    const ids: string[] = [];
+    let cursor: string | null = null;
+
+    // Callers keep each query under GitHub's 1,000-result cap (e.g. one month at a time).
+    do {
+      const result: { search: Connection<{ id?: string }> } = await this.transport.graphql(
+        searchQuery,
+        { query, cursor },
+      );
+
+      ids.push(...result.search.nodes.filter((node) => node?.id).map((node) => node.id!));
+      cursor = result.search.pageInfo.hasNextPage ? result.search.pageInfo.endCursor : null;
+    } while (cursor && ids.length < 1000);
+
+    return [...new Set(ids)];
+  }
+
+  async history(ids: string[], login: string): Promise<PullRequestSnapshot[]> {
+    const snapshots: PullRequestSnapshot[] = [];
+
+    for (let start = 0; start < ids.length; start += 20) {
+      const data = await this.transport.graphql<{ nodes: (RawHistory | null)[] }>(historyQuery, {
+        ids: ids.slice(start, start + 20),
+        login,
+      });
+
+      for (const raw of data.nodes) if (raw?.id) snapshots.push(historySnapshot(raw));
+    }
+
+    return snapshots;
   }
 
   private requireRequest() {

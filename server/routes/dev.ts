@@ -3,6 +3,7 @@ import type { AiRunner } from '../ai/runner.js';
 import type { Notifier } from '../notify/notifier.js';
 import type { FixtureProvider } from '../ai/fixture.js';
 import type { FixtureGitHub } from '../demo/fixture-github.js';
+import { seedDemoQueue } from '../demo/history.js';
 import type { SyncService } from '../sync/service.js';
 
 /** Demo-only controls for stepping the scripted scenario. Never registered against real GitHub. */
@@ -43,7 +44,16 @@ export function registerDevRoutes(
     service.store.clearAccount(fixture.scenario.world.viewer.login);
     notifier.reset(fixture.scenario.world.viewer.login);
 
-    for (const key of ['notification-settings', 'ai-settings']) service.store.deleteSetting(key);
+    for (const key of [
+      'notification-settings',
+      'ai-settings',
+      'review-sla-hours',
+      `backfill:${fixture.scenario.world.viewer.login}`,
+    ]) {
+      service.store.deleteSetting(key);
+    }
+
+    seedDemoQueue(service.store, fixture.scenario.world.viewer.login, Date.now());
     await service.sync();
 
     return { ok: true };
