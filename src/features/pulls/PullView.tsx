@@ -28,6 +28,7 @@ import { cn } from '../../ui/cn';
 import { Kbd } from '../../ui/Kbd';
 import { MarkdownView } from '../../ui/Markdown';
 import { AssistPanel } from '../ai/AssistPanel';
+import { LinearCard } from '../linear/LinearCard';
 import { useInboxNavigation } from '../inbox/InboxContext';
 import { usePullActions } from './actions';
 import { CiIndicator, ciMeta, reasonMeta, reviewMeta, tone } from './meta';
@@ -318,6 +319,8 @@ function PullDetailView({
         </header>
 
         {lead}
+
+        <LinearCard prId={item.id} />
 
         {why.length > 0 && (
           <div className="mx-6 mb-4 space-y-1.5 rounded-md border border-line bg-sunken px-3 py-2.5">

@@ -7,6 +7,8 @@ import { dateTime } from '../../lib/time';
 import { cn } from '../../ui/cn';
 import { aiTaskLabels, type AiEffort, type AiProvider, type AiTask } from '../../../shared/ai';
 import { useAiOverview, useAiSettings } from '../ai/useAi';
+import { useLinearStatus } from '../linear/useLinear';
+import { toast } from 'sonner';
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
@@ -107,6 +109,10 @@ export function SettingsPage() {
             {state?.lastSuccessfulSync ? dateTime(state.lastSuccessfulSync) : 'Not yet'}
           </span>
         </Row>
+
+        <AiSection account={state?.account?.login ?? ''} />
+
+        <LinearSection />
 
         <h2 className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
           Data and privacy
@@ -217,6 +223,73 @@ function AiSection({ account }: { account: string }) {
           </span>
         </Row>
       ))}
+    </>
+  );
+}
+
+function LinearSection() {
+  const status = useLinearStatus();
+  const data = status.data;
+
+  if (!data) return null;
+
+  return (
+    <>
+      <h2 className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase">Linear</h2>
+      <Row
+        label="Connection"
+        hint={
+          data.connected
+            ? `Connected to ${data.workspace}. Teams: ${data.teamKeys.join(', ')}.`
+            : 'Shows the status, owner and priority of tickets your PRs reference.'
+        }
+      >
+        <span
+          className={cn(
+            'text-sm',
+            data.connected ? 'text-ok' : data.error ? 'text-fail' : 'text-fg-muted',
+          )}
+        >
+          {data.connected ? 'Connected' : data.error ? 'Key rejected' : 'Not connected'}
+        </span>
+      </Row>
+      {!data.connected && (
+        <div className="space-y-2 border-b border-line py-4 text-sm text-fg-muted">
+          <p>
+            Create a personal API key in Linear (Settings → Security & access → Personal API keys),
+            then store it in your macOS Keychain by running this in a terminal and pasting the key
+            when asked:
+          </p>
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-sm border border-line bg-sunken px-2 py-1.5 text-xs text-fg">
+              {data.setupCommand}
+            </code>
+            <button
+              type="button"
+              className="h-7 rounded-sm border border-line px-2 text-xs hover:bg-hover"
+              onClick={() =>
+                void navigator.clipboard
+                  .writeText(data.setupCommand)
+                  .then(() => toast('Command copied'))
+              }
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              className="h-7 rounded-sm border border-line px-2 text-xs hover:bg-hover"
+              onClick={() => void status.refetch()}
+            >
+              Check again
+            </button>
+          </div>
+          <p className="text-xs">
+            The key never passes through this app’s pages or API; the server reads it from the
+            Keychain when needed.
+          </p>
+          {data.error && <p className="text-xs text-fail">{data.error}</p>}
+        </div>
+      )}
     </>
   );
 }

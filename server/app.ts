@@ -13,6 +13,8 @@ import { registerDevRoutes } from './routes/dev.js';
 import { registerDiffRoutes } from './routes/diff.js';
 import { registerReviewRoutes } from './routes/review.js';
 import { registerAiRoutes } from './routes/ai.js';
+import { registerLinearRoutes } from './routes/linear.js';
+import { FixtureLinear, LinearService, type LinearSource } from './linear/service.js';
 import { AiRunner } from './ai/runner.js';
 import { FixtureProvider } from './ai/fixture.js';
 import type { AgentProvider } from './ai/provider.js';
@@ -36,6 +38,8 @@ export interface AppOptions {
   aiProviders?: Record<AiProvider, AgentProvider>;
   /** Private scratch directory for agent runs. */
   aiWorkRoot?: string;
+  /** Linear access (Keychain-backed API normally, a fixture in demo mode and tests). */
+  linear?: LinearSource;
   keepaliveMs?: number;
 }
 
@@ -87,6 +91,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
 
   registerReviewRoutes(app, reviews);
   registerAiRoutes(app, runner);
+  registerLinearRoutes(app, service, new LinearService(options.linear ?? new FixtureLinear(false)));
 
   if (options.fixture) registerDevRoutes(app, service, options.fixture, runner);
 

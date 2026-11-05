@@ -3,6 +3,7 @@ import { AlarmClock, CheckCheck, MessageSquare, StickyNote } from 'lucide-react'
 import type { PullRequestItem } from '../../../shared/types';
 import { shortAge, shortDateTime } from '../../lib/time';
 import { Avatar } from '../../ui/Avatar';
+import { LinearMark } from '../../ui/brand-icons';
 import { cn } from '../../ui/cn';
 import { CiIndicator, ReasonChips, reviewSummary } from '../pulls/meta';
 
@@ -82,6 +83,15 @@ export const QueueRow = forwardRef<
             {item.repository.split('/')[1]}
             <span className="text-fg-subtle">#{item.number}</span>
           </span>
+          {item.tickets[0] && (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 font-mono text-2xs text-fg-subtle"
+              title="Linked ticket"
+            >
+              <LinearMark size={10} />
+              {item.tickets[0]}
+            </span>
+          )}
           <span className="inline-flex min-w-0 shrink items-center gap-1">
             <Avatar login={item.author.login} size={14} />
             <span className="truncate">{item.author.login}</span>

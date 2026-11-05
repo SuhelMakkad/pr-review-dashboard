@@ -1,3 +1,4 @@
+import { extractTickets } from './tickets.js';
 import type {
   AttentionReason,
   LocalTriageState,
@@ -224,6 +225,7 @@ export function deriveItem(
     doneAt: isDone ? triage.doneAt : null,
     createdAt: pr.createdAt,
     headRefName: pr.headRefName,
+    tickets: extractTickets(pr).map((ticket) => ticket.identifier),
   };
 }
 

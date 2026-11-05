@@ -196,6 +196,8 @@ export interface PullRequestItem {
   doneAt: string | null;
   createdAt: string;
   headRefName: string;
+  /** Ticket identifiers found in the branch, title or description (e.g. Linear issues). */
+  tickets: string[];
 }
 
 export interface SyncStatus {

@@ -66,6 +66,7 @@ export function useCurrentPull(): {
       doneAt: null,
       createdAt: own.createdAt,
       headRefName: own.headRefName,
+      tickets: own.tickets,
     },
   };
 }

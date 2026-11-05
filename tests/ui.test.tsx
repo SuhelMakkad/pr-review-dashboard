@@ -71,6 +71,10 @@ beforeEach(() => {
         data = { settings: defaultAiSettings(), providers: [] };
       } else if (/^\/api\/pulls\/[^/]+\/ai/.test(path)) {
         data = { runs: [] };
+      } else if (/^\/api\/pulls\/[^/]+\/tickets/.test(path)) {
+        data = { identifiers: [], issues: [], error: null };
+      } else if (path === '/api/linear/status') {
+        data = { configured: false, connected: false, workspace: null, teamKeys: [], error: null, setupCommand: '' };
       } else if (path === '/api/status') {
         data = {
           ...initialStatus(),

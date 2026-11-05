@@ -1,6 +1,7 @@
 import { forwardRef } from 'react';
 import type { AuthorItem } from '../../../shared/author';
 import { shortAge } from '../../lib/time';
+import { LinearMark } from '../../ui/brand-icons';
 import { cn } from '../../ui/cn';
 import { CiIndicator, tone } from '../pulls/meta';
 import { blockerTone, waitState } from './meta';
@@ -70,6 +71,15 @@ export const MineRow = forwardRef<
             {item.repository.split('/')[1]}
             <span className="text-fg-subtle">#{item.number}</span>
           </span>
+          {item.tickets[0] && (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 font-mono text-2xs text-fg-subtle"
+              title="Linked ticket"
+            >
+              <LinearMark size={10} />
+              {item.tickets[0]}
+            </span>
+          )}
           {wait && item.group === 'waiting' && (
             <span
               className="ml-auto shrink-0 tabular-nums"

@@ -1,3 +1,4 @@
+import { extractTickets } from './tickets.js';
 import type { CiState, PullRequestSnapshot, Reviewer, ReviewerVerdict } from './types.js';
 
 export type BlockerKind =
@@ -48,6 +49,7 @@ export interface AuthorItem {
   /** Oldest outstanding wait on someone else (review request), if any. */
   waitingSince: string | null;
   hasNote: boolean;
+  tickets: string[];
 }
 
 const same = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
@@ -221,6 +223,7 @@ export function deriveAuthorItem(
     unresolvedThreads: unresolved.length,
     waitingSince,
     hasNote,
+    tickets: extractTickets(pr).map((ticket) => ticket.identifier),
   };
 }
 
