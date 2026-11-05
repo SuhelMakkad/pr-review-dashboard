@@ -14,6 +14,8 @@ import { PullLayout } from './features/pulls/PullLayout';
 import { PullOverview } from './features/pulls/PullOverview';
 import { filesSearchSchema } from './features/review/search';
 import { SettingsPage } from './features/settings/SettingsPage';
+import { MinePage } from './features/mine/MinePage';
+import { MineReader } from './features/mine/MineReader';
 import { NotFound } from './features/shell/NotFound';
 import { Shell } from './features/shell/Shell';
 
@@ -87,6 +89,18 @@ const githubPullTabRoute = createRoute({
   },
 });
 
+const mineRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: 'mine',
+  component: MinePage,
+});
+
+const minePullRoute = createRoute({
+  getParentRoute: () => mineRoute,
+  path: '$owner/$repo/$number',
+  component: MineReader,
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'settings',
@@ -99,6 +113,7 @@ const routeTree = rootRoute.addChildren([
   pullRoute.addChildren([pullOverviewRoute, pullFilesRoute]),
   githubPullRoute,
   githubPullTabRoute,
+  mineRoute.addChildren([minePullRoute]),
   settingsRoute,
 ]);
 

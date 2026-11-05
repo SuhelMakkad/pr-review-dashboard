@@ -35,6 +35,8 @@ export interface GitHubWrites {
   setThreadResolved(threadId: string, resolved: boolean): Promise<void>;
   setFileViewed(prId: string, path: string, viewed: boolean): Promise<void>;
   addConversationComment(prId: string, body: string): Promise<{ id: string; url: string }>;
+  /** Adds (never removes) requested reviewers; re-requesting someone asks them again. */
+  requestReviews(prId: string, logins: string[]): Promise<void>;
 }
 
 function threadVariables(thread: ThreadInput) {
@@ -136,6 +138,10 @@ export function createWriter(transport: GitHubTransport): GitHubWrites {
 
     async setFileViewed(prId, path, viewed) {
       await run(viewed ? 'MarkFileViewed' : 'UnmarkFileViewed', { pullRequestId: prId, path });
+    },
+
+    async requestReviews(prId, logins) {
+      await run('RequestReviews', { pullRequestId: prId, userLogins: logins });
     },
 
     async addConversationComment(prId, body) {

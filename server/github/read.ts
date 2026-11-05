@@ -294,6 +294,10 @@ export class GitHub implements GitHubApi {
     return this.writes.addConversationComment(prId, body);
   }
 
+  requestReviews(prId: string, logins: string[]) {
+    return this.writes.requestReviews(prId, logins);
+  }
+
   async identity(): Promise<Actor> {
     const result = await this.transport.graphql<{ viewer: Actor }>(identityQuery);
 

@@ -34,6 +34,9 @@ export function registerDevRoutes(
   });
 
   app.post('/api/dev/reset', async () => {
+    // Let an in-flight sync finish first, so it cannot write old state after the reset.
+    await service.sync();
+
     fixture.reset();
     service.store.clearAccount(fixture.scenario.world.viewer.login);
     await service.sync();

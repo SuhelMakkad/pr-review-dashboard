@@ -26,6 +26,12 @@ function hintsFor(pathname: string): Hint[] {
         ];
   }
 
+  if (pathname.startsWith('/mine'))
+    return [
+      { keys: 'j', label: 'Next' },
+      { keys: 'Enter', label: 'Open' },
+    ];
+
   if (pathname.startsWith('/pr/'))
     return [
       { keys: 'Escape', label: 'Back' },
@@ -65,6 +71,7 @@ export function Shell() {
     },
     { keys: 'z', label: 'Undo last action', group: 'General', run: () => void undoLast() },
     ...goTo,
+    { keys: 'g m', label: 'Go to my PRs', group: 'Navigate', run: () => navigate({ to: '/mine' }) },
     {
       keys: 'g s',
       label: 'Go to settings',

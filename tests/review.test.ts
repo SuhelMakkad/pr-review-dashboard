@@ -299,3 +299,20 @@ describe('thread and file actions', () => {
     expect(results.at(-1)).toBe('RATE_LIMITED');
   });
 });
+
+describe('author actions', () => {
+  it('re-requests reviewers on your own PR only', async () => {
+    const { reviews, pr, github, sync } = await setup();
+    const own = pr(3001);
+
+    await reviews.requestReviewers('you', own.snapshot.id, ['mara']);
+
+    expect(ops(github)).toEqual(['RequestReviews']);
+    expect(
+      sync.detail(own.snapshot.id)!.snapshot.reviewRequests.map((reviewer) => reviewer.login),
+    ).toContain('mara');
+    expect(await code(reviews.requestReviewers('you', pr(1839).snapshot.id, ['mara']))).toBe(
+      'NOT_AUTHOR',
+    );
+  });
+});

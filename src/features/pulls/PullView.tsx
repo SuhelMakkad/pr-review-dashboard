@@ -157,7 +157,16 @@ function Thread({
   );
 }
 
-export function PullView({ item, variant }: { item: PullRequestItem; variant: 'pane' | 'page' }) {
+export function PullView({
+  item,
+  variant,
+  lead,
+}: {
+  item: PullRequestItem;
+  variant: 'pane' | 'page';
+  /** Shown under the header (e.g. the author blocker checklist). */
+  lead?: ReactNode;
+}) {
   const query = usePullDetail(item.id);
   const detail = query.data;
 
@@ -169,20 +178,23 @@ export function PullView({ item, variant }: { item: PullRequestItem; variant: 'p
     );
   }
 
-  return <PullDetailView key={item.id} item={item} detail={detail} variant={variant} />;
+  return <PullDetailView key={item.id} item={item} detail={detail} variant={variant} lead={lead} />;
 }
 
 function PullDetailView({
   item,
   detail,
   variant,
+  lead,
 }: {
   item: PullRequestItem;
   detail: PullRequestDetail;
   variant: 'pane' | 'page';
+  lead?: ReactNode;
 }) {
   const pr = detail.snapshot;
   const account = detail.account;
+  const authored = pr.author.login.toLowerCase() === account.toLowerCase();
   const actions = usePullActions();
   const triage = useTriage();
   const inbox = useInboxNavigation();
@@ -305,6 +317,8 @@ function PullDetailView({
           </div>
         </header>
 
+        {lead}
+
         {why.length > 0 && (
           <div className="mx-6 mb-4 space-y-1.5 rounded-md border border-line bg-sunken px-3 py-2.5">
             {why.map((line) => {
@@ -357,30 +371,34 @@ function PullDetailView({
             <ArrowUpRight size={13} aria-hidden="true" />
             <Kbd keys="o" />
           </a>
-          <SnoozeMenu
-            item={item}
-            open={snoozeOpen}
-            onOpenChange={setSnoozeOpen}
-            onSnooze={(until) => leaveQueue(() => actions.snooze(item, until))}
-            onWake={() => actions.wake(item)}
-          />
-          <Button
-            size="sm"
-            icon={<CheckCheck size={13} />}
-            shortcut="e"
-            onClick={() => leaveQueue(() => actions.done(item))}
-          >
-            {item.doneAt ? 'Undo done' : 'Done'}
-          </Button>
-          {item.unreadReplyKeys.length > 0 && (
-            <Button
-              size="sm"
-              icon={<MessageSquare size={13} />}
-              shortcut="m"
-              onClick={() => actions.markSeen(item)}
-            >
-              Mark seen
-            </Button>
+          {!authored && (
+            <>
+              <SnoozeMenu
+                item={item}
+                open={snoozeOpen}
+                onOpenChange={setSnoozeOpen}
+                onSnooze={(until) => leaveQueue(() => actions.snooze(item, until))}
+                onWake={() => actions.wake(item)}
+              />
+              <Button
+                size="sm"
+                icon={<CheckCheck size={13} />}
+                shortcut="e"
+                onClick={() => leaveQueue(() => actions.done(item))}
+              >
+                {item.doneAt ? 'Undo done' : 'Done'}
+              </Button>
+              {item.unreadReplyKeys.length > 0 && (
+                <Button
+                  size="sm"
+                  icon={<MessageSquare size={13} />}
+                  shortcut="m"
+                  onClick={() => actions.markSeen(item)}
+                >
+                  Mark seen
+                </Button>
+              )}
+            </>
           )}
           <Button
             size="sm"
@@ -425,41 +443,45 @@ function PullDetailView({
           />
         </Section>
 
-        <Section
-          title="Your review"
-          aside={
-            latest && (
-              <time className="text-xs text-fg-subtle" title={dateTime(latest.submittedAt)}>
-                {relativePhrase(latest.submittedAt)}
-              </time>
-            )
-          }
-        >
-          {latest ? (
-            <div className="space-y-2">
-              <p className="flex items-center gap-2 text-sm">
-                <span
-                  className="tone rounded-xs px-1.5 py-0.5 text-xs font-medium"
-                  style={tone(reviewMeta[latest.state].tone)}
-                >
-                  {reviewMeta[latest.state].label}
-                </span>
-                <span className="text-fg-subtle">on</span>
-                <code className="text-xs text-fg-muted">{shortSha(latest.commitOid)}</code>
-              </p>
-              {latest.body && <MarkdownView className="text-fg-muted">{latest.body}</MarkdownView>}
-              {latest.commitOid && latest.commitOid !== pr.headOid && (
-                <p className="flex items-center gap-2 text-xs text-changed">
-                  <GitCommitHorizontal size={13} aria-hidden="true" />
-                  The branch moved to {shortSha(pr.headOid)} since this review (including rebases
-                  and force pushes).
+        {!authored && (
+          <Section
+            title="Your review"
+            aside={
+              latest && (
+                <time className="text-xs text-fg-subtle" title={dateTime(latest.submittedAt)}>
+                  {relativePhrase(latest.submittedAt)}
+                </time>
+              )
+            }
+          >
+            {latest ? (
+              <div className="space-y-2">
+                <p className="flex items-center gap-2 text-sm">
+                  <span
+                    className="tone rounded-xs px-1.5 py-0.5 text-xs font-medium"
+                    style={tone(reviewMeta[latest.state].tone)}
+                  >
+                    {reviewMeta[latest.state].label}
+                  </span>
+                  <span className="text-fg-subtle">on</span>
+                  <code className="text-xs text-fg-muted">{shortSha(latest.commitOid)}</code>
                 </p>
-              )}
-            </div>
-          ) : (
-            <p className="text-sm text-fg-muted">You have not reviewed this PR yet.</p>
-          )}
-        </Section>
+                {latest.body && (
+                  <MarkdownView className="text-fg-muted">{latest.body}</MarkdownView>
+                )}
+                {latest.commitOid && latest.commitOid !== pr.headOid && (
+                  <p className="flex items-center gap-2 text-xs text-changed">
+                    <GitCommitHorizontal size={13} aria-hidden="true" />
+                    The branch moved to {shortSha(pr.headOid)} since this review (including rebases
+                    and force pushes).
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm text-fg-muted">You have not reviewed this PR yet.</p>
+            )}
+          </Section>
+        )}
 
         <Section
           title={`Your conversations${mine.length ? ` · ${mine.length}` : ''}`}

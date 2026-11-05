@@ -42,6 +42,15 @@ const schemas = {
   reply: z.object({ account, prId: z.string().min(1), body }).strict(),
   resolve: z.object({ account, prId: z.string().min(1), resolved: z.boolean() }).strict(),
   viewed: z.object({ account, path: z.string().min(1).max(1000), viewed: z.boolean() }).strict(),
+  reviewers: z
+    .object({
+      account,
+      logins: z
+        .array(z.string().regex(/^[A-Za-z0-9-]{1,39}$/))
+        .min(1)
+        .max(15),
+    })
+    .strict(),
 };
 
 async function handle(reply: FastifyReply, work: () => Promise<unknown>) {
@@ -153,6 +162,15 @@ export function registerReviewRoutes(app: FastifyInstance, reviews: ReviewServic
       handle(reply, () =>
         reviews.setViewed(input.account, request.params.id, input.path, input.viewed),
       )
+    );
+  });
+
+  app.post<IdParams>('/api/pulls/:id/reviewers', async (request, reply) => {
+    const input = parse(schemas.reviewers, request.body, reply);
+
+    return (
+      input &&
+      handle(reply, () => reviews.requestReviewers(input.account, request.params.id, input.logins))
     );
   });
 

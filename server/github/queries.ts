@@ -130,6 +130,9 @@ export const mutations = {
   UnmarkFileViewed: `mutation UnmarkFileViewed($pullRequestId: ID!, $path: String!) {
   unmarkFileAsViewed(input: { pullRequestId: $pullRequestId, path: $path }) { pullRequest { id } }
 }`,
+  RequestReviews: `mutation RequestReviews($pullRequestId: ID!, $userLogins: [String!]) {
+  requestReviewsByLogin(input: { pullRequestId: $pullRequestId, userLogins: $userLogins, union: true }) { pullRequest { id } }
+}`,
   AddComment: `mutation AddComment($subjectId: ID!, $body: String!) {
   addComment(input: { subjectId: $subjectId, body: $body }) { commentEdge { node { id url } } }
 }`,

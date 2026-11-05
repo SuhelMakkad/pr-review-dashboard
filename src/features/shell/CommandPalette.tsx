@@ -200,6 +200,15 @@ export function CommandPalette({
                   );
                 })}
                 <Command.Item
+                  value="go my prs authored"
+                  className={itemClass}
+                  onSelect={run(() => navigate({ to: '/mine' }))}
+                >
+                  <GitPullRequest size={15} className="text-fg-subtle" aria-hidden="true" />
+                  My PRs
+                  <Kbd keys="g m" className="ml-auto" />
+                </Command.Item>
+                <Command.Item
                   className={itemClass}
                   onSelect={run(() => navigate({ to: '/settings' }))}
                 >

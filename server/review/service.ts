@@ -473,6 +473,24 @@ export class ReviewService {
     await this.refreshQuietly(prId);
   }
 
+  /** Asks reviewers (again) on one of your own PRs. */
+  async requestReviewers(account: string, prId: string, logins: string[]): Promise<void> {
+    await this.guard(account, true);
+
+    const pr = this.snapshot(prId);
+
+    if (pr.author.login.toLowerCase() !== account.toLowerCase()) {
+      throw new ReviewError(
+        'NOT_AUTHOR',
+        403,
+        'You can only request reviewers on your own PRs here.',
+      );
+    }
+
+    await this.write(() => this.github.requestReviews(prId, logins));
+    await this.refreshQuietly(prId);
+  }
+
   async setViewed(account: string, prId: string, path: string, viewed: boolean): Promise<void> {
     await this.guard(account, true);
 

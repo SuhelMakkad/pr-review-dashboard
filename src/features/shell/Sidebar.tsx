@@ -1,7 +1,7 @@
 import { Link, useRouterState } from '@tanstack/react-router';
-import { GitPullRequest, Monitor, Moon, Settings, Sun } from 'lucide-react';
+import { GitPullRequest, GitPullRequestArrow, Monitor, Moon, Settings, Sun } from 'lucide-react';
 import { appearance, useAppearance } from '../../lib/theme';
-import { usePulls, useStatus } from '../../lib/queries';
+import { useMine, usePulls, useStatus } from '../../lib/queries';
 import { Avatar } from '../../ui/Avatar';
 import { cn } from '../../ui/cn';
 import { Kbd } from '../../ui/Kbd';
@@ -12,7 +12,9 @@ const themeIcons = { light: Sun, dark: Moon, system: Monitor };
 
 export function Sidebar() {
   const pulls = usePulls();
+  const mine = useMine();
   const status = useStatus();
+  const needsYou = (mine.data?.items ?? []).filter((item) => item.group === 'needs_you').length;
   const { theme } = useAppearance();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const items = pulls.data?.items ?? [];
@@ -70,6 +72,40 @@ export function Sidebar() {
             </Tooltip>
           );
         })}
+      </nav>
+
+      <nav aria-label="Authoring" className="mt-4 flex flex-col gap-px px-2">
+        <div className="px-2 pb-1 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
+          Authoring
+        </div>
+        <Tooltip label="Your PRs and what blocks them" shortcut="g m" side="right">
+          <Link
+            to="/mine"
+            aria-current={pathname.startsWith('/mine') ? 'page' : undefined}
+            className={cn(
+              'flex h-8 items-center gap-2.5 rounded-sm px-2 text-sm transition-colors',
+              pathname.startsWith('/mine')
+                ? 'bg-selected font-medium text-fg'
+                : 'text-fg-muted hover:bg-hover hover:text-fg',
+            )}
+          >
+            <GitPullRequestArrow
+              size={15}
+              aria-hidden="true"
+              className={pathname.startsWith('/mine') ? 'text-accent' : ''}
+            />
+            <span className="flex-1 truncate">My PRs</span>
+            <span
+              className={cn(
+                'text-xs tabular-nums',
+                needsYou > 0 ? 'font-semibold text-accent' : 'text-fg-subtle',
+              )}
+              title={`${needsYou} need you`}
+            >
+              {needsYou > 0 ? needsYou : (mine.data?.items.length ?? 0)}
+            </span>
+          </Link>
+        </Tooltip>
       </nav>
 
       <div className="mt-auto flex flex-col gap-px px-2 pb-2">

@@ -343,6 +343,31 @@ export class FixtureGitHub implements GitHubApi {
     this.scenario.world.viewed.set(prId, files);
   }
 
+  async requestReviews(prId: string, logins: string[]): Promise<void> {
+    const pull = this.pullById(prId);
+
+    this.record('RequestReviews', { prId, logins });
+
+    const now = this.now();
+
+    for (const login of logins) {
+      const reviewer = { kind: 'user' as const, login, name: login };
+
+      if (!pull.snapshot.reviewRequests.some((existing) => existing.login === login)) {
+        pull.snapshot.reviewRequests.push(reviewer);
+      }
+
+      pull.snapshot.requestEvents.push({
+        id: this.nextId('request'),
+        createdAt: now,
+        removed: false,
+        reviewer,
+      });
+    }
+
+    pull.snapshot.updatedAt = now;
+  }
+
   async addConversationComment(prId: string, body: string) {
     const pull = this.pullById(prId);
 
