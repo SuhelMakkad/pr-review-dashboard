@@ -10,6 +10,7 @@ import { resetInboxAutoSelect } from '../src/features/inbox/InboxPage';
 import { initialStatus } from '../server/sync';
 import { deriveItem, emptyTriage } from '../shared/attention';
 import { defaultAiSettings } from '../shared/ai';
+import { defaultNotificationSettings } from '../shared/notify';
 import type { LocalTriageState } from '../shared/types';
 import { review, snapshot } from './fixtures';
 
@@ -73,6 +74,8 @@ beforeEach(() => {
         data = { runs: [] };
       } else if (/^\/api\/pulls\/[^/]+\/tickets/.test(path)) {
         data = { identifiers: [], issues: [], error: null };
+      } else if (path === '/api/notifications/settings') {
+        data = defaultNotificationSettings();
       } else if (path === '/api/linear/status') {
         data = {
           configured: false,

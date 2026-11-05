@@ -14,6 +14,9 @@ import { registerDiffRoutes } from './routes/diff.js';
 import { registerReviewRoutes } from './routes/review.js';
 import { registerAiRoutes } from './routes/ai.js';
 import { registerLinearRoutes } from './routes/linear.js';
+import { registerNotifyRoutes } from './routes/notify.js';
+import { Notifier } from './notify/notifier.js';
+import { macosNotify } from './notify/macos.js';
 import { FixtureLinear, LinearService, type LinearSource } from './linear/service.js';
 import { AiRunner } from './ai/runner.js';
 import { FixtureProvider } from './ai/fixture.js';
@@ -40,6 +43,8 @@ export interface AppOptions {
   aiWorkRoot?: string;
   /** Linear access (Keychain-backed API normally, a fixture in demo mode and tests). */
   linear?: LinearSource;
+  /** Native notification sender used when no window is open (macOS by default). */
+  nativeNotify?: (title: string, body: string) => Promise<void>;
   keepaliveMs?: number;
 }
 
@@ -93,7 +98,13 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   registerAiRoutes(app, runner);
   registerLinearRoutes(app, service, new LinearService(options.linear ?? new FixtureLinear(false)));
 
-  if (options.fixture) registerDevRoutes(app, service, options.fixture, runner);
+  const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);
+
+  service.afterSync = (login) =>
+    notifier.afterSync(login, service.list().items, service.mine().items);
+  registerNotifyRoutes(app, service, notifier);
+
+  if (options.fixture) registerDevRoutes(app, service, options.fixture, runner, notifier);
 
   if (webRoot && index) {
     const sendIndex = (reply: FastifyReply) =>

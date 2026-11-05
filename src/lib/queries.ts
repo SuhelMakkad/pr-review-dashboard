@@ -7,6 +7,7 @@ import type {
   TriageUpdate,
 } from '../../shared/types';
 import type { AuthorItem } from '../../shared/author';
+import type { NotificationSettings } from '../../shared/notify';
 import type { DiffManifest, DiffMode } from '../../shared/diff';
 
 export interface MineList {
@@ -68,6 +69,14 @@ export function useDiff(id: string | null, mode: DiffMode) {
     queryFn: () => api<DiffManifest>(`/api/pulls/${encodeURIComponent(id!)}/diff?mode=${mode}`),
     enabled: Boolean(id),
     staleTime: 30_000,
+  });
+}
+
+export function useNotificationSettings() {
+  return useQuery({
+    queryKey: ['notify-settings'],
+    queryFn: () => api<NotificationSettings>('/api/notifications/settings'),
+    staleTime: 60_000,
   });
 }
 

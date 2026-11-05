@@ -100,6 +100,19 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    name: 'notification-log',
+    up(db) {
+      db.exec(`
+        CREATE TABLE notification_log (
+          account TEXT NOT NULL, key TEXT NOT NULL, pr_id TEXT NOT NULL,
+          channel TEXT NOT NULL, sent_at TEXT NOT NULL,
+          PRIMARY KEY (account, key)
+        );
+      `);
+    },
+  },
 ];
 
 export function schemaVersion(db: DatabaseSync): number {

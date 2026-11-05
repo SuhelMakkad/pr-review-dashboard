@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { AiRunner } from '../ai/runner.js';
+import type { Notifier } from '../notify/notifier.js';
 import type { FixtureProvider } from '../ai/fixture.js';
 import type { FixtureGitHub } from '../demo/fixture-github.js';
 import type { SyncService } from '../sync/service.js';
@@ -10,6 +11,7 @@ export function registerDevRoutes(
   service: SyncService,
   fixture: FixtureGitHub,
   runner: AiRunner,
+  notifier: Notifier,
 ): void {
   app.post('/api/dev/advance', async () => {
     const label = fixture.advance();
@@ -39,6 +41,9 @@ export function registerDevRoutes(
 
     fixture.reset();
     service.store.clearAccount(fixture.scenario.world.viewer.login);
+    notifier.reset(fixture.scenario.world.viewer.login);
+
+    for (const key of ['notification-settings', 'ai-settings']) service.store.deleteSetting(key);
     await service.sync();
 
     return { ok: true };

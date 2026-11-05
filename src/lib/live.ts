@@ -4,6 +4,7 @@ import type { ServerEvent } from '../../shared/events';
 import type { PullRequestList, SyncStatus } from '../../shared/types';
 import { queryKeys } from './queryKeys';
 import { session } from './session';
+import { present } from './notifications';
 
 export interface LiveState {
   connected: boolean;
@@ -83,6 +84,9 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
 
       void client.invalidateQueries({ queryKey: queryKeys.mine });
 
+      return;
+    case 'notify':
+      void present(event.notifications);
       return;
     case 'ai.updated':
       void client.invalidateQueries({ queryKey: ['ai', event.prId] });

@@ -66,6 +66,8 @@ export class SyncService {
   private readonly teamsFetched = new Map<string, number>();
   /** PRs that must be fully refetched on the next run regardless of their fingerprint. */
   private readonly forced = new Set<string>();
+  /** Runs after every sync with the active login (used for notifications). */
+  afterSync: ((login: string) => Promise<unknown>) | null = null;
 
   constructor(
     readonly store: Store,
@@ -249,6 +251,11 @@ export class SyncService {
       await Promise.all(Array.from({ length: Math.min(3, fetches.length) }, worker));
 
       this.sampleQueue(account.login);
+
+      if (this.afterSync) {
+        // Hooks (notifications) must never break a sync.
+        await this.afterSync(account.login).catch(() => undefined);
+      }
 
       if (this.status.warnings.length === 0)
         this.status.lastSuccessfulSync = new Date().toISOString();

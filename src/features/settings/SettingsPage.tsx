@@ -8,6 +8,16 @@ import { cn } from '../../ui/cn';
 import { aiTaskLabels, type AiEffort, type AiProvider, type AiTask } from '../../../shared/ai';
 import { useAiOverview, useAiSettings } from '../ai/useAi';
 import { useLinearStatus } from '../linear/useLinear';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { api } from '../../lib/api';
+import { notificationsSupported } from '../../lib/notifications';
+import { useNotificationSettings } from '../../lib/queries';
+import {
+  notificationKindLabels,
+  type NotificationKind,
+  type NotificationSettings,
+} from '../../../shared/notify';
 import { toast } from 'sonner';
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
@@ -109,6 +119,8 @@ export function SettingsPage() {
             {state?.lastSuccessfulSync ? dateTime(state.lastSuccessfulSync) : 'Not yet'}
           </span>
         </Row>
+
+        <NotificationsSection account={state?.account?.login ?? ''} />
 
         <AiSection account={state?.account?.login ?? ''} />
 
@@ -290,6 +302,167 @@ function LinearSection() {
           {data.error && <p className="text-xs text-fail">{data.error}</p>}
         </div>
       )}
+    </>
+  );
+}
+
+function Toggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-4 py-1.5 text-sm">
+      <span>{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="size-4 accent-accent"
+      />
+    </label>
+  );
+}
+
+function NotificationsSection({ account }: { account: string }) {
+  const client = useQueryClient();
+  const query = useNotificationSettings();
+  const [permission, setPermission] = useState(() =>
+    notificationsSupported() ? Notification.permission : 'denied',
+  );
+  const save = useMutation({
+    mutationFn: (settings: NotificationSettings) =>
+      api<NotificationSettings>('/api/notifications/settings', {
+        method: 'PUT',
+        body: { account, settings },
+      }),
+    onSuccess: (settings) => client.setQueryData(['notify-settings'], settings),
+  });
+  const test = useMutation({
+    mutationFn: () => api('/api/notifications/test', { method: 'POST' }),
+  });
+  // Edits live in React state until saved, so controlled inputs update within the click.
+  const [pending, setPending] = useState<NotificationSettings | null>(null);
+  const settings = pending ?? query.data;
+
+  useEffect(() => {
+    if (notificationsSupported()) setPermission(Notification.permission);
+  }, []);
+
+  if (!settings) return null;
+
+  const update = (next: Partial<NotificationSettings>) => {
+    const merged = { ...settings, ...next };
+
+    setPending(merged);
+    save.mutate(merged, {
+      onSuccess: (saved) => {
+        client.setQueryData(['notify-settings'], saved);
+        setPending(null);
+      },
+      onError: () => setPending(null),
+    });
+  };
+
+  return (
+    <>
+      <h2 className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
+        Notifications
+      </h2>
+      <Row
+        label="Desktop notifications"
+        hint={
+          permission === 'granted'
+            ? 'On. Shown while a Review Desk window is open; in-app toasts while you are looking at it.'
+            : permission === 'denied'
+              ? 'Blocked in this browser. Allow them in the site settings for 127.0.0.1.'
+              : 'Get a notification when something needs you.'
+        }
+      >
+        {permission === 'granted' ? (
+          <button
+            type="button"
+            className="h-7 rounded-sm border border-line px-2 text-xs hover:bg-hover"
+            onClick={() => test.mutate()}
+          >
+            Send a test
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={permission === 'denied'}
+            className="h-7 rounded-sm bg-accent px-2 text-xs font-medium text-accent-fg disabled:opacity-50"
+            onClick={() => void Notification.requestPermission().then(setPermission)}
+          >
+            Allow notifications
+          </button>
+        )}
+      </Row>
+      <div className="border-b border-line py-3">
+        {(Object.keys(settings.kinds) as NotificationKind[]).map((kind) => (
+          <Toggle
+            key={kind}
+            label={notificationKindLabels[kind]}
+            checked={settings.kinds[kind]}
+            onChange={(checked) => update({ kinds: { ...settings.kinds, [kind]: checked } })}
+          />
+        ))}
+      </div>
+      <Row label="Quiet hours" hint="Hold notifications back during these hours (local time).">
+        <span className="flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            aria-label="Use quiet hours"
+            checked={Boolean(settings.quietHours)}
+            onChange={(event) =>
+              update({ quietHours: event.target.checked ? { start: '19:00', end: '08:00' } : null })
+            }
+            className="size-4 accent-accent"
+          />
+          <input
+            type="time"
+            aria-label="Quiet hours start"
+            disabled={!settings.quietHours}
+            value={settings.quietHours?.start ?? '19:00'}
+            onChange={(event) =>
+              settings.quietHours &&
+              update({ quietHours: { ...settings.quietHours, start: event.target.value } })
+            }
+            className="h-7 rounded-sm border border-line bg-sunken px-1 disabled:opacity-50"
+          />
+          to
+          <input
+            type="time"
+            aria-label="Quiet hours end"
+            disabled={!settings.quietHours}
+            value={settings.quietHours?.end ?? '08:00'}
+            onChange={(event) =>
+              settings.quietHours &&
+              update({ quietHours: { ...settings.quietHours, end: event.target.value } })
+            }
+            className="h-7 rounded-sm border border-line bg-sunken px-1 disabled:opacity-50"
+          />
+        </span>
+      </Row>
+      <div className="border-b border-line py-3">
+        <Toggle
+          label="Use macOS notifications when no Review Desk window is open"
+          checked={settings.macosWhenClosed}
+          onChange={(macosWhenClosed) => update({ macosWhenClosed })}
+        />
+        <p className="text-xs text-fg-muted">
+          Sent by the local server; clicking one opens Script Editor rather than the PR.
+        </p>
+        <Toggle
+          label="Count my PRs that need me in the app badge"
+          checked={settings.badgeIncludesMine}
+          onChange={(badgeIncludesMine) => update({ badgeIncludesMine })}
+        />
+      </div>
     </>
   );
 }

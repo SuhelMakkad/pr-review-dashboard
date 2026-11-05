@@ -240,6 +240,7 @@ export class Store {
         'draft_comments',
         'review_drafts',
         'ai_runs',
+        'notification_log',
       ]) {
         this.db.prepare(`DELETE FROM ${table} WHERE account = ?`).run(account);
       }
@@ -257,6 +258,10 @@ export class Store {
 
     this.setSetting(`status:${status.account.login}`, { ...status, syncing: false });
     this.setSetting('lastAccount', status.account.login);
+  }
+
+  deleteSetting(key: string): void {
+    this.db.prepare('DELETE FROM settings WHERE key = ?').run(key);
   }
 
   setSetting(key: string, value: unknown): void {

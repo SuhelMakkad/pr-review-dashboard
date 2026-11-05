@@ -2,6 +2,9 @@ import { useState } from 'react';
 import { Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Toaster } from 'sonner';
 import { useShortcuts, type Shortcut } from '../../lib/shortcuts';
+import { setBadge } from '../../lib/notifications';
+import { useMine, useNotificationSettings, usePulls } from '../../lib/queries';
+import { useEffect } from 'react';
 import { useAppearance } from '../../lib/theme';
 import { TooltipProvider } from '../../ui/Tooltip';
 import { undoLast } from '../pulls/actions';
@@ -47,6 +50,17 @@ export function Shell() {
   const { theme } = useAppearance();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const pulls = usePulls();
+  const mine = useMine();
+  const notifySettings = useNotificationSettings();
+  const attention = (pulls.data?.items ?? []).filter((item) => item.queue === 'attention').length;
+  const needsYou = (mine.data?.items ?? []).filter((item) => item.group === 'needs_you').length;
+  const badge = attention + (notifySettings.data?.badgeIncludesMine ? needsYou : 0);
+
+  useEffect(() => {
+    setBadge(badge);
+    document.title = badge > 0 ? `(${badge}) Review Desk` : 'Review Desk';
+  }, [badge]);
 
   const goTo: Shortcut[] = queueSlugs.map((slug) => ({
     keys: queueMeta[slug].keys,
