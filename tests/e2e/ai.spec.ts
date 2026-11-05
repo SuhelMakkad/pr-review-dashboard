@@ -3,6 +3,82 @@ import { demoWrites, failNextAi, openFresh } from './helpers';
 
 test.describe.configure({ mode: 'serial' });
 
+test('keeps a full Codex review in the dashboard and posts selected findings only after submission', async ({
+  page,
+}) => {
+  await openFresh(page, '/inbox/attention/acme/web/1839');
+  await page.getByRole('button', { name: 'Run Codex review' }).click();
+
+  const report = page.getByRole('region', { name: 'Codex review' });
+
+  await expect(report.getByText('No blocking findings')).toBeVisible();
+  await expect(
+    report.getByText('The implementation is mostly sound', { exact: false }),
+  ).toBeVisible();
+  await expect(report.getByRole('checkbox', { name: 'Include finding 1' })).toBeChecked();
+  expect(await demoWrites(page)).toEqual([]);
+
+  await page.reload();
+  await expect(
+    report.getByText('The implementation is mostly sound', { exact: false }),
+  ).toBeVisible();
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+
+  const sheet = page.getByRole('dialog', { name: 'Finish your review' });
+
+  await expect(sheet.getByRole('textbox')).toHaveValue(/## Codex review/);
+  await expect(sheet.getByText('1 inline comment')).toBeVisible();
+  await expect(sheet.getByRole('radio', { name: /Comment/ })).toBeChecked();
+  expect(await demoWrites(page)).toEqual([]);
+
+  await sheet.getByRole('button', { name: 'Close', exact: true }).click();
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+  await expect(sheet.getByText('1 inline comment')).toBeVisible();
+  await sheet.getByRole('textbox').fill('Reviewed with Codex. Please cover the empty-input case.');
+  await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
+
+  await expect(sheet).not.toBeVisible();
+  await expect(
+    report.getByText('The implementation is mostly sound', { exact: false }),
+  ).toBeVisible();
+
+  const writes = await demoWrites(page);
+
+  expect(writes.map((write) => write.op)).toEqual([
+    'AddPendingReview',
+    'AddReviewThread',
+    'SubmitReview',
+  ]);
+  expect(writes[2].details).toMatchObject({
+    event: 'COMMENT',
+    comments: 1,
+    body: 'Reviewed with Codex. Please cover the empty-input case.',
+  });
+});
+
+test('lets the user exclude findings and post only the review summary', async ({ page }) => {
+  await openFresh(page, '/pr/acme/web/1839');
+  await page.getByRole('button', { name: 'Run Codex review' }).click();
+
+  const report = page.getByRole('region', { name: 'Codex review' });
+
+  await report.getByRole('checkbox', { name: 'Include finding 1' }).uncheck();
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+
+  const sheet = page.getByRole('dialog', { name: 'Finish your review' });
+
+  await expect(sheet.getByText('No inline comments')).toBeVisible();
+  expect(await demoWrites(page)).toEqual([]);
+
+  await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
+  await expect(sheet).not.toBeVisible();
+
+  const writes = await demoWrites(page);
+
+  expect(writes.map((write) => write.op)).toEqual(['AddPendingReview', 'SubmitReview']);
+  expect(writes[1].details).toMatchObject({ event: 'COMMENT', comments: 0 });
+});
+
 test('writes a brief with Codex by default, and with Claude on request', async ({ page }) => {
   await openFresh(page, '/inbox/attention/acme/web/1839');
   await expect(page.getByRole('heading', { level: 2 })).toHaveText(

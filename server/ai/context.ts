@@ -103,6 +103,12 @@ export function briefInput(pr: PullRequestSnapshot, diff: DiffManifest): string 
   return wrap(`${header(pr)}\n\n<diff kind="full">\n${filesBlock(diff.files, 160_000)}\n</diff>`);
 }
 
+export function fullReviewInput(pr: PullRequestSnapshot, diff: DiffManifest): string {
+  return wrap(
+    `${header(pr)}\n\nReview the complete PR using review.json, before/ and after/ in the workspace.\n${JSON.stringify({ baseOid: pr.baseOid, headOid: pr.headOid, files: diff.files.map(({ path, status }) => ({ path, status })), threads: pr.threads })}`,
+  );
+}
+
 export function sinceReviewInput(
   pr: PullRequestSnapshot,
   diff: DiffManifest,

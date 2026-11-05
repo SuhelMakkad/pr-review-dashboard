@@ -39,6 +39,7 @@
     "react-resizable-panels": "^4.18.1",
     "remark-gfm": "^4.0.1",
     "sonner": "^2.0.8",
+    "tar": "^7.5.22",
     "tinykeys": "^4.0.1",
     "zod": "^4.1.0"
   },

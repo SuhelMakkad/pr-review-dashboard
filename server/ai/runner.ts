@@ -10,10 +10,11 @@ import {
   type AiSettings,
   type AiTask,
   type DraftCommentsResult,
+  type FullReviewResult,
 } from '../../shared/ai.js';
 import { commentableLines } from '../../shared/diff.js';
-import type { DraftComment } from '../../shared/review.js';
-import type { PullRequestDetail } from '../../shared/types.js';
+import type { DraftComment, ReviewDraft } from '../../shared/review.js';
+import type { PullRequestDetail, PullRequestSnapshot } from '../../shared/types.js';
 import type { DiffService } from '../diff/service.js';
 import type { EventBus } from '../events.js';
 import { redact, safeError } from '../github/errors.js';
@@ -24,10 +25,16 @@ import {
   briefInput,
   draftCommentsInput,
   draftSummaryInput,
+  fullReviewInput,
   sinceReviewInput,
 } from './context.js';
 import type { AgentProvider } from './provider.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from './tasks.js';
+import {
+  downloadRepository,
+  prepareReviewWorkspace,
+  type RepositoryExporter,
+} from './workspace.js';
 
 const MAX_CONCURRENT = 2;
 const PROBE_TTL_MS = 5 * 60_000;
@@ -58,6 +65,9 @@ interface RunRow {
 export class AiRunner {
   private readonly queue: string[] = [];
   private readonly inputs = new Map<string, string>();
+  private readonly snapshots = new Map<string, PullRequestSnapshot>();
+  private readonly executions = new Set<Promise<void>>();
+  private closing = false;
   private readonly active = new Map<
     string,
     { controller: AbortController; provider: AiProvider }
@@ -71,6 +81,7 @@ export class AiRunner {
     private readonly events: EventBus,
     readonly providers: Record<AiProvider, AgentProvider>,
     private readonly workRoot: string,
+    private readonly exportRepository: RepositoryExporter = downloadRepository,
   ) {
     // Runs cut short by a restart cannot resume; say so instead of leaving them spinning.
     this.db
@@ -100,7 +111,13 @@ export class AiRunner {
   }
 
   saveSettings(settings: AiSettings): AiSettings {
-    this.sync.store.setSetting(SETTINGS_KEY, settings);
+    this.sync.store.setSetting(SETTINGS_KEY, {
+      ...settings,
+      tasks: {
+        ...settings.tasks,
+        full_review: { ...settings.tasks.full_review, provider: 'codex' },
+      },
+    });
 
     return this.settings();
   }
@@ -141,6 +158,8 @@ export class AiRunner {
   ): Promise<string> {
     const pr = detail.snapshot;
 
+    if (task === 'full_review')
+      return fullReviewInput(pr, await this.diffs.manifest(pr, 'full', null));
     if (task === 'brief') return briefInput(pr, await this.diffs.manifest(pr, 'full', null));
     if (task === 'draft_comments')
       return draftCommentsInput(pr, await this.diffs.manifest(pr, 'full', null));
@@ -209,12 +228,33 @@ export class AiRunner {
     task: AiTask,
     options: { provider?: AiProvider; force?: boolean } = {},
   ): Promise<AiRun> {
+    this.detail(account, prId);
+
+    if (task === 'full_review') await this.sync.refresh(prId);
+
     const detail = this.detail(account, prId);
     const settings = this.settings();
     const taskSettings = settings.tasks[task];
-    const provider = options.provider ?? taskSettings.provider ?? settings.defaultProvider;
+    const provider =
+      task === 'full_review'
+        ? 'codex'
+        : (options.provider ?? taskSettings.provider ?? settings.defaultProvider);
     const input = await this.buildInput(task, detail, account);
     const head = detail.snapshot.headOid;
+
+    if (task === 'full_review') {
+      await this.sync.refresh(prId);
+
+      const latest = this.detail(account, prId).snapshot;
+
+      if (latest.headOid !== head || latest.baseOid !== detail.snapshot.baseOid) {
+        throw new ReviewError(
+          'HEAD_MOVED',
+          409,
+          'New commits arrived while preparing the review. Run it again.',
+        );
+      }
+    }
     const key = createHash('sha256')
       .update(
         [
@@ -258,6 +298,7 @@ export class AiRunner {
         new Date().toISOString(),
       );
     this.inputs.set(id, input);
+    this.snapshots.set(id, structuredClone(detail.snapshot));
     this.queue.push(id);
     this.emit({ id, pr_id: prId });
     this.pump();
@@ -266,7 +307,7 @@ export class AiRunner {
   }
 
   private pump(): void {
-    while (this.active.size < MAX_CONCURRENT) {
+    while (!this.closing && this.active.size < MAX_CONCURRENT) {
       const busy = new Set([...this.active.values()].map((run) => run.provider));
       const index = this.queue.findIndex((id) => !busy.has(this.row(id)?.provider as AiProvider));
 
@@ -274,8 +315,23 @@ export class AiRunner {
 
       const [id] = this.queue.splice(index, 1);
 
-      void this.execute(id);
+      const execution = this.execute(id);
+
+      this.executions.add(execution);
+      void execution.finally(() => this.executions.delete(execution));
     }
+  }
+
+  async close(): Promise<void> {
+    this.closing = true;
+
+    for (const id of [...this.queue, ...this.active.keys()]) {
+      const row = this.row(id);
+
+      if (row) this.cancel(row.account, id);
+    }
+
+    await Promise.allSettled(this.executions);
   }
 
   private async execute(id: string): Promise<void> {
@@ -289,11 +345,29 @@ export class AiRunner {
     let lastEmit = 0;
 
     this.active.set(id, { controller, provider: row.provider });
-    mkdirSync(workDir, { recursive: true, mode: 0o700 });
     this.update(id, { status: 'running', progress: 'Starting…' });
     this.emit(row);
 
     try {
+      mkdirSync(workDir, { recursive: true, mode: 0o700 });
+
+      if (row.task === 'full_review') {
+        this.update(id, { progress: 'Downloading repository snapshots…' });
+        this.emit(row);
+
+        const snapshot = this.snapshots.get(id)!;
+        const diff = await this.diffs.manifest(snapshot, 'full', null);
+
+        await prepareReviewWorkspace(
+          this.sync.github,
+          snapshot,
+          diff,
+          workDir,
+          controller.signal,
+          this.exportRepository,
+        );
+      }
+
       const result = await this.providers[row.provider].run(
         {
           instructions: instructions[row.task],
@@ -319,7 +393,7 @@ export class AiRunner {
       if (!parsed.success) throw new Error('The agent returned an answer in an unexpected shape.');
 
       const output =
-        row.task === 'draft_comments'
+        row.task === 'draft_comments' || row.task === 'full_review'
           ? await this.anchor(row, parsed.data as DraftCommentsResult)
           : parsed.data;
 
@@ -341,6 +415,7 @@ export class AiRunner {
     } finally {
       this.active.delete(id);
       this.inputs.delete(id);
+      this.snapshots.delete(id);
       rmSync(workDir, { recursive: true, force: true });
       this.emit(row);
       this.pump();
@@ -353,7 +428,11 @@ export class AiRunner {
 
     if (!detail) return result;
 
-    const full = await this.diffs.manifest(detail.snapshot, 'full', null);
+    const full = await this.diffs.manifest(
+      this.snapshots.get(row.id) ?? detail.snapshot,
+      'full',
+      null,
+    );
 
     return {
       ...result,
@@ -387,6 +466,7 @@ export class AiRunner {
     if (queued !== -1) {
       this.queue.splice(queued, 1);
       this.inputs.delete(id);
+      this.snapshots.delete(id);
       this.update(id, {
         status: 'cancelled',
         progress: null,
@@ -429,5 +509,121 @@ export class AiRunner {
       body: body ?? suggestion.body,
       origin: 'ai',
     });
+  }
+
+  /** Stage selected findings locally. Posting still happens only through ReviewService.submit. */
+  async prepareReview(account: string, id: string, indices: number[]): Promise<ReviewDraft> {
+    const row = this.row(id);
+
+    if (
+      !row ||
+      row.account !== account ||
+      row.task !== 'full_review' ||
+      row.status !== 'done' ||
+      !row.result
+    ) {
+      throw new ReviewError('NOT_FOUND', 404, 'That completed review is unavailable.');
+    }
+
+    this.detail(account, row.pr_id);
+    await this.sync.refresh(row.pr_id);
+
+    const detail = this.detail(account, row.pr_id);
+
+    if (detail.snapshot.headOid !== row.head_oid) {
+      throw new ReviewError(
+        'HEAD_MOVED',
+        409,
+        'This Codex review is out of date. Regenerate it before preparing a GitHub review.',
+      );
+    }
+
+    const result = JSON.parse(row.result) as FullReviewResult;
+    const selected = [...new Set(indices)].map((index) => result.comments[index]);
+
+    if (selected.some((comment) => !comment)) {
+      throw new ReviewError('NOT_FOUND', 404, 'One of the selected findings is unavailable.');
+    }
+
+    const changedPaths = new Set(detail.snapshot.files.map((file) => file.path));
+    const draft = this.reviews.draft(account, row.pr_id);
+    const general = selected.filter((comment) => !changedPaths.has(comment.path));
+    const summary = [
+      '## Codex review',
+      result.overall,
+      ...general.map((comment) => `### ${comment.path}\n${comment.body}`),
+      ...(result.coverage.length
+        ? ['### Review coverage', ...result.coverage.map((item) => `- ${item}`)]
+        : []),
+    ].join('\n\n');
+    const body = draft.body.includes(summary)
+      ? draft.body
+      : [draft.body, summary].filter(Boolean).join('\n\n');
+
+    if (
+      body.length > 65_536 ||
+      selected.some((comment) => comment.body.length > 65_536 || !comment.body.trim())
+    ) {
+      throw new ReviewError(
+        'INVALID_REVIEW',
+        422,
+        'This review is too large to post. Select fewer findings.',
+      );
+    }
+
+    const full = await this.diffs.manifest(detail.snapshot, 'full', null);
+    const latest = this.detail(account, row.pr_id).snapshot;
+
+    if (latest.headOid !== row.head_oid) {
+      throw new ReviewError(
+        'HEAD_MOVED',
+        409,
+        'New commits arrived. Regenerate this review before preparing a GitHub review.',
+      );
+    }
+
+    const comments = selected
+      .filter((comment) => changedPaths.has(comment.path))
+      .map((comment) => {
+        const file = full.files.find((candidate) => candidate.path === comment.path);
+        const lines = commentableLines(file?.patch);
+        const visible = comment.side === 'LEFT' ? lines.left : lines.right;
+
+        return {
+          ...comment,
+          line: comment.line !== null && visible.has(comment.line) ? comment.line : null,
+        };
+      });
+
+    // One synchronous transaction avoids partial drafts or duplicate comments on retries.
+    this.sync.store.transaction(() => {
+      for (const comment of comments) {
+        const exists = draft.comments.some(
+          (existing) =>
+            existing.origin === 'ai' &&
+            existing.anchorOid === row.head_oid &&
+            existing.path === comment.path &&
+            existing.line === comment.line &&
+            existing.side === comment.side &&
+            existing.body === comment.body,
+        );
+
+        if (exists) continue;
+
+        this.reviews.drafts.addComment(account, row.pr_id, {
+          ...comment,
+          startLine: null,
+          startSide: null,
+          subjectType: comment.line === null ? 'FILE' : 'LINE',
+          origin: 'ai',
+          anchorOid: row.head_oid,
+        });
+      }
+
+      this.reviews.drafts.saveMeta(account, row.pr_id, { body });
+    });
+    this.events.emit({ type: 'draft.updated', id: row.pr_id });
+
+    return this.reviews.draft(account, row.pr_id);
   }
 }

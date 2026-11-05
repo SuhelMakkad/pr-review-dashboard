@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { AiProvider, AiProviderStatus, AiRun, AiSettings, AiTask } from '../../../shared/ai';
-import type { DraftComment } from '../../../shared/review';
+import type { DraftComment, ReviewDraft } from '../../../shared/review';
 import { api } from '../../lib/api';
 
 export const aiKey = (prId: string) => ['ai', prId] as const;
@@ -72,7 +72,16 @@ export function useAi(prId: string | null, account: string) {
     onSuccess: () => client.invalidateQueries({ queryKey: ['draft', prId] }),
   });
 
+  const prepare = useMutation({
+    mutationFn: ({ runId, indices }: { runId: string; indices: number[] }) =>
+      api<ReviewDraft>(`/api/ai/runs/${encodeURIComponent(runId)}/draft`, {
+        method: 'POST',
+        body: { account, indices },
+      }),
+    onSuccess: (draft) => client.setQueryData(['draft', prId], draft),
+  });
+
   const latest = (task: AiTask) => runs.data?.runs.find((run) => run.task === task) ?? null;
 
-  return { runs, start, cancel, accept, latest };
+  return { runs, start, cancel, accept, prepare, latest };
 }

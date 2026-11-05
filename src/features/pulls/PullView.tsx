@@ -28,6 +28,7 @@ import { cn } from '../../ui/cn';
 import { Kbd } from '../../ui/Kbd';
 import { MarkdownView } from '../../ui/Markdown';
 import { AssistPanel } from '../ai/AssistPanel';
+import { FullReview } from '../ai/FullReview';
 import { LinearCard } from '../linear/LinearCard';
 import { useInboxNavigation } from '../inbox/InboxContext';
 import { usePullActions } from './actions';
@@ -424,6 +425,17 @@ function PullDetailView({
               : `Marked done ${relativePhrase(item.doneAt!)}. It returns when there is new activity.`}
           </p>
         )}
+
+        <Section title="Codex review">
+          <FullReview
+            prId={item.id}
+            account={account}
+            repository={pr.repository}
+            number={pr.number}
+            headOid={pr.headOid}
+            ci={pr.ci}
+          />
+        </Section>
 
         <Section title="✦ Assist">
           <AssistPanel

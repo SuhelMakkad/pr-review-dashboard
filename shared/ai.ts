@@ -2,7 +2,7 @@
 
 export type AiProvider = 'codex' | 'claude';
 export type AiTask =
-  'brief' | 'since_review' | 'draft_comments' | 'author_feedback' | 'draft_summary';
+  'full_review' | 'brief' | 'since_review' | 'draft_comments' | 'author_feedback' | 'draft_summary';
 export type AiEffort = 'low' | 'medium' | 'high' | 'xhigh';
 export type AiRunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
 
@@ -38,6 +38,11 @@ export interface DraftCommentsResult {
   comments: SuggestedComment[];
 }
 
+export interface FullReviewResult extends DraftCommentsResult {
+  assessment: 'changes_requested' | 'no_blocking_findings';
+  coverage: string[];
+}
+
 export interface AuthorFeedbackResult {
   summary: string;
   actionItems: { text: string; threadId: string | null }[];
@@ -48,7 +53,12 @@ export interface DraftSummaryResult {
 }
 
 export type AiResult =
-  BriefResult | SinceReviewResult | DraftCommentsResult | AuthorFeedbackResult | DraftSummaryResult;
+  | FullReviewResult
+  | BriefResult
+  | SinceReviewResult
+  | DraftCommentsResult
+  | AuthorFeedbackResult
+  | DraftSummaryResult;
 
 export interface AiRun {
   id: string;
@@ -89,6 +99,7 @@ export interface AiProviderStatus {
 }
 
 export const aiTaskLabels: Record<AiTask, string> = {
+  full_review: 'Full Codex review',
   brief: 'Brief',
   since_review: 'What changed since your review',
   draft_comments: 'Draft review comments',
@@ -99,6 +110,7 @@ export const aiTaskLabels: Record<AiTask, string> = {
 export const defaultAiSettings = (): AiSettings => ({
   defaultProvider: 'codex',
   tasks: {
+    full_review: { provider: 'codex', effort: 'high', model: null },
     brief: { provider: null, effort: 'low', model: null },
     since_review: { provider: null, effort: 'medium', model: null },
     draft_comments: { provider: null, effort: 'high', model: null },

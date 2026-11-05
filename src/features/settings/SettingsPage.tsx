@@ -193,6 +193,7 @@ function AiSection({ account }: { account: string }) {
           <span className="flex items-center gap-2">
             <select
               aria-label={`${aiTaskLabels[task]} agent`}
+              disabled={task === 'full_review'}
               value={settings.tasks[task].provider ?? ''}
               onChange={(event) =>
                 update({

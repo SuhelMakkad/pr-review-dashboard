@@ -35,6 +35,7 @@ import type { FilesSearch } from './search';
 import { ThreadsRail } from './ThreadsRail';
 import { AssistPanel } from '../ai/AssistPanel';
 import { Suggestions } from '../ai/Suggestions';
+import { FullReview } from '../ai/FullReview';
 import { useAi } from '../ai/useAi';
 import { useReview } from './useReview';
 
@@ -682,6 +683,14 @@ function Workspace() {
                     />
                   ) : (
                     <div className="scroll-thin h-full space-y-3 overflow-y-auto p-3">
+                      <FullReview
+                        prId={item.id}
+                        account={account}
+                        repository={item.repository}
+                        number={item.number}
+                        headOid={detail.data?.snapshot.headOid ?? ''}
+                        ci={detail.data?.snapshot.ci ?? 'none'}
+                      />
                       <AssistPanel
                         prId={item.id}
                         account={account}

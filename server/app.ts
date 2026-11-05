@@ -21,6 +21,9 @@ import { Notifier } from './notify/notifier.js';
 import { macosNotify } from './notify/macos.js';
 import { FixtureLinear, LinearService, type LinearSource } from './linear/service.js';
 import { AiRunner } from './ai/runner.js';
+import { downloadRepository, type RepositoryExporter } from './ai/workspace.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { FixtureProvider } from './ai/fixture.js';
 import type { AgentProvider } from './ai/provider.js';
 import type { AiProvider } from '../shared/ai.js';
@@ -43,6 +46,7 @@ export interface AppOptions {
   aiProviders?: Record<AiProvider, AgentProvider>;
   /** Private scratch directory for agent runs. */
   aiWorkRoot?: string;
+  exportRepository?: RepositoryExporter;
   /** Linear access (Keychain-backed API normally, a fixture in demo mode and tests). */
   linear?: LinearSource;
   /** Native notification sender used when no window is open (macOS by default). */
@@ -94,10 +98,28 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
       claude: new FixtureProvider('claude'),
     },
     options.aiWorkRoot ?? join(tmpdir(), 'review-desk-ai'),
+    options.exportRepository ??
+      (options.fixture
+        ? async (repository, oid, directory, signal) => {
+            const files = options.fixture!.scenario.world.repos.files(repository, oid);
+
+            for (const [path, content] of Object.entries(files)) {
+              signal.throwIfAborted();
+
+              const target = join(directory, path);
+
+              await mkdir(dirname(target), { recursive: true });
+              await writeFile(target, content);
+            }
+
+            return [];
+          }
+        : downloadRepository),
   );
 
   registerReviewRoutes(app, reviews);
   registerAiRoutes(app, runner);
+  app.addHook('onClose', () => runner.close());
   registerLinearRoutes(app, service, new LinearService(options.linear ?? new FixtureLinear(false)));
 
   const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);

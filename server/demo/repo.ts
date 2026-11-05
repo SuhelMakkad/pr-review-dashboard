@@ -45,6 +45,14 @@ export class FixtureRepos {
     return Boolean(this.get(repository, oid));
   }
 
+  files(repository: string, oid: string): Record<string, string> {
+    const commit = this.get(repository, oid);
+
+    if (!commit) throw new Error('The repository snapshot is unavailable.');
+
+    return { ...commit.files };
+  }
+
   private resolve(repository: string, refOrOid: string): string {
     return this.refs.get(repository)?.get(refOrOid) ?? refOrOid;
   }

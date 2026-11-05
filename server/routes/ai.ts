@@ -3,10 +3,12 @@ import { z } from 'zod';
 import type { AiRunner } from '../ai/runner.js';
 import { safeError } from '../github/errors.js';
 import { ReviewError } from '../review/service.js';
+import { defaultAiSettings } from '../../shared/ai.js';
 
 const account = z.string().min(1).max(100);
 const provider = z.enum(['codex', 'claude']);
 const task = z.enum([
+  'full_review',
   'brief',
   'since_review',
   'draft_comments',
@@ -26,6 +28,7 @@ const schemas = {
     settings: z.strictObject({
       defaultProvider: provider,
       tasks: z.strictObject({
+        full_review: taskSettings.optional().default(defaultAiSettings().tasks.full_review),
         brief: taskSettings,
         since_review: taskSettings,
         draft_comments: taskSettings,
@@ -46,6 +49,7 @@ const schemas = {
     index: z.number().int().min(0),
     body: z.string().trim().min(1).max(65_536).optional(),
   }),
+  prepare: z.strictObject({ account, indices: z.array(z.number().int().min(0)).max(100) }),
 };
 
 async function handle(reply: FastifyReply, work: () => Promise<unknown> | unknown) {
@@ -113,6 +117,15 @@ export function registerAiRoutes(app: FastifyInstance, runner: AiRunner): void {
       handle(reply, () =>
         runner.accept(input.account, request.params.runId, input.index, input.body),
       )
+    );
+  });
+
+  app.post<{ Params: { runId: string } }>('/api/ai/runs/:runId/draft', async (request, reply) => {
+    const input = parse(schemas.prepare, request.body, reply);
+
+    return (
+      input &&
+      handle(reply, () => runner.prepareReview(input.account, request.params.runId, input.indices))
     );
   });
 }

@@ -126,10 +126,10 @@ export function AiCard({
 
   return (
     <div className="rounded-md border border-dashed border-ai/50 bg-ai/[0.03] px-3 py-2.5">
-      <div className="mb-1.5 flex items-center gap-2 text-xs">
-        <Sparkles size={12} className="text-ai" aria-hidden="true" />
-        <span className="font-medium text-ai">{title}</span>
-        <span className="text-fg-subtle">
+      <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+        <Sparkles size={12} className="shrink-0 text-ai" aria-hidden="true" />
+        <span className="shrink-0 font-medium text-ai">{title}</span>
+        <span className="order-1 w-full text-fg-subtle">
           {providerLabel[run.provider]} · {run.headOid.slice(0, 7)}
           {run.finishedAt && ` · ${relativePhrase(run.finishedAt)}`}
         </span>

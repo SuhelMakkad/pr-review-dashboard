@@ -1,6 +1,10 @@
 import type { AiProvider } from '../../shared/ai.js';
 import type { AgentProvider, AgentRequest } from './provider.js';
 import { AgentError } from './provider.js';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { DiffFile } from '../../shared/diff.js';
+import { annotatePatch } from './context.js';
 
 const wait = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -42,6 +46,39 @@ export class FixtureProvider implements AgentProvider {
 
       this.failNext = null;
       throw new AgentError(message);
+    }
+
+    if (request.instructions.includes('perform a full code review')) {
+      const review = JSON.parse(await readFile(join(request.workDir, 'review.json'), 'utf8')) as {
+        files: DiffFile[];
+      };
+      const file = review.files.find((candidate) => candidate.patch && !candidate.generated);
+      const line = /R(\d+) \+/.exec(annotatePatch(file?.patch ?? ''));
+
+      return {
+        output: {
+          overall:
+            'The implementation is mostly sound, but the empty-input behavior needs a regression test.',
+          assessment: 'no_blocking_findings',
+          comments:
+            file && line
+              ? [
+                  {
+                    path: file.path,
+                    line: Number(line[1]),
+                    side: 'RIGHT',
+                    severity: 'suggestion',
+                    body: 'Could you add a regression test for empty input? This branch should preserve the existing behavior.',
+                  },
+                ]
+              : [],
+          coverage: [
+            'Inspected the changed source files and related tests in both repository snapshots. Tests were not executed.',
+          ],
+        },
+        model: 'Codex (demo)',
+        usage: null,
+      };
     }
 
     const input = request.input;

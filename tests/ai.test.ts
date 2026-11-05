@@ -1,13 +1,27 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { c } from 'tar';
 import { ClaudeProvider, claudeProgress } from '../server/ai/claude';
 import { CodexProvider, codexProgress } from '../server/ai/codex';
 import { annotatePatch } from '../server/ai/context';
 import { FixtureProvider } from '../server/ai/fixture';
 import { AiRunner } from '../server/ai/runner';
 import { jsonSchemaFor } from '../server/ai/tasks';
+import {
+  extractRepository,
+  prepareReviewWorkspace,
+  type RepositoryExporter,
+} from '../server/ai/workspace';
 import { Store } from '../server/db/store';
 import { FixtureGitHub } from '../server/demo/fixture-github';
 import { defaultScenario } from '../server/demo/scenario';
@@ -15,7 +29,14 @@ import { DiffService } from '../server/diff/service';
 import { EventBus } from '../server/events';
 import { ReviewService } from '../server/review/service';
 import { SyncService } from '../server/sync';
-import type { AiRun, BriefResult, DraftCommentsResult, SinceReviewResult } from '../shared/ai';
+import {
+  defaultAiSettings,
+  type AiRun,
+  type BriefResult,
+  type DraftCommentsResult,
+  type FullReviewResult,
+  type SinceReviewResult,
+} from '../shared/ai';
 
 const cleanups: (() => void)[] = [];
 
@@ -138,7 +159,25 @@ async function setup() {
   cleanups.push(() => store.close());
   await sync.sync();
 
-  const runner = new AiRunner(sync, diffs, reviews, events, providers, workDir());
+  const exported: { oid: string; directory: string }[] = [];
+  const exportRepository: RepositoryExporter = async (repository, oid, directory, signal) => {
+    exported.push({ oid, directory });
+
+    for (const [path, content] of Object.entries(
+      github.scenario.world.repos.files(repository, oid),
+    )) {
+      signal.throwIfAborted();
+
+      const target = join(directory, path);
+
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, content);
+    }
+
+    return [];
+  };
+  const root = workDir();
+  const runner = new AiRunner(sync, diffs, reviews, events, providers, root, exportRepository);
   const pr = (number: number) =>
     [...sync.list().items, ...sync.mine().items].find((item) => item.number === number)!;
   const finished = async (run: AiRun) => {
@@ -153,10 +192,173 @@ async function setup() {
     throw new Error('run did not finish');
   };
 
-  return { store, github, sync, reviews, runner, providers, pr, finished };
+  return {
+    store,
+    github,
+    sync,
+    reviews,
+    runner,
+    providers,
+    pr,
+    finished,
+    diffs,
+    exported,
+    exportRepository,
+    root,
+  };
 }
 
 describe('AI runner', () => {
+  it('runs a full Codex review against both repository snapshots and keeps the report off GitHub', async () => {
+    const { runner, pr, finished, github, reviews, exported, root, sync } = await setup();
+    const settings = defaultAiSettings();
+
+    settings.defaultProvider = 'claude';
+    runner.saveSettings(settings);
+
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const result = run.result as FullReviewResult;
+
+    expect(run).toMatchObject({ provider: 'codex', status: 'done', effort: 'high' });
+    expect(result.assessment).toBe('no_blocking_findings');
+    expect(result.coverage).toHaveLength(1);
+    expect(result.comments[0].line).not.toBeNull();
+    expect(exported.map((item) => item.oid)).toEqual([
+      sync.detail(run.prId)!.snapshot.baseOid,
+      run.headOid,
+    ]);
+    expect(existsSync(join(root, run.id))).toBe(false);
+    expect(reviews.draft('you', run.prId).comments).toEqual([]);
+    expect(github.writes).toEqual([]);
+
+    const cached = await runner.start('you', run.prId, 'full_review');
+
+    expect(cached.id).toBe(run.id);
+  });
+
+  it('stages only selected findings, preserves existing drafts, and posts only on explicit submit', async () => {
+    const { runner, pr, finished, github, reviews, store } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+
+    await reviews.saveDraft('you', run.prId, { body: 'My existing summary.' });
+
+    const summaryOnly = await runner.prepareReview('you', run.id, []);
+
+    expect(summaryOnly.comments).toEqual([]);
+    expect(summaryOnly.body).toContain('My existing summary.');
+    expect(summaryOnly.body).toContain('## Codex review');
+
+    await expect(runner.prepareReview('someone-else', run.id, [0])).rejects.toThrow('unavailable');
+    await expect(runner.prepareReview('you', run.id, [999])).rejects.toThrow('unavailable');
+
+    const draft = await runner.prepareReview('you', run.id, [0, 0]);
+    const retried = await runner.prepareReview('you', run.id, [0]);
+
+    expect(draft.comments).toHaveLength(1);
+    expect(draft.comments[0]).toMatchObject({ origin: 'ai', anchorOid: run.headOid });
+    expect(retried.comments).toHaveLength(1);
+    expect(retried.body).toBe(draft.body);
+    expect(github.writes).toEqual([]);
+
+    const posted = await reviews.submit(run.prId, {
+      account: 'you',
+      event: 'COMMENT',
+      body: draft.body,
+      expectedHeadOid: run.headOid,
+    });
+
+    expect(posted.submittedComments).toBe(1);
+    expect(github.writes.map((write) => write.op)).toEqual([
+      'AddPendingReview',
+      'AddReviewThread',
+      'SubmitReview',
+    ]);
+    expect(
+      (
+        store.db.prepare('SELECT status FROM ai_runs WHERE id = ?').get(run.id) as {
+          status: string;
+        }
+      ).status,
+    ).toBe('done');
+  });
+
+  it('refuses to prepare a full review after the PR head moves, even before the next background sync', async () => {
+    const { runner, pr, finished, github, reviews } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+
+    github.scenario.world.pulls.find((pull) => pull.snapshot.id === run.prId)!.snapshot.headOid =
+      'f'.repeat(40);
+
+    await expect(runner.prepareReview('you', run.id, [0])).rejects.toThrow('out of date');
+    expect(reviews.draft('you', run.prId).comments).toEqual([]);
+    expect(github.writes).toEqual([]);
+  });
+
+  it('provides full repository content beyond the prompt and reports omitted archive entries', async () => {
+    const { pr, sync, diffs, github, exportRepository } = await setup();
+    const snapshot = sync.detail(pr(1839).id)!.snapshot;
+    const directory = workDir();
+    const diff = await diffs.manifest(snapshot, 'full', null);
+    const exporter: RepositoryExporter = async (...args) => {
+      await exportRepository(...args);
+
+      return ['external-link'];
+    };
+
+    await prepareReviewWorkspace(
+      github,
+      snapshot,
+      diff,
+      directory,
+      new AbortController().signal,
+      exporter,
+    );
+
+    const context = JSON.parse(readFileSync(join(directory, 'review.json'), 'utf8'));
+
+    expect(context).toMatchObject({
+      baseOid: snapshot.baseOid,
+      headOid: snapshot.headOid,
+      omittedAfter: ['external-link'],
+    });
+    expect(context.files).toHaveLength(snapshot.changedFiles);
+    expect(readFileSync(join(directory, 'after', diff.files[0].path), 'utf8')).toBe(
+      github.scenario.world.repos.files(snapshot.repository, snapshot.headOid)[diff.files[0].path],
+    );
+  });
+
+  it('stops repository preparation and cleans up the workspace when the server shuts down', async () => {
+    const { sync, diffs, reviews, providers, pr, finished, github } = await setup();
+    const root = workDir();
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const runner = new AiRunner(
+      sync,
+      diffs,
+      reviews,
+      sync.events,
+      providers,
+      root,
+      async (_repository, _oid, _directory, signal) => {
+        notifyStarted();
+
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('Cancelled.')), { once: true });
+        });
+      },
+    );
+    const run = await runner.start('you', pr(1839).id, 'full_review');
+
+    await started;
+    await runner.close();
+
+    expect((await finished(run)).status).toBe('cancelled');
+    expect(existsSync(join(root, run.id))).toBe(false);
+    expect(github.writes).toEqual([]);
+  });
+
   it('writes a brief with Codex by default and reuses it until the input changes', async () => {
     const { runner, pr, finished } = await setup();
     const first = await finished(await runner.start('you', pr(2041).id, 'brief'));
@@ -256,5 +458,25 @@ describe('AI runner', () => {
     expect(restarted.runs('you', run.prId)[0].status).toBe('interrupted');
     runner.cancel('you', run.id);
     expect(store).toBeDefined();
+  });
+});
+
+describe('review archives', () => {
+  it('extracts source files while excluding symlinks that could expose files outside the workspace', async () => {
+    const directory = workDir();
+    const source = join(directory, 'source');
+    const archive = join(directory, 'repo.tar.gz');
+    const destination = join(directory, 'checkout');
+
+    mkdirSync(join(source, 'repository'), { recursive: true });
+    writeFileSync(join(source, 'repository', 'app.ts'), 'export const ready = true;');
+    symlinkSync('/etc/passwd', join(source, 'repository', 'outside'));
+    await c({ cwd: source, file: archive, gzip: true }, ['repository']);
+
+    const omitted = await extractRepository(archive, destination, new AbortController().signal);
+
+    expect(readFileSync(join(destination, 'app.ts'), 'utf8')).toContain('ready = true');
+    expect(existsSync(join(destination, 'outside'))).toBe(false);
+    expect(omitted).toContain('repository/outside');
   });
 });
