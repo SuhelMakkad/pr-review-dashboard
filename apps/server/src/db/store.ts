@@ -16,6 +16,7 @@ import { migrateDatabase } from '@/db/migrate.js';
 import {
   activityEvents,
   aiRuns,
+  githubOperations,
   draftComments,
   feedMembership,
   notificationLog,
@@ -286,6 +287,7 @@ export class Store {
       reviewDrafts,
       aiRuns,
       notificationLog,
+      githubOperations,
     ];
 
     this.transaction(() => {

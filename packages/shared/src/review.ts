@@ -20,6 +20,7 @@ export interface DraftComment {
   status: 'draft' | 'pushed' | 'stale';
   createdAt: string;
   updatedAt: string;
+  githubThreadId?: string | null;
 }
 
 export interface ReviewDraft {
@@ -31,6 +32,7 @@ export interface ReviewDraft {
   preparedReview?: { runId: string; preparedAt: string; indices: number[] } | null;
   /** A pending review that already exists on GitHub (started there or by an interrupted submit). */
   githubPendingReview: { id: string; commentCount: number } | null;
+  activeOperationId?: string | null;
 }
 
 export interface NewDraftComment {

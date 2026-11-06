@@ -7,6 +7,7 @@ import type {
   AiTask,
 } from '@review-desk/shared/ai';
 import type { ActivityKind } from '@review-desk/shared/insights';
+import type { OperationRecord } from '@/operations/types.js';
 import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
 import type { LocalTriageState, PullRequestSnapshot, Source } from '@review-desk/shared/types';
 
@@ -107,6 +108,7 @@ export const reviewDrafts = sqliteTable(
     body: text('body').notNull().default(''),
     event: text('event').$type<ReviewEvent>().notNull().default('COMMENT'),
     githubReviewId: text('github_review_id'),
+    activeOperationId: text('active_operation_id'),
     preparedReview: text('prepared_review', { mode: 'json' }).$type<
       ReviewDraft['preparedReview']
     >(),
@@ -194,3 +196,21 @@ export const notificationLog = sqliteTable(
 export type AiRunRow = typeof aiRuns.$inferSelect;
 export type DraftCommentRow = typeof draftComments.$inferSelect;
 export type ReviewDraftRow = typeof reviewDrafts.$inferSelect;
+
+/** Durable GitHub outbox. The document includes immutable input and per-mutation receipts. */
+export const githubOperations = sqliteTable(
+  'github_operations',
+  {
+    account: text('account').notNull(),
+    id: text('id').notNull(),
+    prId: text('pr_id').notNull(),
+    status: text('status').$type<OperationRecord['status']>().notNull(),
+    createdAt: text('created_at').notNull(),
+    data: text('data', { mode: 'json' }).$type<OperationRecord>().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.account, table.id] }),
+    index('github_operations_by_account').on(table.account, table.createdAt, table.id),
+    index('github_operations_by_pr').on(table.account, table.prId, table.status),
+  ],
+);

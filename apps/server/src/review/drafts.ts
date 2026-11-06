@@ -4,10 +4,11 @@ import { union } from 'drizzle-orm/sqlite-core';
 import type { DraftComment, ReviewDraft, ReviewEvent } from '@review-desk/shared/review';
 import { draftComments, reviewDrafts, type ReviewDraftRow } from '@/db/schema.js';
 import type { Store } from '@/db/store.js';
+import { ReviewError } from '@/review/errors.js';
 
 type DraftMeta = Pick<
   ReviewDraftRow,
-  'body' | 'event' | 'githubReviewId' | 'updatedAt' | 'preparedReview'
+  'body' | 'event' | 'githubReviewId' | 'updatedAt' | 'preparedReview' | 'activeOperationId'
 >;
 
 const commentFields = {
@@ -24,11 +25,16 @@ const commentFields = {
   status: draftComments.status,
   createdAt: draftComments.createdAt,
   updatedAt: draftComments.updatedAt,
+  githubThreadId: draftComments.githubThreadId,
 };
 
 /** Local, unsubmitted review drafts. Nothing here reaches GitHub until the user submits. */
 export class DraftStore {
-  constructor(private readonly store: Store) {}
+  constructor(
+    private readonly store: Store,
+    private readonly operationId?: string,
+    private readonly beforeWrite?: () => void,
+  ) {}
 
   private get db() {
     return this.store.db;
@@ -41,6 +47,7 @@ export class DraftStore {
         event: reviewDrafts.event,
         githubReviewId: reviewDrafts.githubReviewId,
         preparedReview: reviewDrafts.preparedReview,
+        activeOperationId: reviewDrafts.activeOperationId,
         updatedAt: reviewDrafts.updatedAt,
       })
       .from(reviewDrafts)
@@ -54,6 +61,7 @@ export class DraftStore {
       body: row?.body ?? '',
       event: row?.event ?? 'COMMENT',
       githubReviewId: row?.githubReviewId ?? null,
+      activeOperationId: row?.activeOperationId ?? null,
       preparedReview: row?.preparedReview ?? null,
       updatedAt: row?.updatedAt ?? comments.at(-1)!.updatedAt,
       comments,
@@ -100,6 +108,8 @@ export class DraftStore {
       preparedReview?: ReviewDraft['preparedReview'];
     },
   ): void {
+    this.assertEditable(account, prId);
+
     const current = this.draft(account, prId);
     const meta = {
       body: changes.body ?? current?.body ?? '',
@@ -124,6 +134,8 @@ export class DraftStore {
     prId: string,
     input: Omit<DraftComment, 'id' | 'status' | 'createdAt' | 'updatedAt'>,
   ): DraftComment {
+    this.assertEditable(account, prId);
+
     const now = new Date().toISOString();
     const id = randomUUID();
 
@@ -172,6 +184,8 @@ export class DraftStore {
 
     if (!current) return;
 
+    this.assertEditable(account, currentPrId(this.store, account, id));
+
     this.db
       .update(draftComments)
       .set({
@@ -189,6 +203,8 @@ export class DraftStore {
   }
 
   deleteComment(account: string, id: string): void {
+    this.assertEditable(account, currentPrId(this.store, account, id));
+
     this.db
       .delete(draftComments)
       .where(and(eq(draftComments.account, account), eq(draftComments.id, id)))
@@ -196,6 +212,8 @@ export class DraftStore {
   }
 
   clear(account: string, prId: string): void {
+    this.assertEditable(account, prId);
+
     this.store.transaction(() => {
       this.db
         .delete(draftComments)
@@ -207,4 +225,58 @@ export class DraftStore {
         .run();
     });
   }
+
+  assertEditable(account: string, prId: string): void {
+    this.beforeWrite?.();
+
+    const lock = this.db
+      .select({ id: reviewDrafts.activeOperationId })
+      .from(reviewDrafts)
+      .where(and(eq(reviewDrafts.account, account), eq(reviewDrafts.prId, prId)))
+      .get()?.id;
+
+    if (lock && lock !== this.operationId) {
+      throw new ReviewError(
+        'REVIEW_QUEUED',
+        409,
+        'This review is saved in Activity. Resolve or cancel its action before editing.',
+        { operationId: lock },
+      );
+    }
+  }
+
+  lock(account: string, prId: string, operationId: string): void {
+    this.assertEditable(account, prId);
+    this.saveMeta(account, prId, {});
+
+    this.db
+      .update(reviewDrafts)
+      .set({ activeOperationId: operationId })
+      .where(and(eq(reviewDrafts.account, account), eq(reviewDrafts.prId, prId)))
+      .run();
+  }
+
+  unlock(account: string, prId: string, operationId: string): void {
+    this.db
+      .update(reviewDrafts)
+      .set({ activeOperationId: null })
+      .where(
+        and(
+          eq(reviewDrafts.account, account),
+          eq(reviewDrafts.prId, prId),
+          eq(reviewDrafts.activeOperationId, operationId),
+        ),
+      )
+      .run();
+  }
+}
+
+function currentPrId(store: Store, account: string, id: string): string {
+  return (
+    store.db
+      .select({ prId: draftComments.prId })
+      .from(draftComments)
+      .where(and(eq(draftComments.account, account), eq(draftComments.id, id)))
+      .get()?.prId ?? ''
+  );
 }

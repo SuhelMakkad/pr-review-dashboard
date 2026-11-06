@@ -16,17 +16,10 @@ import { GitHubError, safeError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
 import type { SyncService } from '@/sync/service.js';
 import { DraftStore } from '@/review/drafts.js';
+import { ReviewError } from '@/review/errors.js';
+import type { FrozenReview } from '@review-desk/shared/operations';
 
-export class ReviewError extends Error {
-  constructor(
-    readonly code: string,
-    readonly status: number,
-    message: string,
-    readonly details: Record<string, unknown> = {},
-  ) {
-    super(message);
-  }
-}
+export { ReviewError } from '@/review/errors.js';
 
 const IDENTITY_TTL_MS = 30_000;
 const WRITES_PER_MINUTE = 20;
@@ -78,8 +71,14 @@ export class ReviewService {
     private readonly github: GitHubApi,
     private readonly diffs: DiffService,
     private readonly events: EventBus,
+    private readonly execution?: {
+      operationId: string;
+      draft?: FrozenReview;
+      pendingReviewId?: string;
+      assertActive?: () => void;
+    },
   ) {
-    this.drafts = new DraftStore(sync.store);
+    this.drafts = new DraftStore(sync.store, execution?.operationId, execution?.assertActive);
   }
 
   /** Refuses writes for a stale account, re-checking the live gh login before anything is sent. */
@@ -116,6 +115,8 @@ export class ReviewService {
   }
 
   private async write<T>(work: () => Promise<T>): Promise<T> {
+    if (this.execution) return work();
+
     this.limiter.take();
 
     try {
@@ -151,6 +152,7 @@ export class ReviewService {
       event: draft?.event ?? 'COMMENT',
       comments: draft?.comments ?? [],
       updatedAt: draft?.updatedAt ?? null,
+      activeOperationId: draft?.activeOperationId ?? null,
       preparedReview: draft?.preparedReview ?? null,
       githubPendingReview: pr.pendingReview
         ? { id: pr.pendingReview.id, commentCount: pr.pendingReview.commentCount }
@@ -250,11 +252,12 @@ export class ReviewService {
 
   /** Throws away the local draft and any pending review an interrupted submit left on GitHub. */
   async discard(account: string, prId: string): Promise<void> {
-    await this.guard(account, true);
+    await this.guard(account);
 
     const draft = this.drafts.draft(account, prId);
 
     if (draft?.githubReviewId) {
+      await this.guard(account, true);
       await this.write(() => this.github.deleteReview(draft.githubReviewId!));
     }
 
@@ -342,13 +345,15 @@ export class ReviewService {
   async submit(prId: string, request: SubmitReviewRequest): Promise<SubmitReviewResult> {
     await this.guard(request.account, true);
 
-    const refreshed = await this.sync.refresh(prId).catch((error: unknown) => {
-      throw new ReviewError(
-        'GITHUB_ERROR',
-        502,
-        `Could not check the PR before submitting: ${safeError(error)}`,
-      );
-    });
+    const refreshed = this.execution
+      ? null
+      : await this.sync.refresh(prId).catch((error: unknown) => {
+          throw new ReviewError(
+            'GITHUB_ERROR',
+            502,
+            `Could not check the PR before submitting: ${safeError(error)}`,
+          );
+        });
     const pr = refreshed?.snapshot ?? this.snapshot(prId);
 
     if (pr.headOid !== request.expectedHeadOid && !request.allowNewHead) {
@@ -366,7 +371,12 @@ export class ReviewService {
 
     this.drafts.saveMeta(account, prId, { body: request.body, event: request.event });
 
-    const stale = await this.reanchor(account, pr, this.drafts.comments(account, prId));
+    const frozen = this.execution?.draft;
+    const stale = await this.reanchor(
+      account,
+      pr,
+      frozen?.comments ?? this.drafts.comments(account, prId),
+    );
     const alreadyStale = this.drafts
       .comments(account, prId)
       .filter((comment) => comment.status === 'stale');
@@ -385,10 +395,22 @@ export class ReviewService {
     }
 
     const draft = this.drafts.draft(account, prId)!;
-    const comments = draft.comments;
+    const comments = frozen
+      ? frozen.comments.map((comment) => {
+          const anchored = draft.comments.find((candidate) => candidate.id === comment.id);
+
+          return {
+            ...comment,
+            line: anchored?.line ?? comment.line,
+            startLine: anchored?.startLine ?? comment.startLine,
+          };
+        })
+      : draft.comments;
 
     return this.write(async () => {
-      let reviewId = draft.githubReviewId ?? pr.pendingReview?.id ?? null;
+      let reviewId = frozen
+        ? frozen.githubReviewId
+        : (draft.githubReviewId ?? pr.pendingReview?.id ?? null);
 
       if (!reviewId) {
         reviewId = await this.github.addPendingReview(prId, pr.headOid);
@@ -407,9 +429,11 @@ export class ReviewService {
 
       const review = await this.github.submitReview(reviewId, request.event, request.body);
 
-      this.drafts.clear(account, prId);
-      this.changed(prId);
-      await this.refreshQuietly(prId);
+      if (!this.execution) {
+        this.drafts.clear(account, prId);
+        this.changed(prId);
+      }
+      if (!this.execution) await this.refreshQuietly(prId);
 
       return { reviewUrl: review.url, submittedComments: comments.length };
     });
@@ -423,7 +447,7 @@ export class ReviewService {
     if (input.path) {
       await this.assertCommentable(pr, input);
 
-      if (pr.pendingReview) {
+      if (pr.pendingReview && pr.pendingReview.id !== this.execution?.pendingReviewId) {
         throw new ReviewError(
           'PENDING_REVIEW_EXISTS',
           409,
@@ -433,20 +457,31 @@ export class ReviewService {
     }
 
     const result = await this.write(() =>
-      input.path
-        ? this.github.commentNow(prId, pr.headOid, {
-            path: input.path,
-            body: input.body,
-            line: input.line,
-            side: input.side,
-            startLine: input.startLine,
-            startSide: input.startSide,
-            subjectType: input.line === null ? 'FILE' : 'LINE',
-          })
-        : this.github.addConversationComment(prId, input.body),
+      input.path && this.execution
+        ? (async () => {
+            const reviewId = await this.github.addPendingReview(prId, pr.headOid);
+
+            await this.github.addReviewThread(reviewId, {
+              ...input,
+              subjectType: input.line === null ? 'FILE' : 'LINE',
+            });
+
+            return this.github.submitReview(reviewId, 'COMMENT', '');
+          })()
+        : input.path
+          ? this.github.commentNow(prId, pr.headOid, {
+              path: input.path,
+              body: input.body,
+              line: input.line,
+              side: input.side,
+              startLine: input.startLine,
+              startSide: input.startSide,
+              subjectType: input.line === null ? 'FILE' : 'LINE',
+            })
+          : this.github.addConversationComment(prId, input.body),
     );
 
-    await this.refreshQuietly(prId);
+    if (!this.execution) await this.refreshQuietly(prId);
 
     return { url: result.url };
   }
@@ -462,7 +497,7 @@ export class ReviewService {
 
     const result = await this.write(() => this.github.replyToThread(threadId, body));
 
-    await this.refreshQuietly(prId);
+    if (!this.execution) await this.refreshQuietly(prId);
 
     return { url: result.url, pending: result.pending };
   }
@@ -471,7 +506,7 @@ export class ReviewService {
     await this.guard(account, true);
     this.snapshot(prId);
     await this.write(() => this.github.setThreadResolved(threadId, resolved));
-    await this.refreshQuietly(prId);
+    if (!this.execution) await this.refreshQuietly(prId);
   }
 
   /** Asks reviewers (again) on one of your own PRs. */
@@ -489,7 +524,7 @@ export class ReviewService {
     }
 
     await this.write(() => this.github.requestReviews(prId, logins));
-    await this.refreshQuietly(prId);
+    if (!this.execution) await this.refreshQuietly(prId);
   }
 
   async setViewed(account: string, prId: string, path: string, viewed: boolean): Promise<void> {

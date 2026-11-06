@@ -899,6 +899,7 @@ export class AiRunner {
     }
 
     this.detail(account, row.prId);
+    this.reviews.drafts.assertEditable(account, row.prId);
     await this.sync.refresh(row.prId);
 
     const detail = this.detail(account, row.prId);
@@ -1039,6 +1040,7 @@ export class AiRunner {
       throw new ReviewError('NOT_FOUND', 404, 'That generated summary is unavailable.');
 
     this.detail(account, row.prId);
+    this.reviews.drafts.assertEditable(account, row.prId);
     await this.sync.refresh(row.prId);
     this.detail(account, row.prId);
 
