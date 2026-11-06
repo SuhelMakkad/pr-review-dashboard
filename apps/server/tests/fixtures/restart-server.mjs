@@ -13,6 +13,7 @@ const directory = process.env.REVIEW_RESTART_DATA;
 const port = Number(process.env.REVIEW_RESTART_PORT);
 const store = new Store(join(directory, 'state.sqlite'));
 const fixture = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
+fixture.writeDelayMs = Number(process.env.REVIEW_RESTART_WRITE_DELAY ?? 0);
 const sync = new SyncService(store, fixture, new EventBus());
 const providers = { codex: new FixtureProvider('codex'), claude: new FixtureProvider('claude') };
 

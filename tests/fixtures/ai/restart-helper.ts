@@ -19,6 +19,7 @@ export async function startServer(
   port: number,
   delay: number,
   webRoot?: string,
+  githubDelayMs = 0,
 ) {
   const child = spawn(
     process.execPath,
@@ -39,6 +40,7 @@ export async function startServer(
         REVIEW_RESTART_PORT: String(port),
         REVIEW_RESTART_DELAY: String(delay),
         REVIEW_RESTART_WEB_ROOT: webRoot ?? '',
+        REVIEW_RESTART_WRITE_DELAY: String(githubDelayMs),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },

@@ -12,6 +12,8 @@ import { DiffService } from '@/diff/service.js';
 import { registerDevRoutes } from '@/routes/dev.js';
 import { registerDiffRoutes } from '@/routes/diff.js';
 import { registerReviewRoutes } from '@/routes/review.js';
+import { registerOperationRoutes } from '@/routes/operations.js';
+import { OperationQueue, type QueueOptions } from '@/operations/queue.js';
 import { registerAiRoutes } from '@/routes/ai.js';
 import { registerLinearRoutes } from '@/routes/linear.js';
 import { registerNotifyRoutes } from '@/routes/notify.js';
@@ -55,6 +57,7 @@ export interface AppOptions {
   /** Native notification sender used when no window is open (macOS by default). */
   nativeNotify?: (title: string, body: string) => Promise<void>;
   keepaliveMs?: number;
+  operationQueue?: QueueOptions;
 }
 
 export async function createApp(service: SyncService, options: AppOptions = {}) {
@@ -120,7 +123,11 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
         : downloadRepository),
   );
 
-  registerReviewRoutes(app, reviews);
+  const operations = new OperationQueue(service, options.operationQueue);
+
+  registerOperationRoutes(app, operations);
+  registerReviewRoutes(app, reviews, operations);
+  app.addHook('onClose', () => operations.close());
   registerAiRoutes(app, runner);
   app.addHook('onClose', () => runner.close());
   const linearSource = options.linear ?? new FixtureLinear(false);
@@ -142,6 +149,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   service.afterSync = async (login) => {
     await notifier.afterSync(login, service.list().items, service.mine().items);
     await runner.recover(login);
+    operations.wake();
 
     // History fills in the background; it never delays a sync.
     void backfill.start(login);
@@ -149,7 +157,8 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   registerNotifyRoutes(app, service, notifier);
   registerInsightsRoutes(app, service, backfill);
 
-  if (options.fixture) registerDevRoutes(app, service, options.fixture, runner, notifier, linear);
+  if (options.fixture)
+    registerDevRoutes(app, service, options.fixture, runner, notifier, linear, operations);
 
   if (webRoot && index) {
     const sendIndex = (reply: FastifyReply) =>

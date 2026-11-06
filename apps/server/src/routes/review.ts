@@ -2,12 +2,18 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { safeError } from '@/github/errors.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
+import type { OperationQueue } from '@/operations/queue.js';
 
 const account = z.string().min(1).max(100);
 const body = z.string().trim().min(1).max(65_536);
 const side = z.enum(['LEFT', 'RIGHT']);
 const event = z.enum(['COMMENT', 'APPROVE', 'REQUEST_CHANGES']);
 const line = z.number().int().positive().nullable();
+const operationId = z
+  .string()
+  .min(8)
+  .max(120)
+  .regex(/^[A-Za-z0-9-]+$/);
 
 const newComment = z
   .object({
@@ -29,6 +35,7 @@ const schemas = {
   comment: newComment,
   edit: z.object({ account, body }).strict(),
   accountOnly: z.object({ account }).strict(),
+  discard: z.object({ account, operationId }).strict(),
   submit: z
     .object({
       account,
@@ -36,15 +43,23 @@ const schemas = {
       body: z.string().max(65_536),
       expectedHeadOid: z.string().min(7).max(64),
       allowNewHead: z.boolean().optional(),
+      operationId,
     })
     .strict(),
-  now: newComment.extend({ path: z.string().max(1000) }).strict(),
-  reply: z.object({ account, prId: z.string().min(1), body }).strict(),
-  resolve: z.object({ account, prId: z.string().min(1), resolved: z.boolean() }).strict(),
-  viewed: z.object({ account, path: z.string().min(1).max(1000), viewed: z.boolean() }).strict(),
+  now: newComment
+    .extend({ path: z.string().max(1000), operationId, expectedHeadOid: z.string().min(7).max(64) })
+    .strict(),
+  reply: z.object({ account, prId: z.string().min(1), body, operationId }).strict(),
+  resolve: z
+    .object({ account, prId: z.string().min(1), resolved: z.boolean(), operationId })
+    .strict(),
+  viewed: z
+    .object({ account, path: z.string().min(1).max(1000), viewed: z.boolean(), operationId })
+    .strict(),
   reviewers: z
     .object({
       account,
+      operationId,
       logins: z
         .array(z.string().regex(/^[A-Za-z0-9-]{1,39}$/))
         .min(1)
@@ -87,7 +102,11 @@ function parse<T>(schema: z.ZodType<T>, value: unknown, reply: FastifyReply): T 
 
 type IdParams = { Params: { id: string } };
 
-export function registerReviewRoutes(app: FastifyInstance, reviews: ReviewService): void {
+export function registerReviewRoutes(
+  app: FastifyInstance,
+  reviews: ReviewService,
+  queue: OperationQueue,
+): void {
   app.get<IdParams & { Querystring: { account?: string } }>(
     '/api/pulls/:id/draft',
     async (request, reply) =>
@@ -103,9 +122,44 @@ export function registerReviewRoutes(app: FastifyInstance, reviews: ReviewServic
   });
 
   app.delete<IdParams>('/api/pulls/:id/draft', async (request, reply) => {
-    const input = parse(schemas.accountOnly, request.body, reply);
+    const input = parse(schemas.discard, request.body, reply);
 
-    return input && handle(reply, () => reviews.discard(input.account, request.params.id));
+    return (
+      input &&
+      handle(reply, async () => {
+        const replay = queue.find(input.account, input.operationId);
+        if (replay)
+          return reply
+            .code(202)
+            .send(
+              queue.enqueue(
+                input.account,
+                request.params.id,
+                input.operationId,
+                replay.action,
+                input,
+              ),
+            );
+
+        const draft = reviews.drafts.draft(input.account, request.params.id);
+        if (!draft?.githubReviewId) {
+          await reviews.discard(input.account, request.params.id);
+          return { ok: true };
+        }
+
+        return reply
+          .code(202)
+          .send(
+            queue.enqueue(
+              input.account,
+              request.params.id,
+              input.operationId,
+              { type: 'discard', reviewId: draft.githubReviewId },
+              input,
+            ),
+          );
+      })
+    );
   });
 
   app.post<IdParams>('/api/pulls/:id/draft/comments', async (request, reply) => {
@@ -145,13 +199,59 @@ export function registerReviewRoutes(app: FastifyInstance, reviews: ReviewServic
   app.post<IdParams>('/api/pulls/:id/review', async (request, reply) => {
     const input = parse(schemas.submit, request.body, reply);
 
-    return input && handle(reply, () => reviews.submit(request.params.id, input));
+    return (
+      input &&
+      handle(reply, async () => {
+        const draft = reviews.drafts.draft(input.account, request.params.id);
+        const pending = reviews.draft(input.account, request.params.id).githubPendingReview;
+        const frozen = {
+          body: input.body,
+          event: input.event,
+          comments: draft?.comments ?? [],
+          githubReviewId: draft?.githubReviewId ?? pending?.id ?? null,
+        };
+
+        return reply.code(202).send(
+          queue.enqueue(
+            input.account,
+            request.params.id,
+            input.operationId,
+            {
+              type: 'review',
+              review: {
+                account: input.account,
+                event: input.event,
+                body: input.body,
+                expectedHeadOid: input.expectedHeadOid,
+              },
+              draft: frozen,
+            },
+            input,
+          ),
+        );
+      })
+    );
   });
 
   app.post<IdParams>('/api/pulls/:id/comments', async (request, reply) => {
     const input = parse(schemas.now, request.body, reply);
 
-    return input && handle(reply, () => reviews.commentNow(request.params.id, input));
+    return (
+      input &&
+      handle(reply, async () =>
+        reply
+          .code(202)
+          .send(
+            queue.enqueue(
+              input.account,
+              request.params.id,
+              input.operationId,
+              { type: 'comment', comment: input, expectedHeadOid: input.expectedHeadOid },
+              input,
+            ),
+          ),
+      )
+    );
   });
 
   app.post<IdParams>('/api/pulls/:id/viewed', async (request, reply) => {
@@ -159,8 +259,18 @@ export function registerReviewRoutes(app: FastifyInstance, reviews: ReviewServic
 
     return (
       input &&
-      handle(reply, () =>
-        reviews.setViewed(input.account, request.params.id, input.path, input.viewed),
+      handle(reply, async () =>
+        reply
+          .code(202)
+          .send(
+            queue.enqueue(
+              input.account,
+              request.params.id,
+              input.operationId,
+              { type: 'viewed', path: input.path, viewed: input.viewed },
+              input,
+            ),
+          ),
       )
     );
   });
@@ -170,7 +280,19 @@ export function registerReviewRoutes(app: FastifyInstance, reviews: ReviewServic
 
     return (
       input &&
-      handle(reply, () => reviews.requestReviewers(input.account, request.params.id, input.logins))
+      handle(reply, async () =>
+        reply
+          .code(202)
+          .send(
+            queue.enqueue(
+              input.account,
+              request.params.id,
+              input.operationId,
+              { type: 'reviewers', logins: input.logins },
+              input,
+            ),
+          ),
+      )
     );
   });
 
@@ -181,8 +303,18 @@ export function registerReviewRoutes(app: FastifyInstance, reviews: ReviewServic
 
       return (
         input &&
-        handle(reply, () =>
-          reviews.reply(input.account, input.prId, request.params.threadId, input.body),
+        handle(reply, async () =>
+          reply
+            .code(202)
+            .send(
+              queue.enqueue(
+                input.account,
+                input.prId,
+                input.operationId,
+                { type: 'reply', threadId: request.params.threadId, body: input.body },
+                input,
+              ),
+            ),
         )
       );
     },
@@ -195,8 +327,18 @@ export function registerReviewRoutes(app: FastifyInstance, reviews: ReviewServic
 
       return (
         input &&
-        handle(reply, () =>
-          reviews.resolve(input.account, input.prId, request.params.threadId, input.resolved),
+        handle(reply, async () =>
+          reply
+            .code(202)
+            .send(
+              queue.enqueue(
+                input.account,
+                input.prId,
+                input.operationId,
+                { type: 'resolve', threadId: request.params.threadId, resolved: input.resolved },
+                input,
+              ),
+            ),
         )
       );
     },

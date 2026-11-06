@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
-import type { GitHubAction } from '@review-desk/shared/operations';
+import type { GitHubAction, OperationReceipt } from '@review-desk/shared/operations';
 import { Store } from '@/db/store.js';
 import { githubOperations } from '@/db/schema.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
@@ -15,6 +15,8 @@ import { GitHubError } from '@/github/errors.js';
 import { OperationQueue } from '@/operations/queue.js';
 import { ReviewService } from '@/review/service.js';
 import { SyncService } from '@/sync/service.js';
+import { createApp } from '@/app.js';
+import { startServer, stopServer, unusedPort } from '@test/fixtures/ai/restart-helper.js';
 
 const cleanups: (() => unknown | Promise<unknown>)[] = [];
 
@@ -574,4 +576,92 @@ describe('durable GitHub operations', () => {
     await completed(restarted, operation.id, 'needs_attention');
     expect(github.writes).toEqual([]);
   });
+
+  it('returns 202 operation receipts from GitHub command routes and preserves replay IDs', async () => {
+    const { queue, sync, pr } = await setup();
+    await queue.close();
+    const app = await createApp(sync, {
+      sessionToken: 'test-session',
+      ports: [4317],
+      operationQueue: { mutationIntervalMs: 0 },
+    });
+    cleanups.push(() => app.close());
+    const operationId = randomUUID();
+    const options = {
+      method: 'POST' as const,
+      url: `/api/pulls/${encodeURIComponent(pr().id)}/review`,
+      headers: {
+        host: '127.0.0.1:4317',
+        'content-type': 'application/json',
+        'x-review-desk': '1',
+        'x-review-desk-session': 'test-session',
+      },
+      payload: {
+        account: 'you',
+        operationId,
+        event: 'APPROVE',
+        body: 'Queued via HTTP',
+        expectedHeadOid: pr().headOid,
+      },
+    };
+
+    const first = await app.inject(options);
+    const replay = await app.inject(options);
+    expect(first.statusCode).toBe(202);
+    expect(replay.statusCode).toBe(202);
+    expect(first.json().operation.id).toBe(operationId);
+    expect(replay.json().operation.id).toBe(operationId);
+  });
+
+  it('recovers queued work and checks interrupted writes after an actual server process is killed', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'review-desk-outbox-restart-'));
+    cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+    const { queue, store, pr } = await setup(join(directory, 'state.sqlite'));
+    const pull = pr(2041);
+    const interrupted = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'reply',
+      threadId: pull.threads[0].id,
+      body: 'Interrupted request',
+    });
+    const unsent = queue.enqueue('you', pr().id, randomUUID(), {
+      type: 'viewed',
+      path: pr().files[0].path,
+      viewed: true,
+    });
+    await queue.close();
+    const port = await unusedPort();
+    let child = await startServer(directory, port, 1, undefined, 2000);
+    cleanups.push(() => stopServer(child));
+
+    await expect
+      .poll(
+        () =>
+          store.db
+            .select()
+            .from(githubOperations)
+            .where(eq(githubOperations.id, interrupted.operation.id))
+            .get()
+            ?.data.steps.some((step) => step.uncertain),
+        { timeout: 3000, interval: 20 },
+      )
+      .toBe(true);
+    await stopServer(child, 'SIGKILL');
+    child = await startServer(directory, port, 1);
+    const base = `http://127.0.0.1:${port}`;
+    const result = async (id: string) =>
+      ((await (await fetch(`${base}/api/operations/${id}?account=you`)).json()) as OperationReceipt)
+        .operation;
+
+    await expect
+      .poll(async () => (await result(interrupted.operation.id)).status, { timeout: 3000 })
+      .toBe('needs_attention');
+    await expect
+      .poll(async () => (await result(unsent.operation.id)).status, { timeout: 3000 })
+      .toBe('succeeded');
+    expect((await result(interrupted.operation.id)).error?.code).toBe('UNCONFIRMED');
+    const writes = (await (await fetch(`${base}/api/dev/writes`)).json()) as {
+      writes: { op: string }[];
+    };
+    expect(writes.writes.map((write) => write.op)).toEqual(['MarkFileViewed']);
+  }, 15_000);
 });
