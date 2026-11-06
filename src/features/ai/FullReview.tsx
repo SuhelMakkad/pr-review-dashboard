@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { LoaderCircle, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
-import type { FullReviewResult } from '../../../shared/ai';
+import { codexBlocked, type FullReviewResult } from '../../../shared/ai';
 import type { CiState } from '../../../shared/types';
 import { Button } from '../../ui/Button';
 import { MarkdownView } from '../../ui/Markdown';
@@ -35,6 +35,8 @@ export function FullReview({
   const [finishOpen, setFinishOpen] = useState(false);
   const result = run?.status === 'done' ? (run.result as FullReviewResult | null) : null;
   const codex = overview.data?.providers.find((provider) => provider.id === 'codex');
+  const plan = overview.data?.codex ?? null;
+  const blocked = codexBlocked(plan);
   const selected =
     result?.comments.flatMap((_, index) => (excluded.has(`${run!.id}:${index}`) ? [] : [index])) ??
     [];
@@ -78,11 +80,16 @@ export function FullReview({
                 <Sparkles size={13} />
               )
             }
-            disabled={ai.start.isPending || codex?.available === false}
+            disabled={ai.start.isPending || codex?.available === false || blocked}
             onClick={launch}
           >
             {ai.start.isPending ? 'Preparing review…' : 'Run review'}
           </Button>
+          {codex?.available !== false && blocked && (
+            <p className="text-xs text-fail" role="alert">
+              {plan?.problem}
+            </p>
+          )}
           {codex?.available === false && (
             <p className="text-xs text-fail">
               Review agent unavailable. Check installed agents in{' '}

@@ -1,5 +1,13 @@
+import { useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { AiProvider, AiProviderStatus, AiRun, AiSettings, AiTask } from '../../../shared/ai';
+import type {
+  AiProvider,
+  AiProviderStatus,
+  AiRun,
+  AiSettings,
+  AiTask,
+  CodexAccountStatus,
+} from '../../../shared/ai';
 import type { DraftComment, ReviewDraft } from '../../../shared/review';
 import { api } from '../../lib/api';
 
@@ -8,7 +16,12 @@ export const aiKey = (prId: string) => ['ai', prId] as const;
 export function useAiOverview() {
   return useQuery({
     queryKey: ['ai-overview'],
-    queryFn: () => api<{ settings: AiSettings; providers: AiProviderStatus[] }>('/api/ai'),
+    queryFn: () =>
+      api<{
+        settings: AiSettings;
+        providers: AiProviderStatus[];
+        codex: CodexAccountStatus | null;
+      }>('/api/ai'),
     staleTime: 60_000,
   });
 }
@@ -39,6 +52,16 @@ export function useAi(prId: string | null, account: string) {
         ? 2000
         : false,
   });
+
+  const busy = runs.data?.runs.some((run) => run.status === 'queued' || run.status === 'running');
+  const wasBusy = useRef(false);
+
+  // A finished run changes the plan's usage, so the Codex status is read again.
+  useEffect(() => {
+    if (wasBusy.current && !busy) void client.invalidateQueries({ queryKey: ['ai-overview'] });
+
+    wasBusy.current = Boolean(busy);
+  }, [busy, client]);
 
   const start = useMutation({
     mutationFn: ({

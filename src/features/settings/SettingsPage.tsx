@@ -3,9 +3,15 @@ import { ToggleGroup } from 'radix-ui';
 import { appearance, useAppearance, type Density, type ThemePreference } from '../../lib/theme';
 import { useLive } from '../../lib/live';
 import { useStatus } from '../../lib/queries';
-import { dateTime } from '../../lib/time';
+import { dateTime, shortDateTime } from '../../lib/time';
 import { cn } from '../../ui/cn';
-import { aiTaskLabels, type AiEffort, type AiProvider, type AiTask } from '../../../shared/ai';
+import {
+  aiTaskLabels,
+  type AiEffort,
+  type AiProvider,
+  type AiTask,
+  type CodexAccountStatus,
+} from '../../../shared/ai';
 import { useAiOverview, useAiSettings } from '../ai/useAi';
 import { useLinearStatus } from '../linear/useLinear';
 import type { LinearStatus } from '../../../shared/tickets';
@@ -146,11 +152,72 @@ export function SettingsPage() {
 
 const efforts: AiEffort[] = ['low', 'medium', 'high', 'xhigh'];
 
+/** Which ChatGPT plan Codex bills, how much of it is used, and why runs may be paused. */
+function CodexPlan({ status }: { status: CodexAccountStatus }) {
+  return (
+    <div className="max-w-xs text-right text-xs">
+      {status.plan && <div className="text-fg">{status.plan}</div>}
+      {status.windows.map((window) => (
+        <div
+          key={window.label}
+          className={window.usedPercent >= 100 ? 'text-fail' : 'text-fg-muted'}
+        >
+          {window.label}: {window.usedPercent}% used
+          {window.resetsAt && ` · resets ${shortDateTime(window.resetsAt)}`}
+        </div>
+      ))}
+      {status.problem && (
+        <div className="text-fail" role="alert">
+          {status.problem}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Codex models this ChatGPT account offers; shown only for tasks Codex runs. */
+function CodexModelSelect({
+  task,
+  status,
+  agent,
+  value,
+  onChange,
+}: {
+  task: AiTask;
+  status: CodexAccountStatus | null;
+  agent: AiProvider;
+  value: string | null;
+  onChange: (model: string | null) => void;
+}) {
+  if (agent !== 'codex' || !status || status.models.length === 0) return null;
+
+  const fallback = status.models.find((model) => model.isDefault);
+  const known = value === null || status.models.some((model) => model.id === value);
+
+  return (
+    <select
+      aria-label={`${aiTaskLabels[task]} model`}
+      value={value ?? ''}
+      onChange={(event) => onChange(event.target.value || null)}
+      className="h-7 max-w-44 rounded-sm border border-line bg-sunken px-2 text-xs"
+    >
+      <option value="">{fallback ? `${fallback.displayName} (default)` : 'Default model'}</option>
+      {status.models.map((model) => (
+        <option key={model.id} value={model.id}>
+          {model.displayName}
+        </option>
+      ))}
+      {!known && <option value={value!}>{value} (not offered)</option>}
+    </select>
+  );
+}
+
 function AiSection({ account }: { account: string }) {
   const overview = useAiOverview();
   const save = useAiSettings(account);
   const settings = overview.data?.settings;
   const providers = overview.data?.providers ?? [];
+  const codex = overview.data?.codex ?? null;
 
   if (!settings) return null;
 
@@ -187,11 +254,19 @@ function AiSection({ account }: { account: string }) {
           ))}
         </ul>
       </Row>
+      {codex && (
+        <Row
+          label="Codex plan"
+          hint="Codex uses your ChatGPT plan. Runs pause when the plan's limit is reached, so they never fall back to credits."
+        >
+          <CodexPlan status={codex} />
+        </Row>
+      )}
       {(Object.keys(settings.tasks) as AiTask[]).map((task) => (
         <Row
           key={task}
           label={aiTaskLabels[task]}
-          hint="Higher effort is slower and uses more of your plan."
+          hint="Higher effort and larger models use more of your plan."
         >
           <span className="flex items-center gap-2">
             <select
@@ -206,6 +281,8 @@ function AiSection({ account }: { account: string }) {
                     [task]: {
                       ...settings.tasks[task],
                       provider: (event.target.value || null) as AiProvider | null,
+                      // Model ids belong to one agent.
+                      model: null,
                     },
                   },
                 })
@@ -216,6 +293,22 @@ function AiSection({ account }: { account: string }) {
               <option value="codex">Codex</option>
               <option value="claude">Claude Code</option>
             </select>
+            <CodexModelSelect
+              task={task}
+              status={codex}
+              agent={
+                task === 'full_review'
+                  ? 'codex'
+                  : (settings.tasks[task].provider ?? settings.defaultProvider)
+              }
+              value={settings.tasks[task].model}
+              onChange={(model) =>
+                update({
+                  ...settings,
+                  tasks: { ...settings.tasks, [task]: { ...settings.tasks[task], model } },
+                })
+              }
+            />
             <select
               aria-label={`${aiTaskLabels[task]} effort`}
               value={settings.tasks[task].effort}

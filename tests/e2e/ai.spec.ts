@@ -157,3 +157,24 @@ test('shows agent failures and drafts a review summary', async ({ page }) => {
   await sheet.getByRole('button', { name: 'Draft summary' }).click();
   await expect(sheet.getByRole('textbox')).toHaveValue(/The direction looks right/);
 });
+
+test('settings show the Codex plan and let a task pick one of its models', async ({ page }) => {
+  await openFresh(page, '/settings');
+
+  await expect(page.getByText('ChatGPT Plus')).toBeVisible();
+  await expect(page.getByText(/5-hour: 35% used/)).toBeVisible();
+
+  const model = () => page.getByRole('combobox', { name: 'Brief model' });
+  const agent = page.getByRole('combobox', { name: 'Brief agent' });
+
+  await expect(model()).toHaveValue('');
+  await model().selectOption('gpt-demo-mini');
+  await page.reload();
+  await expect(model()).toHaveValue('gpt-demo-mini');
+
+  // Model ids belong to Codex: another agent drops the choice.
+  await agent.selectOption('claude');
+  await expect(model()).toHaveCount(0);
+  await agent.selectOption('');
+  await expect(model()).toHaveValue('');
+});

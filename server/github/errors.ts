@@ -21,6 +21,7 @@ const secretPatterns: RegExp[] = [
   /gh[opusr]_[A-Za-z0-9_]+/g,
   /github_pat_[A-Za-z0-9_]+/g,
   /lin_(?:api|oauth)_[A-Za-z0-9]+/g,
+  /\bsk-[A-Za-z0-9_-]{20,}/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
 ];
 

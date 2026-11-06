@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import {
   aiTaskLabels,
+  codexBlocked,
   type AiProvider,
   type AiRun,
   type AiTask,
@@ -53,6 +54,7 @@ export function RunButton({
   const overview = useAiOverview();
   const providers = overview.data?.providers ?? [];
   const fallback = overview.data?.settings.defaultProvider ?? 'codex';
+  const codexPaused = codexBlocked(overview.data?.codex);
 
   return (
     <span className="inline-flex">
@@ -88,7 +90,12 @@ export function RunButton({
             {providers.map((provider) => (
               <DropdownMenu.Item
                 key={provider.id}
-                disabled={!provider.available}
+                disabled={!provider.available || (provider.id === 'codex' && codexPaused)}
+                title={
+                  provider.id === 'codex' && codexPaused
+                    ? (overview.data?.codex?.problem ?? undefined)
+                    : undefined
+                }
                 onSelect={() => onRun(provider.id)}
                 className="flex h-8 cursor-default items-center gap-2 rounded-sm px-2 outline-none data-[disabled]:opacity-50 data-[highlighted]:bg-selected"
               >
@@ -97,7 +104,11 @@ export function RunButton({
                   {provider.id === fallback && <span className="text-fg-subtle"> · default</span>}
                 </span>
                 <span className="text-2xs text-fg-subtle">
-                  {provider.available ? (provider.version ?? '') : 'not installed'}
+                  {!provider.available
+                    ? 'not installed'
+                    : provider.id === 'codex' && codexPaused
+                      ? 'paused'
+                      : (provider.version ?? '')}
                 </span>
               </DropdownMenu.Item>
             ))}
@@ -178,6 +189,11 @@ export function AiCard({
         </p>
       ) : (
         children
+      )}
+      {run.creditsUsed !== null && (
+        <p className="mt-2 text-2xs text-pending">
+          Your Codex credit balance fell by {run.creditsUsed} during this run.
+        </p>
       )}
       <p className="mt-2 text-2xs text-fg-subtle">
         AI-generated; check it against the code before relying on it.

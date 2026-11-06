@@ -1,4 +1,4 @@
-import type { AiProvider } from '../../shared/ai.js';
+import type { AiProvider, CodexAccountStatus } from '../../shared/ai.js';
 import type { AgentProvider, AgentRequest } from './provider.js';
 import { AgentError } from './provider.js';
 import { readFile } from 'node:fs/promises';
@@ -33,6 +33,35 @@ export class FixtureProvider implements AgentProvider {
 
   async probe() {
     return { available: true, version: 'demo', reason: null };
+  }
+
+  /** A ChatGPT Plus sign-in with usage to spare; `limitReached` exercises the plan guard. */
+  account: CodexAccountStatus = {
+    type: 'chatgpt',
+    plan: 'ChatGPT Plus',
+    windows: [
+      {
+        label: '5-hour',
+        usedPercent: 35,
+        resetsAt: new Date(Date.now() + 2 * 3_600_000).toISOString(),
+      },
+      {
+        label: 'Weekly',
+        usedPercent: 12,
+        resetsAt: new Date(Date.now() + 4 * 86_400_000).toISOString(),
+      },
+    ],
+    limitReached: false,
+    resetsAt: null,
+    models: [
+      { id: 'gpt-demo', displayName: 'GPT-Demo', isDefault: true },
+      { id: 'gpt-demo-mini', displayName: 'GPT-Demo Mini', isDefault: false },
+    ],
+    problem: null,
+  };
+
+  async status(): Promise<CodexAccountStatus> {
+    return structuredClone(this.account);
   }
 
   async run(request: AgentRequest, signal: AbortSignal, onProgress: (progress: string) => void) {

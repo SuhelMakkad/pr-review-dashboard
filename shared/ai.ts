@@ -76,6 +76,8 @@ export interface AiRun {
   finishedAt: string | null;
   /** True when the PR head has moved since this run. */
   stale: boolean;
+  /** How far the Codex credit balance fell during the run; null when it did not or is unknown. */
+  creditsUsed: number | null;
 }
 
 export interface AiTaskSettings {
@@ -98,6 +100,34 @@ export interface AiProviderStatus {
   demo: boolean;
 }
 
+export interface CodexUsageWindow {
+  /** "5-hour", "Weekly" and so on, from the window's length. */
+  label: string;
+  usedPercent: number;
+  resetsAt: string | null;
+}
+
+export interface CodexModel {
+  id: string;
+  displayName: string;
+  isDefault: boolean;
+}
+
+/** The Codex sign-in the dashboard runs under, and how much of the ChatGPT plan is left. */
+export interface CodexAccountStatus {
+  /** Only a ChatGPT sign-in bills the plan; Codex runs are refused for anything else. */
+  type: 'chatgpt' | 'apiKey' | 'other' | null;
+  plan: string | null;
+  windows: CodexUsageWindow[];
+  /** The plan's included usage is used up: Codex runs are paused so no credits are spent. */
+  limitReached: boolean;
+  /** When the exhausted window resets. */
+  resetsAt: string | null;
+  models: CodexModel[];
+  /** Why Codex cannot run on the plan right now, in words the user can act on. */
+  problem: string | null;
+}
+
 export const aiTaskLabels: Record<AiTask, string> = {
   full_review: 'Full review',
   brief: 'Brief',
@@ -118,3 +148,7 @@ export const defaultAiSettings = (): AiSettings => ({
     draft_summary: { provider: null, effort: 'low', model: null },
   },
 });
+
+/** Codex runs are refused: the plan's limit is used up, or the sign-in would not bill the plan. */
+export const codexBlocked = (status: CodexAccountStatus | null | undefined): boolean =>
+  Boolean(status && (status.limitReached || status.type === 'apiKey' || status.type === 'other'));

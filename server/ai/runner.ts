@@ -3,6 +3,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import {
+  codexBlocked,
   defaultAiSettings,
   type AiProvider,
   type AiProviderStatus,
@@ -10,6 +11,7 @@ import {
   type AiRun,
   type AiSettings,
   type AiTask,
+  type CodexAccountStatus,
   type DraftCommentsResult,
   type FullReviewResult,
 } from '../../shared/ai.js';
@@ -40,7 +42,21 @@ import {
 
 const MAX_CONCURRENT = 2;
 const PROBE_TTL_MS = 5 * 60_000;
+const ACCOUNT_TTL_MS = 60_000;
 const SETTINGS_KEY = 'ai-settings';
+
+/** The credits a Codex run measured itself spending, from its recorded usage. */
+function creditsUsed(usage: string | null): number | null {
+  if (!usage) return null;
+
+  try {
+    const value = (JSON.parse(usage) as { credits_used?: unknown }).credits_used;
+
+    return typeof value === 'number' && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Runs AI tasks through local agent CLIs: one queue, at most two runs at once and one per
@@ -57,6 +73,7 @@ export class AiRunner {
     { controller: AbortController; provider: AiProvider }
   >();
   private probes: { at: number; statuses: AiProviderStatus[] } | null = null;
+  private codexAccount: { at: number; status: Promise<CodexAccountStatus | null> } | null = null;
 
   constructor(
     private readonly sync: SyncService,
@@ -123,6 +140,29 @@ export class AiRunner {
     return statuses;
   }
 
+  /** The Codex sign-in and plan usage, read through app-server at most once a minute. */
+  codexStatus(): Promise<CodexAccountStatus | null> {
+    const provider = this.providers.codex;
+
+    if (!provider.status) return Promise.resolve(null);
+    if (this.codexAccount && Date.now() - this.codexAccount.at < ACCOUNT_TTL_MS)
+      return this.codexAccount.status;
+
+    const status = provider.status().catch((error: unknown): CodexAccountStatus => ({
+      type: null,
+      plan: null,
+      windows: [],
+      limitReached: false,
+      resetsAt: null,
+      models: [],
+      problem: `Could not read the Codex sign-in: ${safeError(error)}`,
+    }));
+
+    this.codexAccount = { at: Date.now(), status };
+
+    return status;
+  }
+
   private detail(account: string, prId: string): PullRequestDetail {
     if (account !== this.sync.status.account?.login) {
       throw new ReviewError('ACCOUNT_CHANGED', 409, 'GitHub account changed. Refresh first.');
@@ -178,6 +218,7 @@ export class AiRunner {
       createdAt: row.createdAt,
       finishedAt: row.finishedAt,
       stale: Boolean(currentHead && currentHead !== row.headOid),
+      creditsUsed: creditsUsed(row.usage),
     };
   }
 
@@ -217,6 +258,9 @@ export class AiRunner {
       task === 'full_review'
         ? 'codex'
         : (options.provider ?? taskSettings.provider ?? settings.defaultProvider);
+    // Model ids are Codex's; another agent gets its own default.
+    const model = provider === 'codex' ? taskSettings.model : null;
+
     const input = await this.buildInput(task, detail, account);
     const head = detail.snapshot.headOid;
 
@@ -235,15 +279,9 @@ export class AiRunner {
     }
     const key = createHash('sha256')
       .update(
-        [
-          task,
-          provider,
-          taskSettings.model ?? '',
-          taskSettings.effort,
-          promptVersions[task],
-          head,
-          input,
-        ].join('\u0000'),
+        [task, provider, model ?? '', taskSettings.effort, promptVersions[task], head, input].join(
+          '\u0000',
+        ),
       )
       .digest('hex');
     const existing = this.db
@@ -263,6 +301,19 @@ export class AiRunner {
     if (existing && (existing.status !== 'done' || !options.force))
       return this.toRun(existing, head);
 
+    // A cached answer costs nothing; a new Codex run must fit in the plan.
+    if (provider === 'codex') {
+      const status = await this.codexStatus();
+
+      if (codexBlocked(status)) {
+        throw new ReviewError(
+          'PLAN_LIMIT',
+          409,
+          status?.problem ?? 'Codex cannot run on your ChatGPT plan right now.',
+        );
+      }
+    }
+
     const id = randomUUID();
 
     this.db
@@ -273,7 +324,7 @@ export class AiRunner {
         prId,
         task,
         provider,
-        model: taskSettings.model,
+        model,
         effort: taskSettings.effort,
         headOid: head,
         promptVersion: promptVersions[task],
@@ -399,6 +450,9 @@ export class AiRunner {
         finishedAt: new Date().toISOString(),
       });
     } finally {
+      // A Codex run changes the plan's usage; read it afresh next time.
+      if (row.provider === 'codex') this.codexAccount = null;
+
       this.active.delete(id);
       this.inputs.delete(id);
       this.snapshots.delete(id);

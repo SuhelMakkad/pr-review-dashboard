@@ -75,10 +75,11 @@ function parse<T>(schema: z.ZodType<T>, value: unknown, reply: FastifyReply): T 
 }
 
 export function registerAiRoutes(app: FastifyInstance, runner: AiRunner): void {
-  app.get('/api/ai', async () => ({
-    settings: runner.settings(),
-    providers: await runner.providerStatuses(),
-  }));
+  app.get('/api/ai', async () => {
+    const [providers, codex] = await Promise.all([runner.providerStatuses(), runner.codexStatus()]);
+
+    return { settings: runner.settings(), providers, codex };
+  });
 
   app.put('/api/ai/settings', async (request, reply) => {
     const input = parse(schemas.settings, request.body, reply);

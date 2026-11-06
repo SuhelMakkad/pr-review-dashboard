@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
   mkdirSync,
@@ -13,8 +13,10 @@ import { dirname, join } from 'node:path';
 import { c } from 'tar';
 import { ClaudeProvider, claudeProgress } from '../server/ai/claude';
 import { CodexProvider, codexProgress } from '../server/ai/codex';
+import { mergeSnapshot, summariseUsage, type RateLimitSnapshot } from '../server/ai/codexUsage';
 import { annotatePatch } from '../server/ai/context';
 import { FixtureProvider } from '../server/ai/fixture';
+import { spawnAgentProcess } from '../server/ai/provider';
 import { AiRunner } from '../server/ai/runner';
 import { jsonSchemaFor } from '../server/ai/tasks';
 import {
@@ -42,7 +44,13 @@ const cleanups: (() => void)[] = [];
 
 afterEach(() => {
   for (const cleanup of cleanups.splice(0).reverse()) cleanup();
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith('FAKE_CODEX_')) delete process.env[key];
+  }
+
   delete process.env.GH_TOKEN;
+  delete process.env.CODEX_API_KEY;
+  delete process.env.OPENAI_API_KEY;
 });
 
 const fixturesDir = new URL('./fixtures/ai/', import.meta.url).pathname;
@@ -65,9 +73,13 @@ const request = (directory: string) => ({
   timeoutMs: 20_000,
 });
 
+const fakeCodex = () => new CodexProvider(join(fixturesDir, 'fake-codex.mjs'));
+const run = (provider: CodexProvider, directory = workDir(), model: string | null = null) =>
+  provider.run({ ...request(directory), model }, new AbortController().signal, () => {});
+
 describe('agent CLIs', () => {
   it('maps captured Codex and Claude events to progress labels', () => {
-    const codex = readFileSync(join(fixturesDir, 'codex-exec.jsonl'), 'utf8')
+    const codex = readFileSync(join(fixturesDir, 'codex-app-server.jsonl'), 'utf8')
       .split('\n')
       .filter(Boolean)
       .map((line) => codexProgress(JSON.parse(line)));
@@ -76,33 +88,173 @@ describe('agent CLIs', () => {
       .filter(Boolean)
       .map((line) => claudeProgress(JSON.parse(line)));
 
-    expect(codex.filter(Boolean)).toEqual(['Thinking…', 'Writing the answer…']);
+    expect(codex.filter(Boolean)).toEqual([
+      'Thinking…',
+      'Reading code…',
+      'Thinking…',
+      'Writing the answer…',
+    ]);
     expect(claude.filter(Boolean)).toContain('Writing the answer…');
     expect(claude.some((label) => label?.startsWith('Thinking (~'))).toBe(true);
   });
 
-  it('runs Codex headless, read-only, without connectors or GitHub credentials', async () => {
+  it('runs Codex through app-server on the ChatGPT plan, read-only, with no connectors or credentials', async () => {
     process.env.GH_TOKEN = 'ghp_should_not_leak';
+    process.env.CODEX_API_KEY = 'sk-should-not-leak-000000000000000000';
+    process.env.OPENAI_API_KEY = 'sk-should-not-leak-111111111111111111';
 
     const progress: string[] = [];
-    const result = await new CodexProvider(join(fixturesDir, 'fake-codex.mjs')).run(
+    const result = await fakeCodex().run(
       request(workDir()),
       new AbortController().signal,
       (label) => progress.push(label),
     );
     const answer = result.output as BriefResult;
-    const args = answer.questions[1];
+    const [ghToken, codexKey, openaiKey, args, client, thread, turn, declined] = answer.questions;
 
     expect(answer.summary).toBe('Fake codex answer');
-    expect(answer.questions[0]).toBe('GH_TOKEN=unset');
-    expect(args).toContain('--ignore-user-config');
-    expect(args).toContain('-s read-only');
+    expect([ghToken, codexKey, openaiKey]).toEqual([
+      'GH_TOKEN=unset',
+      'CODEX_API_KEY=unset',
+      'OPENAI_API_KEY=unset',
+    ]);
+    expect(args).toMatch(/^args=app-server /);
     expect(args).toContain('--disable apps');
     expect(args).toContain('--disable plugins');
-    expect(args).toContain('mcp_servers={}');
-    expect(args).toContain('model_reasoning_effort="low"');
-    expect(args).not.toContain(' -m ');
-    expect(progress).toContain('Writing the answer…');
+    expect(args).toContain('web_search="disabled"');
+    expect(args).toContain('notify=[]');
+    expect(client).toBe('client=review_desk');
+    // The account's default model, not the one pinned in the user's Codex config; standard speed;
+    // the user's MCP servers off.
+    expect(JSON.parse(thread.slice('thread='.length))).toMatchObject({
+      model: 'gpt-fake',
+      ephemeral: true,
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+      serviceTier: null,
+      config: { 'mcp_servers.linear.enabled': false },
+    });
+    expect(JSON.parse(turn.slice('turn='.length))).toMatchObject({
+      effort: 'low',
+      serviceTierForTurn: 'default',
+      outputSchema: jsonSchemaFor('brief'),
+    });
+    expect(declined).toBe('declined=true');
+    expect(result.model).toBe('gpt-fake');
+    expect(result.usage).toMatchObject({ input_tokens: 10819, output_tokens: 21, credits_used: 0 });
+    expect(progress).toEqual(['Thinking…', 'Reading code…', 'Thinking…', 'Writing the answer…']);
+  });
+
+  it("uses the task's Codex model and measures credits the run spent", async () => {
+    process.env.FAKE_CODEX_CREDITS = '97.5';
+
+    const result = await run(fakeCodex(), workDir(), 'gpt-fake-mini');
+
+    expect(result.model).toBe('gpt-fake-mini');
+    expect(result.usage).toMatchObject({ credits_used: 2.5 });
+  });
+
+  it('refuses a Codex sign-in that would not bill the ChatGPT plan', async () => {
+    process.env.FAKE_CODEX_ACCOUNT = 'apiKey';
+    await expect(run(fakeCodex())).rejects.toThrow('signed in with an API key');
+
+    process.env.FAKE_CODEX_ACCOUNT = 'none';
+    await expect(run(fakeCodex())).rejects.toThrow('Codex is not signed in');
+  });
+
+  it('does not start a run once the plan limit is used up', async () => {
+    process.env.FAKE_CODEX_LIMIT = 'reached';
+
+    await expect(run(fakeCodex())).rejects.toThrow(/limit is used up.*no credits are spent/);
+  });
+
+  it('interrupts a run when the plan limit runs out midway', async () => {
+    process.env.FAKE_CODEX_LIMIT = 'midrun';
+
+    const directory = workDir();
+
+    await expect(run(fakeCodex(), directory)).rejects.toThrow('ran out during this run');
+    expect(existsSync(join(directory, 'interrupted'))).toBe(true);
+  });
+
+  it('keeps a finished answer when the run uses the last of the plan', async () => {
+    process.env.FAKE_CODEX_LIMIT = 'afteranswer';
+
+    const result = await run(fakeCodex());
+
+    expect((result.output as BriefResult).summary).toBe('Fake codex answer');
+  });
+
+  it('stops a turn that goes silent instead of waiting out the whole timeout', async () => {
+    process.env.FAKE_CODEX_STALL = '1';
+
+    const directory = workDir();
+    const started = Date.now();
+
+    await expect(
+      run(new CodexProvider(join(fixturesDir, 'fake-codex.mjs'), 300), directory),
+    ).rejects.toThrow('Codex stopped responding');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(existsSync(join(directory, 'interrupted'))).toBe(true);
+  });
+
+  it('settles soon after an agent exits even if a detached helper keeps its output open', async () => {
+    // The helper inherits stdout in its own process group, as Codex's code-mode host does.
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const helper = spawn('sleep', ['30'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });",
+      'console.log(helper.pid);',
+      'helper.unref();',
+    ].join('\n');
+    const lines: string[] = [];
+    const started = Date.now();
+    const agent = spawnAgentProcess(process.execPath, ['-e', script], {
+      cwd: workDir(),
+      env: process.env,
+      signal: new AbortController().signal,
+      timeoutMs: 20_000,
+      onLine: (line) => lines.push(line),
+    });
+
+    agent.stdin.end();
+    await agent.done;
+
+    expect(Date.now() - started).toBeLessThan(6_000);
+    process.kill(Number(lines[0]), 'SIGKILL');
+  });
+
+  it('stops before the turn when one of the user’s MCP servers starts anyway', async () => {
+    process.env.FAKE_CODEX_MCP = 'stuck';
+
+    await expect(run(fakeCodex())).rejects.toThrow('MCP server "linear"');
+  });
+
+  it('reports the plan, its usage and the models the account offers', async () => {
+    const status = await fakeCodex().status();
+
+    expect(status).toMatchObject({
+      type: 'chatgpt',
+      plan: 'ChatGPT Plus',
+      limitReached: false,
+      problem: null,
+    });
+    expect(status.windows.map((window) => [window.label, window.usedPercent])).toEqual([
+      ['5-hour', 40],
+      ['Weekly', 20],
+    ]);
+    expect(status.models.map((model) => model.id)).toEqual(['gpt-fake', 'gpt-fake-mini']);
+
+    process.env.FAKE_CODEX_LIMIT = 'reached';
+    expect(await fakeCodex().status()).toMatchObject({
+      limitReached: true,
+      problem: expect.stringContaining('used up'),
+    });
+
+    process.env.FAKE_CODEX_ACCOUNT = 'apiKey';
+    expect(await fakeCodex().status()).toMatchObject({
+      type: 'apiKey',
+      problem: expect.stringContaining('API key'),
+    });
   });
 
   it('runs Claude headless with no tools and returns the structured output', async () => {
@@ -207,6 +359,66 @@ async function setup() {
     root,
   };
 }
+
+describe('Codex plan usage', () => {
+  const snapshot = (overrides: Partial<RateLimitSnapshot> = {}): RateLimitSnapshot => ({
+    limitId: 'codex',
+    primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: 1_900_000_000 },
+    secondary: { usedPercent: 20, windowDurationMins: 10_080, resetsAt: 1_900_500_000 },
+    credits: { hasCredits: true, unlimited: false, balance: '12.5' },
+    spendControlReached: false,
+    planType: 'pro',
+    rateLimitReachedType: null,
+    ...overrides,
+  });
+
+  it('labels windows by length and keeps the credit balance', () => {
+    expect(summariseUsage(snapshot())).toEqual({
+      plan: 'ChatGPT Pro',
+      windows: [
+        { label: '5-hour', usedPercent: 40, resetsAt: new Date(1_900_000_000_000).toISOString() },
+        { label: 'Weekly', usedPercent: 20, resetsAt: new Date(1_900_500_000_000).toISOString() },
+      ],
+      limitReached: false,
+      resetsAt: null,
+      credits: 12.5,
+    });
+    expect(
+      summariseUsage(snapshot({ credits: { hasCredits: true, unlimited: true, balance: null } }))
+        .credits,
+    ).toBeNull();
+  });
+
+  it('treats any exhausted window, reached limit or spend control as the limit', () => {
+    const full = { usedPercent: 100, windowDurationMins: 300, resetsAt: 1_900_000_000 };
+    const fullWeek = { usedPercent: 100, windowDurationMins: 10_080, resetsAt: 1_900_500_000 };
+
+    expect(summariseUsage(snapshot({ primary: full }))).toMatchObject({
+      limitReached: true,
+      resetsAt: new Date(1_900_000_000_000).toISOString(),
+    });
+    // Usage resumes only when the last exhausted window resets.
+    expect(summariseUsage(snapshot({ primary: full, secondary: fullWeek })).resetsAt).toBe(
+      new Date(1_900_500_000_000).toISOString(),
+    );
+    expect(
+      summariseUsage(snapshot({ rateLimitReachedType: 'rate_limit_reached' })).limitReached,
+    ).toBe(true);
+    expect(summariseUsage(snapshot({ spendControlReached: true })).limitReached).toBe(true);
+    expect(summariseUsage(snapshot(), false).limitReached).toBe(true);
+  });
+
+  it('applies sparse updates for the Codex bucket only', () => {
+    const last = snapshot();
+    const full = { usedPercent: 100, windowDurationMins: 300, resetsAt: 1_900_000_000 };
+
+    expect(mergeSnapshot(last, { primary: full, secondary: null })).toMatchObject({
+      primary: full,
+      secondary: last.secondary,
+    });
+    expect(mergeSnapshot(last, { limitId: 'other', primary: full })).toBe(last);
+  });
+});
 
 describe('AI runner', () => {
   it('runs a full Codex review against both repository snapshots and keeps the report off GitHub', async () => {
@@ -431,6 +643,45 @@ describe('AI runner', () => {
     await sync.sync();
 
     expect(runner.runs('you', done.prId).find((run) => run.task === 'brief')?.stale).toBe(true);
+  });
+
+  it('refuses new Codex runs once the plan limit is used up, but still serves cached answers', async () => {
+    const { runner, providers, pr, finished } = await setup();
+    const first = await finished(await runner.start('you', pr(2041).id, 'brief'));
+
+    providers.codex.account = {
+      ...providers.codex.account,
+      limitReached: true,
+      problem: "Your ChatGPT plan's Codex limit is used up. Not run, so no credits are spent.",
+    };
+
+    expect((await runner.start('you', pr(2041).id, 'brief')).id).toBe(first.id);
+    await expect(runner.start('you', pr(2041).id, 'brief', { force: true })).rejects.toMatchObject({
+      code: 'PLAN_LIMIT',
+      status: 409,
+    });
+
+    const claude = await finished(
+      await runner.start('you', pr(2041).id, 'brief', { provider: 'claude' }),
+    );
+
+    expect(claude.status).toBe('done');
+  });
+
+  it("passes a task's model to Codex only", async () => {
+    const { runner, providers, pr, finished } = await setup();
+    const settings = defaultAiSettings();
+    const codexRun = vi.spyOn(providers.codex, 'run');
+    const claudeRun = vi.spyOn(providers.claude, 'run');
+
+    settings.tasks.brief.model = 'gpt-demo-mini';
+    runner.saveSettings(settings);
+
+    await finished(await runner.start('you', pr(2041).id, 'brief'));
+    await finished(await runner.start('you', pr(2041).id, 'brief', { provider: 'claude' }));
+
+    expect(codexRun.mock.calls[0][0].model).toBe('gpt-demo-mini');
+    expect(claudeRun.mock.calls[0][0].model).toBeNull();
   });
 
   it('marks runs interrupted by a restart', async () => {
