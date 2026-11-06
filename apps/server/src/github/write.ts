@@ -84,6 +84,9 @@ export function createWriter(transport: GitHubTransport): GitHubWrites {
       if (!data.addPullRequestReviewThread.thread) {
         throw new GitHubError(
           `GitHub did not accept the comment on ${thread.path}; the line may no longer be in the diff.`,
+          null,
+          422,
+          'rejected',
         );
       }
 

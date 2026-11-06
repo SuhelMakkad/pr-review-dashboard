@@ -5,6 +5,7 @@ export class GitHubError extends Error {
     message: string,
     readonly retryAt: string | null = null,
     readonly status: number | null = null,
+    readonly outcome: 'unknown' | 'rejected' | 'unavailable' | 'rate_limit' | 'auth' = 'unknown',
   ) {
     super(message);
   }

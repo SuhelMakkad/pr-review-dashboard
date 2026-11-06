@@ -36,9 +36,19 @@ export class FixtureGitHub implements GitHubApi {
   readonly writes: FixtureWrite[] = [];
   /** The next write with this op name fails once (failure injection for tests). */
   failNext: string | null = null;
+  loseResponseNext: string | null = null;
+  writeDelayMs = 0;
   private readonly pending = new Map<
     string,
-    { prId: string; commitOid: string; threads: ThreadInput[] }
+    {
+      prId: string;
+      commitOid: string;
+      threads: ThreadInput[];
+      replies: {
+        threadId: string;
+        comment: PullRequestSnapshot['threads'][number]['comments'][number];
+      }[];
+    }
   >();
   scenario: Scenario;
   private history_: PullRequestSnapshot[] = [];
@@ -57,6 +67,8 @@ export class FixtureGitHub implements GitHubApi {
     this.writes.length = 0;
     this.pending.clear();
     this.failNext = null;
+    this.loseResponseNext = null;
+    this.writeDelayMs = 0;
   }
 
   async identity(): Promise<Actor> {
@@ -185,10 +197,23 @@ export class FixtureGitHub implements GitHubApi {
   private record(op: string, details: Record<string, unknown>) {
     if (this.failNext === op) {
       this.failNext = null;
-      throw new GitHubError(`Injected failure for ${op}.`);
+      throw new GitHubError(`Injected failure for ${op}.`, null, 422, 'rejected');
     }
 
     this.writes.push({ op, at: this.now(), details });
+  }
+
+  private async beforeWrite() {
+    if (this.writeDelayMs) await new Promise((resolve) => setTimeout(resolve, this.writeDelayMs));
+  }
+
+  private receipt<T>(op: string, result: T): T {
+    if (this.loseResponseNext === op) {
+      this.loseResponseNext = null;
+      throw new GitHubError(`Response lost after ${op} was accepted.`);
+    }
+
+    return result;
   }
 
   private pullById(prId: string) {
@@ -213,28 +238,34 @@ export class FixtureGitHub implements GitHubApi {
   }
 
   async addPendingReview(prId: string, commitOid: string): Promise<string> {
+    await this.beforeWrite();
     this.pullById(prId);
     this.record('AddPendingReview', { prId, commitOid });
 
     const id = this.nextId('pending-review');
 
-    this.pending.set(id, { prId, commitOid, threads: [] });
+    this.pending.set(id, { prId, commitOid, threads: [], replies: [] });
+    this.pullById(prId).snapshot.pendingReview = { id, createdAt: this.now(), commentCount: 0 };
 
-    return id;
+    return this.receipt('AddPendingReview', id);
   }
 
   async addReviewThread(reviewId: string, thread: ThreadInput): Promise<string> {
+    await this.beforeWrite();
     const review = this.pending.get(reviewId);
 
     if (!review) throw new GitHubError('Pending review not found.');
 
     this.record('AddReviewThread', { reviewId, ...thread });
     review.threads.push(thread);
+    const pending = this.pullById(review.prId).snapshot.pendingReview;
+    if (pending) pending.commentCount++;
 
-    return this.nextId('draft-thread');
+    return this.receipt('AddReviewThread', this.nextId('draft-thread'));
   }
 
   async submitReview(reviewId: string, event: ReviewEvent, body: string) {
+    await this.beforeWrite();
     const review = this.pending.get(reviewId);
 
     if (!review) throw new GitHubError('Pending review not found.');
@@ -243,7 +274,7 @@ export class FixtureGitHub implements GitHubApi {
 
     const pull = this.pullById(review.prId);
     const now = this.now();
-    const id = this.nextId('review');
+    const id = reviewId;
     const login = this.scenario.world.viewer.login;
 
     pull.snapshot.reviews.push({
@@ -288,14 +319,66 @@ export class FixtureGitHub implements GitHubApi {
       (reviewer) => reviewer.login !== login,
     );
     pull.snapshot.updatedAt = now;
+    pull.snapshot.pendingReview = null;
+    for (const reply of review.replies)
+      this.threadById(reply.threadId).thread.comments.push(reply.comment);
     this.pending.delete(reviewId);
 
-    return { id, url: `${pull.snapshot.url}#pullrequestreview-${id}` };
+    return this.receipt('SubmitReview', {
+      id,
+      url: `${pull.snapshot.url}#pullrequestreview-${id}`,
+    });
   }
 
   async deleteReview(reviewId: string): Promise<void> {
+    await this.beforeWrite();
     this.record('DeleteReview', { reviewId });
+    const review = this.pending.get(reviewId);
+    if (review) this.pullById(review.prId).snapshot.pendingReview = null;
     this.pending.delete(reviewId);
+    this.receipt('DeleteReview', undefined);
+  }
+
+  async reviewReceipt(id: string) {
+    const pending = this.pending.get(id);
+
+    if (pending) {
+      const pull = this.pullById(pending.prId);
+
+      return {
+        id,
+        state: 'PENDING',
+        url: pull.snapshot.url,
+        body: '',
+        commitOid: pending.commitOid,
+        comments: [
+          ...pending.threads.map((thread, index) => ({
+            id: `${id}-${index}`,
+            body: thread.body,
+            path: thread.path,
+            line: thread.line ?? null,
+            url: pull.snapshot.url,
+          })),
+          ...pending.replies.map(({ threadId, comment }) => {
+            const thread = this.threadById(threadId).thread;
+            return {
+              id: comment.id,
+              body: comment.body,
+              path: thread.path,
+              line: thread.line,
+              url: comment.url,
+            };
+          }),
+        ],
+      };
+    }
+
+    for (const pull of this.scenario.world.pulls) {
+      const review = pull.snapshot.reviews.find((candidate) => candidate.id === id);
+      if (review) return { ...review, commitOid: review.commitOid ?? null, comments: [] };
+    }
+
+    return null;
   }
 
   async commentNow(prId: string, commitOid: string, thread: ThreadInput) {
@@ -307,6 +390,7 @@ export class FixtureGitHub implements GitHubApi {
   }
 
   async replyToThread(threadId: string, body: string) {
+    await this.beforeWrite();
     const { pull, thread } = this.threadById(threadId);
 
     this.record('ReplyToThread', { threadId, body });
@@ -314,7 +398,7 @@ export class FixtureGitHub implements GitHubApi {
     const id = this.nextId('comment');
     const now = this.now();
 
-    thread.comments.push({
+    const comment = {
       id,
       author: { login: this.scenario.world.viewer.login },
       body,
@@ -322,21 +406,34 @@ export class FixtureGitHub implements GitHubApi {
       updatedAt: now,
       url: `${pull.snapshot.url}#discussion_${id}`,
       replyToId: thread.comments[0]?.id ?? null,
-    });
+    };
+    const pending = [...this.pending.values()].find((review) => review.prId === pull.snapshot.id);
+
+    if (pending) {
+      pending.replies.push({ threadId, comment });
+      if (pull.snapshot.pendingReview) pull.snapshot.pendingReview.commentCount++;
+    } else thread.comments.push(comment);
     pull.snapshot.updatedAt = now;
 
-    return { id, url: `${pull.snapshot.url}#discussion_${id}`, pending: false };
+    return this.receipt('ReplyToThread', {
+      id,
+      url: `${pull.snapshot.url}#discussion_${id}`,
+      pending: Boolean(pending),
+    });
   }
 
   async setThreadResolved(threadId: string, resolved: boolean): Promise<void> {
+    await this.beforeWrite();
     const { pull, thread } = this.threadById(threadId);
 
     this.record(resolved ? 'ResolveThread' : 'UnresolveThread', { threadId });
     thread.isResolved = resolved;
     pull.snapshot.updatedAt = this.now();
+    this.receipt(resolved ? 'ResolveThread' : 'UnresolveThread', undefined);
   }
 
   async setFileViewed(prId: string, path: string, viewed: boolean): Promise<void> {
+    await this.beforeWrite();
     this.pullById(prId);
     this.record(viewed ? 'MarkFileViewed' : 'UnmarkFileViewed', { prId, path });
 
@@ -344,9 +441,11 @@ export class FixtureGitHub implements GitHubApi {
 
     files.set(path, viewed ? 'VIEWED' : 'UNVIEWED');
     this.scenario.world.viewed.set(prId, files);
+    this.receipt(viewed ? 'MarkFileViewed' : 'UnmarkFileViewed', undefined);
   }
 
   async requestReviews(prId: string, logins: string[]): Promise<void> {
+    await this.beforeWrite();
     const pull = this.pullById(prId);
 
     this.record('RequestReviews', { prId, logins });
@@ -369,9 +468,11 @@ export class FixtureGitHub implements GitHubApi {
     }
 
     pull.snapshot.updatedAt = now;
+    this.receipt('RequestReviews', undefined);
   }
 
   async addConversationComment(prId: string, body: string) {
+    await this.beforeWrite();
     const pull = this.pullById(prId);
 
     this.record('AddComment', { prId, body });
@@ -389,7 +490,7 @@ export class FixtureGitHub implements GitHubApi {
     });
     pull.snapshot.updatedAt = now;
 
-    return { id, url: `${pull.snapshot.url}#issuecomment-${id}` };
+    return this.receipt('AddComment', { id, url: `${pull.snapshot.url}#issuecomment-${id}` });
   }
 
   /** Answers the backfill's searches from the scenario plus fictional history. */

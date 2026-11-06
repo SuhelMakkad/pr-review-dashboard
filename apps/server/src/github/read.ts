@@ -20,6 +20,7 @@ import type {
   GitHubApi,
   RateBudget,
   RemoteFile,
+  ReviewReceipt,
 } from '@/github/api.js';
 import { GitHubError } from '@/github/errors.js';
 import {
@@ -31,6 +32,7 @@ import {
   historyQuery,
   searchQuery,
   identityQuery,
+  reviewReceiptQuery,
   snapshotQuery,
   threadCommentsQuery,
   type ConnectionKey,
@@ -340,6 +342,40 @@ export function fingerprintOf(node: RawDetect): string {
 
 export class GitHub implements GitHubApi {
   private readonly writes: GitHubWrites;
+
+  async reviewReceipt(id: string): Promise<ReviewReceipt | null> {
+    let cursor: string | null = null;
+    let receipt: ReviewReceipt | null = null;
+
+    do {
+      const data: {
+        node: {
+          id: string;
+          state: string;
+          url: string;
+          body: string;
+          commit: { oid: string } | null;
+          comments: Connection<ReviewReceipt['comments'][number]>;
+        } | null;
+      } = await this.transport.graphql(reviewReceiptQuery, { id, cursor });
+      if (!data.node?.id) return null;
+
+      receipt ??= {
+        id: data.node.id,
+        state: data.node.state,
+        url: data.node.url,
+        body: data.node.body,
+        commitOid: data.node.commit?.oid ?? null,
+        comments: [],
+      };
+      receipt.comments.push(...data.node.comments.nodes);
+      cursor = data.node.comments.pageInfo.hasNextPage
+        ? data.node.comments.pageInfo.endCursor
+        : null;
+    } while (cursor);
+
+    return receipt;
+  }
 
   constructor(readonly transport: GitHubTransport = new GhCli()) {
     this.writes = createWriter(transport);

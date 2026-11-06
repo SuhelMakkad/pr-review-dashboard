@@ -30,6 +30,13 @@ export type ConnectionKey = keyof typeof connections;
 
 export const identityQuery = 'query Identity { viewer { login avatarUrl } }';
 
+export const reviewReceiptQuery = `query ReviewReceipt($id: ID!, $cursor: String) {
+  node(id: $id) { ... on PullRequestReview {
+    id state url body commit { oid }
+    comments(first: 100, after: $cursor) { nodes { id body path line url } ${pageInfo} }
+  } }
+}`;
+
 export const discoverQuery = `query Discover($query: String!, $cursor: String) {
   search(query: $query, type: ISSUE, first: 100, after: $cursor) { issueCount nodes { ... on PullRequest { id } } ${pageInfo} }
 }`;
@@ -164,6 +171,7 @@ export function allDocuments(): Record<string, string> {
 
   return {
     Identity: identityQuery,
+    ReviewReceipt: reviewReceiptQuery,
     Discover: discoverQuery,
     Snapshot: snapshotQuery,
     Detect: detectQuery,

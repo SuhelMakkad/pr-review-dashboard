@@ -101,6 +101,9 @@ export class GhCli implements GitHubTransport {
         reject(
           new GitHubError(
             `GitHub CLI unavailable: ${safeError(error)}. Install gh and run gh auth login.`,
+            null,
+            null,
+            'unavailable',
           ),
         );
       });
@@ -125,15 +128,44 @@ export class GhCli implements GitHubTransport {
     throw new GitHubError(
       message,
       rateLimited(message) ? new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS).toISOString() : null,
+      null,
+      result.timedOut
+        ? 'unknown'
+        : rateLimited(message)
+          ? 'rate_limit'
+          : /HTTP 401|authentication|not logged/i.test(message)
+            ? 'auth'
+            : /HTTP 4\d\d/.test(message)
+              ? 'rejected'
+              : 'unknown',
     );
   }
 
   async graphql<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-    const raw = await this.run(
-      ['api', '--hostname', 'github.com', 'graphql', '--input', '-'],
-      JSON.stringify({ query, variables }),
+    const response = await this.request<{ data: T; errors?: { message: string; type?: string }[] }>(
+      {
+        method: 'POST',
+        path: 'graphql',
+        body: { query, variables },
+      },
     );
-    const result = JSON.parse(raw) as { data: T; errors?: { message: string; type?: string }[] };
+
+    if (response.status >= 400) {
+      const message = safeError(JSON.stringify(response.data));
+
+      throw new GitHubError(
+        message,
+        null,
+        response.status,
+        response.status === 401 || response.status === 403
+          ? 'auth'
+          : response.status < 500
+            ? 'rejected'
+            : 'unknown',
+      );
+    }
+
+    const result = response.data;
 
     if (result.errors?.length) {
       const message = result.errors.map((error) => error.message).join('; ');
@@ -141,8 +173,17 @@ export class GhCli implements GitHubTransport {
       throw new GitHubError(
         safeError(message),
         /rate.limit/i.test(message)
-          ? new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS).toISOString()
+          ? (retryAtFromHeaders(response.headers) ??
+              new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS).toISOString())
           : null,
+        response.status,
+        /rate.limit/i.test(message)
+          ? 'rate_limit'
+          : /FORBIDDEN|UNAUTHORIZED/i.test(JSON.stringify(result.errors))
+            ? 'auth'
+            : result.data && Object.values(result.data).some(Boolean)
+              ? 'unknown'
+              : 'rejected',
       );
     }
 
@@ -197,6 +238,7 @@ export class GhCli implements GitHubTransport {
           'GitHub rate limit reached.',
           retryAt ?? new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS).toISOString(),
           parsed.status,
+          'rate_limit',
         );
       }
     }
