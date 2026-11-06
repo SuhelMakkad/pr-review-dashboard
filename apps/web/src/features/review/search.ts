@@ -6,6 +6,10 @@ export const filesSearchSchema = z.object({
   file: z.string().max(1000).optional().catch(undefined),
   view: z.enum(['unified', 'split']).optional().catch(undefined),
   thread: z.string().max(200).optional().catch(undefined),
+  inbox: z
+    .enum(['attention', 'waiting', 'caught-up', 'snoozed', 'all'])
+    .optional()
+    .catch(undefined),
 });
 
 export type FilesSearch = z.infer<typeof filesSearchSchema>;

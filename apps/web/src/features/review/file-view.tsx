@@ -3,6 +3,9 @@ import { FileWarning, Info, MessageSquarePlus } from 'lucide-react';
 import type { DiffFile } from '@review-desk/shared/diff';
 import type { DraftComment } from '@review-desk/shared/review';
 import type { ReviewThread } from '@review-desk/shared/types';
+import type { GitHubOperation } from '@review-desk/shared/operations';
+import { openActivity } from '@/features/activity/use-operations';
+import { MarkdownView } from '@/ui/markdown';
 import { Button } from '@/ui/button';
 import { EmptyState } from '@/ui/empty-state';
 import { anchoredThreads, DiffPane, type Anchor, type LineTarget } from '@/features/diff/diff-pane';
@@ -26,6 +29,7 @@ export function FileView({
   onCommentLine,
   onCommentFile,
   onSelectLines,
+  queuedComments = [],
 }: {
   file: DiffFile;
   expanded: boolean;
@@ -44,6 +48,7 @@ export function FileView({
   onCommentLine: (target: LineTarget) => void;
   onCommentFile: () => void;
   onSelectLines: (target: LineTarget | null) => void;
+  queuedComments?: GitHubOperation[];
 }) {
   const floating = threads.filter(
     (thread) => !anchoredThreads([thread], { leftSide: leftSideComments }).length,
@@ -51,7 +56,10 @@ export function FileView({
   const fileDrafts = drafts.filter((draft) => draft.line === null);
   const header = (
     <>
-      {(floating.length > 0 || fileDrafts.length > 0 || fileComposer) && (
+      {(floating.length > 0 ||
+        fileDrafts.length > 0 ||
+        fileComposer ||
+        queuedComments.length > 0) && (
         <div className="max-h-[40%] shrink-0 overflow-y-auto border-b border-line bg-sunken px-2 py-1">
           {floating.length > 0 && (
             <p className="flex items-center gap-1.5 px-2 pt-1 text-2xs text-fg-subtle">
@@ -61,6 +69,37 @@ export function FileView({
           )}
           {floating.map(renderThread)}
           {fileDrafts.map(renderDraft)}
+          {queuedComments.map((operation) => (
+            <div
+              key={operation.id}
+              className="my-2 space-y-1 rounded-md border border-dashed border-accent/50 p-3 text-xs"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-fg-muted">
+                  {operation.status === 'needs_attention'
+                    ? 'Comment needs attention'
+                    : 'Comment queued · not confirmed yet'}
+                </span>
+                <button
+                  type="button"
+                  onClick={openActivity}
+                  className="text-accent hover:underline"
+                >
+                  View activity
+                </button>
+              </div>
+              {operation.action.type === 'comment' && (
+                <>
+                  <p className="text-fg-subtle">
+                    {operation.action.comment.line
+                      ? `Line ${operation.action.comment.line}`
+                      : 'Whole file'}
+                  </p>
+                  <MarkdownView>{operation.action.comment.body}</MarkdownView>
+                </>
+              )}
+            </div>
+          ))}
           {fileComposer && <div className="p-2">{fileComposer}</div>}
         </div>
       )}

@@ -353,7 +353,7 @@ function PullDetailView({
               repo: pr.repository.split('/')[1],
               number: String(pr.number),
             }}
-            search={{}}
+            search={inbox?.queue ? { inbox: inbox.queue } : {}}
             className="inline-flex h-7 items-center gap-1.5 rounded-sm bg-accent px-2.5 text-xs font-medium text-accent-fg hover:bg-accent-hover"
           >
             <FileDiff size={13} aria-hidden="true" />

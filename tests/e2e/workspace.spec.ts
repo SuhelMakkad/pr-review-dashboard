@@ -10,7 +10,7 @@ test('re-reviews a force-pushed PR from the inbox, since your last review', asyn
   );
 
   await page.keyboard.press('Enter');
-  await expect(page).toHaveURL(/\/pr\/acme\/api\/2041\/files$/);
+  await expect(page).toHaveURL(/\/pr\/acme\/api\/2041\/files\?inbox=attention$/);
   await expect(
     page.getByRole('status').filter({ hasText: 'rebased or force-pushed' }),
   ).toBeVisible();

@@ -73,14 +73,14 @@ export function DraftCommentCard({
             label="Edit comment"
             icon={<Pencil size={12} />}
             onClick={() => setEditing(true)}
-            disabled={comment.status === 'pushed'}
+            disabled={busy || comment.status === 'pushed'}
           />
           <IconButton
             size="sm"
             label="Delete comment"
             icon={<Trash2 size={12} />}
             onClick={onDelete}
-            disabled={comment.status === 'pushed'}
+            disabled={busy || comment.status === 'pushed'}
           />
         </span>
       </div>

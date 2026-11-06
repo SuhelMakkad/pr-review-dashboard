@@ -3,7 +3,10 @@ import { Link } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { ArrowUpRight, CircleCheck, CircleDot, RotateCcw } from 'lucide-react';
 import type { AuthorItem, Blocker } from '@review-desk/shared/author';
-import { api } from '@/lib/api';
+import { githubCommand } from '@/lib/operation-command';
+import { openActivity } from '@/features/activity/use-operations';
+import { useOperations } from '@/features/activity/use-operations';
+import { operationUnsettled } from '@review-desk/shared/operations';
 import { refOf } from '@/lib/pr-ref';
 import { queryKeys } from '@/lib/query-keys';
 import { relativePhrase } from '@/lib/time';
@@ -16,14 +19,23 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
   const ref = refOf(item);
   const params = { owner: ref.owner, repo: ref.repo, number: String(ref.number) };
   const wait = waitState(item);
+  const operations = useOperations(account);
+  const queuedRequest = operations.data?.pages
+    .flatMap((page) => page.items)
+    .some(
+      (operation) =>
+        operation.prId === item.id &&
+        operation.action.type === 'reviewers' &&
+        operationUnsettled(operation.status),
+    );
   const rerequest = useMutation({
     mutationFn: (logins: string[]) =>
-      api(`/api/pulls/${encodeURIComponent(item.id)}/reviewers`, {
-        method: 'POST',
-        body: { account, logins },
-      }),
+      githubCommand(`/api/pulls/${encodeURIComponent(item.id)}/reviewers`, { account, logins }),
     onSuccess: (_result, logins) => {
-      toast(`Review requested from ${logins.join(', ')}`);
+      toast(`Review request queued for ${logins.join(', ')}`, {
+        action: { label: 'View activity', onClick: openActivity },
+      });
+      void client.invalidateQueries({ queryKey: ['operations', account] });
       void client.invalidateQueries({ queryKey: queryKeys.mine });
     },
     onError: (error) => toast.error(error.message),
@@ -74,14 +86,16 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
             size="sm"
             variant="ghost"
             icon={<RotateCcw size={12} />}
-            disabled={rerequest.isPending}
+            disabled={rerequest.isPending || queuedRequest}
             onClick={() =>
               rerequest.mutate(blocker.people!.filter((login) => !login.includes('/')))
             }
           >
-            {blocker.kind === 'awaiting_review'
-              ? 'Nudge with a re-request'
-              : `Ask ${blocker.people.slice(0, 2).join(', ')} to review`}
+            {queuedRequest
+              ? 'Review request queued'
+              : blocker.kind === 'awaiting_review'
+                ? 'Nudge with a re-request'
+                : `Ask ${blocker.people.slice(0, 2).join(', ')} to review`}
           </Button>
         ) : (
           <a

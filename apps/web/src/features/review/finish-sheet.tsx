@@ -9,12 +9,9 @@ import {
   X,
 } from 'lucide-react';
 import type { CiState } from '@review-desk/shared/types';
-import {
-  reviewEventLabels,
-  type ReviewDraft,
-  type ReviewEvent,
-  type SubmitReviewResult,
-} from '@review-desk/shared/review';
+import { reviewEventLabels, type ReviewDraft, type ReviewEvent } from '@review-desk/shared/review';
+import type { OperationReceipt } from '@review-desk/shared/operations';
+import { openActivity } from '@/features/activity/use-operations';
 import { ApiError } from '@/lib/api';
 import { dateTime } from '@/lib/time';
 import { Button, IconButton } from '@/ui/button';
@@ -67,9 +64,9 @@ export interface FinishSheetProps {
     body: string;
     expectedHeadOid: string;
     allowNewHead?: boolean;
-  }) => Promise<SubmitReviewResult>;
+  }) => Promise<OperationReceipt>;
   busy: boolean;
-  onSubmitted: (result: SubmitReviewResult) => void;
+  onSubmitted: (result: OperationReceipt) => void;
   onReviewNewCommits: () => void;
 }
 
@@ -98,15 +95,18 @@ export function FinishSheet({
   const applying = ai.application?.status === 'pending';
   const generationError = ai.startError('draft_summary');
   const applicationError = ai.application?.status === 'error' ? ai.application.error : null;
+  const locked = Boolean(draft.activeOperationId);
   const submitted = useRef(false);
-  const current = useRef({ body, saveMeta, applying });
+  const current = useRef({ body, saveMeta, applying, locked });
 
-  current.current = { body, saveMeta, applying };
+  current.current = { body, saveMeta, applying, locked };
   const pending = draft.comments.filter((comment) => comment.status !== 'stale');
   const stale = draft.comments.filter((comment) => comment.status === 'stale');
 
   useEffect(() => {
     if (open) {
+      submitted.current = false;
+      lastSaved.current = draft.body;
       setEvent(draft.event);
       setBody(draft.body);
       setProblem(null);
@@ -115,7 +115,7 @@ export function FinishSheet({
 
   // Autosave the summary so closing the sheet never loses it.
   useEffect(() => {
-    if (!open || applying || body === lastSaved.current) return;
+    if (!open || applying || locked || body === lastSaved.current) return;
 
     const timer = setTimeout(() => {
       lastSaved.current = body;
@@ -123,7 +123,7 @@ export function FinishSheet({
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [body, open, applying]);
+  }, [body, open, applying, locked]);
 
   // Flush pending edits when navigation unmounts the sheet before its debounce finishes.
   useEffect(() => {
@@ -131,6 +131,7 @@ export function FinishSheet({
       if (
         !submitted.current &&
         !current.current.applying &&
+        !current.current.locked &&
         current.current.body !== lastSaved.current
       )
         current.current.saveMeta({ body: current.current.body });
@@ -138,12 +139,13 @@ export function FinishSheet({
   }, []);
 
   const choose = (next: ReviewEvent) => {
+    if (locked) return;
     setEvent(next);
     saveMeta({ event: next });
   };
 
   const send = async (allowNewHead = false) => {
-    if (busy || applying || stale.length > 0) return;
+    if (busy || applying || locked || stale.length > 0) return;
 
     setProblem(null);
 
@@ -176,7 +178,7 @@ export function FinishSheet({
     <Dialog.Root
       open={open}
       onOpenChange={(next) => {
-        if (!next && !applying && body !== lastSaved.current) {
+        if (!next && !applying && !locked && !submitted.current && body !== lastSaved.current) {
           lastSaved.current = body;
           saveMeta({ body });
         }
@@ -212,6 +214,25 @@ export function FinishSheet({
           </div>
 
           <div className="scroll-thin min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+            {locked && (
+              <div
+                role="status"
+                className="flex items-center justify-between gap-3 rounded-md border border-line bg-sunken p-3 text-xs"
+              >
+                <p>
+                  This review is saved in Activity and is read-only until its action is resolved.
+                </p>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    onOpenChange(false);
+                    openActivity();
+                  }}
+                >
+                  View activity
+                </Button>
+              </div>
+            )}
             <div role="radiogroup" aria-label="Review verdict" className="grid grid-cols-3 gap-2">
               {verdicts.map((option) => (
                 <button
@@ -220,6 +241,7 @@ export function FinishSheet({
                   role="radio"
                   aria-checked={event === option.event}
                   onClick={() => choose(option.event)}
+                  disabled={locked}
                   className={cn(
                     'flex flex-col items-start gap-1 rounded-md border px-3 py-2 text-left',
                     event === option.event
@@ -247,7 +269,7 @@ export function FinishSheet({
               </span>
               <RunButton
                 label={summaryRun ? 'Generate new summary' : 'Draft summary'}
-                running={generating || applying || ai.runs.isPending}
+                running={generating || applying || locked || ai.runs.isPending}
                 onRun={(provider) => {
                   ai.start.mutate({
                     task: 'draft_summary',
@@ -375,6 +397,7 @@ export function FinishSheet({
                       savedSummary.stale ||
                       generating ||
                       applying ||
+                      locked ||
                       savedSummary.headOid !== viewedHeadOid
                     }
                     aria-busy={applying}
@@ -405,7 +428,7 @@ export function FinishSheet({
               <span className="sr-only">Summary (optional, Markdown)</span>
               <textarea
                 value={body}
-                disabled={applying}
+                disabled={applying || locked}
                 onChange={(change) => setBody(change.target.value)}
                 rows={5}
                 placeholder="The overall picture: what is good, what must change, what you did not look at."
@@ -485,11 +508,15 @@ export function FinishSheet({
             <Button
               className="ml-auto"
               variant={event === 'REQUEST_CHANGES' ? 'danger' : 'primary'}
-              disabled={busy || applying || stale.length > 0}
+              disabled={busy || applying || locked || stale.length > 0}
               onClick={() => void send()}
               shortcut="$mod+Enter"
             >
-              {busy ? 'Submitting…' : `Submit ${reviewEventLabels[event]} to GitHub`}
+              {busy
+                ? 'Queueing…'
+                : locked
+                  ? 'Review queued'
+                  : `Submit ${reviewEventLabels[event]} to GitHub`}
             </Button>
           </div>
         </Dialog.Content>

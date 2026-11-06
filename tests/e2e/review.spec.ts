@@ -36,7 +36,11 @@ test('drafts comments locally, then submits one review only after confirmation',
   expect(await demoWrites(page)).toEqual([]);
 
   await sheet.getByRole('button', { name: 'Submit Approve to GitHub' }).click();
-  await expect(page).toHaveURL(/\/inbox\/attention\/acme\//);
+  await expect(page).toHaveURL(/\/pr\/acme\/web\/1839\/files/);
+  await expect(page.getByText('Review queued', { exact: true })).toBeVisible();
+  await expect
+    .poll(async () => (await demoWrites(page)).map((write) => write.op))
+    .toEqual(['AddPendingReview', 'AddReviewThread', 'SubmitReview']);
 
   const writes = await demoWrites(page);
 
@@ -55,6 +59,18 @@ test('drafts comments locally, then submits one review only after confirmation',
     body: 'Nice cleanup overall.',
     comments: 1,
   });
+
+  // A standalone workspace stays mounted after submission; the next review must still flush edits.
+  await expect(page.getByRole('button', { name: 'Finish review', exact: true })).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+Shift+Enter');
+  await sheet.getByRole('textbox').fill('A second draft must save when immediately closed.');
+  await sheet.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Finish review', exact: true })).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+Shift+Enter');
+  await expect(sheet.getByRole('textbox')).toHaveValue(
+    'A second draft must save when immediately closed.',
+  );
 });
 
 test('replies to and resolves a thread from the keyboard', async ({ page }) => {
@@ -67,7 +83,7 @@ test('replies to and resolves a thread from the keyboard', async ({ page }) => {
     .getByRole('textbox', { name: 'Reply to thread' })
     .fill('Thanks, the batching looks right.');
   await page.keyboard.press('ControlOrMeta+Enter');
-  await expect(page.getByText('Reply posted')).toBeVisible();
+  await expect(page.getByText('Reply queued', { exact: true })).toBeVisible();
   await expect(page.getByText('Thanks, the batching looks right.')).toBeVisible();
 
   await page.keyboard.press('Shift+r');
@@ -76,7 +92,7 @@ test('replies to and resolves a thread from the keyboard', async ({ page }) => {
     .toEqual(['ReplyToThread', 'ResolveThread']);
 });
 
-test('keeps your text when GitHub rejects a reply', async ({ page }) => {
+test('keeps your text in Activity when GitHub rejects a queued reply', async ({ page }) => {
   await openFresh(page, '/pr/acme/api/2041/files?mode=all');
   await expect(page.getByText('Good catch, batched in chunks of 5k now.')).toBeVisible();
   await failNext(page, 'ReplyToThread');
@@ -89,8 +105,13 @@ test('keeps your text when GitHub rejects a reply', async ({ page }) => {
   await box.fill('This should survive a failure.');
   await page.keyboard.press('ControlOrMeta+Enter');
 
-  await expect(page.getByRole('alert').filter({ hasText: 'Injected failure' })).toBeVisible();
-  await expect(box).toHaveValue('This should survive a failure.');
+  await expect(box).not.toBeVisible();
+  await page.getByRole('button', { name: /^Activity/ }).click();
+
+  const activity = page.getByRole('dialog', { name: 'Activity', exact: true });
+  await expect(activity.getByText('Injected failure', { exact: false })).toBeVisible();
+  await activity.getByText('Saved content and details').click();
+  await expect(activity.getByText('This should survive a failure.', { exact: true })).toBeVisible();
   expect(await demoWrites(page)).toEqual([]);
 });
 
@@ -112,7 +133,10 @@ test('marks files viewed and moves on, and posts a file comment immediately', as
     .getByRole('textbox', { name: /^Comment on src\// })
     .fill('Overall this file reads well.');
   await page.keyboard.press('ControlOrMeta+Alt+Enter');
-  await expect(page.getByText('Comment posted to GitHub')).toBeVisible();
+  await expect(page.getByText('Comment queued', { exact: true })).toBeVisible();
+  await expect
+    .poll(async () => (await demoWrites(page)).map((write) => write.op))
+    .toEqual(['MarkFileViewed', 'AddPendingReview', 'AddReviewThread', 'SubmitReview']);
 
   expect((await demoWrites(page)).map((write) => write.op)).toEqual([
     'MarkFileViewed',

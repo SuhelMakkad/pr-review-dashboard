@@ -13,7 +13,11 @@ import {
 } from 'lucide-react';
 import type { DraftComment } from '@review-desk/shared/review';
 import type { ReviewThread } from '@review-desk/shared/types';
+import type { GitHubAction } from '@review-desk/shared/operations';
+import { operationInProgress, operationUnsettled } from '@review-desk/shared/operations';
 import { refOf } from '@/lib/pr-ref';
+import { inQueue } from '@/features/pulls/meta';
+import { openActivity } from '@/features/activity/use-operations';
 import { useDiff, usePullDetail, usePulls } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { storage } from '@/lib/storage';
@@ -86,6 +90,7 @@ function Workspace() {
   const [selection, setSelection] = useState<LineTarget | null>(null);
   const [replying, setReplying] = useState<string | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
+  const [recoveredBody, setRecoveredBody] = useState('');
   const [railTab, setRailTab] = useState<'threads' | 'assist'>('threads');
   const layout = useDefaultLayout({ id: 'files-workspace', storage: layoutStorage() });
 
@@ -99,14 +104,71 @@ function Workspace() {
   const review = useReview(item?.id ?? null, account);
   const ai = useAi(item?.id ?? null, account);
   const draft = review.draft.data;
+  const locked = Boolean(draft?.activeOperationId);
+
+  useEffect(() => {
+    const recover = () => {
+      if (!account || !item?.id) return;
+      const key = `review-desk-recovered:${account}:${item.id}`;
+      const raw = storage.get(key);
+      if (!raw) return;
+
+      try {
+        const action = JSON.parse(raw) as GitHubAction;
+        if (action.type === 'reply') {
+          setReplying(action.threadId);
+          setRecoveredBody(action.body);
+        }
+        if (action.type === 'comment') {
+          const comment = action.comment;
+          setComposer(
+            comment.line === null
+              ? { path: comment.path, line: null }
+              : {
+                  path: comment.path,
+                  line: comment.line,
+                  side: comment.side ?? 'RIGHT',
+                  startLine: comment.startLine ?? null,
+                },
+          );
+          setRecoveredBody(comment.body);
+        }
+
+        storage.set(key, '');
+      } catch {
+        storage.set(key, '');
+      }
+    };
+
+    recover();
+    window.addEventListener('review-desk-recovered', recover);
+
+    return () => window.removeEventListener('review-desk-recovered', recover);
+  }, [account, item?.id]);
 
   // Generated files (lockfiles, build output) go last and are never opened first.
   const files = useMemo(
     () =>
-      [...(diff.data?.files ?? [])].sort(
-        (left, right) => Number(Boolean(left.generated)) - Number(Boolean(right.generated)),
-      ),
-    [diff.data],
+      [...(diff.data?.files ?? [])]
+        .map((file) => {
+          const pending = review.operations
+            .filter(
+              (operation) =>
+                operation.action.type === 'viewed' &&
+                operation.action.path === file.path &&
+                operationInProgress(operation.status),
+            )
+            .at(-1);
+
+          return pending?.action.type === 'viewed'
+            ? {
+                ...file,
+                viewed: pending.action.viewed ? ('VIEWED' as const) : ('UNVIEWED' as const),
+              }
+            : file;
+        })
+        .sort((left, right) => Number(Boolean(left.generated)) - Number(Boolean(right.generated))),
+    [diff.data, review.operations],
   );
   const current =
     files.find((file) => file.path === search.file) ??
@@ -187,7 +249,12 @@ function Workspace() {
 
   const startComment = () => {
     if (!current) return;
+    if (locked) {
+      openActivity();
+      return;
+    }
 
+    setRecoveredBody('');
     setComposerError(null);
     setComposer(
       selection ? { ...selection, path: current.path } : { path: current.path, line: null },
@@ -206,11 +273,6 @@ function Workspace() {
 
     return () => clearTimeout(timer);
   }, [search.thread, current?.path]);
-
-  const nextAttention = () =>
-    pulls.data?.items.find(
-      (candidate) => candidate.queue === 'attention' && candidate.id !== item?.id,
-    );
 
   useShortcuts([
     {
@@ -255,7 +317,16 @@ function Workspace() {
       keys: 'r',
       label: 'Reply to the focused thread',
       group: 'Pull request',
-      run: () => focusedThread && setReplying(focusedThread.id),
+      run: () => {
+        if (locked) {
+          openActivity();
+          return;
+        }
+        if (focusedThread) {
+          setRecoveredBody('');
+          setReplying(focusedThread.id);
+        }
+      },
     },
     {
       keys: 'Shift+r',
@@ -263,10 +334,17 @@ function Workspace() {
       group: 'Pull request',
       run: () =>
         focusedThread &&
-        review.resolve.mutate(
-          { threadId: focusedThread.id, resolved: !focusedThread.isResolved },
-          { onError: (error) => toast.error(error.message) },
-        ),
+        (review.operations.some(
+          (operation) =>
+            operation.action.type === 'resolve' &&
+            operation.action.threadId === focusedThread.id &&
+            operationUnsettled(operation.status),
+        )
+          ? openActivity()
+          : review.resolve.mutate(
+              { threadId: focusedThread.id, resolved: !focusedThread.isResolved },
+              { onError: (error) => toast.error(error.message) },
+            )),
     },
     {
       keys: '$mod+Shift+Enter',
@@ -352,11 +430,30 @@ function Workspace() {
       focused={thread.id === search.thread}
       actions={{
         replying: replying === thread.id,
-        setReplying: (value) => setReplying(value ? thread.id : null),
+        setReplying: (value) => {
+          setRecoveredBody('');
+          setReplying(value ? thread.id : null);
+        },
         reply: (body) => review.reply.mutateAsync({ threadId: thread.id, body }),
         resolve: (resolved) => review.resolve.mutateAsync({ threadId: thread.id, resolved }),
-        busy: review.reply.isPending || review.resolve.isPending,
+        busy: review.reply.isPending || review.resolve.isPending || locked,
+        locked,
+        resolution: review.operations.find(
+          (operation) =>
+            operation.action.type === 'resolve' &&
+            operation.action.threadId === thread.id &&
+            operationUnsettled(operation.status),
+        ),
       }}
+      recoveredBody={replying === thread.id ? recoveredBody : undefined}
+      queuedReplies={review.operations.filter(
+        (operation) =>
+          operation.action.type === 'reply' &&
+          operation.action.threadId === thread.id &&
+          (operationUnsettled(operation.status) ||
+            (operation.result?.pending &&
+              !thread.comments.some((comment) => comment.url === operation.result?.url))),
+      )}
     />
   );
 
@@ -364,7 +461,7 @@ function Workspace() {
     <DraftCommentCard
       key={comment.id}
       comment={comment}
-      busy={review.editComment.isPending}
+      busy={review.editComment.isPending || locked}
       onEdit={(body) => review.editComment.mutateAsync({ id: comment.id, body })}
       onDelete={() =>
         review.deleteComment.mutate(comment.id, { onError: (error) => toast.error(error.message) })
@@ -375,7 +472,8 @@ function Workspace() {
   const composerFor = (target: NonNullable<ComposerState>) => (
     <Composer
       label={target.line === null ? `Comment on ${target.path}` : `Comment on line ${target.line}`}
-      busy={review.addComment.isPending || review.commentNow.isPending}
+      initial={recoveredBody}
+      busy={review.addComment.isPending || review.commentNow.isPending || locked}
       error={composerError}
       onCancel={() => {
         setComposer(null);
@@ -408,6 +506,7 @@ function Workspace() {
         run: async (body) => {
           try {
             await review.commentNow.mutateAsync({
+              expectedHeadOid: diff.data?.toOid ?? detail.data?.snapshot.headOid ?? '',
               path: target.path,
               line: target.line,
               side: target.line === null ? 'RIGHT' : target.side,
@@ -416,7 +515,7 @@ function Workspace() {
             });
             setComposer(null);
             setComposerError(null);
-            toast('Comment posted to GitHub');
+            toast('Comment queued', { action: { label: 'View activity', onClick: openActivity } });
           } catch (error) {
             setComposerError((error as Error).message);
           }
@@ -625,14 +724,33 @@ function Workspace() {
                 theme={resolvedTheme(theme)}
                 leftSideComments={mode === 'all'}
                 prUrl={item.url}
+                queuedComments={review.operations.filter(
+                  (operation) =>
+                    operation.action.type === 'comment' &&
+                    operation.action.comment.path === current.path &&
+                    operationUnsettled(operation.status),
+                )}
                 renderAnchor={renderAnchor}
                 renderThread={renderThread}
                 renderDraft={renderDraft}
                 onCommentLine={(target) => {
+                  if (locked) {
+                    openActivity();
+                    return;
+                  }
+
+                  setRecoveredBody('');
                   setComposerError(null);
                   setComposer({ ...target, path: current.path });
                 }}
-                onCommentFile={() => setComposer({ path: current.path, line: null })}
+                onCommentFile={() => {
+                  if (locked) {
+                    openActivity();
+                    return;
+                  }
+                  setRecoveredBody('');
+                  setComposer({ path: current.path, line: null });
+                }}
                 onSelectLines={setSelection}
               />
             )}
@@ -750,7 +868,7 @@ function Workspace() {
           draft={draft}
           account={account}
           ci={item.ci}
-          viewedHeadOid={detail.data.snapshot.headOid}
+          viewedHeadOid={diff.data?.toOid ?? detail.data.snapshot.headOid}
           saveMeta={(changes) => review.saveMeta.mutate(changes)}
           submit={(input) => review.submit.mutateAsync(input)}
           busy={review.submit.isPending}
@@ -758,32 +876,38 @@ function Workspace() {
             setFinishOpen(false);
             setSearch({ mode: 'since', file: undefined }, false);
           }}
-          onSubmitted={(result) => {
+          onSubmitted={() => {
             setFinishOpen(false);
-            toast('Review submitted', {
-              description: `${result.submittedComments} ${result.submittedComments === 1 ? 'comment' : 'comments'} posted to GitHub.`,
-              action: {
-                label: 'Open',
-                onClick: () => window.open(result.reviewUrl, '_blank', 'noopener,noreferrer'),
-              },
+            toast('Review queued', {
+              description: 'You can keep reviewing. Progress and recovery are saved in Activity.',
+              action: { label: 'View activity', onClick: openActivity },
             });
+            if (search.inbox) {
+              const queue = search.inbox;
+              const next = pulls.data?.items.find(
+                (candidate) =>
+                  candidate.id !== item.id &&
+                  inQueue(candidate, queue) &&
+                  !review.allOperations.some(
+                    (operation) =>
+                      operation.prId === candidate.id &&
+                      operation.action.type === 'review' &&
+                      operationUnsettled(operation.status),
+                  ),
+              );
 
-            const next = nextAttention();
-
-            if (next) {
-              const target = refOf(next);
-
-              void goTo({
-                to: '/inbox/$queue/$owner/$repo/$number',
-                params: {
-                  queue: 'attention',
-                  owner: target.owner,
-                  repo: target.repo,
-                  number: String(target.number),
-                },
-              });
-            } else {
-              void goTo({ to: '/inbox/$queue', params: { queue: 'attention' } });
+              if (next) {
+                const target = refOf(next);
+                void goTo({
+                  to: '/inbox/$queue/$owner/$repo/$number',
+                  params: {
+                    queue,
+                    owner: target.owner,
+                    repo: target.repo,
+                    number: String(target.number),
+                  },
+                });
+              } else void goTo({ to: '/inbox/$queue', params: { queue } });
             }
           }}
         />

@@ -35,8 +35,10 @@ test('re-requests a review from the author view', async ({ page }) => {
   await openFresh(page, '/mine/acme/api/3001');
 
   await page.getByRole('button', { name: 'Ask mara to review' }).click();
-  await expect(page.getByText('Review requested from mara')).toBeVisible();
-  expect((await demoWrites(page)).map((write) => write.op)).toEqual(['RequestReviews']);
+  await expect(page.getByText('Review request queued for mara')).toBeVisible();
+  await expect
+    .poll(async () => (await demoWrites(page)).map((write) => write.op))
+    .toEqual(['RequestReviews']);
 });
 
 test('flags reviews waiting past the one-day target', async ({ page }) => {

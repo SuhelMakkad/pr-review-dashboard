@@ -11,6 +11,8 @@ import { FinishSheet } from '@/features/review/finish-sheet';
 import { useReview } from '@/features/review/use-review';
 import { AiCard } from '@/features/ai/assist-panel';
 import { useAi, useAiOverview } from '@/features/ai/use-ai';
+import { useInboxNavigation } from '@/features/inbox/inbox-context';
+import { openActivity } from '@/features/activity/use-operations';
 
 /** A complete review stays on the dashboard until the user explicitly prepares and posts it. */
 export function FullReview({
@@ -31,6 +33,8 @@ export function FullReview({
   const ai = useAi(prId, account);
   const overview = useAiOverview();
   const review = useReview(prId, account);
+  const inbox = useInboxNavigation();
+  const locked = Boolean(review.draft.data?.activeOperationId);
   const latest = ai.latest('full_review');
   const run =
     latest && ['failed', 'cancelled', 'interrupted'].includes(latest.status)
@@ -63,7 +67,7 @@ export function FullReview({
   };
 
   const prepare = () => {
-    if (!run) return;
+    if (!run || locked) return;
     ai.prepare.mutate(
       { runId: run.id, indices: selected },
       {
@@ -167,7 +171,7 @@ export function FullReview({
                       type="checkbox"
                       checked={selected.includes(index)}
                       aria-label={`Include finding ${index + 1}`}
-                      disabled={run.stale || preparing}
+                      disabled={run.stale || preparing || locked}
                       onChange={(event) =>
                         setSelection({
                           runId: run.id,
@@ -216,15 +220,17 @@ export function FullReview({
               <div className="space-y-1.5 border-t border-line pt-3">
                 <Button
                   size="sm"
-                  disabled={run.stale || preparing}
+                  disabled={!locked && (run.stale || preparing)}
                   aria-busy={preparing}
-                  onClick={prepare}
+                  onClick={locked ? openActivity : prepare}
                 >
-                  {preparing
-                    ? 'Preparing draft…'
-                    : reusable
-                      ? 'Use prepared review'
-                      : 'Prepare GitHub review'}
+                  {locked
+                    ? 'Review queued · View activity'
+                    : preparing
+                      ? 'Preparing draft…'
+                      : reusable
+                        ? 'Use prepared review'
+                        : 'Prepare GitHub review'}
                 </Button>
                 {preparing && (
                   <p role="status" className="text-xs text-fg-muted">
@@ -308,7 +314,8 @@ export function FullReview({
           busy={review.submit.isPending}
           onSubmitted={() => {
             setFinishOpen(false);
-            toast('Review posted to GitHub');
+            toast('Review queued', { action: { label: 'View activity', onClick: openActivity } });
+            inbox?.advance();
           }}
           onReviewNewCommits={() => {
             setFinishOpen(false);

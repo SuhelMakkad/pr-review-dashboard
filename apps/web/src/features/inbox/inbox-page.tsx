@@ -16,6 +16,8 @@ import { FilterBar } from '@/features/inbox/filter-bar';
 import { activeFilterCount, matchesFilters, type InboxSearch } from '@/features/inbox/filters';
 import { InboxContext } from '@/features/inbox/inbox-context';
 import { QueueRow } from '@/features/inbox/queue-row';
+import { useOperations } from '@/features/activity/use-operations';
+import { operationUnsettled } from '@review-desk/shared/operations';
 
 interface Section {
   label: string | null;
@@ -43,6 +45,15 @@ export function InboxPage() {
   const search = useSearch({ from: '/inbox/$queue' });
   const navigate = useNavigate();
   const pulls = usePulls();
+  const operations = useOperations(pulls.data?.account ?? '');
+  const queuedReviews = new Set(
+    operations.data?.pages
+      .flatMap((page) => page.items)
+      .filter(
+        (operation) => operation.action.type === 'review' && operationUnsettled(operation.status),
+      )
+      .map((operation) => operation.prId),
+  );
   const { ref, item: current } = useCurrentPull();
   const filterRef = useRef<HTMLInputElement>(null);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
@@ -96,7 +107,7 @@ export function InboxPage() {
     void navigate({
       to: '/pr/$owner/$repo/$number/files',
       params: { owner: target.owner, repo: target.repo, number: String(target.number) },
-      search: {},
+      search: { inbox: queue },
     });
   };
 
@@ -151,16 +162,19 @@ export function InboxPage() {
 
   const navigation = useMemo(
     () => ({
+      queue,
       advance: () => {
         if (index === -1) return;
 
-        const next = flat[index + 1] ?? flat[index - 1];
+        const next = [...flat.slice(index + 1), ...flat.slice(0, index).reverse()].find(
+          (item) => !queuedReviews.has(item.id),
+        );
 
         if (next) select(next);
         else void close();
       },
     }),
-    [flat, index, queue],
+    [flat, index, queue, operations.data],
   );
 
   const nextWake = all

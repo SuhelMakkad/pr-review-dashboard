@@ -9,6 +9,9 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import type { ReviewThread } from '@review-desk/shared/types';
+import type { GitHubOperation, OperationReceipt } from '@review-desk/shared/operations';
+import { operationUnsettled } from '@review-desk/shared/operations';
+import { openActivity } from '@/features/activity/use-operations';
 import { dateTime, relativePhrase } from '@/lib/time';
 import { Avatar } from '@/ui/avatar';
 import { cn } from '@/ui/cn';
@@ -20,9 +23,11 @@ import { Composer } from '@/features/review/composer';
 export interface ThreadActions {
   replying: boolean;
   setReplying: (replying: boolean) => void;
-  reply: (body: string) => Promise<{ pending: boolean }>;
+  reply: (body: string) => Promise<OperationReceipt>;
   resolve: (resolved: boolean) => Promise<unknown>;
   busy: boolean;
+  locked?: boolean;
+  resolution?: GitHubOperation;
 }
 
 /** An inline review thread rendered under its line in the diff. Resolved threads start folded. */
@@ -32,12 +37,16 @@ export function ThreadCard({
   unread,
   focused,
   actions,
+  queuedReplies = [],
+  recoveredBody,
 }: {
   thread: ReviewThread;
   account: string;
   unread: Set<string>;
   focused?: boolean;
   actions?: ThreadActions;
+  queuedReplies?: GitHubOperation[];
+  recoveredBody?: string;
 }) {
   const [open, setOpen] = useState(!thread.isResolved || focused);
   const [error, setError] = useState<string | null>(null);
@@ -109,12 +118,43 @@ export function ThreadCard({
               </div>
             );
           })}
+          {queuedReplies
+            .filter(
+              (operation) => operationUnsettled(operation.status) || operation.result?.pending,
+            )
+            .map((operation) => (
+              <div
+                key={operation.id}
+                className="space-y-1 border-l-2 border-dashed border-accent/50 px-3 py-2 text-xs"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-fg-muted">
+                    {operation.status === 'needs_attention'
+                      ? 'Reply needs attention'
+                      : operation.result?.pending
+                        ? 'Added to your pending review on GitHub'
+                        : 'Reply queued · not confirmed yet'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={openActivity}
+                    className="text-accent hover:underline"
+                  >
+                    View activity
+                  </button>
+                </div>
+                {operation.action.type === 'reply' && (
+                  <MarkdownView>{operation.action.body}</MarkdownView>
+                )}
+              </div>
+            ))}
           {actions &&
             (actions.replying ? (
               <div className="p-2">
                 <Composer
                   label="Reply to thread"
                   placeholder="Reply…"
+                  initial={recoveredBody}
                   busy={actions.busy}
                   error={error}
                   onCancel={() => {
@@ -127,15 +167,13 @@ export function ThreadCard({
                     variant: 'primary',
                     run: async (body) => {
                       try {
-                        const result = await actions.reply(body);
+                        await actions.reply(body);
 
                         setError(null);
                         actions.setReplying(false);
-                        toast(
-                          result.pending
-                            ? 'Reply added to your pending review on GitHub'
-                            : 'Reply posted',
-                        );
+                        toast('Reply queued', {
+                          action: { label: 'View activity', onClick: openActivity },
+                        });
                       } catch (failure) {
                         setError((failure as Error).message);
                       }
@@ -151,6 +189,7 @@ export function ThreadCard({
                     variant="ghost"
                     icon={<Reply size={12} />}
                     onClick={() => actions.setReplying(true)}
+                    disabled={actions.locked}
                     shortcut={focused ? 'r' : undefined}
                   >
                     Reply
@@ -161,7 +200,7 @@ export function ThreadCard({
                     size="sm"
                     variant="ghost"
                     icon={thread.isResolved ? <RotateCcw size={12} /> : <CheckCheck size={12} />}
-                    disabled={actions.busy}
+                    disabled={actions.busy || Boolean(actions.resolution)}
                     onClick={() =>
                       void actions
                         .resolve(!thread.isResolved)
@@ -169,7 +208,18 @@ export function ThreadCard({
                     }
                     shortcut={focused ? 'Shift+r' : undefined}
                   >
-                    {thread.isResolved ? 'Unresolve' : 'Resolve'}
+                    {actions.resolution
+                      ? actions.resolution.status === 'needs_attention'
+                        ? 'Resolution needs attention'
+                        : 'Resolution queued'
+                      : thread.isResolved
+                        ? 'Unresolve'
+                        : 'Resolve'}
+                  </Button>
+                )}
+                {actions.resolution && (
+                  <Button size="sm" variant="ghost" onClick={openActivity}>
+                    View activity
                   </Button>
                 )}
               </div>

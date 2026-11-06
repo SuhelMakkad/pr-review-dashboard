@@ -7,6 +7,7 @@ import { Button } from '@/ui/button';
 import { MarkdownView } from '@/ui/markdown';
 import { AiCard, RunButton } from '@/features/ai/assist-panel';
 import { useAi } from '@/features/ai/use-ai';
+import { useReview } from '@/features/review/use-review';
 
 const severityTone = {
   blocking: 'fail',
@@ -26,6 +27,7 @@ export function Suggestions({
   onOpenLine: (path: string, line: number | null) => void;
 }) {
   const ai = useAi(prId, account);
+  const locked = Boolean(useReview(prId, account).draft.data?.activeOperationId);
   const run = ai.latest('draft_comments');
   const [handled, setHandled] = useState<Set<string>>(new Set());
   const result = run?.status === 'done' ? (run.result as DraftCommentsResult | null) : null;
@@ -89,7 +91,7 @@ export function Suggestions({
                 <Button
                   size="sm"
                   icon={<Check size={12} />}
-                  disabled={ai.accept.isPending}
+                  disabled={ai.accept.isPending || locked}
                   onClick={() =>
                     ai.accept.mutate(
                       { runId: run.id, index },

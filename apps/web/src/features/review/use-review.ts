@@ -1,14 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DiffManifest } from '@review-desk/shared/diff';
-import type {
-  DraftComment,
-  ReviewDraft,
-  ReviewEvent,
-  Side,
-  SubmitReviewResult,
-} from '@review-desk/shared/review';
+import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
+import type { OperationReceipt } from '@review-desk/shared/operations';
 import { api, ApiError } from '@/lib/api';
 import { queryKeys } from '@/lib/query-keys';
+import { githubCommand } from '@/lib/operation-command';
+import { useOperations } from '@/features/activity/use-operations';
+
+const viewedVersions = new Map<string, number>();
 
 export const draftKey = (prId: string) => ['draft', prId] as const;
 
@@ -23,6 +22,8 @@ export interface CommentTarget {
 export function useReview(prId: string | null, account: string) {
   const client = useQueryClient();
   const enc = encodeURIComponent(prId ?? '');
+  const operations = useOperations(account);
+  const refreshOperations = () => client.invalidateQueries({ queryKey: ['operations', account] });
 
   const draft = useQuery({
     queryKey: draftKey(prId ?? 'none'),
@@ -63,12 +64,21 @@ export function useReview(prId: string | null, account: string) {
   const saveMeta = useMutation({
     mutationFn: (changes: { body?: string; event?: ReviewEvent }) =>
       api<ReviewDraft>(`/api/pulls/${enc}/draft`, { method: 'PUT', body: { account, ...changes } }),
-    onSuccess: (next) => client.setQueryData(draftKey(prId ?? 'none'), next),
+    // Refetch rather than applying an old autosave response over a newly queued/finished review.
+    onSuccess: refreshDraft,
   });
 
   const discard = useMutation({
-    mutationFn: () => api(`/api/pulls/${enc}/draft`, { method: 'DELETE', body: { account } }),
-    onSuccess: refreshDraft,
+    mutationFn: () =>
+      githubCommand<OperationReceipt | { ok: true }>(
+        `/api/pulls/${enc}/draft`,
+        { account },
+        'DELETE',
+      ),
+    onSuccess: () => {
+      void refreshDraft();
+      void refreshOperations();
+    },
   });
 
   const submit = useMutation({
@@ -77,50 +87,50 @@ export function useReview(prId: string | null, account: string) {
       body: string;
       expectedHeadOid: string;
       allowNewHead?: boolean;
-    }) =>
-      api<SubmitReviewResult>(`/api/pulls/${enc}/review`, {
-        method: 'POST',
-        body: { account, ...input },
-      }),
+    }) => githubCommand(`/api/pulls/${enc}/review`, { account, ...input }),
     onSettled: refreshDraft,
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.pulls });
       void client.invalidateQueries({ queryKey: ['diff', prId] });
+      void refreshOperations();
     },
   });
 
   const commentNow = useMutation({
-    mutationFn: (input: CommentTarget & { body: string }) =>
-      api<{ url: string }>(`/api/pulls/${enc}/comments`, {
-        method: 'POST',
-        body: { account, ...input },
-      }),
+    mutationFn: (input: CommentTarget & { body: string; expectedHeadOid: string }) =>
+      githubCommand(`/api/pulls/${enc}/comments`, { account, ...input }),
+    onSuccess: refreshOperations,
   });
 
   const reply = useMutation({
     mutationFn: ({ threadId, body }: { threadId: string; body: string }) =>
-      api<{ url: string; pending: boolean }>(
-        `/api/threads/${encodeURIComponent(threadId)}/replies`,
-        {
-          method: 'POST',
-          body: { account, prId, body },
-        },
-      ),
+      githubCommand(`/api/threads/${encodeURIComponent(threadId)}/replies`, {
+        account,
+        prId,
+        body,
+      }),
+    onSuccess: refreshOperations,
   });
 
   const resolve = useMutation({
     mutationFn: ({ threadId, resolved }: { threadId: string; resolved: boolean }) =>
-      api(`/api/threads/${encodeURIComponent(threadId)}/resolution`, {
-        method: 'POST',
-        body: { account, prId, resolved },
+      githubCommand(`/api/threads/${encodeURIComponent(threadId)}/resolution`, {
+        account,
+        prId,
+        resolved,
       }),
+    onSuccess: refreshOperations,
   });
 
   /** Optimistic: the tree and progress update before GitHub confirms. */
   const setViewed = useMutation({
     mutationFn: ({ path, viewed }: { path: string; viewed: boolean }) =>
-      api(`/api/pulls/${enc}/viewed`, { method: 'POST', body: { account, path, viewed } }),
+      githubCommand(`/api/pulls/${enc}/viewed`, { account, path, viewed }),
     onMutate: ({ path, viewed }) => {
+      const versionKey = `${account}:${prId}:${path}`;
+      const version = (viewedVersions.get(versionKey) ?? 0) + 1;
+      viewedVersions.set(versionKey, version);
+
       const snapshots = client.getQueriesData<DiffManifest>({ queryKey: ['diff', prId] });
 
       for (const [key, manifest] of snapshots) {
@@ -134,11 +144,28 @@ export function useReview(prId: string | null, account: string) {
         });
       }
 
-      return { snapshots };
+      return { snapshots, version, versionKey };
     },
-    onError: (_error, _variables, context) => {
-      for (const [key, manifest] of context?.snapshots ?? []) client.setQueryData(key, manifest);
+    onError: (_error, variables, context) => {
+      if (!context || viewedVersions.get(context.versionKey) !== context.version) return;
+
+      for (const [key, manifest] of context.snapshots) {
+        const original = manifest?.files.find((file) => file.path === variables.path);
+        if (!original) continue;
+
+        client.setQueryData<DiffManifest>(key, (current) =>
+          current
+            ? {
+                ...current,
+                files: current.files.map((file) =>
+                  file.path === variables.path ? { ...file, viewed: original.viewed } : file,
+                ),
+              }
+            : current,
+        );
+      }
     },
+    onSuccess: refreshOperations,
   });
 
   return {
@@ -153,6 +180,11 @@ export function useReview(prId: string | null, account: string) {
     reply,
     resolve,
     setViewed,
+    operations:
+      operations.data?.pages
+        .flatMap((page) => page.items)
+        .filter((operation) => operation.prId === prId) ?? [],
+    allOperations: operations.data?.pages.flatMap((page) => page.items) ?? [],
   };
 }
 

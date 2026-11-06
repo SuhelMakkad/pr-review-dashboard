@@ -165,10 +165,15 @@ test('keeps a full review in the dashboard and posts selected findings only afte
   await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
 
   await expect(sheet).not.toBeVisible();
+  await expect(page).not.toHaveURL(/1839/);
+  await page.goto('/pr/acme/web/1839');
   await expect(
     report.getByText('The implementation is mostly sound', { exact: false }),
   ).toBeVisible();
 
+  await expect
+    .poll(async () => (await demoWrites(page)).map((write) => write.op))
+    .toEqual(['AddPendingReview', 'AddReviewThread', 'SubmitReview']);
   const writes = await demoWrites(page);
 
   expect(writes.map((write) => write.op)).toEqual([
@@ -200,6 +205,9 @@ test('lets the user exclude findings and post only the review summary', async ({
   await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
   await expect(sheet).not.toBeVisible();
 
+  await expect
+    .poll(async () => (await demoWrites(page)).map((write) => write.op))
+    .toEqual(['AddPendingReview', 'SubmitReview']);
   const writes = await demoWrites(page);
 
   expect(writes.map((write) => write.op)).toEqual(['AddPendingReview', 'SubmitReview']);

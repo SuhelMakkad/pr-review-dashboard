@@ -2,6 +2,7 @@ import { AlertTriangle, Send, Trash2 } from 'lucide-react';
 import { reviewEventLabels, type ReviewDraft } from '@review-desk/shared/review';
 import { Button } from '@/ui/button';
 import { Kbd } from '@/ui/kbd';
+import { openActivity } from '@/features/activity/use-operations';
 
 /** Always-visible summary of the review in progress, with the way to finish it. */
 export function PendingTray({
@@ -20,6 +21,7 @@ export function PendingTray({
   const comments = draft?.comments ?? [];
   const stale = comments.filter((comment) => comment.status === 'stale').length;
   const hasDraft = comments.length > 0 || Boolean(draft?.body.trim());
+  const locked = Boolean(draft?.activeOperationId);
 
   return (
     <div className="flex h-11 shrink-0 items-center gap-3 border-t border-line bg-sunken px-4 text-xs">
@@ -43,7 +45,7 @@ export function PendingTray({
         Select lines and press <Kbd keys="c" /> to comment
       </span>
       <div className="ml-auto flex items-center gap-2">
-        {hasDraft && (
+        {hasDraft && !locked && (
           <Button size="sm" variant="ghost" icon={<Trash2 size={12} />} onClick={onDiscard}>
             Discard
           </Button>
@@ -52,10 +54,10 @@ export function PendingTray({
           size="sm"
           variant="primary"
           icon={<Send size={12} />}
-          onClick={onFinish}
+          onClick={locked ? openActivity : onFinish}
           shortcut="$mod+Shift+Enter"
         >
-          Finish review
+          {locked ? 'Review queued · View activity' : 'Finish review'}
         </Button>
       </div>
     </div>
