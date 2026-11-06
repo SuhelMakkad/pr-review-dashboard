@@ -65,10 +65,11 @@ export function RunButton({
           running ? <LoaderCircle size={12} className="animate-spin" /> : <Sparkles size={12} />
         }
         disabled={running}
+        aria-busy={running}
         onClick={() => onRun()}
         shortcut={shortcut}
       >
-        {label}
+        {running ? 'Working…' : label}
       </Button>
       <DropdownMenu.Root>
         <DropdownMenu.Trigger asChild>
@@ -124,6 +125,7 @@ export function AiCard({
   run,
   title,
   showProvider = true,
+  starting = false,
   onCancel,
   onRerun,
   children,
@@ -131,11 +133,13 @@ export function AiCard({
   run: AiRun;
   title: string;
   showProvider?: boolean;
+  starting?: boolean;
   onCancel: () => void;
   onRerun: () => void;
   children?: ReactNode;
 }) {
   const busy = run.status === 'queued' || run.status === 'running';
+  const preparing = starting && !busy;
 
   return (
     <div className="rounded-md border border-dashed border-ai/50 bg-ai/[0.03] px-3 py-2.5">
@@ -145,7 +149,7 @@ export function AiCard({
         <span className="order-1 w-full text-fg-subtle">
           {showProvider && `${providerLabel[run.provider]} · `}
           {run.headOid.slice(0, 7)}
-          {run.finishedAt && ` · ${relativePhrase(run.finishedAt)}`}
+          {!preparing && run.finishedAt && ` · ${relativePhrase(run.finishedAt)}`}
         </span>
         {run.stale && (
           <span
@@ -156,7 +160,17 @@ export function AiCard({
           </span>
         )}
         <span className="ml-auto flex items-center gap-1">
-          {busy ? (
+          {preparing ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<LoaderCircle size={12} className="animate-spin" aria-hidden="true" />}
+              disabled
+              aria-busy="true"
+            >
+              Starting…
+            </Button>
+          ) : busy ? (
             <Button
               size="sm"
               variant="ghost"
@@ -173,10 +187,14 @@ export function AiCard({
           )}
         </span>
       </div>
-      {busy ? (
-        <p className="flex items-center gap-2 text-sm text-fg-muted" aria-live="polite">
+      {preparing || busy ? (
+        <p className="flex items-center gap-2 text-sm text-fg-muted" role="status">
           <LoaderCircle size={13} className="animate-spin text-ai" aria-hidden="true" />
-          {run.progress ?? 'Working…'}
+          {preparing
+            ? run.task === 'full_review'
+              ? 'Preparing review…'
+              : 'Starting…'
+            : (run.progress ?? 'Working…')}
         </p>
       ) : run.status === 'failed' ? (
         <p className="text-sm text-fail" role="alert">
@@ -388,7 +406,7 @@ export function AssistPanel({
         run: () => {
           const brief = ai.latest('brief');
 
-          if (!brief || (brief.status !== 'queued' && brief.status !== 'running')) {
+          if (!ai.isRunning('brief')) {
             ai.start.mutate({ task: 'brief', force: Boolean(brief) });
           }
         },
@@ -401,7 +419,6 @@ export function AssistPanel({
     <div className={cn('space-y-3', compact && 'text-xs')}>
       {tasks.map((task) => {
         const run = ai.latest(task);
-        const running = Boolean(run && (run.status === 'queued' || run.status === 'running'));
         const launch = (provider?: AiProvider, force?: boolean) =>
           ai.start.mutate({ task, provider, force });
 
@@ -415,7 +432,7 @@ export function AssistPanel({
               <RunButton
                 label="Run"
                 shortcut={task === 'brief' ? 'b' : undefined}
-                running={ai.start.isPending}
+                running={ai.isStarting(task)}
                 onRun={(provider) => launch(provider)}
               />
             </div>
@@ -427,6 +444,7 @@ export function AssistPanel({
             key={task}
             run={run}
             title={aiTaskLabels[task]}
+            starting={ai.isStarting(task)}
             onCancel={() => ai.cancel.mutate(run.id)}
             onRerun={() => launch(run.provider, true)}
           >
@@ -443,7 +461,6 @@ export function AssistPanel({
             {task === 'author_feedback' && run.result && (
               <FeedbackView result={run.result as AuthorFeedbackResult} threadLabel={threadLabel} />
             )}
-            {running && null}
           </AiCard>
         );
       })}

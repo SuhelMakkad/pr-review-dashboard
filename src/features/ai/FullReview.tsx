@@ -31,6 +31,7 @@ export function FullReview({
   const overview = useAiOverview();
   const review = useReview(prId, account);
   const run = ai.latest('full_review');
+  const starting = ai.isStarting('full_review');
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const [finishOpen, setFinishOpen] = useState(false);
   const result = run?.status === 'done' ? (run.result as FullReviewResult | null) : null;
@@ -74,16 +75,17 @@ export function FullReview({
           <Button
             size="sm"
             icon={
-              ai.start.isPending ? (
+              starting ? (
                 <LoaderCircle size={13} className="animate-spin" />
               ) : (
                 <Sparkles size={13} />
               )
             }
-            disabled={ai.start.isPending || codex?.available === false || blocked}
+            disabled={starting || codex?.available === false || blocked}
+            aria-busy={starting}
             onClick={launch}
           >
-            {ai.start.isPending ? 'Preparing review…' : 'Run review'}
+            {starting ? 'Preparing review…' : 'Run review'}
           </Button>
           {codex?.available !== false && blocked && (
             <p className="text-xs text-fail" role="alert">
@@ -105,6 +107,7 @@ export function FullReview({
           run={run}
           title="Full review"
           showProvider={false}
+          starting={starting}
           onCancel={() => ai.cancel.mutate(run.id)}
           onRerun={launch}
         >

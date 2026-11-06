@@ -37,7 +37,7 @@ export function Suggestions({
         <RunButton
           label="Suggest"
           shortcut="Shift+b"
-          running={ai.start.isPending}
+          running={ai.isStarting('draft_comments')}
           onRun={(provider) => ai.start.mutate({ task: 'draft_comments', provider })}
         />
       </div>
@@ -52,6 +52,7 @@ export function Suggestions({
     <AiCard
       run={run}
       title="Suggested comments"
+      starting={ai.isStarting('draft_comments')}
       onCancel={() => ai.cancel.mutate(run.id)}
       onRerun={() =>
         ai.start.mutate({ task: 'draft_comments', provider: run.provider, force: true })

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   AiProvider,
   AiProviderStatus,
@@ -40,6 +40,12 @@ export function useAiSettings(account: string) {
 export function useAi(prId: string | null, account: string) {
   const client = useQueryClient();
   const key = aiKey(prId ?? 'none');
+  const startKey = ['ai-start', account, prId] as const;
+  const startingTasks = useMutationState({
+    filters: { mutationKey: startKey, status: 'pending', exact: true },
+    select: (mutation) => (mutation.state.variables as { task: AiTask }).task,
+  });
+
   const runs = useQuery({
     queryKey: key,
     queryFn: () =>
@@ -64,6 +70,7 @@ export function useAi(prId: string | null, account: string) {
   }, [busy, client]);
 
   const start = useMutation({
+    mutationKey: startKey,
     mutationFn: ({
       task,
       provider,
@@ -105,6 +112,12 @@ export function useAi(prId: string | null, account: string) {
   });
 
   const latest = (task: AiTask) => runs.data?.runs.find((run) => run.task === task) ?? null;
+  const isStarting = (task: AiTask) => startingTasks.includes(task);
+  const isRunning = (task: AiTask) => {
+    const run = latest(task);
 
-  return { runs, start, cancel, accept, prepare, latest };
+    return isStarting(task) || run?.status === 'queued' || run?.status === 'running';
+  };
+
+  return { runs, start, cancel, accept, prepare, latest, isStarting, isRunning };
 }

@@ -289,7 +289,7 @@ function Workspace() {
         setRailOpen(true);
         setRailTab('assist');
 
-        if (ai.latest('brief')?.status !== 'running') {
+        if (!ai.isRunning('brief')) {
           ai.start.mutate({ task: 'brief', force: Boolean(ai.latest('brief')) });
         }
       },
@@ -302,8 +302,7 @@ function Workspace() {
         setRailOpen(true);
         setRailTab('assist');
 
-        if (ai.latest('draft_comments')?.status !== 'running')
-          ai.start.mutate({ task: 'draft_comments' });
+        if (!ai.isRunning('draft_comments')) ai.start.mutate({ task: 'draft_comments' });
       },
     },
     {

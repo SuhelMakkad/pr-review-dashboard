@@ -1,7 +1,132 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { demoWrites, failNextAi, openFresh } from './helpers';
 
 test.describe.configure({ mode: 'serial' });
+
+async function pauseNextAiStart(page: Page) {
+  let markRequested!: () => void;
+  let resume!: () => void;
+
+  const requested = new Promise<void>((resolve) => {
+    markRequested = resolve;
+  });
+  const resumed = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+
+  await page.route(
+    '**/api/pulls/*/ai',
+    async (route) => {
+      markRequested();
+      await resumed;
+
+      await route.continue();
+    },
+    { times: 1 },
+  );
+
+  return { requested, resume };
+}
+
+test('shows immediate feedback while preparing a full review and running it again', async ({
+  page,
+}) => {
+  await openFresh(page, '/inbox/attention/acme/web/1839');
+
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  for (const label of ['Run review', 'Run again']) {
+    const start = await pauseNextAiStart(page);
+
+    await report.getByRole('button', { name: label, exact: true }).click();
+    await start.requested;
+
+    try {
+      const button = report.getByRole('button', {
+        name: label === 'Run review' ? 'Preparing review…' : 'Starting…',
+        exact: true,
+      });
+
+      await expect(button).toBeDisabled();
+      await expect(button).toHaveAttribute('aria-busy', 'true');
+      await expect(report.getByText('No blocking findings')).not.toBeVisible();
+
+      if (label === 'Run again') {
+        await expect(report.getByRole('status')).toHaveText('Preparing review…');
+        await expect(report.getByRole('button', { name: 'Prepare GitHub review' })).toHaveCount(0);
+      }
+    } finally {
+      start.resume();
+    }
+
+    await expect(report.getByText('No blocking findings')).toBeVisible();
+  }
+
+  expect(await demoWrites(page)).toEqual([]);
+});
+
+test('shows a keyboard-started brief as busy and prevents duplicate starts', async ({ page }) => {
+  await openFresh(page, '/pr/acme/web/1839/files');
+  await expect(page.getByRole('navigation', { name: 'Changed files' })).toBeVisible();
+
+  const start = await pauseNextAiStart(page);
+  const requests: string[] = [];
+
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().endsWith('/ai')) {
+      requests.push(request.url());
+    }
+  });
+
+  await page.keyboard.press('b');
+  await start.requested;
+
+  try {
+    await expect(page.getByRole('tab', { name: '✦ Assist' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(page.getByRole('button', { name: /^Working…/ })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Choose the AI agent' }).first()).toBeDisabled();
+
+    await page.keyboard.press('b');
+    await page.keyboard.press('b');
+  } finally {
+    start.resume();
+  }
+
+  await expect(page.getByText('Look closely at')).toBeVisible();
+  expect(requests).toHaveLength(1);
+});
+
+test('restores the previous review and allows retrying when a new review cannot start', async ({
+  page,
+}) => {
+  await openFresh(page, '/inbox/attention/acme/web/1839');
+
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+  await expect(report.getByText('No blocking findings')).toBeVisible();
+  await page.route(
+    '**/api/pulls/*/ai',
+    (route) =>
+      route.fulfill({
+        status: 503,
+        json: { error: 'The review could not start. Try again.' },
+      }),
+    { times: 1 },
+  );
+  await report.getByRole('button', { name: 'Run again', exact: true }).click();
+
+  await expect(report.getByRole('alert')).toHaveText('The review could not start. Try again.');
+  await expect(report.getByText('No blocking findings')).toBeVisible();
+  await expect(report.getByRole('button', { name: 'Run again', exact: true })).toBeEnabled();
+
+  await report.getByRole('button', { name: 'Run again', exact: true }).click();
+  await expect(report.getByRole('alert')).toHaveCount(0);
+  await expect(report.getByText('No blocking findings')).toBeVisible();
+});
 
 test('keeps a full review in the dashboard and posts selected findings only after submission', async ({
   page,

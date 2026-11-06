@@ -220,7 +220,7 @@ export function FinishSheet({
               </span>
               <RunButton
                 label="Draft summary"
-                running={summaryRun?.status === 'running' || summaryRun?.status === 'queued'}
+                running={ai.isRunning('draft_summary')}
                 onRun={(provider) => {
                   saveMeta({ event });
                   requestedAt.current = new Date(Date.now() - 1000).toISOString();
