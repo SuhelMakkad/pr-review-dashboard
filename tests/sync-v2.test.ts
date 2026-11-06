@@ -79,7 +79,7 @@ describe('incremental sync', () => {
     delete legacy.version;
     delete legacy.conversation;
     delete legacy.verdicts;
-    store.db
+    store.db.$client
       .prepare('UPDATE snapshots SET data = ? WHERE id = ?')
       .run(JSON.stringify(legacy), 'pr-1');
     await service.sync();

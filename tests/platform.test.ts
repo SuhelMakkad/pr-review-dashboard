@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
+import { drizzle } from 'drizzle-orm/node-sqlite';
 import { createApp } from '../server/app';
+import { migrate, schemaVersion, type Migration } from '../server/db/legacy';
+import { appliedMigrations, migrateDatabase, migrationsFolder } from '../server/db/migrate';
+import { aiRuns } from '../server/db/schema';
 import { Store } from '../server/db/store';
-import { migrate, schemaVersion, type Migration } from '../server/db/migrations';
 import { EventBus } from '../server/events';
 import { parseIncludedResponse, redact, retryAtFromHeaders } from '../server/github';
 import { FixtureGitHub } from '../server/demo/fixture-github';
@@ -38,20 +42,147 @@ function demoService() {
 }
 
 describe('database migrations', () => {
-  it('creates a fresh database at the latest version', () => {
+  const baseline = readMigrationFiles({ migrationsFolder })[0]!.name;
+
+  /** Tables, columns and indexes as SQLite reports them, ignoring Drizzle's own bookkeeping. */
+  function describeSchema(db: DatabaseSync) {
+    const tables = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != '__drizzle_migrations' ORDER BY name",
+      )
+      .all() as { name: string }[];
+
+    return tables.map(({ name }) => ({
+      name,
+      columns: db
+        .prepare(
+          'SELECT name, lower(type) AS type, "notnull", dflt_value, pk FROM pragma_table_info(?)',
+        )
+        .all(name),
+      indexes: (
+        db
+          .prepare('SELECT name, "unique", origin FROM pragma_index_list(?) ORDER BY name')
+          .all(name) as { name: string }[]
+      ).map((index) => ({
+        ...index,
+        columns: db.prepare('SELECT name FROM pragma_index_info(?) ORDER BY seqno').all(index.name),
+      })),
+    }));
+  }
+
+  function backups(directory: string) {
+    return readdirSync(directory).filter((file) => file.startsWith('backup-'));
+  }
+
+  it('creates a fresh database from the Drizzle baseline', () => {
     const store = new Store(':memory:');
 
     cleanups.push(() => store.close());
 
-    expect(schemaVersion(store.db)).toBeGreaterThanOrEqual(1);
+    expect(appliedMigrations(store.db.$client)).toEqual([baseline]);
+    expect(store.db.select().from(aiRuns).all()).toEqual([]);
   });
 
-  it('backs up an existing database before upgrading and keeps its data', () => {
+  it('keeps the Drizzle baseline identical to the legacy version 5 schema', () => {
+    const legacy = new DatabaseSync(':memory:');
+    const store = new Store(':memory:');
+
+    cleanups.push(() => legacy.close());
+    cleanups.push(() => store.close());
+
+    expect(migrate(legacy, ':memory:')).toBe(5);
+    expect(describeSchema(store.db.$client)).toEqual(describeSchema(legacy));
+  });
+
+  it('adopts a version 5 database without re-running the baseline or backing it up', () => {
+    const directory = temporaryDirectory();
+    const path = join(directory, 'state.sqlite');
+    const legacy = new DatabaseSync(path);
+
+    migrate(legacy, path);
+    legacy.prepare('INSERT INTO settings VALUES (?, ?)').run('lastAccount', JSON.stringify('me'));
+    legacy
+      .prepare('INSERT INTO triage VALUES (?, ?, ?)')
+      .run('me', 'pr-1', JSON.stringify({ note: 'kept' }));
+    legacy.close();
+
+    for (let open = 0; open < 2; open += 1) {
+      const store = new Store(path);
+
+      expect(store.getSetting('lastAccount')).toBe('me');
+      expect(store.triage('me', 'pr-1').note).toBe('kept');
+      expect(appliedMigrations(store.db.$client)).toEqual([baseline]);
+      expect(schemaVersion(store.db.$client)).toBe(5);
+
+      store.close();
+    }
+
+    expect(backups(directory)).toEqual([]);
+  });
+
+  it('upgrades an older database through the legacy steps, then adopts the baseline', () => {
     const directory = temporaryDirectory();
     const path = join(directory, 'state.sqlite');
     const legacy = new DatabaseSync(path);
 
     // A database exactly as Review Desk v1 created it.
+    legacy.exec(`
+      CREATE TABLE snapshots (account TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (account, id));
+      CREATE TABLE triage (account TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (account, id));
+      CREATE TABLE settings (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+      PRAGMA user_version = 1;
+    `);
+    legacy
+      .prepare('INSERT INTO triage VALUES (?, ?, ?)')
+      .run('me', 'pr-1', JSON.stringify({ note: 'kept' }));
+    legacy.close();
+
+    const store = new Store(path);
+
+    cleanups.push(() => store.close());
+
+    expect(store.triage('me', 'pr-1').note).toBe('kept');
+    expect(appliedMigrations(store.db.$client)).toEqual([baseline]);
+    expect(schemaVersion(store.db.$client)).toBe(5);
+    expect(store.db.select().from(aiRuns).all()).toEqual([]);
+    expect(backups(directory)).toEqual(['backup-v1.sqlite']);
+  });
+
+  it('applies a new Drizzle migration to an adopted database, backing it up first', () => {
+    const directory = temporaryDirectory();
+    const path = join(directory, 'state.sqlite');
+    const folder = join(directory, 'migrations');
+    const legacy = new DatabaseSync(path);
+
+    // Start from a database the bridge adopted, so Drizzle appends to the table it created.
+    migrate(legacy, path);
+    legacy.close();
+    cpSync(migrationsFolder, folder, { recursive: true });
+    new Store(path).close();
+
+    expect(backups(directory)).toEqual([]);
+
+    mkdirSync(join(folder, '29990101000000_extra'));
+    writeFileSync(
+      join(folder, '29990101000000_extra', 'migration.sql'),
+      'CREATE TABLE `extra` (`id` text);',
+    );
+
+    const db = drizzle({ client: new DatabaseSync(path) });
+
+    cleanups.push(() => db.$client.close());
+    migrateDatabase(db, path, folder);
+
+    expect(backups(directory)).toEqual(['backup-before-29990101000000_extra.sqlite']);
+    expect(appliedMigrations(db.$client)).toEqual([baseline, '29990101000000_extra']);
+    expect(db.$client.prepare('SELECT * FROM extra').all()).toEqual([]);
+  });
+
+  it('backs up an existing legacy database before upgrading and keeps its data', () => {
+    const directory = temporaryDirectory();
+    const path = join(directory, 'state.sqlite');
+    const legacy = new DatabaseSync(path);
+
     legacy.exec(`
       CREATE TABLE snapshots (account TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (account, id));
       CREATE TABLE triage (account TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (account, id));
@@ -77,7 +208,7 @@ describe('database migrations', () => {
     legacy.close();
   });
 
-  it('rolls back a failing migration and leaves the version unchanged', () => {
+  it('rolls back a failing legacy migration and leaves the version unchanged', () => {
     const db = new DatabaseSync(':memory:');
     const broken: Migration = {
       version: 1,

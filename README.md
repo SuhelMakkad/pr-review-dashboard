@@ -67,13 +67,13 @@ The app binds to `127.0.0.1` only, rejects unexpected hosts and origins, and req
 
 ## Data, backup and recovery
 
-Everything lives in `.data/` (SQLite: cached PRs, notes, drafts, triage, AI results, history). Schema upgrades back up the previous database first (`.data/backup-v<N>.sqlite`). To back up, stop the app and copy `.data/`. To start fresh, stop the app and rename `.data/`. Notes and drafts are stored locally but not encrypted, so protect the folder like other work data.
+Everything lives in `.data/` (SQLite: cached PRs, notes, drafts, triage, AI results, history). Schema upgrades back up the previous database first (`.data/backup-before-<migration>.sqlite`, or `.data/backup-v<N>.sqlite` for databases from before Drizzle). To back up, stop the app and copy `.data/`. To start fresh, stop the app and rename `.data/`. Notes and drafts are stored locally but not encrypted, so protect the folder like other work data.
 
 Syncing is incremental: a cheap fingerprint per PR decides when a full refresh is needed, with a full check every 30 minutes and on opening a PR. Search failures never drop a PR, and a PR leaves the list only once GitHub confirms it was closed or merged.
 
 ## Development
 
-React, TypeScript and Vite (TanStack Router and Query, Tailwind CSS, Radix primitives, `@pierre/diffs`) on the front end; Fastify and Node's built-in SQLite on the server. `shared/` holds the pure rules (attention, author blockers, diffs, tickets, insights), `server/` the GitHub layer, sync, reviews, AI, Linear, notifications and insights, and `src/features/` the UI.
+React, TypeScript and Vite (TanStack Router and Query, Tailwind CSS, Radix primitives, `@pierre/diffs`) on the front end; Fastify and Drizzle ORM over Node's built-in SQLite on the server. `shared/` holds the pure rules (attention, author blockers, diffs, tickets, insights), `server/` the GitHub layer, sync, reviews, AI, Linear, notifications and insights, and `src/features/` the UI.
 
 ```bash
 pnpm test          # unit and component tests (Vitest)
@@ -81,5 +81,7 @@ pnpm e2e           # builds, then Playwright against demo mode in light and dark
 pnpm typecheck
 pnpm format:check
 ```
+
+To change the database schema, edit `server/db/schema.ts`, run `pnpm db:generate --name <change>` and commit the new folder under `drizzle/`. The app applies pending migrations on start. Never edit a migration that has already been released; generate a new one instead.
 
 Every GraphQL document is validated against GitHub's published schema (`tests/schema/github.graphql`). Demo mode (`server/demo/`) models commit graphs, force pushes, GitHub writes with a write log and failure injection, Linear issues, AI answers and review history, so end-to-end tests never touch GitHub or spend AI quota.

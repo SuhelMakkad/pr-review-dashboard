@@ -1,3 +1,4 @@
+import { and, eq } from 'drizzle-orm';
 import type { AuthorItem } from '../../shared/author.js';
 import {
   defaultNotificationSettings,
@@ -7,7 +8,8 @@ import {
   type ReviewNotification,
 } from '../../shared/notify.js';
 import type { PullRequestItem } from '../../shared/types.js';
-import type { Store } from '../db/store.js';
+import { notificationLog } from '../db/schema.js';
+import { batches, type Store } from '../db/store.js';
 import type { EventBus } from '../events.js';
 
 const SETTINGS_KEY = 'notification-settings';
@@ -108,20 +110,32 @@ export class Notifier {
   private seen(account: string, key: string): boolean {
     return Boolean(
       this.store.db
-        .prepare('SELECT 1 FROM notification_log WHERE account = ? AND key = ?')
-        .get(account, key),
+        .select({ key: notificationLog.key })
+        .from(notificationLog)
+        .where(and(eq(notificationLog.account, account), eq(notificationLog.key, key)))
+        .get(),
     );
   }
 
   private remember(account: string, notifications: ReviewNotification[], channel: string) {
-    const insert = this.store.db.prepare(
-      'INSERT OR IGNORE INTO notification_log (account, key, pr_id, channel, sent_at) VALUES (?, ?, ?, ?, ?)',
-    );
-    const now = new Date().toISOString();
+    const sentAt = new Date().toISOString();
 
     this.store.transaction(() => {
-      for (const notification of notifications)
-        insert.run(account, notification.key, notification.prId, channel, now);
+      for (const batch of batches(notifications)) {
+        this.store.db
+          .insert(notificationLog)
+          .values(
+            batch.map((notification) => ({
+              account,
+              key: notification.key,
+              prId: notification.prId,
+              channel,
+              sentAt,
+            })),
+          )
+          .onConflictDoNothing()
+          .run();
+      }
     });
   }
 

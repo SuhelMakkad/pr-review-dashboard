@@ -150,7 +150,7 @@ export class ReviewService {
       body: draft?.body ?? '',
       event: draft?.event ?? 'COMMENT',
       comments: draft?.comments ?? [],
-      updatedAt: draft?.updated_at ?? null,
+      updatedAt: draft?.updatedAt ?? null,
       githubPendingReview: pr.pendingReview
         ? { id: pr.pendingReview.id, commentCount: pr.pendingReview.commentCount }
         : null,
@@ -253,8 +253,8 @@ export class ReviewService {
 
     const draft = this.drafts.draft(account, prId);
 
-    if (draft?.github_review_id) {
-      await this.write(() => this.github.deleteReview(draft.github_review_id!));
+    if (draft?.githubReviewId) {
+      await this.write(() => this.github.deleteReview(draft.githubReviewId!));
     }
 
     this.drafts.clear(account, prId);
@@ -387,7 +387,7 @@ export class ReviewService {
     const comments = draft.comments;
 
     return this.write(async () => {
-      let reviewId = draft.github_review_id ?? pr.pendingReview?.id ?? null;
+      let reviewId = draft.githubReviewId ?? pr.pendingReview?.id ?? null;
 
       if (!reviewId) {
         reviewId = await this.github.addPendingReview(prId, pr.headOid);

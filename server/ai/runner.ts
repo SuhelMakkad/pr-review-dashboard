@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import {
   defaultAiSettings,
   type AiProvider,
@@ -15,6 +16,7 @@ import {
 import { commentableLines } from '../../shared/diff.js';
 import type { DraftComment, ReviewDraft } from '../../shared/review.js';
 import type { PullRequestDetail, PullRequestSnapshot } from '../../shared/types.js';
+import { aiRuns, type AiRunRow } from '../db/schema.js';
 import type { DiffService } from '../diff/service.js';
 import type { EventBus } from '../events.js';
 import { redact, safeError } from '../github/errors.js';
@@ -39,24 +41,6 @@ import {
 const MAX_CONCURRENT = 2;
 const PROBE_TTL_MS = 5 * 60_000;
 const SETTINGS_KEY = 'ai-settings';
-
-interface RunRow {
-  id: string;
-  account: string;
-  pr_id: string;
-  task: AiTask;
-  provider: AiProvider;
-  model: string | null;
-  effort: AiRun['effort'];
-  head_oid: string;
-  cache_key: string;
-  status: AiRun['status'];
-  progress: string | null;
-  result: string | null;
-  error: string | null;
-  created_at: string;
-  finished_at: string | null;
-}
 
 /**
  * Runs AI tasks through local agent CLIs: one queue, at most two runs at once and one per
@@ -85,10 +69,10 @@ export class AiRunner {
   ) {
     // Runs cut short by a restart cannot resume; say so instead of leaving them spinning.
     this.db
-      .prepare(
-        "UPDATE ai_runs SET status = 'interrupted', finished_at = ? WHERE status IN ('queued', 'running')",
-      )
-      .run(new Date().toISOString());
+      .update(aiRuns)
+      .set({ status: 'interrupted', finishedAt: new Date().toISOString() })
+      .where(inArray(aiRuns.status, ['queued', 'running']))
+      .run();
   }
 
   private get db() {
@@ -178,48 +162,42 @@ export class AiRunner {
     return sinceReviewInput(pr, await this.diffs.manifest(pr, 'since-review', reviewOid), account);
   }
 
-  private toRun(row: RunRow, currentHead?: string): AiRun {
+  private toRun(row: AiRunRow, currentHead?: string): AiRun {
     return {
       id: row.id,
-      prId: row.pr_id,
+      prId: row.prId,
       task: row.task,
       provider: row.provider,
       model: row.model,
       effort: row.effort,
-      headOid: row.head_oid,
+      headOid: row.headOid,
       status: row.status,
       progress: row.progress,
       result: row.result ? (JSON.parse(row.result) as AiResult) : null,
       error: row.error,
-      createdAt: row.created_at,
-      finishedAt: row.finished_at,
-      stale: Boolean(currentHead && currentHead !== row.head_oid),
+      createdAt: row.createdAt,
+      finishedAt: row.finishedAt,
+      stale: Boolean(currentHead && currentHead !== row.headOid),
     };
   }
 
-  private row(id: string): RunRow | null {
-    return (
-      (this.db.prepare('SELECT * FROM ai_runs WHERE id = ?').get(id) as RunRow | undefined) ?? null
-    );
+  private row(id: string): AiRunRow | null {
+    return this.db.select().from(aiRuns).where(eq(aiRuns.id, id)).get() ?? null;
   }
 
   private update(
     id: string,
     changes: Partial<
-      Pick<RunRow, 'status' | 'progress' | 'result' | 'error' | 'model' | 'finished_at'>
-    > & { usage?: string | null },
+      Pick<AiRunRow, 'status' | 'progress' | 'result' | 'error' | 'model' | 'usage' | 'finishedAt'>
+    >,
   ) {
-    const entries = Object.entries(changes);
+    if (Object.keys(changes).length === 0) return;
 
-    if (entries.length === 0) return;
-
-    this.db
-      .prepare(`UPDATE ai_runs SET ${entries.map(([key]) => `${key} = ?`).join(', ')} WHERE id = ?`)
-      .run(...entries.map(([, value]) => (value ?? null) as string | null), id);
+    this.db.update(aiRuns).set(changes).where(eq(aiRuns.id, id)).run();
   }
 
-  private emit(row: Pick<RunRow, 'pr_id' | 'id'>) {
-    this.events.emit({ type: 'ai.updated', prId: row.pr_id, runId: row.id });
+  private emit(row: Pick<AiRunRow, 'prId' | 'id'>) {
+    this.events.emit({ type: 'ai.updated', prId: row.prId, runId: row.id });
   }
 
   async start(
@@ -269,10 +247,18 @@ export class AiRunner {
       )
       .digest('hex');
     const existing = this.db
-      .prepare(
-        "SELECT * FROM ai_runs WHERE account = ? AND cache_key = ? AND status IN ('queued', 'running', 'done') ORDER BY created_at DESC LIMIT 1",
+      .select()
+      .from(aiRuns)
+      .where(
+        and(
+          eq(aiRuns.account, account),
+          eq(aiRuns.cacheKey, key),
+          inArray(aiRuns.status, ['queued', 'running', 'done']),
+        ),
       )
-      .get(account, key) as RunRow | undefined;
+      .orderBy(desc(aiRuns.createdAt))
+      .limit(1)
+      .get();
 
     if (existing && (existing.status !== 'done' || !options.force))
       return this.toRun(existing, head);
@@ -280,27 +266,27 @@ export class AiRunner {
     const id = randomUUID();
 
     this.db
-      .prepare(
-        `INSERT INTO ai_runs (id, account, pr_id, task, provider, model, effort, head_oid, prompt_version, cache_key, status, progress, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'Waiting to start…', ?)`,
-      )
-      .run(
+      .insert(aiRuns)
+      .values({
         id,
         account,
         prId,
         task,
         provider,
-        taskSettings.model,
-        taskSettings.effort,
-        head,
-        promptVersions[task],
-        key,
-        new Date().toISOString(),
-      );
+        model: taskSettings.model,
+        effort: taskSettings.effort,
+        headOid: head,
+        promptVersion: promptVersions[task],
+        cacheKey: key,
+        status: 'queued',
+        progress: 'Waiting to start…',
+        createdAt: new Date().toISOString(),
+      })
+      .run();
     this.inputs.set(id, input);
     this.snapshots.set(id, structuredClone(detail.snapshot));
     this.queue.push(id);
-    this.emit({ id, pr_id: prId });
+    this.emit({ id, prId });
     this.pump();
 
     return this.toRun(this.row(id)!, head);
@@ -403,14 +389,14 @@ export class AiRunner {
         model: result.model,
         result: redact(JSON.stringify(output)),
         usage: result.usage ? JSON.stringify(result.usage) : null,
-        finished_at: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
       });
     } catch (error) {
       this.update(id, {
         status: controller.signal.aborted ? 'cancelled' : 'failed',
         progress: null,
         error: controller.signal.aborted ? null : safeError(error),
-        finished_at: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
       });
     } finally {
       this.active.delete(id);
@@ -423,8 +409,8 @@ export class AiRunner {
   }
 
   /** Keeps only anchors GitHub would accept; the rest stay as unanchored suggestions. */
-  private async anchor(row: RunRow, result: DraftCommentsResult): Promise<DraftCommentsResult> {
-    const detail = this.sync.detail(row.pr_id);
+  private async anchor(row: AiRunRow, result: DraftCommentsResult): Promise<DraftCommentsResult> {
+    const detail = this.sync.detail(row.prId);
 
     if (!detail) return result;
 
@@ -470,7 +456,7 @@ export class AiRunner {
       this.update(id, {
         status: 'cancelled',
         progress: null,
-        finished_at: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
       });
       this.emit(row);
     }
@@ -480,9 +466,12 @@ export class AiRunner {
   runs(account: string, prId: string): AiRun[] {
     const head = this.sync.detail(prId)?.snapshot.headOid;
     const rows = this.db
-      .prepare('SELECT * FROM ai_runs WHERE account = ? AND pr_id = ? ORDER BY created_at DESC')
-      .all(account, prId) as unknown as RunRow[];
-    const latest = new Map<AiTask, RunRow>();
+      .select()
+      .from(aiRuns)
+      .where(and(eq(aiRuns.account, account), eq(aiRuns.prId, prId)))
+      .orderBy(desc(aiRuns.createdAt))
+      .all();
+    const latest = new Map<AiTask, AiRunRow>();
 
     for (const row of rows) if (!latest.has(row.task)) latest.set(row.task, row);
 
@@ -501,7 +490,7 @@ export class AiRunner {
 
     if (!suggestion) throw new ReviewError('NOT_FOUND', 404, 'That suggestion no longer exists.');
 
-    return this.reviews.addComment(row.pr_id, {
+    return this.reviews.addComment(row.prId, {
       account,
       path: suggestion.path,
       line: suggestion.line,
@@ -525,12 +514,12 @@ export class AiRunner {
       throw new ReviewError('NOT_FOUND', 404, 'That completed review is unavailable.');
     }
 
-    this.detail(account, row.pr_id);
-    await this.sync.refresh(row.pr_id);
+    this.detail(account, row.prId);
+    await this.sync.refresh(row.prId);
 
-    const detail = this.detail(account, row.pr_id);
+    const detail = this.detail(account, row.prId);
 
-    if (detail.snapshot.headOid !== row.head_oid) {
+    if (detail.snapshot.headOid !== row.headOid) {
       throw new ReviewError(
         'HEAD_MOVED',
         409,
@@ -546,7 +535,7 @@ export class AiRunner {
     }
 
     const changedPaths = new Set(detail.snapshot.files.map((file) => file.path));
-    const draft = this.reviews.draft(account, row.pr_id);
+    const draft = this.reviews.draft(account, row.prId);
     const general = selected.filter((comment) => !changedPaths.has(comment.path));
     const summary = [
       '## Codex review',
@@ -572,9 +561,9 @@ export class AiRunner {
     }
 
     const full = await this.diffs.manifest(detail.snapshot, 'full', null);
-    const latest = this.detail(account, row.pr_id).snapshot;
+    const latest = this.detail(account, row.prId).snapshot;
 
-    if (latest.headOid !== row.head_oid) {
+    if (latest.headOid !== row.headOid) {
       throw new ReviewError(
         'HEAD_MOVED',
         409,
@@ -601,7 +590,7 @@ export class AiRunner {
         const exists = draft.comments.some(
           (existing) =>
             existing.origin === 'ai' &&
-            existing.anchorOid === row.head_oid &&
+            existing.anchorOid === row.headOid &&
             existing.path === comment.path &&
             existing.line === comment.line &&
             existing.side === comment.side &&
@@ -610,20 +599,20 @@ export class AiRunner {
 
         if (exists) continue;
 
-        this.reviews.drafts.addComment(account, row.pr_id, {
+        this.reviews.drafts.addComment(account, row.prId, {
           ...comment,
           startLine: null,
           startSide: null,
           subjectType: comment.line === null ? 'FILE' : 'LINE',
           origin: 'ai',
-          anchorOid: row.head_oid,
+          anchorOid: row.headOid,
         });
       }
 
-      this.reviews.drafts.saveMeta(account, row.pr_id, { body });
+      this.reviews.drafts.saveMeta(account, row.prId, { body });
     });
-    this.events.emit({ type: 'draft.updated', id: row.pr_id });
+    this.events.emit({ type: 'draft.updated', id: row.prId });
 
-    return this.reviews.draft(account, row.pr_id);
+    return this.reviews.draft(account, row.prId);
   }
 }

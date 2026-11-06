@@ -17,6 +17,11 @@ export interface Config {
   webRoot: string | null;
 }
 
+/** The repository root, whether running from `server/` (tsx) or the built `dist/server/`. */
+export const projectRoot = fileURLToPath(
+  new URL(import.meta.url.includes('/dist/') ? '../../' : '../', import.meta.url),
+);
+
 const PORTS = {
   production: { ui: 4317, api: 4317 },
   development: { ui: 4317, api: 4318 },
@@ -43,9 +48,6 @@ export function loadConfig(argv = process.argv, env = process.env): Config {
         ? PORTS.development
         : PORTS.production;
 
-  const projectRoot = fileURLToPath(
-    new URL(import.meta.url.includes('/dist/') ? '../../' : '../', import.meta.url),
-  );
   const port = Number(env.REVIEW_DESK_PORT) || ports.api;
   const uiPort = env.REVIEW_DESK_PORT && !viteDev ? port : ports.ui;
   const dataDir = resolve(

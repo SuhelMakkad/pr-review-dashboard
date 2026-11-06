@@ -1,3 +1,5 @@
+import { eq } from 'drizzle-orm';
+import { activityEvents } from '../db/schema.js';
 import type { EventBus } from '../events.js';
 import { safeError } from '../github/errors.js';
 import type { SyncService } from '../sync/service.js';
@@ -60,11 +62,12 @@ export class Backfill {
     const done = new Set(force ? [] : state.doneWindows);
     const now = Date.now();
     const known = new Set(
-      (
-        this.sync.store.db
-          .prepare('SELECT DISTINCT pr_id FROM activity_events WHERE account = ?')
-          .all(login) as { pr_id: string }[]
-      ).map((row) => row.pr_id),
+      this.sync.store.db
+        .selectDistinct({ prId: activityEvents.prId })
+        .from(activityEvents)
+        .where(eq(activityEvents.account, login))
+        .all()
+        .map((row) => row.prId),
     );
     const save = (patch: Partial<Omit<BackfillState, 'running'>>) =>
       this.sync.store.setSetting(this.key(login), {

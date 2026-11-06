@@ -9,10 +9,12 @@ export interface Migration {
 }
 
 /**
- * Ordered schema history. Never edit a released migration; append a new one instead.
- * Version 1 is the v1 schema, so databases created by Review Desk v1 upgrade in place.
+ * The schema history from before Drizzle, frozen at version 5. It now only brings older databases
+ * up to version 5, which is identical to Drizzle's baseline migration; new schema changes go in
+ * `server/db/schema.ts` and `drizzle/`. Version 1 is the v1 schema, so databases created by Review
+ * Desk v1 upgrade in place.
  */
-export const migrations: Migration[] = [
+export const legacyMigrations: Migration[] = [
   {
     version: 1,
     name: 'initial',
@@ -121,25 +123,26 @@ export function schemaVersion(db: DatabaseSync): number {
   return Number(row.user_version);
 }
 
-function backupPath(databasePath: string, version: number): string {
+/** Where to copy the database before upgrading it, never overwriting an earlier backup. */
+export function backupPath(databasePath: string, label: string): string {
   const directory = dirname(databasePath);
-  const base = join(directory, `backup-v${version}.sqlite`);
+  const base = join(directory, `backup-${label}.sqlite`);
 
-  return existsSync(base) ? join(directory, `backup-v${version}-${Date.now()}.sqlite`) : base;
+  return existsSync(base) ? join(directory, `backup-${label}-${Date.now()}.sqlite`) : base;
 }
 
 /**
  * Applies pending migrations, each in its own immediate transaction. An existing on-disk database
  * is copied with VACUUM INTO before its first pending migration, so an upgrade can be undone.
  */
-export function migrate(db: DatabaseSync, databasePath: string, list = migrations): number {
+export function migrate(db: DatabaseSync, databasePath: string, list = legacyMigrations): number {
   const current = schemaVersion(db);
   const pending = list.filter((migration) => migration.version > current);
 
   if (pending.length === 0) return current;
 
   if (current > 0 && databasePath !== ':memory:') {
-    db.prepare('VACUUM INTO ?').run(backupPath(databasePath, current));
+    db.prepare('VACUUM INTO ?').run(backupPath(databasePath, `v${current}`));
   }
 
   for (const migration of pending) {

@@ -275,7 +275,7 @@ describe('AI runner', () => {
     ]);
     expect(
       (
-        store.db.prepare('SELECT status FROM ai_runs WHERE id = ?').get(run.id) as {
+        store.db.$client.prepare('SELECT status FROM ai_runs WHERE id = ?').get(run.id) as {
           status: string;
         }
       ).status,

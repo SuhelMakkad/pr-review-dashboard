@@ -1,40 +1,47 @@
 import { randomUUID } from 'node:crypto';
-import type { DraftComment, ReviewEvent, Side } from '../../shared/review.js';
+import { and, asc, eq, ne, or, sql } from 'drizzle-orm';
+import { union } from 'drizzle-orm/sqlite-core';
+import type { DraftComment, ReviewEvent } from '../../shared/review.js';
+import { draftComments, reviewDrafts, type ReviewDraftRow } from '../db/schema.js';
 import type { Store } from '../db/store.js';
 
-interface DraftRow {
-  body: string;
-  event: ReviewEvent;
-  github_review_id: string | null;
-  updated_at: string;
-}
+type DraftMeta = Pick<ReviewDraftRow, 'body' | 'event' | 'githubReviewId' | 'updatedAt'>;
 
-const toComment = (row: Record<string, unknown>): DraftComment => ({
-  id: String(row.id),
-  path: String(row.path),
-  line: row.line === null ? null : Number(row.line),
-  side: String(row.side) as Side,
-  startLine: row.start_line === null ? null : Number(row.start_line),
-  startSide: row.start_side === null ? null : (String(row.start_side) as Side),
-  subjectType: String(row.subject_type) as DraftComment['subjectType'],
-  body: String(row.body),
-  origin: String(row.origin) as DraftComment['origin'],
-  anchorOid: String(row.anchor_oid),
-  status: String(row.status) as DraftComment['status'],
-  createdAt: String(row.created_at),
-  updatedAt: String(row.updated_at),
-});
+const commentFields = {
+  id: draftComments.id,
+  path: draftComments.path,
+  line: draftComments.line,
+  side: draftComments.side,
+  startLine: draftComments.startLine,
+  startSide: draftComments.startSide,
+  subjectType: draftComments.subjectType,
+  body: draftComments.body,
+  origin: draftComments.origin,
+  anchorOid: draftComments.anchorOid,
+  status: draftComments.status,
+  createdAt: draftComments.createdAt,
+  updatedAt: draftComments.updatedAt,
+};
 
 /** Local, unsubmitted review drafts. Nothing here reaches GitHub until the user submits. */
 export class DraftStore {
   constructor(private readonly store: Store) {}
 
-  draft(account: string, prId: string): (DraftRow & { comments: DraftComment[] }) | null {
-    const row = this.store.db
-      .prepare(
-        'SELECT body, event, github_review_id, updated_at FROM review_drafts WHERE account = ? AND pr_id = ?',
-      )
-      .get(account, prId) as DraftRow | undefined;
+  private get db() {
+    return this.store.db;
+  }
+
+  draft(account: string, prId: string): (DraftMeta & { comments: DraftComment[] }) | null {
+    const row = this.db
+      .select({
+        body: reviewDrafts.body,
+        event: reviewDrafts.event,
+        githubReviewId: reviewDrafts.githubReviewId,
+        updatedAt: reviewDrafts.updatedAt,
+      })
+      .from(reviewDrafts)
+      .where(and(eq(reviewDrafts.account, account), eq(reviewDrafts.prId, prId)))
+      .get();
     const comments = this.comments(account, prId);
 
     if (!row && comments.length === 0) return null;
@@ -42,31 +49,40 @@ export class DraftStore {
     return {
       body: row?.body ?? '',
       event: row?.event ?? 'COMMENT',
-      github_review_id: row?.github_review_id ?? null,
-      updated_at: row?.updated_at ?? comments.at(-1)!.updatedAt,
+      githubReviewId: row?.githubReviewId ?? null,
+      updatedAt: row?.updatedAt ?? comments.at(-1)!.updatedAt,
       comments,
     };
   }
 
   comments(account: string, prId: string): DraftComment[] {
-    return (
-      this.store.db
-        .prepare(
-          'SELECT * FROM draft_comments WHERE account = ? AND pr_id = ? ORDER BY created_at, rowid',
-        )
-        .all(account, prId) as Record<string, unknown>[]
-    ).map(toComment);
+    return this.db
+      .select(commentFields)
+      .from(draftComments)
+      .where(and(eq(draftComments.account, account), eq(draftComments.prId, prId)))
+      .orderBy(asc(draftComments.createdAt), sql`rowid`)
+      .all();
   }
 
   /** PR ids with a draft in progress, for badges in the inbox. */
   prsWithDrafts(account: string): Set<string> {
-    const rows = this.store.db
-      .prepare(
-        "SELECT pr_id FROM draft_comments WHERE account = ? UNION SELECT pr_id FROM review_drafts WHERE account = ? AND (body != '' OR event != 'COMMENT')",
-      )
-      .all(account, account) as { pr_id: string }[];
+    const rows = union(
+      this.db
+        .select({ prId: draftComments.prId })
+        .from(draftComments)
+        .where(eq(draftComments.account, account)),
+      this.db
+        .select({ prId: reviewDrafts.prId })
+        .from(reviewDrafts)
+        .where(
+          and(
+            eq(reviewDrafts.account, account),
+            or(ne(reviewDrafts.body, ''), ne(reviewDrafts.event, 'COMMENT')),
+          ),
+        ),
+    ).all();
 
-    return new Set(rows.map((row) => row.pr_id));
+    return new Set(rows.map((row) => row.prId));
   }
 
   saveMeta(
@@ -75,22 +91,21 @@ export class DraftStore {
     changes: { body?: string; event?: ReviewEvent; githubReviewId?: string | null },
   ): void {
     const current = this.draft(account, prId);
-    const now = new Date().toISOString();
-
-    this.store.db
-      .prepare(
-        'INSERT OR REPLACE INTO review_drafts (account, pr_id, body, event, github_review_id, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
-      )
-      .run(
-        account,
-        prId,
-        changes.body ?? current?.body ?? '',
-        changes.event ?? current?.event ?? 'COMMENT',
+    const meta = {
+      body: changes.body ?? current?.body ?? '',
+      event: changes.event ?? current?.event ?? 'COMMENT',
+      githubReviewId:
         changes.githubReviewId !== undefined
           ? changes.githubReviewId
-          : (current?.github_review_id ?? null),
-        now,
-      );
+          : (current?.githubReviewId ?? null),
+      updatedAt: new Date().toISOString(),
+    };
+
+    this.db
+      .insert(reviewDrafts)
+      .values({ account, prId, ...meta })
+      .onConflictDoUpdate({ target: [reviewDrafts.account, reviewDrafts.prId], set: meta })
+      .run();
   }
 
   addComment(
@@ -101,37 +116,38 @@ export class DraftStore {
     const now = new Date().toISOString();
     const id = randomUUID();
 
-    this.store.db
-      .prepare(
-        `INSERT INTO draft_comments (id, account, pr_id, path, line, side, start_line, start_side, subject_type, body, origin, anchor_oid, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
-      )
-      .run(
+    this.db
+      .insert(draftComments)
+      .values({
         id,
         account,
         prId,
-        input.path,
-        input.line,
-        input.side,
-        input.startLine,
-        input.startSide,
-        input.subjectType,
-        input.body,
-        input.origin,
-        input.anchorOid,
-        now,
-        now,
-      );
+        path: input.path,
+        line: input.line,
+        side: input.side,
+        startLine: input.startLine,
+        startSide: input.startSide,
+        subjectType: input.subjectType,
+        body: input.body,
+        origin: input.origin,
+        anchorOid: input.anchorOid,
+        status: 'draft',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
 
     return this.comment(account, id)!;
   }
 
   comment(account: string, id: string): DraftComment | null {
-    const row = this.store.db
-      .prepare('SELECT * FROM draft_comments WHERE account = ? AND id = ?')
-      .get(account, id) as Record<string, unknown> | undefined;
+    const row = this.db
+      .select(commentFields)
+      .from(draftComments)
+      .where(and(eq(draftComments.account, account), eq(draftComments.id, id)))
+      .get();
 
-    return row ? toComment(row) : null;
+    return row ?? null;
   }
 
   updateComment(
@@ -145,37 +161,39 @@ export class DraftStore {
 
     if (!current) return;
 
-    this.store.db
-      .prepare(
-        'UPDATE draft_comments SET body = ?, line = ?, start_line = ?, status = ?, anchor_oid = ?, github_thread_id = COALESCE(?, github_thread_id), updated_at = ? WHERE account = ? AND id = ?',
-      )
-      .run(
-        changes.body ?? current.body,
-        changes.line !== undefined ? changes.line : current.line,
-        changes.startLine !== undefined ? changes.startLine : current.startLine,
-        changes.status ?? current.status,
-        changes.anchorOid ?? current.anchorOid,
-        changes.githubThreadId ?? null,
-        new Date().toISOString(),
-        account,
-        id,
-      );
+    this.db
+      .update(draftComments)
+      .set({
+        body: changes.body ?? current.body,
+        line: changes.line !== undefined ? changes.line : current.line,
+        startLine: changes.startLine !== undefined ? changes.startLine : current.startLine,
+        status: changes.status ?? current.status,
+        anchorOid: changes.anchorOid ?? current.anchorOid,
+        // Only overwrite the thread id when a new one is given.
+        ...(changes.githubThreadId !== undefined ? { githubThreadId: changes.githubThreadId } : {}),
+        updatedAt: new Date().toISOString(),
+      })
+      .where(and(eq(draftComments.account, account), eq(draftComments.id, id)))
+      .run();
   }
 
   deleteComment(account: string, id: string): void {
-    this.store.db
-      .prepare('DELETE FROM draft_comments WHERE account = ? AND id = ?')
-      .run(account, id);
+    this.db
+      .delete(draftComments)
+      .where(and(eq(draftComments.account, account), eq(draftComments.id, id)))
+      .run();
   }
 
   clear(account: string, prId: string): void {
     this.store.transaction(() => {
-      this.store.db
-        .prepare('DELETE FROM draft_comments WHERE account = ? AND pr_id = ?')
-        .run(account, prId);
-      this.store.db
-        .prepare('DELETE FROM review_drafts WHERE account = ? AND pr_id = ?')
-        .run(account, prId);
+      this.db
+        .delete(draftComments)
+        .where(and(eq(draftComments.account, account), eq(draftComments.prId, prId)))
+        .run();
+      this.db
+        .delete(reviewDrafts)
+        .where(and(eq(reviewDrafts.account, account), eq(reviewDrafts.prId, prId)))
+        .run();
     });
   }
 }
