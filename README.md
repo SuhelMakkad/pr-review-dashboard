@@ -65,13 +65,17 @@ security add-generic-password -U -s review-desk.linear -a api-key -w
 
 ## GitHub account and safety
 
-The server calls `gh api` with your existing login; no token is extracted, stored or sent to the browser. Every write is an explicit action in the UI and states who it posts as. Before any write the server re-checks the live `gh` login and refuses if it changed. Writes are rate-limited, comment lines are checked against the PR's diff, and a review is never submitted on a head you did not see unless you confirm. Submitting is resumable: if GitHub fails part-way, retrying never duplicates comments.
+The server calls `gh api` with your existing login; no token is extracted, stored or sent to the browser. Every write is an explicit action in the UI and states who it posts as. GitHub actions are saved in a durable SQLite outbox before the editor closes. Open **Activity** in the status bar or command palette to inspect progress, saved content, GitHub links, and recovery options. Queued reviews are read-only across tabs; other PRs remain editable. Inbox reviews advance after queue acceptance, while standalone PR pages stay open.
+
+The worker rechecks the live account before each mutation, paces writes, honors rate-limit cooldowns, and validates the reviewed commit before submission. Confirmed steps are checkpointed so recovery resumes the remaining work. If a request may have reached GitHub without a response, Activity checks what it can verify and leaves ambiguous results **Unconfirmed** instead of automatically repeating them. Cancellation is available until sending starts. Cleanup of a partial pending review requires confirmation and saves its GitHub content before restoring the local draft.
+
+Actions continue when the browser closes while the local server remains running. After a server restart, unsent actions resume automatically; interrupted mutations are checked first. Replies attached to an existing GitHub pending review are labeled as pending rather than posted. Viewed-file updates sync quietly and report failures in Activity.
 
 The app binds to `127.0.0.1` only, rejects unexpected hosts and origins, and requires a per-launch session token on every write. Pages cannot be framed, user Markdown renders without raw HTML or remote images, and errors are scrubbed of tokens and keys. To switch account, run `gh auth switch --hostname github.com --user LOGIN`; each account keeps separate data.
 
 ## Data, backup and recovery
 
-Everything lives in `.data/` (SQLite: cached PRs, notes, drafts, triage, AI results, history). Schema upgrades back up the previous database first (`.data/backup-before-<migration>.sqlite`, or `.data/backup-v<N>.sqlite` for databases from before Drizzle). To back up, stop the app and copy `.data/`. To start fresh, stop the app and rename `.data/`. Notes and drafts are stored locally but not encrypted, so protect the folder like other work data.
+Everything lives in `.data/` (SQLite: cached PRs, notes, drafts, queued GitHub actions and receipts, triage, AI results, history). Schema upgrades back up the previous database first (`.data/backup-before-<migration>.sqlite`, or `.data/backup-v<N>.sqlite` for databases from before Drizzle). To back up, stop the app and copy `.data/`. To start fresh, stop the app and rename `.data/`. Notes and drafts are stored locally but not encrypted, so protect the folder like other work data.
 
 Syncing is incremental: a cheap fingerprint per PR decides when a full refresh is needed, with a full check every 30 minutes and on opening a PR. Search failures never drop a PR, and a PR leaves the list only once GitHub confirms it was closed or merged.
 
