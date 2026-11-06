@@ -63,6 +63,15 @@ export function useAi(prId: string | null, account: string) {
     filters: { mutationKey: applyKey, exact: true },
     select: (mutation) => ({ status: mutation.state.status, error: mutation.state.error }),
   });
+  const controlKey = ['ai-control', account, prId] as const;
+  const controls = useMutationState({
+    filters: { mutationKey: controlKey, exact: true },
+    select: (mutation) => ({
+      ...(mutation.state.variables as { runId: string; operation: 'pause' | 'resume' }),
+      status: mutation.state.status,
+      error: mutation.state.error,
+    }),
+  });
 
   const runs = useQuery({
     queryKey: key,
@@ -125,6 +134,16 @@ export function useAi(prId: string | null, account: string) {
     onSuccess: () => client.invalidateQueries({ queryKey: key }),
   });
 
+  const control = useMutation({
+    mutationKey: controlKey,
+    mutationFn: ({ runId, operation }: { runId: string; operation: 'pause' | 'resume' }) =>
+      api(`/api/ai/runs/${encodeURIComponent(runId)}/${operation}`, {
+        method: 'POST',
+        body: { account },
+      }),
+    onSettled: () => client.invalidateQueries({ queryKey: key }),
+  });
+
   const accept = useMutation({
     mutationFn: ({ runId, index, body }: { runId: string; index: number; body?: string }) =>
       api<DraftComment>(`/api/ai/runs/${encodeURIComponent(runId)}/accept`, {
@@ -163,7 +182,13 @@ export function useAi(prId: string | null, account: string) {
     runs.data?.runs.find((run) => run.task === task && run.status === 'done') ?? null;
   const startError = (task: AiTask) => starts.filter((state) => state.task === task).at(-1)?.error;
   const isStarting = (task: AiTask) =>
-    starts.some((state) => state.task === task && state.status === 'pending');
+    starts.some((state) => state.task === task && state.status === 'pending') ||
+    controls.some(
+      (state) =>
+        state.operation === 'resume' &&
+        state.runId === latest(task)?.id &&
+        state.status === 'pending',
+    );
   const isRunning = (task: AiTask) => {
     const run = latest(task);
 
@@ -174,6 +199,9 @@ export function useAi(prId: string | null, account: string) {
     runs,
     start,
     cancel,
+    pause: (runId: string) => control.mutate({ runId, operation: 'pause' }),
+    resume: (runId: string) => control.mutate({ runId, operation: 'resume' }),
+    controlError: controls.at(-1)?.error,
     accept,
     prepare,
     preparation: preparations.at(-1),

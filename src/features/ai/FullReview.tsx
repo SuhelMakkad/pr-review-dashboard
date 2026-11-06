@@ -134,6 +134,8 @@ export function FullReview({
           starting={starting}
           onCancel={() => ai.cancel.mutate(run.id)}
           onRerun={launch}
+          onPause={() => ai.pause(run.id)}
+          onResume={() => ai.resume(run.id)}
         >
           {result && (
             <div className="space-y-3">
@@ -276,11 +278,21 @@ export function FullReview({
               ? 'The new review was stopped.'
               : 'The new review was interrupted by a restart.'}{' '}
           Your previous completed review is still available above.
+          {latest.resumable && (
+            <Button size="sm" variant="ghost" onClick={() => ai.resume(latest.id)}>
+              Resume saved review
+            </Button>
+          )}
         </p>
       )}
       {ai.startError('full_review') && (
         <p className="text-xs text-fail" role="alert">
           {ai.startError('full_review')!.message}
+        </p>
+      )}
+      {ai.controlError && (
+        <p role="alert" className="text-xs text-fail">
+          {ai.controlError.message}
         </p>
       )}
       {finishOpen && review.draft.data && (

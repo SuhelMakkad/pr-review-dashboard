@@ -110,6 +110,18 @@ export function registerAiRoutes(app: FastifyInstance, runner: AiRunner): void {
     return input && handle(reply, () => runner.cancel(input.account, request.params.runId));
   });
 
+  app.post<{ Params: { runId: string } }>('/api/ai/runs/:runId/pause', async (request, reply) => {
+    const input = parse(schemas.cancel, request.body, reply);
+
+    return input && handle(reply, () => runner.pause(input.account, request.params.runId));
+  });
+
+  app.post<{ Params: { runId: string } }>('/api/ai/runs/:runId/resume', async (request, reply) => {
+    const input = parse(schemas.cancel, request.body, reply);
+
+    return input && handle(reply, () => runner.resume(input.account, request.params.runId));
+  });
+
   app.post<{ Params: { runId: string } }>('/api/ai/runs/:runId/accept', async (request, reply) => {
     const input = parse(schemas.accept, request.body, reply);
 

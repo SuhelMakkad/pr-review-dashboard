@@ -4,7 +4,8 @@ export type AiProvider = 'codex' | 'claude';
 export type AiTask =
   'full_review' | 'brief' | 'since_review' | 'draft_comments' | 'author_feedback' | 'draft_summary';
 export type AiEffort = 'low' | 'medium' | 'high' | 'xhigh';
-export type AiRunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
+export type AiRunStatus =
+  'queued' | 'running' | 'paused' | 'done' | 'failed' | 'cancelled' | 'interrupted';
 
 export interface BriefResult {
   summary: string;
@@ -77,6 +78,9 @@ export interface AiRun {
   /** True when the code, review discussion, or task inputs changed since this run. */
   stale: boolean;
   staleReason: string | null;
+  resumable: boolean;
+  canPause: boolean;
+  pauseReason: 'user' | 'restart' | null;
   /** How far the Codex credit balance fell during the run; null when it did not or is unknown. */
   creditsUsed: number | null;
 }

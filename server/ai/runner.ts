@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
@@ -18,7 +18,7 @@ import {
 } from '../../shared/ai.js';
 import { commentableLines } from '../../shared/diff.js';
 import type { DraftComment, ReviewDraft } from '../../shared/review.js';
-import type { PullRequestDetail, PullRequestSnapshot } from '../../shared/types.js';
+import type { PullRequestDetail } from '../../shared/types.js';
 import { aiRuns, type AiRunRow } from '../db/schema.js';
 import type { DiffService } from '../diff/service.js';
 import type { EventBus } from '../events.js';
@@ -66,9 +66,7 @@ function creditsUsed(usage: string | null): number | null {
  */
 export class AiRunner {
   private readonly queue: string[] = [];
-  private readonly inputs = new Map<string, string>();
-  private readonly snapshots = new Map<string, PullRequestSnapshot>();
-  private readonly executions = new Set<Promise<void>>();
+  private readonly executions = new Map<string, Promise<void>>();
   private closing = false;
   private readonly active = new Map<string, AbortController>();
   private probes: { at: number; statuses: AiProviderStatus[] } | null = null;
@@ -83,12 +81,34 @@ export class AiRunner {
     private readonly workRoot: string,
     private readonly exportRepository: RepositoryExporter = downloadRepository,
   ) {
-    // Runs cut short by a restart cannot resume; say so instead of leaving them spinning.
-    this.db
-      .update(aiRuns)
-      .set({ status: 'interrupted', finishedAt: new Date().toISOString() })
+    const unfinished = this.db
+      .select()
+      .from(aiRuns)
       .where(inArray(aiRuns.status, ['queued', 'running']))
-      .run();
+      .all();
+
+    for (const row of unfinished) {
+      const resumable = Boolean(row.request && this.providers[row.provider].supportsResume);
+
+      this.db
+        .update(aiRuns)
+        .set(
+          resumable
+            ? {
+                status: 'paused',
+                pauseReason: 'restart',
+                progress: 'Saved after a server restart.',
+                finishedAt: null,
+              }
+            : {
+                status: 'interrupted',
+                progress: null,
+                finishedAt: new Date().toISOString(),
+              },
+        )
+        .where(eq(aiRuns.id, row.id))
+        .run();
+    }
   }
 
   private get db() {
@@ -207,7 +227,9 @@ export class AiRunner {
   }
 
   private toRun(row: AiRunRow, currentHead?: string): AiRun {
-    const staleReason = this.staleReason(row, currentHead);
+    const staleReason =
+      this.staleReason(row, currentHead) ??
+      (row.status === 'paused' && row.request ? this.resumeProblem(row) : null);
 
     return {
       id: row.id,
@@ -225,8 +247,34 @@ export class AiRunner {
       finishedAt: row.finishedAt,
       stale: Boolean(staleReason),
       staleReason,
+      resumable: Boolean(
+        row.request &&
+        this.providers[row.provider].supportsResume &&
+        ['paused', 'failed', 'interrupted'].includes(row.status) &&
+        !this.resumeProblem(row),
+      ),
+      canPause: Boolean(
+        row.request &&
+        this.providers[row.provider].supportsResume &&
+        ['queued', 'running'].includes(row.status),
+      ),
+      pauseReason: row.pauseReason,
       creditsUsed: creditsUsed(row.usage),
     };
+  }
+
+  private resumeProblem(row: AiRunRow): string | null {
+    if (row.promptVersion !== promptVersions[row.task])
+      return 'Review instructions changed. Generate a new review.';
+
+    const pr = this.sync.detail(row.prId)?.snapshot;
+
+    if (!pr) return 'This PR is no longer tracked.';
+    if (!row.request) return 'This run has no saved checkpoint. Generate a new review.';
+    if (reviewFingerprint(pr) !== reviewFingerprint(row.request.snapshot))
+      return 'The PR or its review discussion changed while this run was stopped. Generate a new review.';
+
+    return this.staleReason(row);
   }
 
   private staleReason(row: AiRunRow, currentHead?: string): string | null {
@@ -275,7 +323,19 @@ export class AiRunner {
   private update(
     id: string,
     changes: Partial<
-      Pick<AiRunRow, 'status' | 'progress' | 'result' | 'error' | 'model' | 'usage' | 'finishedAt'>
+      Pick<
+        AiRunRow,
+        | 'status'
+        | 'progress'
+        | 'result'
+        | 'error'
+        | 'model'
+        | 'usage'
+        | 'finishedAt'
+        | 'request'
+        | 'threadId'
+        | 'pauseReason'
+      >
     >,
   ) {
     if (Object.keys(changes).length === 0) return;
@@ -357,7 +417,7 @@ export class AiRunner {
           and(
             eq(aiRuns.account, account),
             eq(aiRuns.cacheKey, key),
-            inArray(aiRuns.status, ['queued', 'running', 'done']),
+            inArray(aiRuns.status, ['queued', 'running', 'paused', 'done']),
           ),
         )
         .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
@@ -365,7 +425,7 @@ export class AiRunner {
         .get();
     const existing = findExisting();
 
-    if (existing && (existing.status !== 'done' || !options.force))
+    if (existing && (!options.force || ['queued', 'running'].includes(existing.status)))
       return this.toRun(existing, head);
 
     // A cached answer costs nothing; a new Codex run must fit in the plan.
@@ -384,10 +444,13 @@ export class AiRunner {
     // Concurrent requests can both pass the first lookup while checking the shared plan status.
     const concurrent = findExisting();
 
-    if (concurrent && (concurrent.status !== 'done' || !options.force))
+    if (concurrent && (!options.force || ['queued', 'running'].includes(concurrent.status)))
       return this.toRun(concurrent, head);
 
     const id = randomUUID();
+
+    if (this.closing)
+      throw new ReviewError('SHUTTING_DOWN', 503, 'The server is restarting. Try again shortly.');
 
     this.db
       .insert(aiRuns)
@@ -403,13 +466,31 @@ export class AiRunner {
         promptVersion: promptVersions[task],
         cacheKey: key,
         context,
+        request: {
+          input,
+          snapshot: structuredClone(detail.snapshot),
+          instructions: instructions[task],
+          schema: jsonSchemaFor(task),
+        },
         status: 'queued',
         progress: 'Waiting to start…',
         createdAt: new Date().toISOString(),
       })
       .run();
-    this.inputs.set(id, input);
-    this.snapshots.set(id, structuredClone(detail.snapshot));
+    const superseded = this.db
+      .select()
+      .from(aiRuns)
+      .where(
+        and(
+          eq(aiRuns.account, account),
+          eq(aiRuns.prId, prId),
+          eq(aiRuns.task, task),
+          inArray(aiRuns.status, ['paused', 'failed', 'interrupted']),
+        ),
+      )
+      .all();
+
+    for (const previous of superseded) this.cancel(account, previous.id);
     this.queue.push(id);
     this.emit({ id, prId });
     this.pump();
@@ -425,8 +506,8 @@ export class AiRunner {
 
       const execution = this.execute(id);
 
-      this.executions.add(execution);
-      void execution.finally(() => this.executions.delete(execution));
+      this.executions.set(id, execution);
+      void execution.finally(() => this.executions.delete(id));
     }
   }
 
@@ -436,35 +517,57 @@ export class AiRunner {
     for (const id of [...this.queue, ...this.active.keys()]) {
       const row = this.row(id);
 
-      if (row) this.cancel(row.account, id);
+      if (!row) continue;
+      if (row.request && this.providers[row.provider].supportsResume)
+        this.pause(row.account, id, 'restart');
+      else this.cancel(row.account, id);
     }
 
-    await Promise.allSettled(this.executions);
+    await Promise.allSettled(this.executions.values());
   }
 
   private async execute(id: string): Promise<void> {
     const row = this.row(id);
-    const input = this.inputs.get(id);
+    const saved = row?.request;
 
-    if (!row || !input) return;
+    if (!row || !saved) return;
 
     const controller = new AbortController();
     const workDir = join(this.workRoot, id);
     let lastEmit = 0;
+    let validCheckpoint = true;
 
     this.active.set(id, controller);
-    this.update(id, { status: 'running', progress: 'Starting…' });
+    this.update(id, {
+      status: 'running',
+      progress: row.threadId ? 'Resuming saved review…' : 'Starting…',
+      pauseReason: null,
+    });
     this.emit(row);
 
     try {
       mkdirSync(workDir, { recursive: true, mode: 0o700 });
 
-      if (row.task === 'full_review') {
+      let prepared = false;
+
+      try {
+        const context = JSON.parse(readFileSync(join(workDir, 'review.json'), 'utf8'));
+
+        prepared =
+          context.headOid === row.headOid && context.repository === saved.snapshot.repository;
+      } catch {
+        // A missing or incomplete workspace is rebuilt at the original commits.
+      }
+
+      if (row.task === 'full_review' && !prepared) {
         this.update(id, { progress: 'Preparing review…' });
         this.emit(row);
 
-        const snapshot = this.snapshots.get(id)!;
+        const snapshot = saved.snapshot;
         const diff = await this.diffs.manifest(snapshot, 'full', null);
+
+        for (const path of ['before', 'after', 'review.json'])
+          rmSync(join(workDir, path), { recursive: true, force: true });
 
         await prepareReviewWorkspace(
           this.sync.github,
@@ -478,16 +581,20 @@ export class AiRunner {
 
       const result = await this.providers[row.provider].run(
         {
-          instructions: instructions[row.task],
-          input,
-          schema: jsonSchemaFor(row.task),
+          instructions: saved.instructions,
+          input: saved.input,
+          schema: saved.schema,
           effort: row.effort,
           model: row.model,
           workDir,
           timeoutMs: timeouts[row.task],
+          threadId: row.threadId,
+          onThread: (threadId, model) => this.update(id, { threadId, model }),
         },
         controller.signal,
         (progress) => {
+          if (controller.signal.aborted) return;
+
           this.update(id, { progress });
 
           if (Date.now() - lastEmit > 400) {
@@ -496,14 +603,19 @@ export class AiRunner {
           }
         },
       );
+      controller.signal.throwIfAborted();
       const parsed = taskSchemas[row.task].safeParse(result.output);
 
-      if (!parsed.success) throw new Error('The agent returned an answer in an unexpected shape.');
+      if (!parsed.success) {
+        validCheckpoint = false;
+        throw new Error('The agent returned an answer in an unexpected shape.');
+      }
 
       const output =
         row.task === 'draft_comments' || row.task === 'full_review'
           ? await this.anchor(row, parsed.data as DraftCommentsResult)
           : parsed.data;
+      controller.signal.throwIfAborted();
 
       this.update(id, {
         status: 'done',
@@ -512,22 +624,34 @@ export class AiRunner {
         result: redact(JSON.stringify(output)),
         usage: result.usage ? JSON.stringify(result.usage) : null,
         finishedAt: new Date().toISOString(),
+        request: null,
       });
     } catch (error) {
-      this.update(id, {
-        status: controller.signal.aborted ? 'cancelled' : 'failed',
-        progress: null,
-        error: controller.signal.aborted ? null : safeError(error),
-        finishedAt: new Date().toISOString(),
-      });
+      if (this.row(id)?.status !== 'paused')
+        this.update(id, {
+          status: controller.signal.aborted ? 'cancelled' : 'failed',
+          progress: null,
+          error: controller.signal.aborted ? null : safeError(error),
+          finishedAt: new Date().toISOString(),
+          ...(controller.signal.aborted ||
+          !validCheckpoint ||
+          !this.providers[row.provider].supportsResume
+            ? { request: null }
+            : {}),
+        });
     } finally {
       // A Codex run changes the plan's usage; read it afresh next time.
       if (row.provider === 'codex') this.codexAccount = null;
 
       this.active.delete(id);
-      this.inputs.delete(id);
-      this.snapshots.delete(id);
-      rmSync(workDir, { recursive: true, force: true });
+      const current = this.row(id);
+      const keepWorkspace =
+        current?.status === 'paused' ||
+        (current?.status === 'failed' &&
+          current.request &&
+          this.providers[row.provider].supportsResume);
+
+      if (!keepWorkspace) rmSync(workDir, { recursive: true, force: true });
       this.emit(row);
       this.pump();
     }
@@ -539,11 +663,7 @@ export class AiRunner {
 
     if (!detail) return result;
 
-    const full = await this.diffs.manifest(
-      this.snapshots.get(row.id) ?? detail.snapshot,
-      'full',
-      null,
-    );
+    const full = await this.diffs.manifest(row.request?.snapshot ?? detail.snapshot, 'full', null);
 
     return {
       ...result,
@@ -568,7 +688,16 @@ export class AiRunner {
     const active = this.active.get(id);
 
     if (active) {
+      this.update(id, {
+        status: 'cancelled',
+        request: null,
+        pauseReason: null,
+        progress: null,
+        error: null,
+        finishedAt: new Date().toISOString(),
+      });
       active.abort();
+      this.emit(row);
       return;
     }
 
@@ -576,14 +705,139 @@ export class AiRunner {
 
     if (queued !== -1) {
       this.queue.splice(queued, 1);
-      this.inputs.delete(id);
-      this.snapshots.delete(id);
       this.update(id, {
         status: 'cancelled',
+        request: null,
         progress: null,
         finishedAt: new Date().toISOString(),
       });
+      rmSync(join(this.workRoot, id), { recursive: true, force: true });
       this.emit(row);
+    }
+
+    if (['paused', 'failed', 'interrupted'].includes(row.status)) {
+      this.update(id, {
+        status: 'cancelled',
+        request: null,
+        pauseReason: null,
+        error: null,
+        progress: null,
+        finishedAt: new Date().toISOString(),
+      });
+      rmSync(join(this.workRoot, id), { recursive: true, force: true });
+      this.emit(row);
+    }
+  }
+
+  pause(account: string, id: string, reason: 'user' | 'restart' = 'user'): void {
+    const row = this.row(id);
+
+    if (!row || row.account !== account)
+      throw new ReviewError('NOT_FOUND', 404, 'That run no longer exists.');
+    if (!['queued', 'running'].includes(row.status)) return;
+    if (!row.request || !this.providers[row.provider].supportsResume)
+      throw new ReviewError('CANNOT_PAUSE', 409, 'This agent does not support pausing.');
+
+    const queued = this.queue.indexOf(id);
+
+    if (queued !== -1) this.queue.splice(queued, 1);
+    this.update(id, {
+      status: 'paused',
+      pauseReason: reason,
+      progress:
+        reason === 'restart' ? 'Saved for recovery after restart.' : 'Paused. Progress is saved.',
+      error: null,
+      finishedAt: null,
+    });
+    this.active.get(id)?.abort();
+    this.emit(row);
+  }
+
+  async resume(account: string, id: string): Promise<AiRun> {
+    let row = this.row(id);
+
+    if (!row || row.account !== account)
+      throw new ReviewError('NOT_FOUND', 404, 'That run no longer exists.');
+    this.detail(account, row.prId);
+
+    if (['queued', 'running'].includes(row.status)) return this.toRun(row);
+    if (
+      !row.request ||
+      !this.providers[row.provider].supportsResume ||
+      !['paused', 'failed', 'interrupted'].includes(row.status)
+    )
+      throw new ReviewError(
+        'CANNOT_RESUME',
+        409,
+        'This run cannot be resumed. Generate a new review.',
+      );
+
+    // A pause may still be waiting for the old process to flush and exit. Never overlap turns.
+    if (this.active.has(id)) await this.executions.get(id);
+
+    await this.sync.refresh(row.prId);
+    const problem = this.resumeProblem(row);
+
+    if (problem) throw new ReviewError('STALE_REVIEW', 409, problem);
+    if (row.provider === 'codex') {
+      const status = await this.codexStatus();
+
+      if (codexBlocked(status))
+        throw new ReviewError(
+          'PLAN_LIMIT',
+          409,
+          status?.problem ?? 'Codex is paused until your plan has usage available.',
+        );
+    }
+
+    row = this.row(id)!;
+
+    if (['queued', 'running'].includes(row.status)) return this.toRun(row);
+    if (this.closing)
+      throw new ReviewError('SHUTTING_DOWN', 503, 'The server is restarting. Try again shortly.');
+    if (!row.request || !['paused', 'failed', 'interrupted'].includes(row.status))
+      throw new ReviewError('CANNOT_RESUME', 409, 'This run is no longer resumable.');
+    const changed = this.resumeProblem(row);
+
+    if (changed) throw new ReviewError('STALE_REVIEW', 409, changed);
+
+    this.update(id, {
+      status: 'queued',
+      pauseReason: null,
+      progress: 'Waiting to resume…',
+      error: null,
+      finishedAt: null,
+    });
+    this.queue.push(id);
+    this.emit(row);
+    this.pump();
+
+    return this.toRun(this.row(id)!);
+  }
+
+  async recover(account: string): Promise<void> {
+    if (this.closing) return;
+
+    const rows = this.db
+      .select()
+      .from(aiRuns)
+      .where(
+        and(
+          eq(aiRuns.account, account),
+          eq(aiRuns.status, 'paused'),
+          eq(aiRuns.pauseReason, 'restart'),
+        ),
+      )
+      .orderBy(aiRuns.createdAt)
+      .all();
+
+    for (const row of rows) {
+      try {
+        await this.resume(account, row.id);
+      } catch (error) {
+        this.update(row.id, { error: safeError(error) });
+        this.emit(row);
+      }
     }
   }
 

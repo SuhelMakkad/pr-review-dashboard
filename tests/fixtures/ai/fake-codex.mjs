@@ -7,7 +7,7 @@
 //   FAKE_CODEX_STALL    1 to go silent once the turn starts
 //   FAKE_CODEX_SOL      1 to also offer gpt-6.1-sol
 //   FAKE_CODEX_CREDITS  balance after the run (default: unchanged)
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,12 @@ const scenario = {
 };
 const seen = { clientInfo: null, thread: null, turn: null, declined: false, interrupted: false };
 let limitReads = 0;
+const historyPath = join(process.cwd(), '.fake-codex-history.json');
+let history = null;
+
+const saveHistory = () => {
+  if (history && !history.options.ephemeral) writeFileSync(historyPath, JSON.stringify(history));
+};
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const notify = (method, params) => send({ method, params });
@@ -89,11 +95,14 @@ function playTurn() {
 
     if (message.method === 'item/completed' && message.params.item.type === 'agentMessage') {
       message.params.item.text = JSON.stringify(answer());
+      history.turn.items.push(message.params.item);
     }
 
     send(message);
   }
 
+  history.turn.status = 'completed';
+  saveHistory();
   notify('turn/completed', {
     threadId: 'thread-1',
     turn: { id: 'turn-1', items: [], status: 'completed', error: null },
@@ -147,6 +156,8 @@ const handlers = {
   }),
   'thread/start': (params) => {
     seen.thread = params;
+    history = { options: params, turn: null, turnStarts: 0 };
+    saveHistory();
 
     if (scenario.mcp === 'stuck') {
       setTimeout(() =>
@@ -162,8 +173,25 @@ const handlers = {
 
     return { thread: { id: 'thread-1' }, model: params.model ?? 'pinned-model' };
   },
+  'thread/resume': (params) => {
+    if (!existsSync(historyPath) || process.env.FAKE_CODEX_RESUME_FAIL)
+      throw new Error('Saved thread not found.');
+
+    history = JSON.parse(readFileSync(historyPath, 'utf8'));
+    seen.thread = { ...params, resumed: true };
+
+    return {
+      thread: { id: 'thread-1', status: { type: 'idle' } },
+      model: params.model ?? history.options.model,
+    };
+  },
+  'thread/turns/list': () => ({ data: history?.turn ? [history.turn] : [], nextCursor: null }),
   'turn/start': (params) => {
     seen.turn = params;
+    history.turn = { id: 'turn-1', status: 'inProgress', items: [], input: params.input };
+    history.turnStarts += 1;
+    saveHistory();
+    writeFileSync(join(process.cwd(), '.fake-turn-started'), 'yes');
 
     // An approval request must be declined (runs are unattended); the turn plays once it is. The
     // MCP tripwire must stop the run before anything else happens.
@@ -175,6 +203,8 @@ const handlers = {
   },
   'turn/interrupt': () => {
     seen.interrupted = true;
+    if (history?.turn) history.turn.status = 'interrupted';
+    saveHistory();
     // Visible to the test: the run's working directory is this process's cwd.
     writeFileSync(join(process.cwd(), 'interrupted'), 'yes');
     notify('turn/completed', {
@@ -209,5 +239,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     return;
   }
 
-  send({ id: message.id, result: handler(message.params) });
+  try {
+    send({ id: message.id, result: handler(message.params) });
+  } catch (error) {
+    send({ id: message.id, error: { code: -32000, message: error.message } });
+  }
 });

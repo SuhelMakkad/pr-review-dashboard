@@ -13,9 +13,11 @@ export interface AgentRequest {
   schema: Record<string, unknown>;
   effort: AiEffort;
   model: string | null;
-  /** Private, empty working directory for this run. */
+  /** Private working directory, retained while a resumable run is paused. */
   workDir: string;
   timeoutMs: number;
+  threadId?: string | null;
+  onThread?: (threadId: string, model: string | null) => void;
 }
 
 export interface AgentResult {
@@ -28,6 +30,7 @@ export interface AgentProvider {
   id: AiProvider;
   label: string;
   demo: boolean;
+  supportsResume?: boolean;
   probe(): Promise<{ available: boolean; version: string | null; reason: string | null }>;
   /** Codex only: the sign-in, plan usage and models runs would use. */
   status?(): Promise<CodexAccountStatus>;

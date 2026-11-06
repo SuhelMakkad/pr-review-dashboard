@@ -54,6 +54,8 @@ export function Suggestions({
       title="Suggested comments"
       starting={ai.isStarting('draft_comments')}
       onCancel={() => ai.cancel.mutate(run.id)}
+      onPause={() => ai.pause(run.id)}
+      onResume={() => ai.resume(run.id)}
       onRerun={() =>
         ai.start.mutate({ task: 'draft_comments', provider: run.provider, force: true })
       }

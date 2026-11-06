@@ -2,6 +2,7 @@ import type { AiProvider, CodexAccountStatus } from '../../shared/ai.js';
 import type { AgentProvider, AgentRequest } from './provider.js';
 import { AgentError } from './provider.js';
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { DiffFile } from '../../shared/diff.js';
 import { annotatePatch } from './context.js';
@@ -26,6 +27,10 @@ export class FixtureProvider implements AgentProvider {
   /** Fail the next run with this message (failure injection for tests). */
   failNext: string | null = null;
   delayMs = 120;
+
+  get supportsResume() {
+    return this.id === 'codex';
+  }
 
   constructor(readonly id: AiProvider) {
     this.label = id === 'codex' ? 'Codex' : 'Claude Code';
@@ -65,6 +70,8 @@ export class FixtureProvider implements AgentProvider {
   }
 
   async run(request: AgentRequest, signal: AbortSignal, onProgress: (progress: string) => void) {
+    if (this.supportsResume) request.onThread?.(request.threadId ?? randomUUID(), 'Codex (demo)');
+
     onProgress('Thinking…');
     await wait(this.delayMs, signal);
     onProgress('Writing the answer…');

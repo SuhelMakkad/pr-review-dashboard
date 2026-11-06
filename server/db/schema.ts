@@ -150,6 +150,14 @@ export const aiRuns = sqliteTable(
     promptVersion: integer('prompt_version').notNull(),
     cacheKey: text('cache_key').notNull(),
     context: text('context', { mode: 'json' }).$type<AiRunContext>(),
+    request: text('request', { mode: 'json' }).$type<{
+      input: string;
+      instructions: string;
+      schema: Record<string, unknown>;
+      snapshot: PullRequestSnapshot;
+    }>(),
+    threadId: text('thread_id'),
+    pauseReason: text('pause_reason').$type<'user' | 'restart'>(),
     status: text('status').$type<AiRunStatus>().notNull(),
     progress: text('progress'),
     result: text('result'),

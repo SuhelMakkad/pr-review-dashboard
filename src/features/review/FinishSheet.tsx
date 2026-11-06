@@ -294,19 +294,49 @@ export function FinishSheet({
                     </p>
                   </div>
                   {summaryRun && !ai.isStarting('draft_summary') && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => ai.cancel.mutate(summaryRun.id)}
-                    >
-                      Stop
-                    </Button>
+                    <>
+                      {summaryRun.canPause && (
+                        <Button size="sm" variant="ghost" onClick={() => ai.pause(summaryRun.id)}>
+                          Pause
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => ai.cancel.mutate(summaryRun.id)}
+                      >
+                        Stop
+                      </Button>
+                    </>
                   )}
                 </div>
               )}
               {summaryRun?.status === 'failed' && (
                 <p role="alert" className="text-fail">
                   Summary generation failed: {summaryRun.error ?? 'Try generating it again.'}
+                </p>
+              )}
+              {summaryRun?.status === 'paused' && (
+                <p role="status" className="text-fg-muted">
+                  Summary generation is paused. Your progress is saved.
+                </p>
+              )}
+              {summaryRun?.resumable && !generating && (
+                <Button size="sm" onClick={() => ai.resume(summaryRun.id)}>
+                  Resume summary
+                </Button>
+              )}
+              {summaryRun?.status === 'paused' && summaryRun.stale && (
+                <p className="text-pending">{summaryRun.staleReason} Generate a new summary.</p>
+              )}
+              {summaryRun?.status === 'paused' && summaryRun.error && (
+                <p role="alert" className="text-fail">
+                  {summaryRun.error}
+                </p>
+              )}
+              {ai.controlError && (
+                <p role="alert" className="text-fail">
+                  {ai.controlError.message}
                 </p>
               )}
               {(summaryRun?.status === 'cancelled' || summaryRun?.status === 'interrupted') && (

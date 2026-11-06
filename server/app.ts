@@ -141,6 +141,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
 
   service.afterSync = async (login) => {
     await notifier.afterSync(login, service.list().items, service.mine().items);
+    await runner.recover(login);
 
     // History fills in the background; it never delays a sync.
     void backfill.start(login);

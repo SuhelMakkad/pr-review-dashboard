@@ -141,6 +141,7 @@ export class CodexProvider implements AgentProvider {
   readonly id = 'codex' as const;
   readonly label = 'Codex';
   readonly demo = false;
+  readonly supportsResume = true;
 
   constructor(
     private readonly command = 'codex',
@@ -192,16 +193,31 @@ export class CodexProvider implements AgentProvider {
     signal: AbortSignal,
     onProgress: (progress: string) => void,
   ): Promise<AgentResult> {
-    const server = await CodexAppServer.open(this.command, {
-      cwd: request.workDir,
-      signal,
-      timeoutMs: request.timeoutMs,
-    });
+    const controller = new AbortController();
+    let interrupt = async () => {};
+    const onAbort = () => {
+      void Promise.race([interrupt(), delay(INTERRUPT_GRACE_MS)])
+        .catch(() => {})
+        .finally(() => controller.abort());
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) controller.abort();
+    let server: CodexAppServer | undefined;
 
     try {
-      return await this.review(server, request, onProgress);
+      server = await CodexAppServer.open(this.command, {
+        cwd: request.workDir,
+        signal: controller.signal,
+        timeoutMs: request.timeoutMs,
+      });
+
+      return await this.review(server, request, onProgress, (handler) => {
+        interrupt = handler;
+      });
     } finally {
-      server.close();
+      signal.removeEventListener('abort', onAbort);
+      server?.close();
     }
   }
 
@@ -209,6 +225,7 @@ export class CodexProvider implements AgentProvider {
     server: CodexAppServer,
     request: AgentRequest,
     onProgress: (progress: string) => void,
+    onInterrupt: (handler: () => Promise<void>) => void,
   ): Promise<AgentResult> {
     // The run must bill the ChatGPT plan, and the plan must have included usage left.
     const problem = accountProblem(await readAccount(server));
@@ -243,6 +260,11 @@ export class CodexProvider implements AgentProvider {
     let interrupted = false;
     let lastMessageAt = Date.now();
     let watchdog: NodeJS.Timeout | undefined;
+    let complete!: () => void;
+
+    onInterrupt(async () => {
+      if (threadId && turnId) await server.request('turn/interrupt', { threadId, turnId });
+    });
 
     // A stopped run interrupts its turn as soon as the turn is known, so Codex stops generating
     // before the session is closed.
@@ -257,6 +279,7 @@ export class CodexProvider implements AgentProvider {
     };
 
     const finished = new Promise<void>((resolve, reject) => {
+      complete = resolve;
       const stop = (message: string) => {
         if (stopped) return;
 
@@ -339,33 +362,72 @@ export class CodexProvider implements AgentProvider {
       () => clearInterval(watchdog),
     );
 
-    const thread = await server.request<{ thread: { id: string }; model: string }>('thread/start', {
+    const threadOptions = {
       cwd: request.workDir,
       model,
-      ephemeral: true,
       sandbox: 'read-only',
       approvalPolicy: 'never',
       // The user's config may ask for Fast mode, which uses the plan faster.
       serviceTier: null,
       config: mcpOff,
-    });
+    };
+    const thread = await server.request<{
+      thread: { id: string; status?: { type: string } };
+      model: string;
+    }>(
+      request.threadId ? 'thread/resume' : 'thread/start',
+      request.threadId
+        ? { ...threadOptions, threadId: request.threadId, excludeTurns: true }
+        : { ...threadOptions, ephemeral: !request.onThread },
+    );
 
     threadId = thread.thread.id;
+    request.onThread?.(threadId, thread.model);
 
     // Stopped before the turn began (an MCP server started): never start it.
     if (stopped) await finished;
 
-    const turn = await server.request<{ turn: { id: string } }>('turn/start', {
-      threadId,
-      input: [
-        { type: 'text', text: `${request.instructions}\n\n${request.input}`, text_elements: [] },
-      ],
-      effort: request.effort,
-      outputSchema: request.schema,
-      serviceTierForTurn: 'default',
-    });
+    type SavedTurn = {
+      id: string;
+      status: string;
+      items: { type: string; text?: string; phase?: string | null }[];
+    };
+    const latest = request.threadId
+      ? (
+          await server.request<{ data: SavedTurn[] }>('thread/turns/list', {
+            threadId,
+            limit: 1,
+            sortDirection: 'desc',
+            itemsView: 'full',
+          })
+        ).data[0]
+      : null;
+    const savedAnswer =
+      latest?.status === 'completed'
+        ? latest.items
+            .filter((item) => item.type === 'agentMessage' && item.phase !== 'commentary')
+            .at(-1)?.text
+        : null;
 
-    turnId ??= turn.turn.id;
+    if (savedAnswer) {
+      answer = savedAnswer;
+      complete();
+    } else if (latest?.status === 'inProgress' && thread.thread.status?.type === 'active') {
+      turnId = latest.id;
+    } else {
+      const text = latest
+        ? `Continue the original task from the saved review progress in this thread. Use the same repository snapshots and finish the review without repeating completed investigation unnecessarily. Return the final structured answer.\n\n${request.instructions}`
+        : `${request.instructions}\n\n${request.input}`;
+      const turn = await server.request<{ turn: { id: string } }>('turn/start', {
+        threadId,
+        input: [{ type: 'text', text, text_elements: [] }],
+        effort: request.effort,
+        outputSchema: request.schema,
+        serviceTierForTurn: 'default',
+      });
+
+      turnId ??= turn.turn.id;
+    }
     await interruptIfStopped();
     await finished;
 

@@ -128,6 +128,8 @@ export function AiCard({
   starting = false,
   onCancel,
   onRerun,
+  onPause,
+  onResume,
   children,
 }: {
   run: AiRun;
@@ -136,6 +138,8 @@ export function AiCard({
   starting?: boolean;
   onCancel: () => void;
   onRerun: () => void;
+  onPause?: () => void;
+  onResume?: () => void;
   children?: ReactNode;
 }) {
   const busy = run.status === 'queued' || run.status === 'running';
@@ -160,6 +164,16 @@ export function AiCard({
           </span>
         )}
         <span className="ml-auto flex items-center gap-1">
+          {!preparing && busy && run.canPause && onPause && (
+            <Button size="sm" variant="ghost" onClick={onPause}>
+              Pause
+            </Button>
+          )}
+          {!preparing && !busy && run.resumable && onResume && (
+            <Button size="sm" variant="ghost" onClick={onResume}>
+              Resume
+            </Button>
+          )}
           {preparing ? (
             <Button
               size="sm"
@@ -200,6 +214,27 @@ export function AiCard({
         <p className="text-sm text-fail" role="alert">
           {run.error ?? 'The agent failed.'}
         </p>
+      ) : run.status === 'paused' ? (
+        <div className="space-y-1 text-sm text-fg-muted">
+          <p role="status">
+            {run.pauseReason === 'restart'
+              ? 'Paused by a server restart. Your progress is saved.'
+              : 'Paused. Your progress is saved.'}
+          </p>
+          {run.pauseReason === 'restart' && !run.error && run.resumable && (
+            <p className="text-xs">This run will resume after the server reconnects.</p>
+          )}
+          {run.error && (
+            <p role="alert" className="text-xs text-fail">
+              {run.error}
+            </p>
+          )}
+          {run.stale && (
+            <p className="text-xs text-pending">
+              {run.staleReason} Generate a new review to cover the changes.
+            </p>
+          )}
+        </div>
       ) : run.status === 'cancelled' || run.status === 'interrupted' ? (
         <p className="flex items-center gap-2 text-sm text-fg-muted">
           <CircleDashed size={13} aria-hidden="true" />
@@ -447,6 +482,8 @@ export function AssistPanel({
             starting={ai.isStarting(task)}
             onCancel={() => ai.cancel.mutate(run.id)}
             onRerun={() => launch(run.provider, true)}
+            onPause={() => ai.pause(run.id)}
+            onResume={() => ai.resume(run.id)}
           >
             {task === 'brief' && run.result && (
               <BriefView result={run.result as BriefResult} onOpenFile={onOpenFile} />
@@ -467,6 +504,11 @@ export function AssistPanel({
       {ai.start.error && (
         <p className="text-xs text-fail" role="alert">
           {ai.start.error.message}
+        </p>
+      )}
+      {ai.controlError && (
+        <p role="alert" className="text-xs text-fail">
+          {ai.controlError.message}
         </p>
       )}
       <p className="flex items-center gap-1 text-2xs text-fg-subtle">

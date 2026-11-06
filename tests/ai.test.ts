@@ -219,6 +219,87 @@ describe('agent CLIs', () => {
     expect((result.output as BriefResult).summary).toBe('Fake codex answer');
   });
 
+  it('saves and resumes the same Codex thread after an interrupted turn with the same restrictions', async () => {
+    const directory = workDir();
+    const provider = fakeCodex();
+    const controller = new AbortController();
+    const checkpoint = vi.fn();
+
+    process.env.FAKE_CODEX_STALL = '1';
+    const pending = provider.run(
+      { ...request(directory), onThread: checkpoint },
+      controller.signal,
+      () => {},
+    );
+    const stopped = expect(pending).rejects.toThrow(/stopped|Cancelled/);
+
+    await vi.waitFor(() => expect(existsSync(join(directory, '.fake-turn-started'))).toBe(true));
+    controller.abort();
+    await stopped;
+    expect(checkpoint).toHaveBeenCalledWith('thread-1', 'gpt-fake');
+    expect(
+      JSON.parse(readFileSync(join(directory, '.fake-codex-history.json'), 'utf8')).turn.status,
+    ).toBe('interrupted');
+
+    delete process.env.FAKE_CODEX_STALL;
+    const resumed = await provider.run(
+      { ...request(directory), threadId: 'thread-1', onThread: checkpoint },
+      new AbortController().signal,
+      () => {},
+    );
+    const thread = (resumed.output as BriefResult).questions.find((value) =>
+      value.startsWith('thread='),
+    )!;
+    const history = JSON.parse(readFileSync(join(directory, '.fake-codex-history.json'), 'utf8'));
+
+    expect(JSON.parse(thread.slice('thread='.length))).toMatchObject({
+      threadId: 'thread-1',
+      resumed: true,
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+      serviceTier: null,
+      config: { 'mcp_servers.linear.enabled': false },
+    });
+    expect(history.options.ephemeral).toBe(false);
+    expect(history.turnStarts).toBe(2);
+    expect(history.turn.input[0].text).toContain('saved review progress');
+    expect((resumed.output as BriefResult).summary).toBe('Fake codex answer');
+  });
+
+  it('recovers an already completed thread answer without starting another turn', async () => {
+    const directory = workDir();
+    const provider = fakeCodex();
+    const checkpoint = vi.fn();
+    const first = await provider.run(
+      { ...request(directory), onThread: checkpoint },
+      new AbortController().signal,
+      () => {},
+    );
+    const recovered = await provider.run(
+      { ...request(directory), threadId: 'thread-1', onThread: checkpoint },
+      new AbortController().signal,
+      () => {},
+    );
+
+    expect(recovered.output).toEqual(first.output);
+    expect(
+      JSON.parse(readFileSync(join(directory, '.fake-codex-history.json'), 'utf8')).turnStarts,
+    ).toBe(1);
+  });
+
+  it('reports a missing saved Codex thread without silently starting a new one', async () => {
+    const directory = workDir();
+
+    await expect(
+      fakeCodex().run(
+        { ...request(directory), threadId: 'missing-thread', onThread: () => {} },
+        new AbortController().signal,
+        () => {},
+      ),
+    ).rejects.toThrow('Saved thread not found');
+    expect(existsSync(join(directory, '.fake-turn-started'))).toBe(false);
+  });
+
   it('stops a turn that goes silent instead of waiting out the whole timeout', async () => {
     process.env.FAKE_CODEX_STALL = '1';
 
@@ -399,6 +480,7 @@ function holdRuns(provider: FixtureProvider) {
   const controls = new Map<string, { complete: () => void; fail: (error: Error) => void }>();
 
   vi.spyOn(provider, 'run').mockImplementation(async (request, signal, onProgress) => {
+    request.onThread?.(request.threadId ?? `thread-${request.workDir}`, 'gpt-demo');
     const onAbort = () => controls.get(request.workDir)?.fail(new Error('Cancelled.'));
 
     try {
@@ -586,7 +668,8 @@ describe('AI runner', () => {
       expect(await finished(first)).toMatchObject({ status: 'failed', error: 'Agent unavailable' });
       await vi.waitFor(() => expect(controls.has(join(root, queued.id))).toBe(true));
 
-      expect(existsSync(join(root, first.id))).toBe(false);
+      expect(existsSync(join(root, first.id))).toBe(true);
+      expect(runner.runs('you', first.prId)[0].resumable).toBe(true);
       expect(runner.runs('you', second.prId)[0].status).toBe('running');
 
       controls.get(join(root, second.id))!.complete();
@@ -967,7 +1050,7 @@ describe('AI runner', () => {
     );
   });
 
-  it('stops repository preparation and cleans up the workspace when the server shuts down', async () => {
+  it('saves incomplete repository preparation when the server shuts down', async () => {
     const { sync, diffs, reviews, providers, pr, finished, github } = await setup();
     const root = workDir();
     let notifyStarted!: () => void;
@@ -994,9 +1077,250 @@ describe('AI runner', () => {
     await started;
     await runner.close();
 
-    expect((await finished(run)).status).toBe('cancelled');
-    expect(existsSync(join(root, run.id))).toBe(false);
+    expect(await finished(run)).toMatchObject({
+      status: 'paused',
+      pauseReason: 'restart',
+      resumable: true,
+    });
+    expect(existsSync(join(root, run.id))).toBe(true);
     expect(github.writes).toEqual([]);
+  });
+
+  it('pauses and resumes the same review and checkpoint without downloading its snapshots again', async () => {
+    const { runner, providers, pr, finished, root, exported, github } = await setup();
+    const controls = holdRuns(providers.codex);
+
+    try {
+      const run = await runner.start('you', pr(1839).id, 'full_review');
+
+      await vi.waitFor(() => expect(controls.size).toBe(1));
+      runner.pause('you', run.id);
+      expect(runner.runs('you', run.prId)[0]).toMatchObject({
+        id: run.id,
+        status: 'paused',
+        pauseReason: 'user',
+        resumable: true,
+      });
+
+      const resumed = await Promise.all([
+        runner.resume('you', run.id),
+        runner.resume('you', run.id),
+      ]);
+
+      expect(resumed.map((item) => item.id)).toEqual([run.id, run.id]);
+      expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(2);
+      expect(vi.mocked(providers.codex.run).mock.calls[1][0].threadId).toBe(
+        `thread-${join(root, run.id)}`,
+      );
+      expect(exported).toHaveLength(2);
+      controls.get(join(root, run.id))!.complete();
+
+      expect(await finished(run)).toMatchObject({
+        id: run.id,
+        status: 'done',
+        createdAt: run.createdAt,
+        resumable: false,
+      });
+      expect(existsSync(join(root, run.id))).toBe(false);
+      expect(github.writes).toEqual([]);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('resumes a queued review within the two-run limit and allows discarding a paused checkpoint', async () => {
+    const { runner, providers, pr, root, finished } = await setup();
+    const controls = holdRuns(providers.codex);
+
+    try {
+      const first = await runner.start('you', pr(1839).id, 'full_review');
+      await runner.start('you', pr(2041).id, 'full_review');
+      const queued = await runner.start('you', pr(2050).id, 'full_review');
+
+      await vi.waitFor(() => expect(controls.size).toBe(2));
+      runner.pause('you', queued.id);
+      expect((await runner.resume('you', queued.id)).status).toBe('queued');
+      runner.pause('you', first.id);
+
+      await vi.waitFor(() => expect(controls.has(join(root, queued.id))).toBe(true));
+      expect(runner.runs('you', first.prId)[0].status).toBe('paused');
+      runner.cancel('you', first.id);
+
+      expect(await finished(first)).toMatchObject({ status: 'cancelled', resumable: false });
+      expect(existsSync(join(root, first.id))).toBe(false);
+      await expect(runner.resume('you', first.id)).rejects.toThrow('cannot be resumed');
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('recovers saved runs from an on-disk database after a restart and rebuilds a missing workspace', async () => {
+    const { github, providers, pr, exportRepository, exported } = await setup();
+    const root = workDir();
+    const path = join(root, 'state.sqlite');
+    const controls = holdRuns(providers.codex);
+    const openSession = () => {
+      const store = new Store(path);
+      const sync = new SyncService(store, github, new EventBus());
+      const diffs = new DiffService(github);
+      const reviews = new ReviewService(sync, github, diffs, sync.events);
+      const runner = new AiRunner(
+        sync,
+        diffs,
+        reviews,
+        sync.events,
+        providers,
+        root,
+        exportRepository,
+      );
+
+      return { store, sync, runner };
+    };
+    let session = openSession();
+
+    try {
+      await session.sync.sync();
+      const run = await session.runner.start('you', pr(1839).id, 'full_review');
+
+      await vi.waitFor(() => expect(controls.size).toBe(1));
+      await session.runner.close();
+      expect(session.runner.runs('you', run.prId)[0]).toMatchObject({
+        status: 'paused',
+        pauseReason: 'restart',
+        resumable: true,
+      });
+      // Simulate an abrupt process exit after the last persisted checkpoint.
+      session.store.db.$client
+        .prepare('UPDATE ai_runs SET status = ? WHERE id = ?')
+        .run('running', run.id);
+      session.store.close();
+      rmSync(join(root, run.id), { recursive: true, force: true });
+      session = openSession();
+      await session.sync.sync();
+      await session.runner.recover('you');
+
+      await vi.waitFor(() => expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(2));
+      expect(vi.mocked(providers.codex.run).mock.calls[1][0]).toMatchObject({
+        threadId: `thread-${join(root, run.id)}`,
+        workDir: join(root, run.id),
+      });
+      expect(exported).toHaveLength(4);
+      controls.get(join(root, run.id))!.complete();
+
+      await vi.waitFor(() => expect(session.runner.runs('you', run.prId)[0].status).toBe('done'));
+      expect(session.runner.runs('you', run.prId)[0].id).toBe(run.id);
+      expect(existsSync(join(root, run.id))).toBe(false);
+    } finally {
+      await session.runner.close();
+      session.store.close();
+    }
+  });
+
+  it('leaves user-paused reviews paused after restarting while recovering other runs', async () => {
+    const { runner, providers, pr, sync, diffs, reviews, root, exportRepository } = await setup();
+    const controls = holdRuns(providers.codex);
+    const run = await runner.start('you', pr(1839).id, 'full_review');
+
+    await vi.waitFor(() => expect(controls.size).toBe(1));
+    runner.pause('you', run.id);
+    await runner.close();
+    const restarted = new AiRunner(
+      sync,
+      diffs,
+      reviews,
+      sync.events,
+      providers,
+      root,
+      exportRepository,
+    );
+
+    await restarted.recover('you');
+    expect(restarted.runs('you', run.prId)[0]).toMatchObject({
+      status: 'paused',
+      pauseReason: 'user',
+      resumable: true,
+    });
+    expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(1);
+    await restarted.close();
+  });
+
+  it.each(['head', 'review', 'draft'] as const)(
+    'refuses to resume when the %s changes while paused',
+    async (change) => {
+      const { runner, providers, pr, github, reviews, sync } = await setup();
+      const controls = holdRuns(providers.codex);
+
+      try {
+        const run = await runner.start(
+          'you',
+          pr(2041).id,
+          change === 'draft' ? 'draft_summary' : 'full_review',
+        );
+
+        await vi.waitFor(() => expect(controls.size).toBe(1));
+        runner.pause('you', run.id);
+        const snapshot = github.scenario.world.pulls.find(
+          (pull) => pull.snapshot.id === run.prId,
+        )!.snapshot;
+
+        if (change === 'head') snapshot.headOid = snapshot.baseOid!;
+        if (change === 'review')
+          snapshot.reviews.push({ ...snapshot.reviews[0], id: 'new-review' });
+        if (change === 'draft')
+          await reviews.saveDraft('you', run.prId, { event: 'REQUEST_CHANGES' });
+        await sync.refresh(run.prId);
+
+        await expect(runner.resume('you', run.id)).rejects.toThrow(/changed|commits/);
+        expect(runner.runs('you', run.prId)[0]).toMatchObject({
+          status: 'paused',
+          resumable: false,
+        });
+        expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(1);
+      } finally {
+        await runner.close();
+      }
+    },
+  );
+
+  it('keeps a saved checkpoint when resumption is blocked by plan usage and rejects another account', async () => {
+    const { runner, providers, pr } = await setup();
+    const controls = holdRuns(providers.codex);
+
+    try {
+      const run = await runner.start('you', pr(1839).id, 'full_review');
+
+      await vi.waitFor(() => expect(controls.size).toBe(1));
+      runner.pause('you', run.id);
+      providers.codex.account.limitReached = true;
+
+      await expect(runner.resume('other-account', run.id)).rejects.toThrow('no longer exists');
+      await expect(runner.resume('you', run.id)).rejects.toThrow('plan');
+      expect(runner.runs('you', run.prId)[0]).toMatchObject({ status: 'paused', resumable: true });
+      expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(1);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('starts a new review when requested and discards the superseded paused checkpoint', async () => {
+    const { runner, providers, pr, root } = await setup();
+    const controls = holdRuns(providers.codex);
+
+    try {
+      const first = await runner.start('you', pr(1839).id, 'full_review');
+
+      await vi.waitFor(() => expect(controls.size).toBe(1));
+      runner.pause('you', first.id);
+      expect((await runner.start('you', first.prId, 'full_review')).id).toBe(first.id);
+
+      const fresh = await runner.start('you', first.prId, 'full_review', { force: true });
+
+      expect(fresh.id).not.toBe(first.id);
+      await vi.waitFor(() => expect(existsSync(join(root, first.id))).toBe(false));
+      await expect(runner.resume('you', first.id)).rejects.toThrow('cannot be resumed');
+    } finally {
+      await runner.close();
+    }
   });
 
   it('writes a brief with Codex by default and reuses it until the input changes', async () => {
@@ -1111,7 +1435,7 @@ describe('AI runner', () => {
     expect(claudeRun.mock.calls[0][0].model).toBeNull();
   });
 
-  it('marks runs interrupted by a restart', async () => {
+  it('marks legacy runs without saved inputs as interrupted by a restart', async () => {
     const { store, sync, reviews, providers, pr } = await setup();
     const runner = new AiRunner(
       sync,
@@ -1125,6 +1449,10 @@ describe('AI runner', () => {
     providers.codex.delayMs = 10_000;
 
     const run = await runner.start('you', pr(2041).id, 'brief');
+    await runner.close();
+    store.db.$client
+      .prepare('UPDATE ai_runs SET status = ?, request = NULL WHERE id = ?')
+      .run('running', run.id);
     const restarted = new AiRunner(
       sync,
       new DiffService(sync.github),
@@ -1135,7 +1463,6 @@ describe('AI runner', () => {
     );
 
     expect(restarted.runs('you', run.prId)[0].status).toBe('interrupted');
-    runner.cancel('you', run.id);
     expect(store).toBeDefined();
   });
 });
