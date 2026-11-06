@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { c } from 'tar';
 import { ClaudeProvider, claudeProgress } from '../server/ai/claude';
-import { CodexProvider, codexProgress } from '../server/ai/codex';
+import { CodexProvider, codexProgress, withDefault } from '../server/ai/codex';
 import { mergeSnapshot, summariseUsage, type RateLimitSnapshot } from '../server/ai/codexUsage';
 import { annotatePatch } from '../server/ai/context';
 import { FixtureProvider } from '../server/ai/fixture';
@@ -110,7 +110,8 @@ describe('agent CLIs', () => {
       (label) => progress.push(label),
     );
     const answer = result.output as BriefResult;
-    const [ghToken, codexKey, openaiKey, args, client, thread, turn, declined] = answer.questions;
+    const [ghToken, codexKey, openaiKey, args, client, thread, turn, declined, originator] =
+      answer.questions;
 
     expect(answer.summary).toBe('Fake codex answer');
     expect([ghToken, codexKey, openaiKey]).toEqual([
@@ -124,6 +125,7 @@ describe('agent CLIs', () => {
     expect(args).toContain('web_search="disabled"');
     expect(args).toContain('notify=[]');
     expect(client).toBe('client=review_desk');
+    expect(originator).toBe('originator=review_desk');
     // The account's default model, not the one pinned in the user's Codex config; standard speed;
     // the user's MCP servers off.
     expect(JSON.parse(thread.slice('thread='.length))).toMatchObject({
@@ -152,6 +154,38 @@ describe('agent CLIs', () => {
 
     expect(result.model).toBe('gpt-fake-mini');
     expect(result.usage).toMatchObject({ credits_used: 2.5 });
+  });
+
+  it('prefers GPT-6.1-Sol as the default once the account offers it', async () => {
+    const offered = await fakeCodex().status();
+
+    expect(offered.models.find((model) => model.isDefault)?.id).toBe('gpt-fake');
+
+    process.env.FAKE_CODEX_SOL = '1';
+
+    const status = await fakeCodex().status();
+    const result = await run(fakeCodex());
+
+    expect(status.models.filter((model) => model.isDefault).map((model) => model.id)).toEqual([
+      'gpt-6.1-sol',
+    ]);
+    expect(result.model).toBe('gpt-6.1-sol');
+    expect((await run(fakeCodex(), workDir(), 'gpt-fake-mini')).model).toBe('gpt-fake-mini');
+    // A task model the account no longer offers runs on the default instead of failing.
+    expect((await run(fakeCodex(), workDir(), 'gpt-retired')).model).toBe('gpt-6.1-sol');
+  });
+
+  it("follows t3code's preferred order when GPT-6.1-Sol is not offered", () => {
+    const models = [
+      { id: 'gpt-5.6-luna', displayName: 'Luna', isDefault: true },
+      { id: 'gpt-5.6-sol', displayName: 'Sol', isDefault: false },
+      { id: 'gpt-6-astra', displayName: 'Astra', isDefault: false },
+    ];
+
+    expect(withDefault(models).find((model) => model.isDefault)?.id).toBe('gpt-6-astra');
+    expect(withDefault(models.slice(0, 1)).find((model) => model.isDefault)?.id).toBe(
+      'gpt-5.6-luna',
+    );
   });
 
   it('refuses a Codex sign-in that would not bill the ChatGPT plan', async () => {

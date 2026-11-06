@@ -70,7 +70,12 @@ export class CodexAppServer {
 
     server.agent = spawnAgentProcess(command, appServerArgs(), {
       ...options,
-      env: codexEnvironment(options.cwd),
+      // Codex refreshes its model catalog before `initialize`; naming the client at spawn keeps
+      // that refresh from overwriting the shared models cache with the plain CLI's catalog.
+      env: {
+        ...codexEnvironment(options.cwd),
+        CODEX_INTERNAL_ORIGINATOR_OVERRIDE: clientInfo.name,
+      },
       onLine: (line) => server.receive(line),
     });
     server.agent.done.then(

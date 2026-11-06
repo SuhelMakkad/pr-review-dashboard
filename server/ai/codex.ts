@@ -79,6 +79,22 @@ async function readUsage(server: CodexAppServer) {
 }
 
 /** The models this ChatGPT account can use from this app, as Codex offers them. */
+/**
+ * Models used by default, best first: the first one the account offers wins, else Codex's own
+ * default. OpenAI offers GPT-6.1-Sol only to Codex CLI 0.159.0 and later (older ones get "not
+ * supported when using Codex with a ChatGPT account"; see pingdotgg/t3code#27939); the rest is
+ * t3code's order.
+ */
+export const PREFERRED_MODELS = ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra'];
+
+/** Marks the model a task without one runs on: a preferred model if offered, else Codex's default. */
+export function withDefault(models: CodexModel[]): CodexModel[] {
+  const preferred = PREFERRED_MODELS.find((id) => models.some((model) => model.id === id));
+  const chosen = preferred ?? models.find((model) => model.isDefault)?.id;
+
+  return models.map((model) => ({ ...model, isDefault: model.id === chosen }));
+}
+
 async function listModels(server: CodexAppServer): Promise<CodexModel[]> {
   const models: CodexModel[] = [];
   let cursor: string | null = null;
@@ -104,7 +120,7 @@ async function listModels(server: CodexAppServer): Promise<CodexModel[]> {
     if (!cursor) break;
   }
 
-  return models;
+  return withDefault(models);
 }
 
 /** Snake case, matching the usage recorded for earlier runs. */
@@ -212,8 +228,11 @@ export class CodexProvider implements AgentProvider {
     const mcpOff = Object.fromEntries(
       Object.keys(config.mcp_servers ?? {}).map((name) => [`mcp_servers.${name}.enabled`, false]),
     );
-    const model =
-      request.model ?? (await listModels(server)).find((candidate) => candidate.isDefault)?.id;
+    const models = await listModels(server);
+    // A model the account does not offer would fail the run, so it gets the default instead.
+    const model = models.some((candidate) => candidate.id === request.model)
+      ? request.model!
+      : (models.find((candidate) => candidate.isDefault)?.id ?? request.model ?? undefined);
 
     let snapshot: RateLimitSnapshot = start.snapshot;
     let threadId: string | null = null;

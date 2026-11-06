@@ -207,7 +207,7 @@ function CodexModelSelect({
           {model.displayName}
         </option>
       ))}
-      {!known && <option value={value!}>{value} (not offered)</option>}
+      {!known && <option value={value!}>{value} (not offered; uses the default)</option>}
     </select>
   );
 }

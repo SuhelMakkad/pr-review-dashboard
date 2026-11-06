@@ -5,6 +5,7 @@
 //   FAKE_CODEX_LIMIT    ok (default) | reached | midrun | afteranswer
 //   FAKE_CODEX_MCP      off (default) | stuck
 //   FAKE_CODEX_STALL    1 to go silent once the turn starts
+//   FAKE_CODEX_SOL      1 to also offer gpt-6.1-sol
 //   FAKE_CODEX_CREDITS  balance after the run (default: unchanged)
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -51,6 +52,7 @@ const answer = () => ({
     `thread=${JSON.stringify(seen.thread)}`,
     `turn=${JSON.stringify({ ...seen.turn, input: undefined })}`,
     `declined=${seen.declined}`,
+    `originator=${process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE}`,
   ],
 });
 
@@ -137,6 +139,9 @@ const handlers = {
       { model: 'gpt-fake', displayName: 'GPT-Fake', hidden: false, isDefault: true },
       { model: 'gpt-fake-mini', displayName: 'GPT-Fake Mini', hidden: false, isDefault: false },
       { model: 'gpt-secret', displayName: 'Secret', hidden: true, isDefault: false },
+      ...(process.env.FAKE_CODEX_SOL
+        ? [{ model: 'gpt-6.1-sol', displayName: 'GPT-6.1-Sol', hidden: false, isDefault: false }]
+        : []),
     ],
     nextCursor: null,
   }),
