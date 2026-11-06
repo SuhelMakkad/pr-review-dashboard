@@ -394,6 +394,30 @@ async function setup() {
   };
 }
 
+function holdRuns(provider: FixtureProvider) {
+  const run = provider.run.bind(provider);
+  const controls = new Map<string, { complete: () => void; fail: (error: Error) => void }>();
+
+  vi.spyOn(provider, 'run').mockImplementation(async (request, signal, onProgress) => {
+    const onAbort = () => controls.get(request.workDir)?.fail(new Error('Cancelled.'));
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        controls.set(request.workDir, { complete: resolve, fail: reject });
+        signal.addEventListener('abort', onAbort, { once: true });
+
+        if (signal.aborted) onAbort();
+      });
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+
+    return run(request, signal, onProgress);
+  });
+
+  return controls;
+}
+
 describe('Codex plan usage', () => {
   const snapshot = (overrides: Partial<RateLimitSnapshot> = {}): RateLimitSnapshot => ({
     limitId: 'codex',
@@ -455,6 +479,127 @@ describe('Codex plan usage', () => {
 });
 
 describe('AI runner', () => {
+  it('runs two full reviews in isolated workspaces and queues another until a slot is free', async () => {
+    const { runner, providers, pr, finished, root, sync, github } = await setup();
+    const controls = holdRuns(providers.codex);
+
+    try {
+      const first = await runner.start('you', pr(1839).id, 'full_review');
+      const second = await runner.start('you', pr(2041).id, 'full_review');
+      const queued = await runner.start('you', pr(2050).id, 'full_review');
+
+      expect([first.status, second.status, queued.status]).toEqual([
+        'running',
+        'running',
+        'queued',
+      ]);
+      await vi.waitFor(() => expect(controls.size).toBe(2));
+
+      for (const run of [first, second]) {
+        const directory = join(root, run.id);
+        const context = JSON.parse(readFileSync(join(directory, 'review.json'), 'utf8'));
+        const snapshot = sync.detail(run.prId)!.snapshot;
+
+        expect(context).toMatchObject({
+          repository: snapshot.repository,
+          number: snapshot.number,
+          headOid: run.headOid,
+        });
+        expect(existsSync(join(directory, 'before'))).toBe(true);
+        expect(existsSync(join(directory, 'after'))).toBe(true);
+      }
+
+      expect(existsSync(join(root, queued.id))).toBe(false);
+      expect((await runner.start('you', second.prId, 'full_review')).id).toBe(second.id);
+
+      controls.get(join(root, first.id))!.complete();
+      expect((await finished(first)).status).toBe('done');
+      await vi.waitFor(() => expect(controls.has(join(root, queued.id))).toBe(true));
+
+      expect(existsSync(join(root, first.id))).toBe(false);
+      expect(runner.runs('you', second.prId)[0].status).toBe('running');
+      expect(existsSync(join(root, second.id, 'review.json'))).toBe(true);
+
+      controls.get(join(root, second.id))!.complete();
+      controls.get(join(root, queued.id))!.complete();
+
+      const completed = await Promise.all([finished(second), finished(queued)]);
+
+      expect(completed.map((run) => run.status)).toEqual(['done', 'done']);
+      expect(completed.every((run) => !existsSync(join(root, run.id)))).toBe(true);
+      expect(github.writes).toEqual([]);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('cancels running and queued reviews independently and shares the limit with Claude', async () => {
+    const { runner, providers, pr, finished, root } = await setup();
+    const codex = holdRuns(providers.codex);
+    const claude = holdRuns(providers.claude);
+
+    try {
+      const first = await runner.start('you', pr(1839).id, 'full_review');
+      const second = await runner.start('you', pr(2041).id, 'full_review');
+      const queued = await runner.start('you', pr(2050).id, 'full_review');
+      const brief = await runner.start('you', pr(870).id, 'brief', { provider: 'claude' });
+
+      await vi.waitFor(() => expect(codex.size).toBe(2));
+      expect(brief.status).toBe('queued');
+      expect(claude.size).toBe(0);
+
+      runner.cancel('you', queued.id);
+      runner.cancel('you', first.id);
+
+      expect((await finished(queued)).status).toBe('cancelled');
+      expect((await finished(first)).status).toBe('cancelled');
+      await vi.waitFor(() => expect(claude.has(join(root, brief.id))).toBe(true));
+
+      expect(codex.size).toBe(2);
+      expect(existsSync(join(root, queued.id))).toBe(false);
+      expect(existsSync(join(root, first.id))).toBe(false);
+      expect(runner.runs('you', second.prId)[0].status).toBe('running');
+
+      codex.get(join(root, second.id))!.complete();
+      claude.get(join(root, brief.id))!.complete();
+
+      const completed = await Promise.all([finished(second), finished(brief)]);
+
+      expect(completed.map((run) => run.status)).toEqual(['done', 'done']);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('starts the next queued task after a review fails while another review keeps running', async () => {
+    const { runner, providers, pr, finished, root } = await setup();
+    const controls = holdRuns(providers.codex);
+
+    try {
+      const first = await runner.start('you', pr(1839).id, 'full_review');
+      const second = await runner.start('you', pr(2041).id, 'full_review');
+      const queued = await runner.start('you', pr(2050).id, 'brief');
+
+      await vi.waitFor(() => expect(controls.size).toBe(2));
+      controls.get(join(root, first.id))!.fail(new Error('Agent unavailable'));
+
+      expect(await finished(first)).toMatchObject({ status: 'failed', error: 'Agent unavailable' });
+      await vi.waitFor(() => expect(controls.has(join(root, queued.id))).toBe(true));
+
+      expect(existsSync(join(root, first.id))).toBe(false);
+      expect(runner.runs('you', second.prId)[0].status).toBe('running');
+
+      controls.get(join(root, second.id))!.complete();
+      controls.get(join(root, queued.id))!.complete();
+
+      const completed = await Promise.all([finished(second), finished(queued)]);
+
+      expect(completed.map((run) => run.status)).toEqual(['done', 'done']);
+    } finally {
+      await runner.close();
+    }
+  });
+
   it('runs a full Codex review against both repository snapshots and keeps the report off GitHub', async () => {
     const { runner, pr, finished, github, reviews, exported, root, sync } = await setup();
     const settings = defaultAiSettings();

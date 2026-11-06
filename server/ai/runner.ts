@@ -59,8 +59,8 @@ function creditsUsed(usage: string | null): number | null {
 }
 
 /**
- * Runs AI tasks through local agent CLIs: one queue, at most two runs at once and one per
- * provider, results cached by exact input so a PR head is only analysed once per task.
+ * Runs AI tasks through local agent CLIs: one queue, at most two runs at once across providers,
+ * results cached by exact input so a PR head is only analysed once per task.
  */
 export class AiRunner {
   private readonly queue: string[] = [];
@@ -68,10 +68,7 @@ export class AiRunner {
   private readonly snapshots = new Map<string, PullRequestSnapshot>();
   private readonly executions = new Set<Promise<void>>();
   private closing = false;
-  private readonly active = new Map<
-    string,
-    { controller: AbortController; provider: AiProvider }
-  >();
+  private readonly active = new Map<string, AbortController>();
   private probes: { at: number; statuses: AiProviderStatus[] } | null = null;
   private codexAccount: { at: number; status: Promise<CodexAccountStatus | null> } | null = null;
 
@@ -353,12 +350,9 @@ export class AiRunner {
 
   private pump(): void {
     while (!this.closing && this.active.size < MAX_CONCURRENT) {
-      const busy = new Set([...this.active.values()].map((run) => run.provider));
-      const index = this.queue.findIndex((id) => !busy.has(this.row(id)?.provider as AiProvider));
+      const id = this.queue.shift();
 
-      if (index === -1) return;
-
-      const [id] = this.queue.splice(index, 1);
+      if (!id) return;
 
       const execution = this.execute(id);
 
@@ -389,7 +383,7 @@ export class AiRunner {
     const workDir = join(this.workRoot, id);
     let lastEmit = 0;
 
-    this.active.set(id, { controller, provider: row.provider });
+    this.active.set(id, controller);
     this.update(id, { status: 'running', progress: 'Starting…' });
     this.emit(row);
 
@@ -505,7 +499,7 @@ export class AiRunner {
     const active = this.active.get(id);
 
     if (active) {
-      active.controller.abort();
+      active.abort();
       return;
     }
 
