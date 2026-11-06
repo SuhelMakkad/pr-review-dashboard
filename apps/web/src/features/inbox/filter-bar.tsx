@@ -2,10 +2,10 @@ import { forwardRef, useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
 import { Check, ChevronRight, ListFilter, Search, X } from 'lucide-react';
 import type { PullRequestItem } from '@review-desk/shared/types';
-import { cn } from '../../ui/cn';
-import { Kbd } from '../../ui/kbd';
-import { ciMeta, reasonMeta } from '../pulls/meta';
-import { activeFilterCount, type InboxSearch } from './filters';
+import { cn } from '@/ui/cn';
+import { Kbd } from '@/ui/kbd';
+import { ciMeta, reasonMeta } from '@/features/pulls/meta';
+import { activeFilterCount, type InboxSearch } from '@/features/inbox/filters';
 
 const menuClass =
   'z-50 min-w-[200px] rounded-md border border-line bg-elevated p-1 text-sm text-fg shadow-popover';

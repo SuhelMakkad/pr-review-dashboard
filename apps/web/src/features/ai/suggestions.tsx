@@ -3,10 +3,10 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { Check, X } from 'lucide-react';
 import type { DraftCommentsResult } from '@review-desk/shared/ai';
-import { Button } from '../../ui/button';
-import { MarkdownView } from '../../ui/markdown';
-import { AiCard, RunButton } from './assist-panel';
-import { useAi } from './use-ai';
+import { Button } from '@/ui/button';
+import { MarkdownView } from '@/ui/markdown';
+import { AiCard, RunButton } from '@/features/ai/assist-panel';
+import { useAi } from '@/features/ai/use-ai';
 
 const severityTone = {
   blocking: 'fail',

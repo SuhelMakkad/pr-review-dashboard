@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChartTooltip, niceTicks, useWidth } from './common';
+import { ChartTooltip, niceTicks, useWidth } from '@/features/insights/charts/common';
 
 export interface Column {
   key: string;

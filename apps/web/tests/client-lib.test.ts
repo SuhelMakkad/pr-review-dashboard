@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
-import { matchesFilters } from '../apps/web/src/features/inbox/filters';
-import { parsePrUrl } from '../apps/web/src/lib/pr-ref';
-import { applyOptimistic } from '../apps/web/src/lib/queries';
-import { keyCaps } from '../apps/web/src/lib/shortcuts';
-import { parseSnooze, shortAge, snoozePresets } from '../apps/web/src/lib/time';
-import { review, snapshot, thread } from './fixtures';
+import { matchesFilters } from '@/features/inbox/filters';
+import { parsePrUrl } from '@/lib/pr-ref';
+import { applyOptimistic } from '@/lib/queries';
+import { keyCaps } from '@/lib/shortcuts';
+import { parseSnooze, shortAge, snoozePresets } from '@/lib/time';
+import { review, snapshot, thread } from '@test/fixtures';
 
 // Thursday 5 November 2026, 10:30 local time.
 const now = new Date(2026, 10, 5, 10, 30);

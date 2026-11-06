@@ -15,13 +15,13 @@ import {
   type ReviewEvent,
   type SubmitReviewResult,
 } from '@review-desk/shared/review';
-import { ApiError } from '../../lib/api';
-import { dateTime } from '../../lib/time';
-import { Button, IconButton } from '../../ui/button';
-import { RunButton } from '../ai/assist-panel';
-import { useAi } from '../ai/use-ai';
-import { cn } from '../../ui/cn';
-import { Kbd } from '../../ui/kbd';
+import { ApiError } from '@/lib/api';
+import { dateTime } from '@/lib/time';
+import { Button, IconButton } from '@/ui/button';
+import { RunButton } from '@/features/ai/assist-panel';
+import { useAi } from '@/features/ai/use-ai';
+import { cn } from '@/ui/cn';
+import { Kbd } from '@/ui/kbd';
 
 const verdicts: {
   event: ReviewEvent;

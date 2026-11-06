@@ -2,15 +2,15 @@ import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, LoaderCircle, RefreshCw, Table2 } from 'lucide-react';
 import type { Insights } from '@review-desk/shared/insights';
-import { api } from '../../lib/api';
-import { usePulls } from '../../lib/queries';
-import { relativePhrase } from '../../lib/time';
-import { Button } from '../../ui/button';
-import { cn } from '../../ui/cn';
-import { ColumnChart } from './charts/column-chart';
-import { formatHours, Legend } from './charts/common';
-import { LineChart } from './charts/line-chart';
-import { SegmentedBar } from './charts/segmented-bar';
+import { api } from '@/lib/api';
+import { usePulls } from '@/lib/queries';
+import { relativePhrase } from '@/lib/time';
+import { Button } from '@/ui/button';
+import { cn } from '@/ui/cn';
+import { ColumnChart } from '@/features/insights/charts/column-chart';
+import { formatHours, Legend } from '@/features/insights/charts/common';
+import { LineChart } from '@/features/insights/charts/line-chart';
+import { SegmentedBar } from '@/features/insights/charts/segmented-bar';
 
 interface InsightsResponse {
   insights: Insights | null;

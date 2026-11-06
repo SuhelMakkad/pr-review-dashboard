@@ -1,8 +1,8 @@
 import { forwardRef, useEffect, useRef, useState } from 'react';
 import { CircleCheck, Search, X } from 'lucide-react';
 import type { DiffFile } from '@review-desk/shared/diff';
-import { cn } from '../../ui/cn';
-import { Kbd } from '../../ui/kbd';
+import { cn } from '@/ui/cn';
+import { Kbd } from '@/ui/kbd';
 
 const statusMeta: Record<DiffFile['status'], { letter: string; tone: string; label: string }> = {
   added: { letter: 'A', tone: 'add', label: 'Added' },

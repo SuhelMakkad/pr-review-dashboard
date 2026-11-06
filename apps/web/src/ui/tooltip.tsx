@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Tooltip as Primitive } from 'radix-ui';
-import { Kbd } from './kbd';
+import { Kbd } from '@/ui/kbd';
 
 export function TooltipProvider({ children }: { children: ReactNode }) {
   return (

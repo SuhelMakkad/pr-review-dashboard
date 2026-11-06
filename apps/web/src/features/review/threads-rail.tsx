@@ -1,7 +1,7 @@
 import type { DiffFile } from '@review-desk/shared/diff';
 import type { ReviewThread } from '@review-desk/shared/types';
-import { cn } from '../../ui/cn';
-import { Kbd } from '../../ui/kbd';
+import { cn } from '@/ui/cn';
+import { Kbd } from '@/ui/kbd';
 
 export function ThreadsRail({
   threads,

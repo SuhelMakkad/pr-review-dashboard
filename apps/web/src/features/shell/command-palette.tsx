@@ -16,14 +16,14 @@ import {
   Search,
   Settings,
 } from 'lucide-react';
-import { parsePrUrl, refOf } from '../../lib/pr-ref';
-import { usePulls, useSyncNow } from '../../lib/queries';
-import { appearance } from '../../lib/theme';
-import { snoozePresets } from '../../lib/time';
-import { Kbd } from '../../ui/kbd';
-import { usePullActions } from '../pulls/actions';
-import { queueMeta, queueSlugs } from '../pulls/meta';
-import { useCurrentPull } from '../pulls/use-current-pull';
+import { parsePrUrl, refOf } from '@/lib/pr-ref';
+import { usePulls, useSyncNow } from '@/lib/queries';
+import { appearance } from '@/lib/theme';
+import { snoozePresets } from '@/lib/time';
+import { Kbd } from '@/ui/kbd';
+import { usePullActions } from '@/features/pulls/actions';
+import { queueMeta, queueSlugs } from '@/features/pulls/meta';
+import { useCurrentPull } from '@/features/pulls/use-current-pull';
 
 const itemClass =
   'flex h-9 cursor-default items-center gap-2.5 rounded-sm px-2.5 text-sm text-fg data-[selected=true]:bg-selected aria-disabled:opacity-50';

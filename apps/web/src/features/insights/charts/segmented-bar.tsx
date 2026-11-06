@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChartTooltip, Legend, useWidth } from './common';
+import { ChartTooltip, Legend, useWidth } from '@/features/insights/charts/common';
 
 export interface Segment {
   label: string;

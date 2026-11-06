@@ -18,23 +18,23 @@ import type {
   PullRequestSnapshot,
   ReviewThread,
 } from '@review-desk/shared/types';
-import { api } from '../../lib/api';
-import { usePullDetail, useTriage } from '../../lib/queries';
-import { useShortcuts } from '../../lib/shortcuts';
-import { dateTime, relativePhrase, shortDateTime } from '../../lib/time';
-import { Avatar } from '../../ui/avatar';
-import { Button } from '../../ui/button';
-import { cn } from '../../ui/cn';
-import { Kbd } from '../../ui/kbd';
-import { MarkdownView } from '../../ui/markdown';
-import { AssistPanel } from '../ai/assist-panel';
-import { FullReview } from '../ai/full-review';
-import { LinearCard } from '../linear/linear-card';
-import { useInboxNavigation } from '../inbox/inbox-context';
-import { usePullActions } from './actions';
-import { CiIndicator, ciMeta, reasonMeta, reviewMeta, tone } from './meta';
-import { Notes } from './notes';
-import { SnoozeMenu } from './snooze-menu';
+import { api } from '@/lib/api';
+import { usePullDetail, useTriage } from '@/lib/queries';
+import { useShortcuts } from '@/lib/shortcuts';
+import { dateTime, relativePhrase, shortDateTime } from '@/lib/time';
+import { Avatar } from '@/ui/avatar';
+import { Button } from '@/ui/button';
+import { cn } from '@/ui/cn';
+import { Kbd } from '@/ui/kbd';
+import { MarkdownView } from '@/ui/markdown';
+import { AssistPanel } from '@/features/ai/assist-panel';
+import { FullReview } from '@/features/ai/full-review';
+import { LinearCard } from '@/features/linear/linear-card';
+import { useInboxNavigation } from '@/features/inbox/inbox-context';
+import { usePullActions } from '@/features/pulls/actions';
+import { CiIndicator, ciMeta, reasonMeta, reviewMeta, tone } from '@/features/pulls/meta';
+import { Notes } from '@/features/pulls/notes';
+import { SnoozeMenu } from '@/features/pulls/snooze-menu';
 
 const shortSha = (oid: string | null | undefined) => oid?.slice(0, 7) ?? 'unknown';
 

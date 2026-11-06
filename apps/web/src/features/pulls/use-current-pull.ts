@@ -1,7 +1,7 @@
 import { useParams } from '@tanstack/react-router';
 import type { PullRequestItem } from '@review-desk/shared/types';
-import { sameRef, type PrRef } from '../../lib/pr-ref';
-import { useMine, usePulls } from '../../lib/queries';
+import { sameRef, type PrRef } from '@/lib/pr-ref';
+import { useMine, usePulls } from '@/lib/queries';
 
 /** The PR named by the current route, if any (inbox reading pane or PR pages). */
 export function useRouteRef(): PrRef | null {

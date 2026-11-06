@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router';
-import { EmptyState } from '../../ui/empty-state';
+import { EmptyState } from '@/ui/empty-state';
 
 export function NotFound() {
   return (

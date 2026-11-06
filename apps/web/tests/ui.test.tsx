@@ -5,13 +5,13 @@ import { act, cleanup, render, screen, waitFor, within } from '@testing-library/
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router';
-import { createAppRouter } from '../apps/web/src/router';
-import { resetInboxAutoSelect } from '../apps/web/src/features/inbox/inbox-page';
+import { createAppRouter } from '@/router';
+import { resetInboxAutoSelect } from '@/features/inbox/inbox-page';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { defaultAiSettings } from '@review-desk/shared/ai';
 import { defaultNotificationSettings } from '@review-desk/shared/notify';
 import type { LocalTriageState } from '@review-desk/shared/types';
-import { review, snapshot, status } from './fixtures';
+import { review, snapshot, status } from '@test/fixtures';
 
 const followUp = snapshot({
   id: 'follow',

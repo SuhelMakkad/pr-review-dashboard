@@ -1,6 +1,6 @@
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from 'react';
-import { cn } from './cn';
-import { Kbd } from './kbd';
+import { cn } from '@/ui/cn';
+import { Kbd } from '@/ui/kbd';
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger';
 type Size = 'sm' | 'md';

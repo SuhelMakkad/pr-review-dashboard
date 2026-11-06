@@ -3,7 +3,9 @@
 const CACHE = 'review-desk-shell-v1';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(['/offline.html', '/icons/icon-192.png'])));
+  event.waitUntil(
+    caches.open(CACHE).then((cache) => cache.addAll(['/offline.html', '/icons/icon-192.png'])),
+  );
   self.skipWaiting();
 });
 
@@ -11,7 +13,9 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))))
+      .then((keys) =>
+        Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))),
+      )
       .then(() => self.clients.claim()),
   );
 });
@@ -31,7 +35,9 @@ self.addEventListener('notificationclick', (event) => {
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windows) => {
-      const existing = windows.find((client) => new URL(client.url).origin === self.location.origin);
+      const existing = windows.find(
+        (client) => new URL(client.url).origin === self.location.origin,
+      );
 
       if (existing) {
         existing.postMessage({ type: 'navigate', path });

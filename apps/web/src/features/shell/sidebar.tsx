@@ -8,13 +8,13 @@ import {
   Settings,
   Sun,
 } from 'lucide-react';
-import { appearance, useAppearance } from '../../lib/theme';
-import { useMine, usePulls, useStatus } from '../../lib/queries';
-import { Avatar } from '../../ui/avatar';
-import { cn } from '../../ui/cn';
-import { Kbd } from '../../ui/kbd';
-import { Tooltip } from '../../ui/tooltip';
-import { inQueue, queueMeta, queueSlugs } from '../pulls/meta';
+import { appearance, useAppearance } from '@/lib/theme';
+import { useMine, usePulls, useStatus } from '@/lib/queries';
+import { Avatar } from '@/ui/avatar';
+import { cn } from '@/ui/cn';
+import { Kbd } from '@/ui/kbd';
+import { Tooltip } from '@/ui/tooltip';
+import { inQueue, queueMeta, queueSlugs } from '@/features/pulls/meta';
 
 const themeIcons = { light: Sun, dark: Moon, system: Monitor };
 

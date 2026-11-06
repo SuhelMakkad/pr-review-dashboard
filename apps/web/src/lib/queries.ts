@@ -14,9 +14,9 @@ export interface MineList {
   account: string | null;
   items: AuthorItem[];
 }
-import { api } from './api';
-import { fallbackInterval, useLive } from './live';
-import { queryKeys } from './query-keys';
+import { api } from '@/lib/api';
+import { fallbackInterval, useLive } from '@/lib/live';
+import { queryKeys } from '@/lib/query-keys';
 
 export function useStatus() {
   const live = useLive();

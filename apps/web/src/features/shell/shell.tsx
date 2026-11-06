@@ -1,18 +1,18 @@
 import { useState } from 'react';
 import { Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Toaster } from 'sonner';
-import { useShortcuts, type Shortcut } from '../../lib/shortcuts';
-import { setBadge } from '../../lib/notifications';
-import { useMine, useNotificationSettings, usePulls } from '../../lib/queries';
+import { useShortcuts, type Shortcut } from '@/lib/shortcuts';
+import { setBadge } from '@/lib/notifications';
+import { useMine, useNotificationSettings, usePulls } from '@/lib/queries';
 import { useEffect } from 'react';
-import { useAppearance } from '../../lib/theme';
-import { TooltipProvider } from '../../ui/tooltip';
-import { undoLast } from '../pulls/actions';
-import { queueMeta, queueSlugs } from '../pulls/meta';
-import { CheatSheet } from './cheat-sheet';
-import { CommandPalette } from './command-palette';
-import { Sidebar } from './sidebar';
-import { StatusBar, type Hint } from './status-bar';
+import { useAppearance } from '@/lib/theme';
+import { TooltipProvider } from '@/ui/tooltip';
+import { undoLast } from '@/features/pulls/actions';
+import { queueMeta, queueSlugs } from '@/features/pulls/meta';
+import { CheatSheet } from '@/features/shell/cheat-sheet';
+import { CommandPalette } from '@/features/shell/command-palette';
+import { Sidebar } from '@/features/shell/sidebar';
+import { StatusBar, type Hint } from '@/features/shell/status-bar';
 
 function hintsFor(pathname: string): Hint[] {
   if (pathname.startsWith('/inbox/')) {

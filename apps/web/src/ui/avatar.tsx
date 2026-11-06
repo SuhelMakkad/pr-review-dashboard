@@ -1,5 +1,5 @@
 import type React from 'react';
-import { cn } from './cn';
+import { cn } from '@/ui/cn';
 
 function hue(login: string): number {
   let hash = 0;

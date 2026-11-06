@@ -1,6 +1,6 @@
 import type { AttentionKind, PullRequestItem } from '@review-desk/shared/types';
-import { reasonMeta } from '../pulls/meta';
-import type { InboxSearch } from './filters';
+import { reasonMeta } from '@/features/pulls/meta';
+import type { InboxSearch } from '@/features/inbox/filters';
 
 const DAY = 24 * 60 * 60_000;
 const order: AttentionKind[] = [

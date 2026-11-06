@@ -3,15 +3,15 @@ import { Outlet, useNavigate } from '@tanstack/react-router';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 import { GitPullRequestDraft } from 'lucide-react';
 import type { AuthorItem } from '@review-desk/shared/author';
-import { refOf } from '../../lib/pr-ref';
-import { useMine } from '../../lib/queries';
-import { useShortcuts } from '../../lib/shortcuts';
-import { EmptyState } from '../../ui/empty-state';
-import { Kbd } from '../../ui/kbd';
-import { useRouteRef } from '../pulls/use-current-pull';
-import { sameRef } from '../../lib/pr-ref';
-import { groupMeta, groupOrder } from './meta';
-import { MineRow } from './mine-row';
+import { refOf } from '@/lib/pr-ref';
+import { useMine } from '@/lib/queries';
+import { useShortcuts } from '@/lib/shortcuts';
+import { EmptyState } from '@/ui/empty-state';
+import { Kbd } from '@/ui/kbd';
+import { useRouteRef } from '@/features/pulls/use-current-pull';
+import { sameRef } from '@/lib/pr-ref';
+import { groupMeta, groupOrder } from '@/features/mine/meta';
+import { MineRow } from '@/features/mine/mine-row';
 
 function layoutStorage() {
   try {

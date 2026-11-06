@@ -1,11 +1,11 @@
 import { forwardRef } from 'react';
 import { AlarmClock, CheckCheck, MessageSquare, StickyNote } from 'lucide-react';
 import type { PullRequestItem } from '@review-desk/shared/types';
-import { shortAge, shortDateTime } from '../../lib/time';
-import { Avatar } from '../../ui/avatar';
-import { LinearMark } from '../../ui/brand-icons';
-import { cn } from '../../ui/cn';
-import { CiIndicator, ReasonChips, reviewSummary } from '../pulls/meta';
+import { shortAge, shortDateTime } from '@/lib/time';
+import { Avatar } from '@/ui/avatar';
+import { LinearMark } from '@/ui/brand-icons';
+import { cn } from '@/ui/cn';
+import { CiIndicator, ReasonChips, reviewSummary } from '@/features/pulls/meta';
 
 /**
  * One PR in a queue. Comfortable density: title on the first line, the reasons it is here and its

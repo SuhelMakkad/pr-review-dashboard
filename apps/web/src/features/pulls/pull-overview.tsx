@@ -1,5 +1,5 @@
-import { PullView } from './pull-view';
-import { useCurrentPull } from './use-current-pull';
+import { PullView } from '@/features/pulls/pull-view';
+import { useCurrentPull } from '@/features/pulls/use-current-pull';
 
 export function PullOverview() {
   const { item } = useCurrentPull();

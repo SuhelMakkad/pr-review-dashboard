@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
-import { startServer, stopServer, unusedPort } from '../fixtures/ai/restart-helper';
-import { expectAccessible } from './helpers';
+import { startServer, stopServer, unusedPort } from '@/fixtures/ai/restart-helper';
+import { expectAccessible } from '@/e2e/helpers';
 
 test('keeps a user-paused review across navigation and restart, then resumes the same run', async ({
   page,

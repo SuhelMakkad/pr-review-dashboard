@@ -23,12 +23,12 @@ import {
   type BriefResult,
   type SinceReviewResult,
 } from '@review-desk/shared/ai';
-import { useShortcuts } from '../../lib/shortcuts';
-import { relativePhrase } from '../../lib/time';
-import { Button } from '../../ui/button';
-import { cn } from '../../ui/cn';
-import { Kbd } from '../../ui/kbd';
-import { useAi, useAiOverview } from './use-ai';
+import { useShortcuts } from '@/lib/shortcuts';
+import { relativePhrase } from '@/lib/time';
+import { Button } from '@/ui/button';
+import { cn } from '@/ui/cn';
+import { Kbd } from '@/ui/kbd';
+import { useAi, useAiOverview } from '@/features/ai/use-ai';
 
 const providerLabel: Record<AiProvider, string> = { codex: 'Codex', claude: 'Claude' };
 

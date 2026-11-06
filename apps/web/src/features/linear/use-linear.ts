@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import type { LinearIssue, LinearStatus } from '@review-desk/shared/tickets';
-import { api } from '../../lib/api';
+import { api } from '@/lib/api';
 
 export function useLinearStatus() {
   return useQuery({

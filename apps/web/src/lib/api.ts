@@ -1,4 +1,4 @@
-import { session } from './session';
+import { session } from '@/lib/session';
 
 export class ApiError extends Error {
   constructor(

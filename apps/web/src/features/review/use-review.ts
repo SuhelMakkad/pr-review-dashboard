@@ -7,8 +7,8 @@ import type {
   Side,
   SubmitReviewResult,
 } from '@review-desk/shared/review';
-import { api, ApiError } from '../../lib/api';
-import { queryKeys } from '../../lib/query-keys';
+import { api, ApiError } from '@/lib/api';
+import { queryKeys } from '@/lib/query-keys';
 
 export const draftKey = (prId: string) => ['draft', prId] as const;
 

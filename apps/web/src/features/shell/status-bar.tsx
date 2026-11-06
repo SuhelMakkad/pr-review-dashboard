@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Popover } from 'radix-ui';
 import { CircleAlert, RefreshCw } from 'lucide-react';
-import { useLive } from '../../lib/live';
-import { useStatus, useSyncNow } from '../../lib/queries';
-import { dateTime, relativePhrase } from '../../lib/time';
-import { cn } from '../../ui/cn';
-import { Kbd } from '../../ui/kbd';
+import { useLive } from '@/lib/live';
+import { useStatus, useSyncNow } from '@/lib/queries';
+import { dateTime, relativePhrase } from '@/lib/time';
+import { cn } from '@/ui/cn';
+import { Kbd } from '@/ui/kbd';
 
 function useTick(ms: number) {
   const [, setTick] = useState(0);

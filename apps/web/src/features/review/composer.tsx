@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Eye, Pencil } from 'lucide-react';
-import { Button } from '../../ui/button';
-import { cn } from '../../ui/cn';
-import { MarkdownView } from '../../ui/markdown';
+import { Button } from '@/ui/button';
+import { cn } from '@/ui/cn';
+import { MarkdownView } from '@/ui/markdown';
 
 export interface ComposerAction {
   label: string;

@@ -1,10 +1,10 @@
 import { forwardRef } from 'react';
 import type { AuthorItem } from '@review-desk/shared/author';
-import { shortAge } from '../../lib/time';
-import { LinearMark } from '../../ui/brand-icons';
-import { cn } from '../../ui/cn';
-import { CiIndicator, tone } from '../pulls/meta';
-import { blockerTone, waitState } from './meta';
+import { shortAge } from '@/lib/time';
+import { LinearMark } from '@/ui/brand-icons';
+import { cn } from '@/ui/cn';
+import { CiIndicator, tone } from '@/features/pulls/meta';
+import { blockerTone, waitState } from '@/features/mine/meta';
 
 export const MineRow = forwardRef<
   HTMLDivElement,

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectAccessible, openFresh } from './helpers';
+import { expectAccessible, openFresh } from '@/e2e/helpers';
 
 test.describe.configure({ mode: 'serial' });
 

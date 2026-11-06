@@ -3,19 +3,19 @@ import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-route
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 import { CircleAlert, Inbox } from 'lucide-react';
 import type { PullRequestItem } from '@review-desk/shared/types';
-import { refOf } from '../../lib/pr-ref';
-import { usePulls } from '../../lib/queries';
-import { useShortcuts } from '../../lib/shortcuts';
-import { shortDateTime } from '../../lib/time';
-import { EmptyState } from '../../ui/empty-state';
-import { Kbd } from '../../ui/kbd';
-import { inQueue, isFollowUp, queueMeta, type QueueSlug } from '../pulls/meta';
-import { useCurrentPull } from '../pulls/use-current-pull';
-import { Digest } from './digest';
-import { FilterBar } from './filter-bar';
-import { activeFilterCount, matchesFilters, type InboxSearch } from './filters';
-import { InboxContext } from './inbox-context';
-import { QueueRow } from './queue-row';
+import { refOf } from '@/lib/pr-ref';
+import { usePulls } from '@/lib/queries';
+import { useShortcuts } from '@/lib/shortcuts';
+import { shortDateTime } from '@/lib/time';
+import { EmptyState } from '@/ui/empty-state';
+import { Kbd } from '@/ui/kbd';
+import { inQueue, isFollowUp, queueMeta, type QueueSlug } from '@/features/pulls/meta';
+import { useCurrentPull } from '@/features/pulls/use-current-pull';
+import { Digest } from '@/features/inbox/digest';
+import { FilterBar } from '@/features/inbox/filter-bar';
+import { activeFilterCount, matchesFilters, type InboxSearch } from '@/features/inbox/filters';
+import { InboxContext } from '@/features/inbox/inbox-context';
+import { QueueRow } from '@/features/inbox/queue-row';
 
 interface Section {
   label: string | null;

@@ -4,13 +4,13 @@ import { LoaderCircle, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { codexBlocked, type FullReviewResult } from '@review-desk/shared/ai';
 import type { CiState } from '@review-desk/shared/types';
-import { dateTime } from '../../lib/time';
-import { Button } from '../../ui/button';
-import { MarkdownView } from '../../ui/markdown';
-import { FinishSheet } from '../review/finish-sheet';
-import { useReview } from '../review/use-review';
-import { AiCard } from './assist-panel';
-import { useAi, useAiOverview } from './use-ai';
+import { dateTime } from '@/lib/time';
+import { Button } from '@/ui/button';
+import { MarkdownView } from '@/ui/markdown';
+import { FinishSheet } from '@/features/review/finish-sheet';
+import { useReview } from '@/features/review/use-review';
+import { AiCard } from '@/features/ai/assist-panel';
+import { useAi, useAiOverview } from '@/features/ai/use-ai';
 
 /** A complete review stays on the dashboard until the user explicitly prepares and posts it. */
 export function FullReview({

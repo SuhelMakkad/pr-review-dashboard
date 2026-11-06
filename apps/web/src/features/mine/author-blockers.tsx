@@ -3,12 +3,12 @@ import { Link } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { ArrowUpRight, CircleCheck, CircleDot, RotateCcw } from 'lucide-react';
 import type { AuthorItem, Blocker } from '@review-desk/shared/author';
-import { api } from '../../lib/api';
-import { refOf } from '../../lib/pr-ref';
-import { queryKeys } from '../../lib/query-keys';
-import { relativePhrase } from '../../lib/time';
-import { Button } from '../../ui/button';
-import { blockerTone, groupMeta, waitState } from './meta';
+import { api } from '@/lib/api';
+import { refOf } from '@/lib/pr-ref';
+import { queryKeys } from '@/lib/query-keys';
+import { relativePhrase } from '@/lib/time';
+import { Button } from '@/ui/button';
+import { blockerTone, groupMeta, waitState } from '@/features/mine/meta';
 
 /** What stands between your PR and merging, each item with the next step to clear it. */
 export function AuthorBlockers({ item, account }: { item: AuthorItem; account: string }) {

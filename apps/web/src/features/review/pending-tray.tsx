@@ -1,7 +1,7 @@
 import { AlertTriangle, Send, Trash2 } from 'lucide-react';
 import { reviewEventLabels, type ReviewDraft } from '@review-desk/shared/review';
-import { Button } from '../../ui/button';
-import { Kbd } from '../../ui/kbd';
+import { Button } from '@/ui/button';
+import { Kbd } from '@/ui/kbd';
 
 /** Always-visible summary of the review in progress, with the way to finish it. */
 export function PendingTray({

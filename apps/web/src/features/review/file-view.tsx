@@ -3,9 +3,9 @@ import { FileWarning, Info, MessageSquarePlus } from 'lucide-react';
 import type { DiffFile } from '@review-desk/shared/diff';
 import type { DraftComment } from '@review-desk/shared/review';
 import type { ReviewThread } from '@review-desk/shared/types';
-import { Button } from '../../ui/button';
-import { EmptyState } from '../../ui/empty-state';
-import { anchoredThreads, DiffPane, type Anchor, type LineTarget } from '../diff/diff-pane';
+import { Button } from '@/ui/button';
+import { EmptyState } from '@/ui/empty-state';
+import { anchoredThreads, DiffPane, type Anchor, type LineTarget } from '@/features/diff/diff-pane';
 
 /** One file: collapsed placeholder, file-level threads and comments, then the diff itself. */
 export function FileView({

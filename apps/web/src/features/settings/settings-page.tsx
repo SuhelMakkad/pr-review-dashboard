@@ -1,10 +1,10 @@
 import type { ReactNode } from 'react';
 import { ToggleGroup } from 'radix-ui';
-import { appearance, useAppearance, type Density, type ThemePreference } from '../../lib/theme';
-import { useLive } from '../../lib/live';
-import { useStatus } from '../../lib/queries';
-import { dateTime, shortDateTime } from '../../lib/time';
-import { cn } from '../../ui/cn';
+import { appearance, useAppearance, type Density, type ThemePreference } from '@/lib/theme';
+import { useLive } from '@/lib/live';
+import { useStatus } from '@/lib/queries';
+import { dateTime, shortDateTime } from '@/lib/time';
+import { cn } from '@/ui/cn';
 import {
   aiTaskLabels,
   type AiEffort,
@@ -12,16 +12,16 @@ import {
   type AiTask,
   type CodexAccountStatus,
 } from '@review-desk/shared/ai';
-import { useAiOverview, useAiSettings } from '../ai/use-ai';
-import { useLinearStatus } from '../linear/use-linear';
+import { useAiOverview, useAiSettings } from '@/features/ai/use-ai';
+import { useLinearStatus } from '@/features/linear/use-linear';
 import type { LinearStatus } from '@review-desk/shared/tickets';
-import { Button } from '../../ui/button';
+import { Button } from '@/ui/button';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { api } from '../../lib/api';
-import { notificationsSupported } from '../../lib/notifications';
-import { useNotificationSettings } from '../../lib/queries';
+import { api } from '@/lib/api';
+import { notificationsSupported } from '@/lib/notifications';
+import { useNotificationSettings } from '@/lib/queries';
 import {
   notificationKindLabels,
   type NotificationKind,

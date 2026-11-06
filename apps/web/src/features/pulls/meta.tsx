@@ -25,7 +25,7 @@ import type {
   Queue,
   ReviewState,
 } from '@review-desk/shared/types';
-import { cn } from '../../ui/cn';
+import { cn } from '@/ui/cn';
 
 export const tone = (variable: string): CSSProperties =>
   ({ '--tone': `var(--${variable})` }) as CSSProperties;

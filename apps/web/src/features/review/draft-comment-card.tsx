@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { AlertTriangle, Pencil, Trash2 } from 'lucide-react';
 import type { DraftComment } from '@review-desk/shared/review';
-import { IconButton } from '../../ui/button';
-import { cn } from '../../ui/cn';
-import { MarkdownView } from '../../ui/markdown';
-import { Composer } from './composer';
+import { IconButton } from '@/ui/button';
+import { cn } from '@/ui/cn';
+import { MarkdownView } from '@/ui/markdown';
+import { Composer } from '@/features/review/composer';
 
 /** A comment waiting in your review. Dashed so it never looks like something already posted. */
 export function DraftCommentCard({

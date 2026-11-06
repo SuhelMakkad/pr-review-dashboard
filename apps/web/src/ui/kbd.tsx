@@ -1,5 +1,5 @@
-import { keyCaps } from '../lib/shortcuts';
-import { cn } from './cn';
+import { keyCaps } from '@/lib/shortcuts';
+import { cn } from '@/ui/cn';
 
 /** Renders a shortcut as key caps: '$mod+k' → ⌘ K, 'g i' → G then I. */
 export function Kbd({ keys, className }: { keys: string; className?: string }) {

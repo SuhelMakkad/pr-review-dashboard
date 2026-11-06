@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectAccessible, openFresh } from './helpers';
+import { expectAccessible, openFresh } from '@/e2e/helpers';
 
 test('shows the linked Linear issue next to the PR and in the queue', async ({ page }) => {
   await openFresh(page, '/inbox/attention/acme/api/2041');

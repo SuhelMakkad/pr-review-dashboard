@@ -1,12 +1,12 @@
 import { Link, Outlet, useNavigate, useRouter, useRouterState } from '@tanstack/react-router';
 import { ArrowLeft, ArrowUpRight } from 'lucide-react';
-import { usePulls, useMine } from '../../lib/queries';
-import { useShortcuts } from '../../lib/shortcuts';
-import { IconButton } from '../../ui/button';
-import { cn } from '../../ui/cn';
-import { EmptyState } from '../../ui/empty-state';
-import { Kbd } from '../../ui/kbd';
-import { useCurrentPull } from './use-current-pull';
+import { usePulls, useMine } from '@/lib/queries';
+import { useShortcuts } from '@/lib/shortcuts';
+import { IconButton } from '@/ui/button';
+import { cn } from '@/ui/cn';
+import { EmptyState } from '@/ui/empty-state';
+import { Kbd } from '@/ui/kbd';
+import { useCurrentPull } from '@/features/pulls/use-current-pull';
 
 const tabClass = (active: boolean) =>
   cn(

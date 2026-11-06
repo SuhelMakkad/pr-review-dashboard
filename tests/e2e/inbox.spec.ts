@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { expectAccessible, openFresh } from './helpers';
+import { expectAccessible, openFresh } from '@/e2e/helpers';
 
 async function open(page: Page, path = '/') {
   await openFresh(page, path);

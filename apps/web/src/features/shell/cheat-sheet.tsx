@@ -1,8 +1,8 @@
 import { Dialog } from 'radix-ui';
 import { X } from 'lucide-react';
-import { useRegisteredShortcuts, type ShortcutGroup } from '../../lib/shortcuts';
-import { IconButton } from '../../ui/button';
-import { Kbd } from '../../ui/kbd';
+import { useRegisteredShortcuts, type ShortcutGroup } from '@/lib/shortcuts';
+import { IconButton } from '@/ui/button';
+import { Kbd } from '@/ui/kbd';
 
 const order: ShortcutGroup[] = ['General', 'Navigate', 'Queue', 'Pull request', 'Appearance'];
 

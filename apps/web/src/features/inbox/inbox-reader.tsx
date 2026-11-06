@@ -1,7 +1,7 @@
-import { EmptyState } from '../../ui/empty-state';
-import { PullView } from '../pulls/pull-view';
-import { useCurrentPull } from '../pulls/use-current-pull';
-import { usePulls } from '../../lib/queries';
+import { EmptyState } from '@/ui/empty-state';
+import { PullView } from '@/features/pulls/pull-view';
+import { useCurrentPull } from '@/features/pulls/use-current-pull';
+import { usePulls } from '@/lib/queries';
 
 export function InboxReader() {
   const pulls = usePulls();

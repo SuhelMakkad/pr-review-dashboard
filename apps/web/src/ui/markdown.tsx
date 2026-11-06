@@ -1,7 +1,7 @@
 import type React from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { cn } from './cn';
+import { cn } from '@/ui/cn';
 
 const safeHref = (href?: string) => (href && /^(https?:|mailto:|#)/i.test(href) ? href : undefined);
 

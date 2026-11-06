@@ -9,13 +9,13 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import type { ReviewThread } from '@review-desk/shared/types';
-import { dateTime, relativePhrase } from '../../lib/time';
-import { Avatar } from '../../ui/avatar';
-import { cn } from '../../ui/cn';
-import { MarkdownView } from '../../ui/markdown';
-import { tone } from '../pulls/meta';
-import { Button } from '../../ui/button';
-import { Composer } from '../review/composer';
+import { dateTime, relativePhrase } from '@/lib/time';
+import { Avatar } from '@/ui/avatar';
+import { cn } from '@/ui/cn';
+import { MarkdownView } from '@/ui/markdown';
+import { tone } from '@/features/pulls/meta';
+import { Button } from '@/ui/button';
+import { Composer } from '@/features/review/composer';
 
 export interface ThreadActions {
   replying: boolean;

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectAccessible, openFresh } from './helpers';
+import { expectAccessible, openFresh } from '@/e2e/helpers';
 
 test('shows review speed, volume and verdicts from the backfilled history', async ({ page }) => {
   await openFresh(page, '/inbox/attention');
