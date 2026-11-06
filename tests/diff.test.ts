@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { commentableLines, mapLine, parseHunks, withFileHeaders } from '../shared/diff';
-import { textPatch } from '../server/diff/patch';
-import { DiffService } from '../server/diff/service';
-import { Store } from '../server/db/store';
-import { FixtureGitHub } from '../server/demo/fixture-github';
-import { defaultScenario } from '../server/demo/scenario';
-import { SyncService } from '../server/sync';
+import { commentableLines, mapLine, parseHunks, withFileHeaders } from '../packages/shared/src/diff';
+import { textPatch } from '../apps/server/src/diff/patch';
+import { DiffService } from '../apps/server/src/diff/service';
+import { Store } from '../apps/server/src/db/store';
+import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
+import { defaultScenario } from '../apps/server/src/demo/scenario';
+import { SyncService } from '../apps/server/src/sync/index';
 
 async function demo() {
   const store = new Store(':memory:');

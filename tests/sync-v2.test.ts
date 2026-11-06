@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Store } from '../server/db/store';
-import { GitHub, GitHubError } from '../server/github';
-import type { DetectResult } from '../server/github/api';
-import { SyncService } from '../server/sync';
+import { Store } from '../apps/server/src/db/store';
+import { GitHub, GitHubError } from '../apps/server/src/github/index';
+import type { DetectResult } from '../apps/server/src/github/api';
+import { SyncService } from '../apps/server/src/sync/index';
 import { snapshot } from './fixtures';
 
 const stores: Store[] = [];

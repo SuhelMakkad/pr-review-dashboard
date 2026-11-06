@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Store } from '../server/db/store';
-import { FixtureGitHub } from '../server/demo/fixture-github';
-import { defaultScenario } from '../server/demo/scenario';
-import { EventBus } from '../server/events';
-import { Notifier } from '../server/notify/notifier';
-import { SyncService } from '../server/sync';
-import { defaultNotificationSettings, inQuietHours } from '../shared/notify';
-import type { ServerEvent } from '../shared/events';
+import { Store } from '../apps/server/src/db/store';
+import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
+import { defaultScenario } from '../apps/server/src/demo/scenario';
+import { EventBus } from '../apps/server/src/events';
+import { Notifier } from '../apps/server/src/notify/notifier';
+import { SyncService } from '../apps/server/src/sync/index';
+import { defaultNotificationSettings, inQuietHours } from '../packages/shared/src/notify';
+import type { ServerEvent } from '../packages/shared/src/events';
 
 const stores: Store[] = [];
 

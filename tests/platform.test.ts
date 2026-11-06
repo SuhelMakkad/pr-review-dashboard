@@ -5,17 +5,17 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { drizzle } from 'drizzle-orm/node-sqlite';
-import { createApp } from '../server/app';
-import { migrate, schemaVersion, type Migration } from '../server/db/legacy';
-import { appliedMigrations, migrateDatabase, migrationsFolder } from '../server/db/migrate';
-import { aiRuns } from '../server/db/schema';
-import { Store } from '../server/db/store';
-import { EventBus } from '../server/events';
-import { parseIncludedResponse, redact, retryAtFromHeaders } from '../server/github';
-import { FixtureGitHub } from '../server/demo/fixture-github';
-import { defaultScenario } from '../server/demo/scenario';
-import { SyncService } from '../server/sync';
-import type { ServerEvent } from '../shared/events';
+import { createApp } from '../apps/server/src/app';
+import { migrate, schemaVersion, type Migration } from '../apps/server/src/db/legacy';
+import { appliedMigrations, migrateDatabase, migrationsFolder } from '../apps/server/src/db/migrate';
+import { aiRuns } from '../apps/server/src/db/schema';
+import { Store } from '../apps/server/src/db/store';
+import { EventBus } from '../apps/server/src/events';
+import { parseIncludedResponse, redact, retryAtFromHeaders } from '../apps/server/src/github/index';
+import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
+import { defaultScenario } from '../apps/server/src/demo/scenario';
+import { SyncService } from '../apps/server/src/sync/index';
+import type { ServerEvent } from '../packages/shared/src/events';
 
 const cleanups: (() => void | Promise<void>)[] = [];
 

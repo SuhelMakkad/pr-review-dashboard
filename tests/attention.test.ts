@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveItem, emptyTriage, sortItems } from '../shared/attention';
+import { deriveItem, emptyTriage, sortItems } from '../packages/shared/src/attention';
 import { review, snapshot, t, thread } from './fixtures';
 
 describe('review attention', () => {

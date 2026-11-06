@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { buildSchema, parse, validate } from 'graphql';
 import { describe, expect, it } from 'vitest';
-import { allDocuments } from '../server/github/queries';
+import { allDocuments } from '../apps/server/src/github/queries';
 
 // GitHub's published schema (https://docs.github.com/public/fpt/schema.docs.graphql).
 const schema = buildSchema(

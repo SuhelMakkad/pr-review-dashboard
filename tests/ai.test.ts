@@ -11,26 +11,26 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { c } from 'tar';
-import { ClaudeProvider, claudeProgress } from '../server/ai/claude';
-import { CodexProvider, codexProgress, withDefault } from '../server/ai/codex';
-import { mergeSnapshot, summariseUsage, type RateLimitSnapshot } from '../server/ai/codex-usage';
-import { annotatePatch } from '../server/ai/context';
-import { FixtureProvider } from '../server/ai/fixture';
-import { spawnAgentProcess } from '../server/ai/provider';
-import { AiRunner } from '../server/ai/runner';
-import { jsonSchemaFor } from '../server/ai/tasks';
+import { ClaudeProvider, claudeProgress } from '../apps/server/src/ai/claude';
+import { CodexProvider, codexProgress, withDefault } from '../apps/server/src/ai/codex';
+import { mergeSnapshot, summariseUsage, type RateLimitSnapshot } from '../apps/server/src/ai/codex-usage';
+import { annotatePatch } from '../apps/server/src/ai/context';
+import { FixtureProvider } from '../apps/server/src/ai/fixture';
+import { spawnAgentProcess } from '../apps/server/src/ai/provider';
+import { AiRunner } from '../apps/server/src/ai/runner';
+import { jsonSchemaFor } from '../apps/server/src/ai/tasks';
 import {
   extractRepository,
   prepareReviewWorkspace,
   type RepositoryExporter,
-} from '../server/ai/workspace';
-import { Store } from '../server/db/store';
-import { FixtureGitHub } from '../server/demo/fixture-github';
-import { defaultScenario } from '../server/demo/scenario';
-import { DiffService } from '../server/diff/service';
-import { EventBus } from '../server/events';
-import { ReviewService } from '../server/review/service';
-import { SyncService } from '../server/sync';
+} from '../apps/server/src/ai/workspace';
+import { Store } from '../apps/server/src/db/store';
+import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
+import { defaultScenario } from '../apps/server/src/demo/scenario';
+import { DiffService } from '../apps/server/src/diff/service';
+import { EventBus } from '../apps/server/src/events';
+import { ReviewService } from '../apps/server/src/review/service';
+import { SyncService } from '../apps/server/src/sync/index';
 import {
   defaultAiSettings,
   type AiRun,
@@ -38,7 +38,7 @@ import {
   type DraftCommentsResult,
   type FullReviewResult,
   type SinceReviewResult,
-} from '../shared/ai';
+} from '../packages/shared/src/ai';
 
 const cleanups: (() => void)[] = [];
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { GitHub, type GitHubTransport, safeError } from '../server/github';
+import { GitHub, type GitHubTransport, safeError } from '../apps/server/src/github/index';
 
 const page = (hasNextPage = false, endCursor: string | null = null) => ({ hasNextPage, endCursor });
 const connection = <T>(nodes: T[], hasNextPage = false, endCursor: string | null = null) => ({

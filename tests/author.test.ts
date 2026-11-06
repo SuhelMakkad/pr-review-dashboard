@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { deriveAuthorItem, sortAuthorItems } from '../shared/author';
-import { extractActivity } from '../server/insights/extract';
+import { deriveAuthorItem, sortAuthorItems } from '../packages/shared/src/author';
+import { extractActivity } from '../apps/server/src/insights/extract';
 import { review, snapshot, t, thread } from './fixtures';
 
 const mine = (overrides: Parameters<typeof snapshot>[0] = {}) =>

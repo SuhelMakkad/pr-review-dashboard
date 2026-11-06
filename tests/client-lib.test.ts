@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { deriveItem, emptyTriage } from '../shared/attention';
-import { matchesFilters } from '../src/features/inbox/filters';
-import { parsePrUrl } from '../src/lib/pr-ref';
-import { applyOptimistic } from '../src/lib/queries';
-import { keyCaps } from '../src/lib/shortcuts';
-import { parseSnooze, shortAge, snoozePresets } from '../src/lib/time';
+import { deriveItem, emptyTriage } from '../packages/shared/src/attention';
+import { matchesFilters } from '../apps/web/src/features/inbox/filters';
+import { parsePrUrl } from '../apps/web/src/lib/pr-ref';
+import { applyOptimistic } from '../apps/web/src/lib/queries';
+import { keyCaps } from '../apps/web/src/lib/shortcuts';
+import { parseSnooze, shortAge, snoozePresets } from '../apps/web/src/lib/time';
 import { review, snapshot, thread } from './fixtures';
 
 // Thursday 5 November 2026, 10:30 local time.

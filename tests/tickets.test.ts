@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractTickets } from '../shared/tickets';
+import { extractTickets } from '../packages/shared/src/tickets';
 
 const ids = (
   pr: { headRefName?: string; title?: string; body?: string },

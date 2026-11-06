@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { Store } from '../server/db/store';
-import { FixtureGitHub } from '../server/demo/fixture-github';
-import { defaultScenario } from '../server/demo/scenario';
-import { DiffService } from '../server/diff/service';
-import { EventBus } from '../server/events';
-import { ReviewError, ReviewService } from '../server/review/service';
-import { SyncService } from '../server/sync';
+import { Store } from '../apps/server/src/db/store';
+import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
+import { defaultScenario } from '../apps/server/src/demo/scenario';
+import { DiffService } from '../apps/server/src/diff/service';
+import { EventBus } from '../apps/server/src/events';
+import { ReviewError, ReviewService } from '../apps/server/src/review/service';
+import { SyncService } from '../apps/server/src/sync/index';
 
 const stores: Store[] = [];
 

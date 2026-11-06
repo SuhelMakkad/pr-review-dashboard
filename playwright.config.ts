@@ -34,7 +34,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'rm -rf .data-e2e && node dist/server/index.js',
+    command: 'rm -rf .data-e2e && node dist/apps/server/src/index.js',
     url: `http://127.0.0.1:${port}/api/status`,
     reuseExistingServer: false,
     timeout: 30_000,

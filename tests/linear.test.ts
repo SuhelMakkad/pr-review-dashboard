@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createApp } from '../server/app';
-import { Store } from '../server/db/store';
-import { FixtureGitHub } from '../server/demo/fixture-github';
-import { defaultScenario } from '../server/demo/scenario';
-import { EventBus } from '../server/events';
-import { registerSecret } from '../server/github/errors';
-import { FixtureLinear, LinearApi, LinearService } from '../server/linear/service';
-import { SyncService } from '../server/sync';
+import { createApp } from '../apps/server/src/app';
+import { Store } from '../apps/server/src/db/store';
+import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
+import { defaultScenario } from '../apps/server/src/demo/scenario';
+import { EventBus } from '../apps/server/src/events';
+import { registerSecret } from '../apps/server/src/github/errors';
+import { FixtureLinear, LinearApi, LinearService } from '../apps/server/src/linear/service';
+import { SyncService } from '../apps/server/src/sync/index';
 
 const cleanups: (() => unknown)[] = [];
 

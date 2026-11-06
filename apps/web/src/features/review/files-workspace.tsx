@@ -1,0 +1,793 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useSearch } from '@tanstack/react-router';
+import { WorkerPoolContextProvider } from '@pierre/diffs/react';
+import DiffsWorker from '@pierre/diffs/worker/worker.js?worker';
+import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
+import { toast } from 'sonner';
+import {
+  CircleAlert,
+  GitCompareArrows,
+  History,
+  PanelRightClose,
+  PanelRightOpen,
+} from 'lucide-react';
+import type { DraftComment } from '../../../../../packages/shared/src/review';
+import type { ReviewThread } from '../../../../../packages/shared/src/types';
+import { refOf } from '../../lib/pr-ref';
+import { useDiff, usePullDetail, usePulls } from '../../lib/queries';
+import { useShortcuts } from '../../lib/shortcuts';
+import { storage } from '../../lib/storage';
+import { useAppearance } from '../../lib/theme';
+import { Button, IconButton } from '../../ui/button';
+import { cn } from '../../ui/cn';
+import { EmptyState } from '../../ui/empty-state';
+import { Kbd } from '../../ui/kbd';
+import type { Anchor, LineTarget } from '../diff/diff-pane';
+import { FileTree } from '../diff/file-tree';
+import { ThreadCard } from '../diff/thread-card';
+import { useCurrentPull } from '../pulls/use-current-pull';
+import { Composer } from './composer';
+import { DraftCommentCard } from './draft-comment-card';
+import { FileView } from './file-view';
+import { FinishSheet } from './finish-sheet';
+import { PendingTray } from './pending-tray';
+import type { FilesSearch } from './search';
+import { ThreadsRail } from './threads-rail';
+import { AssistPanel } from '../ai/assist-panel';
+import { Suggestions } from '../ai/suggestions';
+import { FullReview } from '../ai/full-review';
+import { useAi } from '../ai/use-ai';
+import { useReview } from './use-review';
+
+const VIEW_KEY = 'review-desk-diff-view';
+
+function layoutStorage() {
+  try {
+    return localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+const resolvedTheme = (theme: string) =>
+  theme === 'system'
+    ? typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light'
+    : (theme as 'light' | 'dark');
+
+/** The review workspace: file tree, one file's diff with threads and drafts, threads rail, finish. */
+export function FilesWorkspace() {
+  return (
+    <WorkerPoolContextProvider
+      poolOptions={{ workerFactory: () => new DiffsWorker(), poolSize: 2 }}
+      highlighterOptions={{}}
+    >
+      <Workspace />
+    </WorkerPoolContextProvider>
+  );
+}
+
+type ComposerState = (LineTarget & { path: string }) | { path: string; line: null } | null;
+
+function Workspace() {
+  const { item } = useCurrentPull();
+  const search = useSearch({ from: '/pr/$owner/$repo/$number/files' });
+  const navigate = useNavigate({ from: '/pr/$owner/$repo/$number/files' });
+  const goTo = useNavigate();
+  const pulls = usePulls();
+  const { theme } = useAppearance();
+  const fileFilterRef = useRef<HTMLInputElement>(null);
+  const diffRef = useRef<HTMLDivElement>(null);
+  const [railOpen, setRailOpen] = useState(() => storage.get('review-desk-rail') !== 'closed');
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [composer, setComposer] = useState<ComposerState>(null);
+  const [composerError, setComposerError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<LineTarget | null>(null);
+  const [replying, setReplying] = useState<string | null>(null);
+  const [finishOpen, setFinishOpen] = useState(false);
+  const [railTab, setRailTab] = useState<'threads' | 'assist'>('threads');
+  const layout = useDefaultLayout({ id: 'files-workspace', storage: layoutStorage() });
+
+  const reviewOid = item?.latestReview?.commitOid ?? null;
+  const changedSinceReview = Boolean(item?.reasons.some((reason) => reason.kind === 'changed'));
+  const mode: 'all' | 'since' = search.mode ?? (changedSinceReview && reviewOid ? 'since' : 'all');
+  const view = search.view ?? (storage.get(VIEW_KEY) === 'split' ? 'split' : 'unified');
+  const diff = useDiff(item?.id ?? null, mode === 'since' ? 'since-review' : 'full');
+  const detail = usePullDetail(item?.id ?? null);
+  const account = detail.data?.account ?? pulls.data?.account ?? '';
+  const review = useReview(item?.id ?? null, account);
+  const ai = useAi(item?.id ?? null, account);
+  const draft = review.draft.data;
+
+  // Generated files (lockfiles, build output) go last and are never opened first.
+  const files = useMemo(
+    () =>
+      [...(diff.data?.files ?? [])].sort(
+        (left, right) => Number(Boolean(left.generated)) - Number(Boolean(right.generated)),
+      ),
+    [diff.data],
+  );
+  const current =
+    files.find((file) => file.path === search.file) ??
+    files.find((file) => !file.generated) ??
+    files[0];
+  const index = current ? files.indexOf(current) : -1;
+  const threads = detail.data?.snapshot.threads ?? [];
+  const unread = new Set(item?.unreadReplyKeys ?? []);
+  const drafts = draft?.comments ?? [];
+
+  const threadsByFile = useMemo(() => {
+    const map = new Map<string, ReviewThread[]>();
+
+    for (const thread of threads) map.set(thread.path, [...(map.get(thread.path) ?? []), thread]);
+
+    return map;
+  }, [threads]);
+  const threadCounts = useMemo(
+    () =>
+      new Map(
+        [...threadsByFile].map(([path, list]) => [
+          path,
+          list.filter((thread) => !thread.isResolved).length,
+        ]),
+      ),
+    [threadsByFile],
+  );
+
+  const setSearch = (next: Partial<FilesSearch>, replace = true) =>
+    navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace });
+
+  const selectFile = (path: string, thread?: string) => {
+    setComposer(null);
+    setSelection(null);
+    setSearch({ file: path, thread });
+  };
+
+  const scrollDiff = (delta: number) => {
+    diffRef.current
+      ?.querySelector<HTMLElement>('.diff-scroller')
+      ?.scrollBy({ top: delta, behavior: 'auto' });
+  };
+
+  const unresolved = threads.filter(
+    (thread) => !thread.isResolved && files.some((file) => file.path === thread.path),
+  );
+  const focusedThread = threads.find((thread) => thread.id === search.thread);
+
+  const nextUnresolved = (direction: 1 | -1) => {
+    if (unresolved.length === 0) return;
+
+    const position = unresolved.findIndex((thread) => thread.id === search.thread);
+    const next = unresolved[(position + direction + unresolved.length) % unresolved.length];
+
+    selectFile(next.path, next.id);
+  };
+
+  const toggleViewed = (path: string, advance: boolean) => {
+    const file = files.find((candidate) => candidate.path === path);
+
+    if (!file) return;
+
+    const viewed = file.viewed !== 'VIEWED';
+
+    review.setViewed.mutate(
+      { path, viewed },
+      { onError: (error) => toast.error(`Could not update viewed state: ${error.message}`) },
+    );
+
+    if (advance && viewed) {
+      const after = [...files.slice(index + 1), ...files.slice(0, index)].find(
+        (candidate) => candidate.viewed !== 'VIEWED' && candidate.path !== path,
+      );
+
+      if (after) selectFile(after.path);
+    }
+  };
+
+  const startComment = () => {
+    if (!current) return;
+
+    setComposerError(null);
+    setComposer(
+      selection ? { ...selection, path: current.path } : { path: current.path, line: null },
+    );
+  };
+
+  // Bring a focused thread into view once its file has rendered.
+  useEffect(() => {
+    if (!search.thread) return;
+
+    const timer = setTimeout(() => {
+      diffRef.current
+        ?.querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(search.thread!)}"]`)
+        ?.scrollIntoView({ block: 'center' });
+    }, 150);
+
+    return () => clearTimeout(timer);
+  }, [search.thread, current?.path]);
+
+  const nextAttention = () =>
+    pulls.data?.items.find(
+      (candidate) => candidate.queue === 'attention' && candidate.id !== item?.id,
+    );
+
+  useShortcuts([
+    {
+      keys: 'n',
+      label: 'Next file',
+      group: 'Pull request',
+      run: () => files[index + 1] && selectFile(files[index + 1].path),
+    },
+    {
+      keys: 'p',
+      label: 'Previous file',
+      group: 'Pull request',
+      run: () => files[index - 1] && selectFile(files[index - 1].path),
+    },
+    { keys: 'j', label: 'Scroll down', group: 'Pull request', run: () => scrollDiff(80) },
+    { keys: 'k', label: 'Scroll up', group: 'Pull request', run: () => scrollDiff(-80) },
+    {
+      keys: 'u',
+      label: 'Next unresolved thread',
+      group: 'Pull request',
+      run: () => nextUnresolved(1),
+    },
+    {
+      keys: 'Shift+u',
+      label: 'Previous unresolved thread',
+      group: 'Pull request',
+      run: () => nextUnresolved(-1),
+    },
+    {
+      keys: 'c',
+      label: 'Comment on selected lines (or the file)',
+      group: 'Pull request',
+      run: startComment,
+    },
+    {
+      keys: 'v',
+      label: 'Mark file viewed and go to the next',
+      group: 'Pull request',
+      run: () => current && toggleViewed(current.path, true),
+    },
+    {
+      keys: 'r',
+      label: 'Reply to the focused thread',
+      group: 'Pull request',
+      run: () => focusedThread && setReplying(focusedThread.id),
+    },
+    {
+      keys: 'Shift+r',
+      label: 'Resolve or unresolve the focused thread',
+      group: 'Pull request',
+      run: () =>
+        focusedThread &&
+        review.resolve.mutate(
+          { threadId: focusedThread.id, resolved: !focusedThread.isResolved },
+          { onError: (error) => toast.error(error.message) },
+        ),
+    },
+    {
+      keys: '$mod+Shift+Enter',
+      label: 'Finish review',
+      group: 'Pull request',
+      allowInInput: true,
+      run: () => setFinishOpen(true),
+    },
+    {
+      keys: 't',
+      label: 'Go to file',
+      group: 'Pull request',
+      run: () => fileFilterRef.current?.focus(),
+    },
+    {
+      keys: 'b',
+      label: 'Run the AI brief',
+      group: 'Pull request',
+      run: () => {
+        setRailOpen(true);
+        setRailTab('assist');
+
+        if (!ai.isRunning('brief')) {
+          ai.start.mutate({ task: 'brief', force: Boolean(ai.latest('brief')) });
+        }
+      },
+    },
+    {
+      keys: 'Shift+b',
+      label: 'Suggest review comments with AI',
+      group: 'Pull request',
+      run: () => {
+        setRailOpen(true);
+        setRailTab('assist');
+
+        if (!ai.isRunning('draft_comments')) ai.start.mutate({ task: 'draft_comments' });
+      },
+    },
+    {
+      keys: 'd',
+      label: 'Toggle full diff / since your review',
+      group: 'Pull request',
+      run: () =>
+        reviewOid &&
+        setSearch({ mode: mode === 'since' ? 'all' : 'since', file: undefined }, false),
+    },
+    {
+      keys: 'Shift+d',
+      label: 'Split or unified view',
+      group: 'Pull request',
+      run: () => {
+        const next = view === 'split' ? 'unified' : 'split';
+
+        storage.set(VIEW_KEY, next);
+        setSearch({ view: next });
+      },
+    },
+    {
+      keys: 'x',
+      label: 'Load a collapsed file',
+      group: 'Pull request',
+      run: () => current && setExpanded(new Set([...expanded, current.path])),
+    },
+    {
+      keys: '.',
+      label: 'Toggle threads panel',
+      group: 'Pull request',
+      run: () => {
+        storage.set('review-desk-rail', railOpen ? 'closed' : 'open');
+        setRailOpen(!railOpen);
+      },
+    },
+  ]);
+
+  if (!item) return null;
+
+  const renderThread = (thread: ReviewThread) => (
+    <ThreadCard
+      key={thread.id}
+      thread={thread}
+      account={account}
+      unread={unread}
+      focused={thread.id === search.thread}
+      actions={{
+        replying: replying === thread.id,
+        setReplying: (value) => setReplying(value ? thread.id : null),
+        reply: (body) => review.reply.mutateAsync({ threadId: thread.id, body }),
+        resolve: (resolved) => review.resolve.mutateAsync({ threadId: thread.id, resolved }),
+        busy: review.reply.isPending || review.resolve.isPending,
+      }}
+    />
+  );
+
+  const renderDraft = (comment: DraftComment) => (
+    <DraftCommentCard
+      key={comment.id}
+      comment={comment}
+      busy={review.editComment.isPending}
+      onEdit={(body) => review.editComment.mutateAsync({ id: comment.id, body })}
+      onDelete={() =>
+        review.deleteComment.mutate(comment.id, { onError: (error) => toast.error(error.message) })
+      }
+    />
+  );
+
+  const composerFor = (target: NonNullable<ComposerState>) => (
+    <Composer
+      label={target.line === null ? `Comment on ${target.path}` : `Comment on line ${target.line}`}
+      busy={review.addComment.isPending || review.commentNow.isPending}
+      error={composerError}
+      onCancel={() => {
+        setComposer(null);
+        setComposerError(null);
+      }}
+      primary={{
+        label: 'Add to review',
+        keys: '$mod+Enter',
+        variant: 'primary',
+        run: async (body) => {
+          try {
+            await review.addComment.mutateAsync({
+              path: target.path,
+              line: target.line,
+              side: target.line === null ? 'RIGHT' : target.side,
+              startLine: target.line === null ? null : target.startLine,
+              body,
+            });
+            setComposer(null);
+            setComposerError(null);
+          } catch (error) {
+            setComposerError((error as Error).message);
+          }
+        },
+      }}
+      alternate={{
+        label: `Comment now as @${account}`,
+        keys: '$mod+Alt+Enter',
+        variant: 'secondary',
+        run: async (body) => {
+          try {
+            await review.commentNow.mutateAsync({
+              path: target.path,
+              line: target.line,
+              side: target.line === null ? 'RIGHT' : target.side,
+              startLine: target.line === null ? null : target.startLine,
+              body,
+            });
+            setComposer(null);
+            setComposerError(null);
+            toast('Comment posted to GitHub');
+          } catch (error) {
+            setComposerError((error as Error).message);
+          }
+        },
+      }}
+    />
+  );
+
+  const renderAnchor = (anchor: Anchor) => {
+    if (anchor.kind === 'thread') {
+      const thread = threads.find((candidate) => candidate.id === anchor.id);
+
+      return thread ? renderThread(thread) : null;
+    }
+
+    if (anchor.kind === 'draft') {
+      const comment = drafts.find((candidate) => candidate.id === anchor.id);
+
+      return comment ? renderDraft(comment) : null;
+    }
+
+    return composer && composer.line !== null ? (
+      <div className="my-2 mr-4 ml-2">{composerFor(composer)}</div>
+    ) : null;
+  };
+
+  const kind = diff.data?.kind;
+  const banner =
+    mode === 'since' && diff.data
+      ? kind === 'identical'
+        ? { tone: 'ok', icon: History, text: 'Nothing has changed since your review.' }
+        : kind === 'fast-forward'
+          ? {
+              tone: 'changed',
+              icon: GitCompareArrows,
+              text: `New commits since your review (${reviewOid?.slice(0, 7)} → ${diff.data.toOid.slice(0, 7)}).${diff.data.note ? ` ${diff.data.note}` : ''}`,
+            }
+          : {
+              tone: kind === 'unavailable' ? 'pending' : 'changed',
+              icon: kind === 'unavailable' ? CircleAlert : GitCompareArrows,
+              text: diff.data.note ?? '',
+            }
+      : null;
+  const viewedCount = files.filter((file) => file.viewed === 'VIEWED').length;
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex h-11 shrink-0 items-center gap-3 border-b border-line px-3">
+        <div
+          role="radiogroup"
+          aria-label="Diff range"
+          className="inline-flex rounded-sm border border-line bg-sunken p-0.5"
+        >
+          {(
+            [
+              ['all', 'All changes'],
+              ['since', 'Since your review'],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="radio"
+              aria-checked={mode === value}
+              disabled={value === 'since' && !reviewOid}
+              title={
+                value === 'since' && !reviewOid ? 'You have not reviewed this PR yet' : undefined
+              }
+              onClick={() => setSearch({ mode: value, file: undefined }, false)}
+              className={cn(
+                'h-6 rounded-xs px-2.5 text-xs disabled:opacity-40',
+                mode === value
+                  ? 'bg-panel font-medium text-fg shadow-sm'
+                  : 'text-fg-muted hover:text-fg',
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <Kbd keys="d" />
+        {current && (
+          <span
+            className="min-w-0 flex-1 truncate font-mono text-xs text-fg-muted"
+            title={current.path}
+          >
+            {index + 1}/{files.length} · {current.path}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-1">
+          {current && (
+            <Button
+              size="sm"
+              variant={current.viewed === 'VIEWED' ? 'secondary' : 'ghost'}
+              onClick={() => toggleViewed(current.path, false)}
+              aria-pressed={current.viewed === 'VIEWED'}
+            >
+              {current.viewed === 'VIEWED' ? 'Viewed' : 'Mark viewed'}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              const next = view === 'split' ? 'unified' : 'split';
+
+              storage.set(VIEW_KEY, next);
+              setSearch({ view: next });
+            }}
+            shortcut="Shift+d"
+          >
+            {view === 'split' ? 'Split' : 'Unified'}
+          </Button>
+          <IconButton
+            size="sm"
+            label={railOpen ? 'Hide threads' : 'Show threads'}
+            icon={railOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
+            onClick={() => {
+              storage.set('review-desk-rail', railOpen ? 'closed' : 'open');
+              setRailOpen(!railOpen);
+            }}
+          />
+        </div>
+      </div>
+
+      {banner && banner.text && (
+        <p
+          className="flex shrink-0 items-start gap-2 border-b border-line px-4 py-2 text-xs"
+          style={{ background: `color-mix(in oklch, var(--${banner.tone}) 8%, var(--panel))` }}
+          role="status"
+        >
+          <banner.icon
+            size={14}
+            style={{ color: `var(--${banner.tone})` }}
+            className="mt-px shrink-0"
+            aria-hidden="true"
+          />
+          <span className="text-fg">{banner.text}</span>
+        </p>
+      )}
+
+      <Group
+        orientation="horizontal"
+        className="min-h-0 flex-1"
+        defaultLayout={layout.defaultLayout}
+        onLayoutChanged={layout.onLayoutChanged}
+      >
+        <Panel id="tree" defaultSize="20" minSize="12" maxSize="40">
+          {diff.data ? (
+            <FileTree
+              ref={fileFilterRef}
+              files={files}
+              selected={current?.path}
+              threadCounts={threadCounts}
+              onSelect={(path) => selectFile(path)}
+              onToggleViewed={(path) => toggleViewed(path, false)}
+            />
+          ) : (
+            <div className="h-full border-r border-line bg-sunken" />
+          )}
+        </Panel>
+        <Separator className="w-px bg-line outline-none hover:bg-accent data-[separator=active]:bg-accent" />
+        <Panel id="diff" minSize="40">
+          <div ref={diffRef} className="h-full min-w-0 bg-panel">
+            {diff.isPending ? (
+              <p className="p-6 text-sm text-fg-muted" aria-busy="true">
+                Loading diff…
+              </p>
+            ) : diff.error ? (
+              <div className="grid h-full place-items-center">
+                <EmptyState
+                  icon={<CircleAlert size={28} />}
+                  title="Could not load the diff"
+                  hint={diff.error.message}
+                />
+              </div>
+            ) : !current ? (
+              <div className="grid h-full place-items-center">
+                <EmptyState
+                  icon={<History size={28} />}
+                  title={
+                    kind === 'identical' ? 'Nothing new since your review' : 'No changed files'
+                  }
+                  hint={kind === 'identical' ? 'Press D to see the full diff.' : undefined}
+                />
+              </div>
+            ) : (
+              <FileView
+                key={`${mode}:${current.path}`}
+                file={current}
+                expanded={expanded.has(current.path)}
+                onExpand={() => setExpanded(new Set([...expanded, current.path]))}
+                threads={threadsByFile.get(current.path) ?? []}
+                drafts={drafts.filter((comment) => comment.path === current.path)}
+                composer={
+                  composer && composer.path === current.path && composer.line !== null
+                    ? composer
+                    : null
+                }
+                fileComposer={
+                  composer && composer.path === current.path && composer.line === null
+                    ? composerFor(composer)
+                    : null
+                }
+                view={view}
+                theme={resolvedTheme(theme)}
+                leftSideComments={mode === 'all'}
+                prUrl={item.url}
+                renderAnchor={renderAnchor}
+                renderThread={renderThread}
+                renderDraft={renderDraft}
+                onCommentLine={(target) => {
+                  setComposerError(null);
+                  setComposer({ ...target, path: current.path });
+                }}
+                onCommentFile={() => setComposer({ path: current.path, line: null })}
+                onSelectLines={setSelection}
+              />
+            )}
+          </div>
+        </Panel>
+        {railOpen && (
+          <>
+            <Separator className="w-px bg-line outline-none hover:bg-accent data-[separator=active]:bg-accent" />
+            <Panel id="rail" defaultSize="24" minSize="16" maxSize="40">
+              <div className="flex h-full flex-col border-l border-line bg-sunken">
+                <div
+                  role="tablist"
+                  aria-label="Side panel"
+                  className="flex shrink-0 gap-1 border-b border-line px-2 pt-2"
+                >
+                  {(
+                    [
+                      ['threads', `Threads${unresolved.length ? ` · ${unresolved.length}` : ''}`],
+                      ['assist', '✦ Assist'],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="tab"
+                      aria-selected={railTab === value}
+                      onClick={() => setRailTab(value)}
+                      className={cn(
+                        '-mb-px border-b-2 px-2 pb-1.5 text-xs',
+                        railTab === value
+                          ? 'border-accent font-medium text-fg'
+                          : 'border-transparent text-fg-muted hover:text-fg',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div className="min-h-0 flex-1">
+                  {railTab === 'threads' ? (
+                    <ThreadsRail
+                      threads={threads}
+                      files={files}
+                      unread={unread}
+                      focused={search.thread}
+                      onOpen={(thread) => selectFile(thread.path, thread.id)}
+                    />
+                  ) : (
+                    <div className="scroll-thin h-full space-y-3 overflow-y-auto p-3">
+                      <FullReview
+                        prId={item.id}
+                        account={account}
+                        repository={item.repository}
+                        number={item.number}
+                        headOid={detail.data?.snapshot.headOid ?? ''}
+                        ci={detail.data?.snapshot.ci ?? 'none'}
+                      />
+                      <AssistPanel
+                        prId={item.id}
+                        account={account}
+                        bindShortcuts={false}
+                        compact
+                        tasks={[
+                          'brief',
+                          ...(reviewOid && changedSinceReview ? (['since_review'] as const) : []),
+                        ]}
+                        threadLabel={(threadId) => {
+                          const thread = threads.find((candidate) => candidate.id === threadId);
+
+                          return thread
+                            ? `${thread.path.split('/').pop()}${thread.line ? `:${thread.line}` : ''}`
+                            : threadId;
+                        }}
+                        onOpenFile={(path) =>
+                          files.some((file) => file.path === path) && selectFile(path)
+                        }
+                        onOpenThread={(threadId) => {
+                          const thread = threads.find((candidate) => candidate.id === threadId);
+
+                          if (thread) selectFile(thread.path, thread.id);
+                        }}
+                      />
+                      <Suggestions
+                        prId={item.id}
+                        account={account}
+                        onOpenLine={(path) =>
+                          files.some((file) => file.path === path) && selectFile(path)
+                        }
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Panel>
+          </>
+        )}
+      </Group>
+
+      <PendingTray
+        draft={draft}
+        viewed={viewedCount}
+        total={files.length}
+        onFinish={() => setFinishOpen(true)}
+        onDiscard={() => {
+          if (window.confirm('Discard your pending review and all its comments?')) {
+            review.discard.mutate(undefined, { onError: (error) => toast.error(error.message) });
+          }
+        }}
+      />
+
+      {draft && detail.data && (
+        <FinishSheet
+          open={finishOpen}
+          onOpenChange={setFinishOpen}
+          draft={draft}
+          account={account}
+          ci={item.ci}
+          viewedHeadOid={detail.data.snapshot.headOid}
+          saveMeta={(changes) => review.saveMeta.mutate(changes)}
+          submit={(input) => review.submit.mutateAsync(input)}
+          busy={review.submit.isPending}
+          onReviewNewCommits={() => {
+            setFinishOpen(false);
+            setSearch({ mode: 'since', file: undefined }, false);
+          }}
+          onSubmitted={(result) => {
+            setFinishOpen(false);
+            toast('Review submitted', {
+              description: `${result.submittedComments} ${result.submittedComments === 1 ? 'comment' : 'comments'} posted to GitHub.`,
+              action: {
+                label: 'Open',
+                onClick: () => window.open(result.reviewUrl, '_blank', 'noopener,noreferrer'),
+              },
+            });
+
+            const next = nextAttention();
+
+            if (next) {
+              const target = refOf(next);
+
+              void goTo({
+                to: '/inbox/$queue/$owner/$repo/$number',
+                params: {
+                  queue: 'attention',
+                  owner: target.owner,
+                  repo: target.repo,
+                  number: String(target.number),
+                },
+              });
+            } else {
+              void goTo({ to: '/inbox/$queue', params: { queue: 'attention' } });
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}

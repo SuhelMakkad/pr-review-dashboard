@@ -3,10 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Store } from '../server/db/store';
-import { SyncService } from '../server/sync';
-import { GitHub, GitHubError } from '../server/github';
-import { createApp } from '../server/app';
+import { Store } from '../apps/server/src/db/store';
+import { SyncService } from '../apps/server/src/sync/index';
+import { GitHub, GitHubError } from '../apps/server/src/github/index';
+import { createApp } from '../apps/server/src/app';
 import { snapshot, thread } from './fixtures';
 
 const stores: Store[] = [];

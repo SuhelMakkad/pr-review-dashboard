@@ -1,13 +1,13 @@
 // A separate server process lets recovery tests exercise a real SQLite reopen and process exit.
 import { join } from 'node:path';
-import { createApp } from '../../../server/app.ts';
-import { FixtureProvider } from '../../../server/ai/fixture.ts';
-import { Store } from '../../../server/db/store.ts';
-import { FixtureGitHub } from '../../../server/demo/fixture-github.ts';
-import { defaultScenario } from '../../../server/demo/scenario.ts';
-import { EventBus } from '../../../server/events.ts';
-import { SyncService } from '../../../server/sync/service.ts';
-import { FixtureLinear } from '../../../server/linear/service.ts';
+import { createApp } from '../../../apps/server/src/app.ts';
+import { FixtureProvider } from '../../../apps/server/src/ai/fixture.ts';
+import { Store } from '../../../apps/server/src/db/store.ts';
+import { FixtureGitHub } from '../../../apps/server/src/demo/fixture-github.ts';
+import { defaultScenario } from '../../../apps/server/src/demo/scenario.ts';
+import { EventBus } from '../../../apps/server/src/events.ts';
+import { SyncService } from '../../../apps/server/src/sync/service.ts';
+import { FixtureLinear } from '../../../apps/server/src/linear/service.ts';
 
 const directory = process.env.REVIEW_RESTART_DATA;
 const port = Number(process.env.REVIEW_RESTART_PORT);
