@@ -1,0 +1,481 @@
+import { useEffect, useRef } from 'react';
+import { Dialog } from 'radix-ui';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { Link, useNavigate } from '@tanstack/react-router';
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  Clock3,
+  ExternalLink,
+  LoaderCircle,
+  X,
+} from 'lucide-react';
+import { toast } from 'sonner';
+import {
+  operationInProgress,
+  operationLabels,
+  type GitHubOperation,
+  type OperationControl,
+  type OperationReceipt,
+} from '@review-desk/shared/operations';
+import { api } from '@/lib/api';
+import { storage } from '@/lib/storage';
+import { dateTime, relativePhrase } from '@/lib/time';
+import { useStatus } from '@/lib/queries';
+import { Button, IconButton } from '@/ui/button';
+import { MarkdownView } from '@/ui/markdown';
+import { cn } from '@/ui/cn';
+import { openActivity, setActivityOpen, useActivityOpen, useOperations } from './use-operations';
+
+const controlLabels: Record<OperationControl, string> = {
+  cancel: 'Cancel before sending',
+  retry: 'Retry remaining steps',
+  check: 'Check GitHub',
+  reopen: 'Return to draft',
+  dismiss: 'Dismiss notice',
+  restore: 'Restore editable draft',
+};
+
+function label(operation: GitHubOperation) {
+  if (operation.action.type === 'review')
+    return operation.action.review.event === 'APPROVE'
+      ? 'Submit approval'
+      : operation.action.review.event === 'REQUEST_CHANGES'
+        ? 'Request changes'
+        : 'Submit review';
+  if (operation.action.type === 'resolve')
+    return operation.action.resolved ? 'Resolve thread' : 'Unresolve thread';
+
+  return operationLabels[operation.action.type];
+}
+
+function statusLabel(operation: GitHubOperation) {
+  if (operation.status === 'needs_attention')
+    return operation.error?.code === 'UNCONFIRMED' ? 'Unconfirmed' : 'Needs attention';
+  if (operation.status === 'succeeded')
+    return operation.result?.pending
+      ? 'Added to pending review'
+      : operation.action.type === 'discard'
+        ? 'Completed'
+        : 'Confirmed by GitHub';
+
+  return {
+    queued: 'Queued',
+    running: 'Sending to GitHub',
+    waiting: 'Waiting to retry',
+    checking: 'Checking GitHub',
+    cancelled: 'Cancelled',
+  }[operation.status];
+}
+
+export function ActivityButton() {
+  const open = useActivityOpen();
+  const account = useStatus().data?.account?.login ?? '';
+  const operations = useOperations(account);
+  const items = operations.data?.pages.flatMap((page) => page.items) ?? [];
+  const running = items.filter((item) => operationInProgress(item.status)).length;
+  const attention = items.filter(
+    (item) => item.status === 'needs_attention' && !item.dismissedAt,
+  ).length;
+
+  return (
+    <button
+      type="button"
+      onClick={openActivity}
+      className={cn(
+        'inline-flex shrink-0 items-center gap-1.5 rounded-xs px-1 hover:bg-hover hover:text-fg',
+        attention > 0 && 'text-pending',
+      )}
+      aria-expanded={open}
+    >
+      <Activity size={12} aria-hidden="true" />
+      Activity
+      {running > 0 && <span>{running} running</span>}
+      {attention > 0 && (
+        <span className="inline-flex items-center gap-1">
+          <AlertTriangle size={11} aria-hidden="true" />
+          {attention} {attention === 1 ? 'needs' : 'need'} attention
+        </span>
+      )}
+      {operations.isError && <span className="text-pending">Unavailable</span>}
+    </button>
+  );
+}
+
+function OperationCard({ operation }: { operation: GitHubOperation }) {
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const control = useMutation({
+    mutationFn: (command: OperationControl) =>
+      api<OperationReceipt>(`/api/operations/${encodeURIComponent(operation.id)}/${command}`, {
+        method: 'POST',
+        body: {
+          account: operation.account,
+          confirm: command === 'restore' || command === 'reopen',
+        },
+      }),
+    onSuccess: (_receipt, command) => {
+      void client.invalidateQueries({ queryKey: ['operations', operation.account] });
+      void client.invalidateQueries({ queryKey: ['draft', operation.prId] });
+
+      if (command === 'reopen') {
+        storage.set(
+          `review-desk-recovered:${operation.account}:${operation.prId}`,
+          JSON.stringify(operation.action),
+        );
+        window.dispatchEvent(new Event('review-desk-recovered'));
+        const [owner, repo] = operation.repository.split('/');
+
+        setActivityOpen(false);
+        void navigate({
+          to: '/pr/$owner/$repo/$number/files',
+          params: { owner, repo, number: String(operation.number) },
+          search: {
+            ...(operation.action.type === 'reply' ? { thread: operation.action.threadId } : {}),
+          },
+        });
+      }
+    },
+  });
+  const attention = operation.status === 'needs_attention';
+  const Icon = attention
+    ? AlertTriangle
+    : operation.status === 'succeeded'
+      ? CheckCircle2
+      : operationInProgress(operation.status)
+        ? Clock3
+        : Activity;
+  const body =
+    operation.action.type === 'review'
+      ? operation.action.review.body
+      : operation.action.type === 'reply'
+        ? operation.action.body
+        : operation.action.type === 'comment'
+          ? operation.action.comment.body
+          : '';
+
+  return (
+    <article
+      className="space-y-2 border-b border-line px-4 py-3"
+      aria-label={`${label(operation)} on ${operation.repository} #${operation.number}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="text-sm font-medium">{label(operation)}</h3>
+        <time
+          className="shrink-0 text-2xs text-fg-subtle"
+          dateTime={operation.createdAt}
+          title={dateTime(operation.createdAt)}
+        >
+          {relativePhrase(operation.createdAt)}
+        </time>
+      </div>
+      <p className="text-xs text-fg-muted">
+        <Link
+          to="/pr/$owner/$repo/$number/files"
+          params={{
+            owner: operation.repository.split('/')[0],
+            repo: operation.repository.split('/')[1],
+            number: String(operation.number),
+          }}
+          search={
+            operation.action.type === 'reply' || operation.action.type === 'resolve'
+              ? { thread: operation.action.threadId }
+              : {}
+          }
+          onClick={() => setActivityOpen(false)}
+          className="hover:text-accent hover:underline"
+        >
+          {operation.repository} #{operation.number}
+        </Link>{' '}
+        · @{operation.account}
+      </p>
+      <p
+        role="status"
+        className={cn(
+          'flex items-center gap-1.5 text-xs',
+          attention
+            ? 'text-pending'
+            : operation.status === 'succeeded'
+              ? 'text-ok'
+              : 'text-fg-muted',
+        )}
+      >
+        <Icon size={13} aria-hidden="true" />
+        {statusLabel(operation)}
+      </p>
+      <p className="text-xs">{operation.progress}</p>
+      {operation.error && <p className="text-xs text-pending">{operation.error.message}</p>}
+      {operation.retryAt && (
+        <p className="text-xs text-fg-muted">Next attempt: {dateTime(operation.retryAt)}.</p>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {operation.controls.map((command) => (
+          <Button
+            key={command}
+            size="sm"
+            variant={command === 'dismiss' ? 'ghost' : 'secondary'}
+            disabled={control.isPending}
+            onClick={() => {
+              if (
+                command === 'restore' &&
+                !window.confirm(
+                  'Remove this pending review from GitHub and restore an editable local draft? Its current content will be saved in Activity first.',
+                )
+              )
+                return;
+              if (
+                command === 'reopen' &&
+                operation.error?.code === 'UNCONFIRMED' &&
+                !window.confirm(
+                  'Have you checked GitHub and confirmed this action did not post? Sending it again could create a duplicate.',
+                )
+              )
+                return;
+
+              control.mutate(command);
+            }}
+          >
+            {command === 'reopen' && operation.error?.code === 'HEAD_MOVED'
+              ? 'Review new commits'
+              : controlLabels[command]}
+          </Button>
+        ))}
+        <a
+          href={operation.result?.url ?? operation.prUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 px-1 py-1 text-xs text-accent hover:underline"
+        >
+          Open GitHub <ExternalLink size={11} aria-hidden="true" />
+        </a>
+      </div>
+      {control.error && (
+        <p role="alert" className="text-xs text-fail">
+          {control.error.message}
+        </p>
+      )}
+      <details className="text-xs">
+        <summary className="cursor-pointer py-1 text-fg-muted">Saved content and details</summary>
+        <div className="mt-2 space-y-3 break-words rounded-md border border-line bg-sunken p-3">
+          <p>{operation.title}</p>
+          <p className="text-fg-muted">
+            Queued {dateTime(operation.createdAt)}
+            {operation.finishedAt ? ` · Finished ${dateTime(operation.finishedAt)}` : ''}
+          </p>
+          {operation.action.type === 'review' && (
+            <p>
+              Reviewed commit: <code>{operation.action.review.expectedHeadOid.slice(0, 7)}</code>
+            </p>
+          )}
+          {body && <MarkdownView>{body}</MarkdownView>}
+          {operation.action.type === 'review' &&
+            operation.action.draft.comments.map((comment) => (
+              <div key={comment.id}>
+                <code>
+                  {comment.path}
+                  {comment.line ? `:${comment.line}` : ''}
+                </code>
+                <MarkdownView>{comment.body}</MarkdownView>
+              </div>
+            ))}
+          {operation.action.type === 'viewed' && (
+            <p>
+              {operation.action.path} · {operation.action.viewed ? 'Viewed' : 'Unviewed'}
+            </p>
+          )}
+          {operation.action.type === 'reviewers' && (
+            <p>Reviewers: {operation.action.logins.join(', ')}</p>
+          )}
+          {operation.savedPendingReview && (
+            <section
+              className="space-y-2 border-t border-line pt-2"
+              aria-label="Saved GitHub pending review"
+            >
+              <h4 className="font-medium">GitHub pending content saved before recovery</h4>
+              {operation.savedPendingReview.body && (
+                <MarkdownView>{operation.savedPendingReview.body}</MarkdownView>
+              )}
+              {operation.savedPendingReview.comments.map((comment) => (
+                <div key={comment.id}>
+                  <code>
+                    {comment.path}
+                    {comment.line ? `:${comment.line}` : ''}
+                  </code>
+                  <MarkdownView>{comment.body}</MarkdownView>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() =>
+                      void navigator.clipboard.writeText(comment.body).then(
+                        () => toast('Saved comment copied'),
+                        () => toast.error('Could not copy comment'),
+                      )
+                    }
+                  >
+                    Copy comment
+                  </Button>
+                </div>
+              ))}
+            </section>
+          )}
+          {body && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() =>
+                void navigator.clipboard.writeText(body).then(
+                  () => toast('Saved text copied'),
+                  () => toast.error('Could not copy saved text'),
+                )
+              }
+            >
+              Copy saved text
+            </Button>
+          )}
+        </div>
+      </details>
+    </article>
+  );
+}
+
+export function ActivityDrawer() {
+  const open = useActivityOpen();
+  const account = useStatus().data?.account?.login ?? '';
+  const operations = useOperations(account);
+  const notices = useRef<Record<string, string> | null>(null);
+  const noticeAccount = useRef('');
+  const items = operations.data?.pages.flatMap((page) => page.items) ?? [];
+
+  useEffect(() => {
+    if (!account || !operations.data) return;
+
+    if (noticeAccount.current !== account) {
+      noticeAccount.current = account;
+      try {
+        notices.current = JSON.parse(storage.get(`operation-notices:${account}`) ?? '{}');
+      } catch {
+        notices.current = {};
+      }
+    }
+
+    const seen = notices.current ?? {};
+
+    for (const operation of items) {
+      const signature = `${operation.status}:${operation.error?.code ?? ''}`;
+      if (seen[operation.id] === signature) continue;
+
+      if (operation.status === 'needs_attention' && !operation.dismissedAt) {
+        toast.error(`${label(operation)} needs attention`, {
+          description: `${operation.repository} #${operation.number}`,
+          action: { label: 'View activity', onClick: openActivity },
+        });
+      } else if (
+        operation.status === 'succeeded' &&
+        seen[operation.id] &&
+        operation.action.type !== 'viewed'
+      ) {
+        toast(
+          operation.result?.pending
+            ? 'Added to your pending review on GitHub'
+            : `${label(operation)} completed`,
+          {
+            description: `${operation.repository} #${operation.number}`,
+            action: { label: 'View activity', onClick: openActivity },
+          },
+        );
+      }
+
+      seen[operation.id] = signature;
+    }
+
+    notices.current = seen;
+    storage.set(`operation-notices:${account}`, JSON.stringify(seen));
+  }, [account, operations.data]);
+
+  const groups = [
+    {
+      title: 'Needs attention',
+      items: items.filter((item) => item.status === 'needs_attention' && !item.dismissedAt),
+    },
+    { title: 'In progress', items: items.filter((item) => operationInProgress(item.status)) },
+    {
+      title: 'Recent',
+      items: items
+        .filter((item) => ['succeeded', 'cancelled'].includes(item.status) || item.dismissedAt)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    },
+  ];
+
+  return (
+    <Dialog.Root open={open} onOpenChange={setActivityOpen} modal={false}>
+      <Dialog.Portal>
+        <Dialog.Content
+          aria-describedby="activity-description"
+          onInteractOutside={(event) => event.preventDefault()}
+          className="fixed top-0 right-0 bottom-7 z-40 flex w-[420px] max-w-full flex-col border-l border-line bg-elevated shadow-popover"
+        >
+          <header className="flex items-start justify-between border-b border-line px-4 py-4">
+            <div>
+              <Dialog.Title className="text-base font-semibold">Activity</Dialog.Title>
+              <Dialog.Description id="activity-description" className="mt-1 text-xs text-fg-muted">
+                GitHub actions · saved on this device
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <IconButton size="sm" label="Close activity" icon={<X size={15} />} />
+            </Dialog.Close>
+          </header>
+          <div
+            className="scroll-thin min-h-0 flex-1 overflow-y-auto"
+            aria-busy={operations.isPending}
+          >
+            {operations.isPending && (
+              <p role="status" className="flex items-center gap-2 p-4 text-sm text-fg-muted">
+                <LoaderCircle size={14} className="animate-spin" />
+                Loading activity…
+              </p>
+            )}
+            {operations.error && (
+              <div role="alert" className="space-y-2 p-4 text-sm">
+                <p>Could not load activity. {operations.error.message}</p>
+                <Button size="sm" onClick={() => void operations.refetch()}>
+                  Try again
+                </Button>
+              </div>
+            )}
+            {groups.map(
+              (group) =>
+                group.items.length > 0 && (
+                  <section key={group.title} aria-label={group.title}>
+                    <h2 className="px-4 pt-4 pb-1 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
+                      {group.title} · {group.items.length}
+                    </h2>
+                    {group.items.map((operation) => (
+                      <OperationCard key={operation.id} operation={operation} />
+                    ))}
+                  </section>
+                ),
+            )}
+            {!operations.isPending && !operations.error && items.length === 0 && (
+              <p className="p-4 text-sm text-fg-muted">
+                Your GitHub actions and their results will appear here.
+              </p>
+            )}
+            {operations.hasNextPage && (
+              <div className="p-4">
+                <Button
+                  size="sm"
+                  disabled={operations.isFetchingNextPage}
+                  onClick={() => void operations.fetchNextPage()}
+                >
+                  {operations.isFetchingNextPage ? 'Loading…' : 'Load older actions'}
+                </Button>
+              </div>
+            )}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}

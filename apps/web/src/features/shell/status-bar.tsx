@@ -6,6 +6,7 @@ import { useStatus, useSyncNow } from '@/lib/queries';
 import { dateTime, relativePhrase } from '@/lib/time';
 import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
+import { ActivityButton } from '@/features/activity/activity-drawer';
 
 function useTick(ms: number) {
   const [, setTick] = useState(0);
@@ -133,6 +134,7 @@ export function StatusBar({ hints }: { hints: Hint[] }) {
         </Popover.Root>
       )}
 
+      <ActivityButton />
       <span className="ml-auto truncate">{state?.account?.login}</span>
 
       <span className="hidden items-center gap-3 lg:inline-flex">

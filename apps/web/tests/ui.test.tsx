@@ -67,6 +67,8 @@ beforeEach(() => {
 
       if (path === '/api/mine') {
         data = { account: 'me', items: [] };
+      } else if (path.startsWith('/api/operations')) {
+        data = { items: [], nextCursor: null };
       } else if (path === '/api/ai') {
         data = { settings: defaultAiSettings(), providers: [] };
       } else if (/^\/api\/pulls\/[^/]+\/ai/.test(path)) {

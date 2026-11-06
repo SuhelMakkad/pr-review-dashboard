@@ -13,6 +13,9 @@ import { CheatSheet } from '@/features/shell/cheat-sheet';
 import { CommandPalette } from '@/features/shell/command-palette';
 import { Sidebar } from '@/features/shell/sidebar';
 import { StatusBar, type Hint } from '@/features/shell/status-bar';
+import { ActivityDrawer } from '@/features/activity/activity-drawer';
+import { useActivityOpen } from '@/features/activity/use-operations';
+import { cn } from '@/ui/cn';
 
 function hintsFor(pathname: string): Hint[] {
   if (pathname.startsWith('/inbox/')) {
@@ -45,6 +48,7 @@ function hintsFor(pathname: string): Hint[] {
 }
 
 export function Shell() {
+  const activityOpen = useActivityOpen();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { theme } = useAppearance();
@@ -110,7 +114,7 @@ export function Shell() {
       </a>
       <div className="grid h-full grid-cols-[auto_minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto]">
         <Sidebar />
-        <main id="main" className="min-w-0 bg-panel">
+        <main id="main" className={cn('min-w-0 bg-panel', activityOpen && 'xl:pr-[420px]')}>
           <Outlet />
         </main>
         <StatusBar hints={hintsFor(pathname)} />
@@ -120,6 +124,7 @@ export function Shell() {
         onOpenChange={setPaletteOpen}
         onShowShortcuts={() => setShortcutsOpen(true)}
       />
+      <ActivityDrawer />
       <CheatSheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
       <Toaster
         theme={theme}

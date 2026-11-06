@@ -15,6 +15,7 @@ import {
   Rows3,
   Search,
   Settings,
+  Activity,
 } from 'lucide-react';
 import { parsePrUrl, refOf } from '@/lib/pr-ref';
 import { usePulls, useSyncNow } from '@/lib/queries';
@@ -24,6 +25,7 @@ import { Kbd } from '@/ui/kbd';
 import { usePullActions } from '@/features/pulls/actions';
 import { queueMeta, queueSlugs } from '@/features/pulls/meta';
 import { useCurrentPull } from '@/features/pulls/use-current-pull';
+import { openActivity } from '@/features/activity/use-operations';
 
 const itemClass =
   'flex h-9 cursor-default items-center gap-2.5 rounded-sm px-2.5 text-sm text-fg data-[selected=true]:bg-selected aria-disabled:opacity-50';
@@ -228,6 +230,10 @@ export function CommandPalette({
               </Command.Group>
 
               <Command.Group heading="App" className={groupClass}>
+                <Command.Item className={itemClass} onSelect={run(openActivity)}>
+                  <Activity size={15} className="text-fg-subtle" aria-hidden="true" />
+                  View GitHub activity
+                </Command.Item>
                 <Command.Item className={itemClass} onSelect={run(() => sync.mutate())}>
                   <RefreshCw size={15} className="text-fg-subtle" aria-hidden="true" />
                   Sync with GitHub now

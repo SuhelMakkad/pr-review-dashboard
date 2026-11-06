@@ -92,6 +92,12 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
     case 'insights.updated':
       void client.invalidateQueries({ queryKey: ['insights'] });
       return;
+    case 'operation.updated':
+      void client.invalidateQueries({ queryKey: ['operations', event.account] });
+      void client.invalidateQueries({ queryKey: ['draft', event.prId] });
+      if (['needs_attention', 'cancelled'].includes(event.status))
+        void client.invalidateQueries({ queryKey: ['diff', event.prId] });
+      return;
     case 'ai.updated':
       void client.invalidateQueries({ queryKey: ['ai', event.prId] });
       return;
