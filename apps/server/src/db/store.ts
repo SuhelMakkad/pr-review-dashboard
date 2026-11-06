@@ -55,6 +55,7 @@ export function* batches<T>(rows: T[]): Generator<T[]> {
 
 export class Store {
   readonly db: Database;
+  private transactionDepth = 0;
 
   constructor(readonly path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -68,9 +69,27 @@ export class Store {
 
   /** Runs `work` in one immediate transaction, rolling back if it throws. */
   transaction<T>(work: () => T): T {
-    // Callers are synchronous; the cast only satisfies Drizzle's compile-time guard against async
-    // callbacks, which cannot be checked against an unresolved `T`.
-    return this.db.transaction<T>(work as never, { behavior: 'immediate' });
+    const depth = this.transactionDepth++;
+
+    try {
+      if (depth === 0) return this.db.transaction<T>(work as never, { behavior: 'immediate' });
+
+      const savepoint = `store_nested_${depth}`;
+      this.db.$client.exec(`SAVEPOINT ${savepoint}`);
+
+      try {
+        const result = work();
+        this.db.$client.exec(`RELEASE SAVEPOINT ${savepoint}`);
+
+        return result;
+      } catch (error) {
+        this.db.$client.exec(`ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);
+
+        throw error;
+      }
+    } finally {
+      this.transactionDepth--;
+    }
   }
 
   snapshots(account: string): PullRequestSnapshot[] {

@@ -459,6 +459,26 @@ describe('GitHub transport helpers', () => {
   });
 });
 
+describe('nested transactions', () => {
+  it('rolls back nested writes without discarding outer changes', () => {
+    const store = new Store(':memory:');
+
+    cleanups.push(() => store.close());
+    store.transaction(() => {
+      store.setSetting('outer', 'kept');
+      expect(() =>
+        store.transaction(() => {
+          store.setSetting('inner', 'rolled back');
+          throw new Error('rollback inner');
+        }),
+      ).toThrow('rollback inner');
+    });
+
+    expect(store.getSetting('outer')).toBe('kept');
+    expect(store.getSetting('inner')).toBeNull();
+  });
+});
+
 describe('demo mode', () => {
   it('syncs the default scenario into every queue', async () => {
     const { service } = demoService();
