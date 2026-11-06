@@ -4,6 +4,7 @@ import { LoaderCircle, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { codexBlocked, type FullReviewResult } from '../../../shared/ai';
 import type { CiState } from '../../../shared/types';
+import { dateTime } from '../../lib/time';
 import { Button } from '../../ui/Button';
 import { MarkdownView } from '../../ui/Markdown';
 import { FinishSheet } from '../review/FinishSheet';
@@ -30,17 +31,30 @@ export function FullReview({
   const ai = useAi(prId, account);
   const overview = useAiOverview();
   const review = useReview(prId, account);
-  const run = ai.latest('full_review');
+  const latest = ai.latest('full_review');
+  const run =
+    latest && ['failed', 'cancelled', 'interrupted'].includes(latest.status)
+      ? (ai.completed('full_review') ?? latest)
+      : latest;
   const starting = ai.isStarting('full_review');
-  const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  const [selection, setSelection] = useState<{ runId: string; indices: number[] } | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
   const result = run?.status === 'done' ? (run.result as FullReviewResult | null) : null;
   const codex = overview.data?.providers.find((provider) => provider.id === 'codex');
   const plan = overview.data?.codex ?? null;
   const blocked = codexBlocked(plan);
+  const prepared = review.draft.data?.preparedReview;
   const selected =
-    result?.comments.flatMap((_, index) => (excluded.has(`${run!.id}:${index}`) ? [] : [index])) ??
-    [];
+    selection && selection.runId === run?.id
+      ? selection.indices
+      : prepared && prepared.runId === run?.id
+        ? prepared.indices
+        : (result?.comments.map((_, index) => index) ?? []);
+  const reusable =
+    prepared?.runId === run?.id &&
+    [...selected].sort((a, b) => a - b).join(',') === prepared?.indices.join(',');
+  const preparing = ai.preparation?.status === 'pending';
+  const prepareError = ai.preparation?.status === 'error' ? ai.preparation.error : null;
   const launch = () => ai.start.mutate({ task: 'full_review', force: Boolean(run) });
   const target = {
     owner: repository.split('/')[0],
@@ -50,7 +64,6 @@ export function FullReview({
 
   const prepare = () => {
     if (!run) return;
-
     ai.prepare.mutate(
       { runId: run.id, indices: selected },
       {
@@ -62,7 +75,18 @@ export function FullReview({
 
   return (
     <section aria-label="Full review" className="space-y-3">
-      {!run ? (
+      {!run && ai.runs.isPending ? (
+        <p role="status" className="text-xs text-fg-muted">
+          Loading saved review…
+        </p>
+      ) : !run && ai.runs.error ? (
+        <div role="alert" className="space-y-2 text-xs text-fail">
+          <p>Could not load the saved review. {ai.runs.error.message}</p>
+          <Button size="sm" onClick={() => void ai.runs.refetch()}>
+            Try again
+          </Button>
+        </div>
+      ) : !run ? (
         <div className="space-y-3 rounded-md border border-ai/40 bg-ai/[0.03] p-3">
           <div>
             <h3 className="flex items-center gap-1.5 text-sm font-medium text-ai">
@@ -122,6 +146,14 @@ export function FullReview({
                 {' · '}
                 {result.comments.length} {result.comments.length === 1 ? 'finding' : 'findings'}
               </p>
+              <p className="text-2xs text-fg-subtle">
+                Generated{' '}
+                <time dateTime={run.finishedAt ?? run.createdAt}>
+                  {dateTime(run.finishedAt ?? run.createdAt)}
+                </time>
+                {' · '}
+                {run.stale ? 'Out of date' : 'Up to date'}
+              </p>
               <MarkdownView>{result.overall}</MarkdownView>
               {result.comments.map((comment, index) => (
                 <article
@@ -131,17 +163,15 @@ export function FullReview({
                   <label className="flex items-center gap-2 text-xs">
                     <input
                       type="checkbox"
-                      checked={!excluded.has(`${run.id}:${index}`)}
+                      checked={selected.includes(index)}
                       aria-label={`Include finding ${index + 1}`}
-                      disabled={run.stale || ai.prepare.isPending}
+                      disabled={run.stale || preparing}
                       onChange={(event) =>
-                        setExcluded((current) => {
-                          const next = new Set(current);
-
-                          if (event.target.checked) next.delete(`${run.id}:${index}`);
-                          else next.add(`${run.id}:${index}`);
-
-                          return next;
+                        setSelection({
+                          runId: run.id,
+                          indices: event.target.checked
+                            ? [...selected, index]
+                            : selected.filter((item) => item !== index),
                         })
                       }
                       className="size-3.5 accent-accent"
@@ -178,13 +208,52 @@ export function FullReview({
               )}
               {run.stale && (
                 <p className="text-xs text-pending">
-                  New commits arrived. Regenerate this review before posting.
+                  {run.staleReason} Regenerate this review before posting.
                 </p>
               )}
               <div className="space-y-1.5 border-t border-line pt-3">
-                <Button size="sm" disabled={run.stale || ai.prepare.isPending} onClick={prepare}>
-                  {ai.prepare.isPending ? 'Preparing draft…' : 'Prepare GitHub review'}
+                <Button
+                  size="sm"
+                  disabled={run.stale || preparing}
+                  aria-busy={preparing}
+                  onClick={prepare}
+                >
+                  {preparing
+                    ? 'Preparing draft…'
+                    : reusable
+                      ? 'Use prepared review'
+                      : 'Prepare GitHub review'}
                 </Button>
+                {preparing && (
+                  <p role="status" className="text-xs text-fg-muted">
+                    Preparing your GitHub review. You can navigate away; preparation will continue.
+                  </p>
+                )}
+                {reusable && prepared && !preparing && (
+                  <p className="text-2xs text-fg-subtle">
+                    Draft prepared{' '}
+                    <time dateTime={prepared.preparedAt}>{dateTime(prepared.preparedAt)}</time>.{' '}
+                    Your saved edits are kept when you reopen it.
+                  </p>
+                )}
+                {ai.isRunning('draft_summary') && (
+                  <p role="status" className="text-xs text-fg-muted">
+                    Your review summary is being generated in the background. Open the prepared
+                    review to follow its progress.
+                  </p>
+                )}
+                {ai.completed('draft_summary') && !ai.isRunning('draft_summary') && (
+                  <p className="text-2xs text-fg-subtle">
+                    {ai.completed('draft_summary')!.stale
+                      ? 'The saved review summary is out of date. Open the prepared review to generate a new one.'
+                      : 'A generated summary is saved. Open the prepared review to use it or generate a new one.'}
+                  </p>
+                )}
+                {prepareError && (
+                  <p role="alert" className="text-xs text-fail">
+                    {prepareError.message}
+                  </p>
+                )}
                 <p className="text-2xs text-fg-subtle">
                   {selected.length} selected. Edit the summary and choose a verdict before posting.
                   Existing draft comments are kept.
@@ -194,9 +263,24 @@ export function FullReview({
           )}
         </AiCard>
       )}
-      {ai.start.error && (
+      {(starting || latest?.status === 'running' || latest?.status === 'queued') && (
+        <p className="text-2xs text-fg-subtle">
+          You can navigate away. This review will continue in the background.
+        </p>
+      )}
+      {latest && run?.id !== latest.id && (
+        <p role={latest.status === 'failed' ? 'alert' : 'status'} className="text-xs text-fg-muted">
+          {latest.status === 'failed'
+            ? `The new review failed: ${latest.error}`
+            : latest.status === 'cancelled'
+              ? 'The new review was stopped.'
+              : 'The new review was interrupted by a restart.'}{' '}
+          Your previous completed review is still available above.
+        </p>
+      )}
+      {ai.startError('full_review') && (
         <p className="text-xs text-fail" role="alert">
-          {ai.start.error.message}
+          {ai.startError('full_review')!.message}
         </p>
       )}
       {finishOpen && review.draft.data && (

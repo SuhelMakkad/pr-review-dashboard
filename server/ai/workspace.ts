@@ -184,6 +184,8 @@ export async function prepareReviewWorkspace(
         files: diff.files,
         expectedChangedFiles: pr.changedFiles,
         threads: pr.threads,
+        reviews: pr.reviews,
+        conversation: pr.conversation,
         omittedBefore,
         omittedAfter,
         notes: [

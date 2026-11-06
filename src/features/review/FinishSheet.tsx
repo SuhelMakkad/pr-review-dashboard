@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { Dialog } from 'radix-ui';
-import { AlertTriangle, CheckCircle2, CircleDot, MessageSquare, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  CircleDot,
+  LoaderCircle,
+  MessageSquare,
+  X,
+} from 'lucide-react';
 import type { CiState } from '../../../shared/types';
 import {
   reviewEventLabels,
@@ -9,10 +16,10 @@ import {
   type SubmitReviewResult,
 } from '../../../shared/review';
 import { ApiError } from '../../lib/api';
+import { dateTime } from '../../lib/time';
 import { Button, IconButton } from '../../ui/Button';
 import { RunButton } from '../ai/AssistPanel';
 import { useAi } from '../ai/useAi';
-import type { DraftSummaryResult } from '../../../shared/ai';
 import { cn } from '../../ui/cn';
 import { Kbd } from '../../ui/Kbd';
 
@@ -86,7 +93,15 @@ export function FinishSheet({
   const lastSaved = useRef(draft.body);
   const ai = useAi(draft.prId, account);
   const summaryRun = ai.latest('draft_summary');
-  const requestedAt = useRef<string | null>(null);
+  const savedSummary = ai.completed('draft_summary');
+  const generating = ai.isRunning('draft_summary');
+  const applying = ai.application?.status === 'pending';
+  const generationError = ai.startError('draft_summary');
+  const applicationError = ai.application?.status === 'error' ? ai.application.error : null;
+  const submitted = useRef(false);
+  const current = useRef({ body, saveMeta, applying });
+
+  current.current = { body, saveMeta, applying };
   const pending = draft.comments.filter((comment) => comment.status !== 'stale');
   const stale = draft.comments.filter((comment) => comment.status === 'stale');
 
@@ -100,7 +115,7 @@ export function FinishSheet({
 
   // Autosave the summary so closing the sheet never loses it.
   useEffect(() => {
-    if (!open || body === lastSaved.current) return;
+    if (!open || applying || body === lastSaved.current) return;
 
     const timer = setTimeout(() => {
       lastSaved.current = body;
@@ -108,20 +123,19 @@ export function FinishSheet({
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [body, open]);
+  }, [body, open, applying]);
 
-  // Fill the summary with an AI draft once the requested run finishes.
+  // Flush pending edits when navigation unmounts the sheet before its debounce finishes.
   useEffect(() => {
-    if (
-      !requestedAt.current ||
-      summaryRun?.status !== 'done' ||
-      summaryRun.createdAt < requestedAt.current
-    )
-      return;
-
-    requestedAt.current = null;
-    setBody((summaryRun.result as DraftSummaryResult).body);
-  }, [summaryRun?.status, summaryRun?.id]);
+    return () => {
+      if (
+        !submitted.current &&
+        !current.current.applying &&
+        current.current.body !== lastSaved.current
+      )
+        current.current.saveMeta({ body: current.current.body });
+    };
+  }, []);
 
   const choose = (next: ReviewEvent) => {
     setEvent(next);
@@ -129,11 +143,14 @@ export function FinishSheet({
   };
 
   const send = async (allowNewHead = false) => {
+    if (busy || applying || stale.length > 0) return;
+
     setProblem(null);
 
     try {
       const result = await submit({ event, body, expectedHeadOid: viewedHeadOid, allowNewHead });
 
+      submitted.current = true;
       onSubmitted(result);
     } catch (error) {
       setProblem({
@@ -156,7 +173,17 @@ export function FinishSheet({
   ];
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !applying && body !== lastSaved.current) {
+          lastSaved.current = body;
+          saveMeta({ body });
+        }
+
+        onOpenChange(next);
+      }}
+    >
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/25 dark:bg-black/50" />
         <Dialog.Content
@@ -219,19 +246,136 @@ export function FinishSheet({
                 Summary (optional, Markdown)
               </span>
               <RunButton
-                label="Draft summary"
-                running={ai.isRunning('draft_summary')}
+                label={summaryRun ? 'Generate new summary' : 'Draft summary'}
+                running={generating || applying || ai.runs.isPending}
                 onRun={(provider) => {
-                  saveMeta({ event });
-                  requestedAt.current = new Date(Date.now() - 1000).toISOString();
-                  ai.start.mutate({ task: 'draft_summary', provider, force: true });
+                  ai.start.mutate({
+                    task: 'draft_summary',
+                    provider,
+                    force: true,
+                    draftEvent: event,
+                    draftBody: body,
+                  });
                 }}
               />
             </div>
+            <section aria-label="Generated review summary" className="space-y-2 text-xs">
+              {ai.runs.isPending && (
+                <p role="status" className="text-fg-muted">
+                  Loading saved summaries…
+                </p>
+              )}
+              {ai.runs.error && (
+                <div role="alert" className="space-y-1 text-fail">
+                  <p>Could not load saved summaries. {ai.runs.error.message}</p>
+                  <Button size="sm" onClick={() => void ai.runs.refetch()}>
+                    Try again
+                  </Button>
+                </div>
+              )}
+              {generating && (
+                <div className="flex items-start gap-2 text-fg-muted">
+                  <LoaderCircle
+                    size={13}
+                    className="mt-px animate-spin text-ai"
+                    aria-hidden="true"
+                  />
+                  <div className="space-y-1">
+                    <p role="status">
+                      {ai.isStarting('draft_summary')
+                        ? 'Starting summary…'
+                        : summaryRun?.status === 'queued'
+                          ? 'Summary queued…'
+                          : 'Generating summary…'}
+                    </p>
+                    <p>
+                      You can close this window or navigate away. Generation will continue, and the
+                      result will be saved here.
+                    </p>
+                  </div>
+                  {summaryRun && !ai.isStarting('draft_summary') && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => ai.cancel.mutate(summaryRun.id)}
+                    >
+                      Stop
+                    </Button>
+                  )}
+                </div>
+              )}
+              {summaryRun?.status === 'failed' && (
+                <p role="alert" className="text-fail">
+                  Summary generation failed: {summaryRun.error ?? 'Try generating it again.'}
+                </p>
+              )}
+              {(summaryRun?.status === 'cancelled' || summaryRun?.status === 'interrupted') && (
+                <p role="status" className="text-fg-muted">
+                  {summaryRun.status === 'cancelled'
+                    ? 'Summary generation was stopped.'
+                    : 'Summary generation was interrupted by a restart.'}{' '}
+                  Generate a new summary to try again.
+                </p>
+              )}
+              {generationError && (
+                <p role="alert" className="text-fail">
+                  {generationError.message}
+                </p>
+              )}
+              {savedSummary && (
+                <div className="space-y-2 rounded-md border border-ai/30 bg-ai/[0.03] p-3">
+                  <p className="text-fg-muted">
+                    Generated{' '}
+                    <time dateTime={savedSummary.finishedAt ?? savedSummary.createdAt}>
+                      {dateTime(savedSummary.finishedAt ?? savedSummary.createdAt)}
+                    </time>
+                    {' · '}
+                    {savedSummary.headOid.slice(0, 7)}
+                    {' · '}
+                    {savedSummary.stale ? 'Out of date' : 'Up to date'}
+                  </p>
+                  {savedSummary.stale && (
+                    <p className="text-pending">
+                      {savedSummary.staleReason} Generate a new summary before using it.
+                    </p>
+                  )}
+                  <Button
+                    size="sm"
+                    disabled={
+                      savedSummary.stale ||
+                      generating ||
+                      applying ||
+                      savedSummary.headOid !== viewedHeadOid
+                    }
+                    aria-busy={applying}
+                    onClick={() => {
+                      ai.applySummary.mutate(savedSummary.id, {
+                        onSuccess: (next) => {
+                          lastSaved.current = next.body;
+                          setBody(next.body);
+                        },
+                      });
+                    }}
+                  >
+                    {applying ? 'Loading generated summary…' : 'Use generated summary'}
+                  </Button>
+                  <p className="text-2xs text-fg-subtle">
+                    Using this summary replaces the text below. Your current text is kept until you
+                    choose to use it.
+                  </p>
+                </div>
+              )}
+              {applicationError && (
+                <p role="alert" className="text-fail">
+                  {applicationError.message}
+                </p>
+              )}
+            </section>
             <label className="block">
               <span className="sr-only">Summary (optional, Markdown)</span>
               <textarea
                 value={body}
+                disabled={applying}
                 onChange={(change) => setBody(change.target.value)}
                 rows={5}
                 placeholder="The overall picture: what is good, what must change, what you did not look at."
@@ -311,7 +455,7 @@ export function FinishSheet({
             <Button
               className="ml-auto"
               variant={event === 'REQUEST_CHANGES' ? 'danger' : 'primary'}
-              disabled={busy || stale.length > 0}
+              disabled={busy || applying || stale.length > 0}
               onClick={() => void send()}
               shortcut="$mod+Enter"
             >

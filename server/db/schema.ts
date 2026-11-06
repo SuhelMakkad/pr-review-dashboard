@@ -1,7 +1,7 @@
 import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
-import type { AiEffort, AiProvider, AiRunStatus, AiTask } from '../../shared/ai.js';
+import type { AiEffort, AiProvider, AiRunContext, AiRunStatus, AiTask } from '../../shared/ai.js';
 import type { ActivityKind } from '../../shared/insights.js';
-import type { DraftComment, ReviewEvent, Side } from '../../shared/review.js';
+import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '../../shared/review.js';
 import type { LocalTriageState, PullRequestSnapshot, Source } from '../../shared/types.js';
 
 /**
@@ -101,6 +101,9 @@ export const reviewDrafts = sqliteTable(
     body: text('body').notNull().default(''),
     event: text('event').$type<ReviewEvent>().notNull().default('COMMENT'),
     githubReviewId: text('github_review_id'),
+    preparedReview: text('prepared_review', { mode: 'json' }).$type<
+      ReviewDraft['preparedReview']
+    >(),
     updatedAt: text('updated_at').notNull(),
   },
   (table) => [primaryKey({ columns: [table.account, table.prId] })],
@@ -146,6 +149,7 @@ export const aiRuns = sqliteTable(
     headOid: text('head_oid').notNull(),
     promptVersion: integer('prompt_version').notNull(),
     cacheKey: text('cache_key').notNull(),
+    context: text('context', { mode: 'json' }).$type<AiRunContext>(),
     status: text('status').$type<AiRunStatus>().notNull(),
     progress: text('progress'),
     result: text('result'),

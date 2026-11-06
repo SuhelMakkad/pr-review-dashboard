@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   codexBlocked,
   defaultAiSettings,
@@ -9,6 +9,7 @@ import {
   type AiProviderStatus,
   type AiResult,
   type AiRun,
+  type AiRunContext,
   type AiSettings,
   type AiTask,
   type CodexAccountStatus,
@@ -33,6 +34,7 @@ import {
   sinceReviewInput,
 } from './context.js';
 import type { AgentProvider } from './provider.js';
+import { draftFingerprint, reviewFingerprint } from './freshness.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from './tasks.js';
 import {
   downloadRepository,
@@ -176,6 +178,7 @@ export class AiRunner {
     task: AiTask,
     detail: PullRequestDetail,
     account: string,
+    completedReview: AiRunRow | null,
   ): Promise<string> {
     const pr = detail.snapshot;
 
@@ -188,15 +191,11 @@ export class AiRunner {
 
     if (task === 'draft_summary') {
       const draft = this.reviews.draft(account, pr.id);
-      const review = this.runs(account, pr.id).find(
-        (run) => run.task === 'full_review' && run.status === 'done' && !run.stale,
-      );
-
       return draftSummaryInput(
         pr,
         await this.diffs.manifest(pr, 'full', null),
         draft,
-        (review?.result as FullReviewResult | null) ?? null,
+        completedReview?.result ? (JSON.parse(completedReview.result) as FullReviewResult) : null,
       );
     }
 
@@ -208,6 +207,8 @@ export class AiRunner {
   }
 
   private toRun(row: AiRunRow, currentHead?: string): AiRun {
+    const staleReason = this.staleReason(row, currentHead);
+
     return {
       id: row.id,
       prId: row.prId,
@@ -222,9 +223,49 @@ export class AiRunner {
       error: row.error,
       createdAt: row.createdAt,
       finishedAt: row.finishedAt,
-      stale: Boolean(currentHead && currentHead !== row.headOid),
+      stale: Boolean(staleReason),
+      staleReason,
       creditsUsed: creditsUsed(row.usage),
     };
+  }
+
+  private staleReason(row: AiRunRow, currentHead?: string): string | null {
+    const pr = this.sync.detail(row.prId)?.snapshot;
+
+    if ((currentHead ?? pr?.headOid) && (currentHead ?? pr?.headOid) !== row.headOid)
+      return 'New commits arrived after this was generated.';
+
+    if (!pr || !['full_review', 'draft_summary'].includes(row.task)) return null;
+    if (!row.context) return 'Generate a new review to verify that it covers the current PR.';
+    if (row.context.review !== reviewFingerprint(pr))
+      return 'The PR or its review discussion changed after this was generated.';
+
+    if (row.task === 'draft_summary') {
+      if (row.context.fullReviewId !== (this.completedReview(row.account, row.prId)?.id ?? null))
+        return 'A newer full review is available. Generate a new summary to include it.';
+      if (row.context.draft !== draftFingerprint(this.reviews.draft(row.account, row.prId)))
+        return 'Your verdict or draft comments changed after this summary was generated.';
+    }
+
+    return null;
+  }
+
+  private completedReview(account: string, prId: string): AiRunRow | null {
+    const rows = this.db
+      .select()
+      .from(aiRuns)
+      .where(
+        and(
+          eq(aiRuns.account, account),
+          eq(aiRuns.prId, prId),
+          eq(aiRuns.task, 'full_review'),
+          eq(aiRuns.status, 'done'),
+        ),
+      )
+      .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
+      .all();
+
+    return rows.find((row) => !this.staleReason(row)) ?? null;
   }
 
   private row(id: string): AiRunRow | null {
@@ -254,7 +295,7 @@ export class AiRunner {
   ): Promise<AiRun> {
     this.detail(account, prId);
 
-    if (task === 'full_review') await this.sync.refresh(prId);
+    if (task === 'full_review' || task === 'draft_summary') await this.sync.refresh(prId);
 
     const detail = this.detail(account, prId);
     const settings = this.settings();
@@ -266,7 +307,19 @@ export class AiRunner {
     // Model ids are Codex's; another agent gets its own default.
     const model = provider === 'codex' ? taskSettings.model : null;
 
-    const input = await this.buildInput(task, detail, account);
+    const completedReview = task === 'draft_summary' ? this.completedReview(account, prId) : null;
+    const context: AiRunContext | null = ['full_review', 'draft_summary'].includes(task)
+      ? {
+          review: reviewFingerprint(detail.snapshot),
+          ...(task === 'draft_summary'
+            ? {
+                draft: draftFingerprint(this.reviews.draft(account, prId)),
+                fullReviewId: completedReview?.id ?? null,
+              }
+            : {}),
+        }
+      : null;
+    const input = await this.buildInput(task, detail, account, completedReview);
     const head = detail.snapshot.headOid;
 
     if (task === 'full_review') {
@@ -284,24 +337,33 @@ export class AiRunner {
     }
     const key = createHash('sha256')
       .update(
-        [task, provider, model ?? '', taskSettings.effort, promptVersions[task], head, input].join(
-          '\u0000',
-        ),
+        [
+          task,
+          provider,
+          model ?? '',
+          taskSettings.effort,
+          promptVersions[task],
+          head,
+          input,
+          JSON.stringify(context),
+        ].join('\u0000'),
       )
       .digest('hex');
-    const existing = this.db
-      .select()
-      .from(aiRuns)
-      .where(
-        and(
-          eq(aiRuns.account, account),
-          eq(aiRuns.cacheKey, key),
-          inArray(aiRuns.status, ['queued', 'running', 'done']),
-        ),
-      )
-      .orderBy(desc(aiRuns.createdAt))
-      .limit(1)
-      .get();
+    const findExisting = () =>
+      this.db
+        .select()
+        .from(aiRuns)
+        .where(
+          and(
+            eq(aiRuns.account, account),
+            eq(aiRuns.cacheKey, key),
+            inArray(aiRuns.status, ['queued', 'running', 'done']),
+          ),
+        )
+        .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
+        .limit(1)
+        .get();
+    const existing = findExisting();
 
     if (existing && (existing.status !== 'done' || !options.force))
       return this.toRun(existing, head);
@@ -319,6 +381,12 @@ export class AiRunner {
       }
     }
 
+    // Concurrent requests can both pass the first lookup while checking the shared plan status.
+    const concurrent = findExisting();
+
+    if (concurrent && (concurrent.status !== 'done' || !options.force))
+      return this.toRun(concurrent, head);
+
     const id = randomUUID();
 
     this.db
@@ -334,6 +402,7 @@ export class AiRunner {
         headOid: head,
         promptVersion: promptVersions[task],
         cacheKey: key,
+        context,
         status: 'queued',
         progress: 'Waiting to start…',
         createdAt: new Date().toISOString(),
@@ -518,20 +587,25 @@ export class AiRunner {
     }
   }
 
-  /** The latest run for each task on a PR, flagged stale when the head has moved since. */
+  /** Keep the latest attempt and latest completed result so a failed retry never loses a review. */
   runs(account: string, prId: string): AiRun[] {
     const head = this.sync.detail(prId)?.snapshot.headOid;
     const rows = this.db
       .select()
       .from(aiRuns)
       .where(and(eq(aiRuns.account, account), eq(aiRuns.prId, prId)))
-      .orderBy(desc(aiRuns.createdAt))
+      .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
       .all();
     const latest = new Map<AiTask, AiRunRow>();
+    const completed = new Map<AiTask, AiRunRow>();
 
-    for (const row of rows) if (!latest.has(row.task)) latest.set(row.task, row);
+    for (const row of rows) {
+      if (!latest.has(row.task)) latest.set(row.task, row);
+      if (row.status === 'done' && !completed.has(row.task)) completed.set(row.task, row);
+    }
+    const ids = new Set([...latest.values(), ...completed.values()].map((row) => row.id));
 
-    return [...latest.values()].map((row) => this.toRun(row, head));
+    return rows.filter((row) => ids.has(row.id)).map((row) => this.toRun(row, head));
   }
 
   /** Copies one suggested comment into the user's draft review; nothing is posted. */
@@ -575,11 +649,13 @@ export class AiRunner {
 
     const detail = this.detail(account, row.prId);
 
-    if (detail.snapshot.headOid !== row.headOid) {
+    const staleReason = this.staleReason(row);
+
+    if (staleReason) {
       throw new ReviewError(
         'HEAD_MOVED',
         409,
-        'This review is out of date. Regenerate it before preparing a GitHub review.',
+        `This review is out of date. ${staleReason} Regenerate it before preparing a GitHub review.`,
       );
     }
 
@@ -592,19 +668,20 @@ export class AiRunner {
 
     const changedPaths = new Set(detail.snapshot.files.map((file) => file.path));
     const draft = this.reviews.draft(account, row.prId);
+    const indicesKey = (values: number[]) => [...new Set(values)].sort((a, b) => a - b).join(',');
+
+    if (
+      draft.preparedReview?.runId === id &&
+      indicesKey(draft.preparedReview.indices) === indicesKey(indices)
+    )
+      return draft;
+
     const general = selected.filter((comment) => !changedPaths.has(comment.path));
     const summary = [
       result.overall,
       ...general.map((comment) => `### ${comment.path}\n${comment.body}`),
     ].join('\n\n');
-    const body = draft.body.includes(summary)
-      ? draft.body
-      : [draft.body, summary].filter(Boolean).join('\n\n');
-
-    if (
-      body.length > 65_536 ||
-      selected.some((comment) => comment.body.length > 65_536 || !comment.body.trim())
-    ) {
+    if (selected.some((comment) => comment.body.length > 65_536 || !comment.body.trim())) {
       throw new ReviewError(
         'INVALID_REVIEW',
         422,
@@ -615,7 +692,7 @@ export class AiRunner {
     const full = await this.diffs.manifest(detail.snapshot, 'full', null);
     const latest = this.detail(account, row.prId).snapshot;
 
-    if (latest.headOid !== row.headOid) {
+    if (latest.headOid !== row.headOid || this.staleReason(row)) {
       throw new ReviewError(
         'HEAD_MOVED',
         409,
@@ -638,8 +715,27 @@ export class AiRunner {
 
     // One synchronous transaction avoids partial drafts or duplicate comments on retries.
     this.sync.store.transaction(() => {
+      const current = this.reviews.draft(account, row.prId);
+
+      if (
+        current.preparedReview?.runId === id &&
+        indicesKey(current.preparedReview.indices) === indicesKey(indices)
+      )
+        return;
+
+      const body = current.body.includes(summary)
+        ? current.body
+        : [current.body, summary].filter(Boolean).join('\n\n');
+
+      if (body.length > 65_536)
+        throw new ReviewError(
+          'INVALID_REVIEW',
+          422,
+          'This review is too large to post. Select fewer findings.',
+        );
+
       for (const comment of comments) {
-        const exists = draft.comments.some(
+        const exists = current.comments.some(
           (existing) =>
             existing.origin === 'ai' &&
             existing.anchorOid === row.headOid &&
@@ -661,7 +757,48 @@ export class AiRunner {
         });
       }
 
-      this.reviews.drafts.saveMeta(account, row.prId, { body });
+      this.reviews.drafts.saveMeta(account, row.prId, {
+        body,
+        preparedReview: {
+          runId: id,
+          preparedAt: new Date().toISOString(),
+          indices: [...new Set(indices)].sort((a, b) => a - b),
+        },
+      });
+    });
+    this.events.emit({ type: 'draft.updated', id: row.prId });
+
+    return this.reviews.draft(account, row.prId);
+  }
+
+  /** Apply an explicitly selected summary only after checking its evidence against live GitHub. */
+  async applySummary(account: string, id: string): Promise<ReviewDraft> {
+    const row = this.row(id);
+
+    if (
+      !row ||
+      row.account !== account ||
+      row.task !== 'draft_summary' ||
+      row.status !== 'done' ||
+      !row.result
+    )
+      throw new ReviewError('NOT_FOUND', 404, 'That generated summary is unavailable.');
+
+    this.detail(account, row.prId);
+    await this.sync.refresh(row.prId);
+    this.detail(account, row.prId);
+
+    const reason = this.staleReason(row);
+
+    if (reason)
+      throw new ReviewError(
+        'STALE_REVIEW',
+        409,
+        `${reason} Generate a new summary before using it.`,
+      );
+
+    this.reviews.drafts.saveMeta(account, row.prId, {
+      body: (JSON.parse(row.result) as { body: string }).body,
     });
     this.events.emit({ type: 'draft.updated', id: row.prId });
 

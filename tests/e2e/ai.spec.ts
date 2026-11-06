@@ -1,9 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
-import { demoWrites, failNextAi, openFresh } from './helpers';
+import { demoWrites, expectAccessible, failNextAi, openFresh } from './helpers';
 
 test.describe.configure({ mode: 'serial' });
 
-async function pauseNextAiStart(page: Page) {
+async function pauseNextAiStart(page: Page, pattern = '**/api/pulls/*/ai') {
   let markRequested!: () => void;
   let resume!: () => void;
 
@@ -15,7 +15,7 @@ async function pauseNextAiStart(page: Page) {
   });
 
   await page.route(
-    '**/api/pulls/*/ai',
+    pattern,
     async (route) => {
       markRequested();
       await resumed;
@@ -159,7 +159,7 @@ test('keeps a full review in the dashboard and posts selected findings only afte
   expect(await demoWrites(page)).toEqual([]);
 
   await sheet.getByRole('button', { name: 'Close', exact: true }).click();
-  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+  await report.getByRole('button', { name: 'Use prepared review' }).click();
   await expect(sheet.getByText('1 inline comment')).toBeVisible();
   await sheet.getByRole('textbox').fill('Please cover the empty-input case.');
   await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
@@ -280,7 +280,233 @@ test('shows agent failures and drafts a review summary', async ({ page }) => {
   const sheet = page.getByRole('dialog', { name: 'Finish your review' });
 
   await sheet.getByRole('button', { name: 'Draft summary' }).click();
+  await sheet.getByRole('button', { name: 'Use generated summary' }).click();
   await expect(sheet.getByRole('textbox')).toHaveValue(/The direction looks right/);
+});
+
+test('keeps review startup loading when navigating away and returning', async ({ page }) => {
+  await openFresh(page, '/pr/acme/web/1839');
+  const start = await pauseNextAiStart(page);
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+  await start.requested;
+
+  try {
+    await page.getByRole('link', { name: 'Settings', exact: true }).click();
+    await page.goBack();
+    await expect(
+      report.getByRole('button', { name: 'Preparing review…', exact: true }),
+    ).toBeDisabled();
+    await expect(report.getByText(/continue in the background/)).toBeVisible();
+  } finally {
+    start.resume();
+  }
+
+  await expect(report.getByText('No blocking findings')).toBeVisible();
+  await expect(report.getByText(/Generated/)).toBeVisible();
+  await expect(report.getByRole('button', { name: 'Run again' })).toBeEnabled();
+});
+
+test('continues preparing after navigation and reopens the saved draft with edits', async ({
+  page,
+}) => {
+  await openFresh(page, '/pr/acme/web/1839');
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+  await expect(report.getByText('No blocking findings')).toBeVisible();
+
+  const preparation = await pauseNextAiStart(page, '**/api/ai/runs/*/draft');
+
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+  await preparation.requested;
+
+  try {
+    await page.getByRole('link', { name: 'Settings', exact: true }).click();
+    await page.goBack();
+    await expect(report.getByRole('button', { name: 'Preparing draft…' })).toBeDisabled();
+    await expect(report.getByRole('status')).toContainText('preparation will continue');
+  } finally {
+    preparation.resume();
+  }
+
+  await expect(report.getByRole('button', { name: 'Use prepared review' })).toBeEnabled();
+  await page.reload();
+  await report.getByRole('button', { name: 'Use prepared review' }).click();
+
+  const sheet = page.getByRole('dialog', { name: 'Finish your review' });
+
+  await sheet.getByRole('textbox').fill('My saved review edits.');
+  await sheet.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await page.goBack();
+  await report.getByRole('button', { name: 'Use prepared review' }).click();
+
+  await expect(sheet.getByRole('textbox')).toHaveValue('My saved review edits.');
+  await expect(sheet.getByText('1 inline comment')).toBeVisible();
+  expect(await demoWrites(page)).toEqual([]);
+});
+
+test('saves generated summaries across navigation and reload until explicitly used', async ({
+  page,
+}, testInfo) => {
+  await openFresh(page, '/pr/acme/web/1839');
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+
+  const sheet = page.getByRole('dialog', { name: 'Finish your review' });
+  const start = await pauseNextAiStart(page);
+
+  await sheet.getByRole('textbox').fill('Keep my current summary.');
+  await sheet.getByRole('button', { name: 'Draft summary' }).click();
+  await start.requested;
+
+  try {
+    await sheet.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.getByRole('link', { name: 'Settings', exact: true }).click();
+    await page.goBack();
+    await report.getByRole('button', { name: 'Use prepared review' }).click();
+    await expect(sheet.getByRole('status')).toContainText('Starting summary…');
+    await expect(sheet.getByRole('button', { name: 'Working…' })).toBeDisabled();
+  } finally {
+    start.resume();
+  }
+
+  await expect(sheet.getByRole('button', { name: 'Use generated summary' })).toBeEnabled();
+  await expect(sheet.getByRole('textbox')).toHaveValue('Keep my current summary.');
+  await page.reload();
+  await report.getByRole('button', { name: 'Use prepared review' }).click();
+  await expect(sheet.getByRole('button', { name: 'Generate new summary' })).toBeEnabled();
+  await expect(
+    sheet.getByRole('region', { name: 'Generated review summary' }).locator('time'),
+  ).toHaveAttribute('datetime', /T/);
+  await expectAccessible(page);
+  await page.screenshot({ path: testInfo.outputPath('saved-summary.png') });
+
+  await page.route(
+    '**/api/ai/runs/*/summary',
+    (route) =>
+      route.fulfill({
+        status: 503,
+        json: { error: 'Could not load the generated summary. Try again.' },
+      }),
+    { times: 1 },
+  );
+  await sheet.getByRole('button', { name: 'Use generated summary' }).click();
+  await expect(sheet.getByRole('alert')).toContainText('Could not load the generated summary');
+  await expect(sheet.getByRole('textbox')).toHaveValue('Keep my current summary.');
+  await sheet.getByRole('button', { name: 'Use generated summary' }).click();
+  await expect(sheet.getByRole('textbox')).toHaveValue(/The direction looks right/);
+  expect(await demoWrites(page)).toEqual([]);
+});
+
+test('keeps preparation errors visible after navigation and allows retrying', async ({ page }) => {
+  await openFresh(page, '/pr/acme/web/1839');
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+  await page.route(
+    '**/api/ai/runs/*/draft',
+    (route) =>
+      route.fulfill({
+        status: 503,
+        json: { error: 'Draft preparation is temporarily unavailable.' },
+      }),
+    { times: 1 },
+  );
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+  await expect(report.getByRole('alert')).toContainText('temporarily unavailable');
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await page.goBack();
+  await expect(report.getByRole('alert')).toContainText('temporarily unavailable');
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+  await expect(page.getByRole('dialog', { name: 'Finish your review' })).toBeVisible();
+});
+
+test('shows a saved-review loading error and allows retrying without starting another review', async ({
+  page,
+}) => {
+  const pattern = '**/api/pulls/*/ai?*';
+
+  await page.route(pattern, (route) =>
+    route.request().method() === 'GET'
+      ? route.fulfill({
+          status: 503,
+          json: { error: 'Saved reviews are temporarily unavailable.' },
+        })
+      : route.continue(),
+  );
+  await openFresh(page, '/pr/acme/web/1839');
+
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await expect(report.getByRole('alert')).toContainText(
+    'Saved reviews are temporarily unavailable',
+  );
+  await expect(report.getByRole('button', { name: 'Run review', exact: true })).toHaveCount(0);
+  await page.unroute(pattern);
+  await report.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(report.getByRole('button', { name: 'Run review', exact: true })).toBeEnabled();
+});
+
+test('retains a saved summary after a failed regeneration and marks it stale after a verdict change', async ({
+  page,
+}) => {
+  await openFresh(page, '/pr/acme/web/1839');
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+
+  const sheet = page.getByRole('dialog', { name: 'Finish your review' });
+
+  await sheet.getByRole('button', { name: 'Draft summary' }).click();
+  await expect(sheet.getByRole('button', { name: 'Use generated summary' })).toBeEnabled();
+  await failNextAi(page, 'Summary generation unavailable.');
+  await sheet.getByRole('button', { name: 'Generate new summary' }).click();
+  await expect(sheet.getByRole('alert')).toContainText('Summary generation unavailable.');
+  await expect(sheet.getByRole('button', { name: 'Use generated summary' })).toBeEnabled();
+  await sheet.getByRole('button', { name: 'Close', exact: true }).click();
+  await report.getByRole('button', { name: 'Use prepared review' }).click();
+  await expect(sheet.getByRole('alert')).toContainText('Summary generation unavailable.');
+  await sheet.getByRole('radio', { name: /Approve/ }).click();
+  await expect(sheet.getByRole('button', { name: 'Use generated summary' })).toBeDisabled();
+  await expect(sheet.getByText(/verdict or draft comments changed/)).toBeVisible();
+  await sheet.getByRole('button', { name: 'Generate new summary' }).click();
+  await expect(sheet.getByRole('button', { name: 'Use generated summary' })).toBeEnabled();
+});
+
+test('marks a full review out of date after new review discussion arrives', async ({ page }) => {
+  await openFresh(page, '/pr/acme/api/2041');
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+  await expect(report.getByText('No blocking findings')).toBeVisible();
+  await page.evaluate(async () => {
+    const token = document.querySelector<HTMLMetaElement>(
+      'meta[name="review-desk-session"]',
+    )!.content;
+
+    const response = await fetch('/api/dev/advance', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Review-Desk': '1',
+        'X-Review-Desk-Session': token,
+      },
+      body: '{}',
+    });
+
+    if (!response.ok) throw new Error('Could not advance the demo review discussion.');
+  });
+
+  await expect(report.getByRole('button', { name: 'Prepare GitHub review' })).toBeDisabled();
+  await expect(report.getByText(/review discussion changed/)).toBeVisible();
+  await report.getByRole('button', { name: 'Regenerate', exact: true }).click();
+  await expect(report.getByRole('button', { name: 'Prepare GitHub review' })).toBeEnabled();
 });
 
 test('settings show the Codex plan and let a task pick one of its models', async ({ page }) => {

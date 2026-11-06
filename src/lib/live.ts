@@ -80,6 +80,7 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
       for (const id of event.ids) {
         void client.invalidateQueries({ queryKey: queryKeys.detail(id) });
         void client.invalidateQueries({ queryKey: ['diff', id] });
+        void client.invalidateQueries({ queryKey: ['ai', id] });
       }
 
       void client.invalidateQueries({ queryKey: queryKeys.mine });
@@ -96,6 +97,7 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
       return;
     case 'draft.updated':
       void client.invalidateQueries({ queryKey: ['draft', event.id] });
+      void client.invalidateQueries({ queryKey: ['ai', event.id] });
       return;
     case 'triage.updated':
       void client.invalidateQueries({ queryKey: queryKeys.pulls });

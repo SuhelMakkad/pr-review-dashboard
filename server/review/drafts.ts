@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, ne, or, sql } from 'drizzle-orm';
 import { union } from 'drizzle-orm/sqlite-core';
-import type { DraftComment, ReviewEvent } from '../../shared/review.js';
+import type { DraftComment, ReviewDraft, ReviewEvent } from '../../shared/review.js';
 import { draftComments, reviewDrafts, type ReviewDraftRow } from '../db/schema.js';
 import type { Store } from '../db/store.js';
 
-type DraftMeta = Pick<ReviewDraftRow, 'body' | 'event' | 'githubReviewId' | 'updatedAt'>;
+type DraftMeta = Pick<
+  ReviewDraftRow,
+  'body' | 'event' | 'githubReviewId' | 'updatedAt' | 'preparedReview'
+>;
 
 const commentFields = {
   id: draftComments.id,
@@ -37,6 +40,7 @@ export class DraftStore {
         body: reviewDrafts.body,
         event: reviewDrafts.event,
         githubReviewId: reviewDrafts.githubReviewId,
+        preparedReview: reviewDrafts.preparedReview,
         updatedAt: reviewDrafts.updatedAt,
       })
       .from(reviewDrafts)
@@ -50,6 +54,7 @@ export class DraftStore {
       body: row?.body ?? '',
       event: row?.event ?? 'COMMENT',
       githubReviewId: row?.githubReviewId ?? null,
+      preparedReview: row?.preparedReview ?? null,
       updatedAt: row?.updatedAt ?? comments.at(-1)!.updatedAt,
       comments,
     };
@@ -88,7 +93,12 @@ export class DraftStore {
   saveMeta(
     account: string,
     prId: string,
-    changes: { body?: string; event?: ReviewEvent; githubReviewId?: string | null },
+    changes: {
+      body?: string;
+      event?: ReviewEvent;
+      githubReviewId?: string | null;
+      preparedReview?: ReviewDraft['preparedReview'];
+    },
   ): void {
     const current = this.draft(account, prId);
     const meta = {
@@ -99,6 +109,7 @@ export class DraftStore {
           ? changes.githubReviewId
           : (current?.githubReviewId ?? null),
       updatedAt: new Date().toISOString(),
+      preparedReview: changes.preparedReview ?? current?.preparedReview ?? null,
     };
 
     this.db

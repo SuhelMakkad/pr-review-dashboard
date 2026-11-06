@@ -129,4 +129,10 @@ export function registerAiRoutes(app: FastifyInstance, runner: AiRunner): void {
       handle(reply, () => runner.prepareReview(input.account, request.params.runId, input.indices))
     );
   });
+
+  app.post<{ Params: { runId: string } }>('/api/ai/runs/:runId/summary', async (request, reply) => {
+    const input = parse(schemas.cancel, request.body, reply);
+
+    return input && handle(reply, () => runner.applySummary(input.account, request.params.runId));
+  });
 }

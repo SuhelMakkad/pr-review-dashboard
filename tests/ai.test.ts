@@ -764,6 +764,176 @@ describe('AI runner', () => {
     expect(github.writes).toEqual([]);
   });
 
+  it('persists prepared review details and reuses the saved draft without changing user edits', async () => {
+    const { runner, pr, finished, reviews, sync, diffs, providers, root, exportRepository } =
+      await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const [prepared] = await Promise.all([
+      runner.prepareReview('you', run.id, [0]),
+      runner.prepareReview('you', run.id, [0]),
+    ]);
+
+    expect(prepared.preparedReview).toMatchObject({ runId: run.id, indices: [0] });
+    expect(reviews.draft('you', run.prId).comments).toHaveLength(1);
+    expect(Date.parse(prepared.preparedReview!.preparedAt)).toBeGreaterThan(0);
+    await reviews.saveDraft('you', run.prId, { body: 'My edited summary.' });
+    await runner.close();
+
+    const restarted = new AiRunner(
+      sync,
+      diffs,
+      reviews,
+      sync.events,
+      providers,
+      root,
+      exportRepository,
+    );
+    const reused = await restarted.prepareReview('you', run.id, [0, 0]);
+
+    expect(reused.body).toBe('My edited summary.');
+    expect(reused.comments).toHaveLength(1);
+    expect(reused.preparedReview).toEqual(prepared.preparedReview);
+    expect(restarted.runs('you', run.prId)[0]).toMatchObject({ id: run.id, stale: false });
+    await restarted.close();
+  });
+
+  it.each(['review', 'reply', 'description', 'base'] as const)(
+    'invalidates a completed review after a new %s without a head change',
+    async (change) => {
+      const { runner, pr, finished, github, sync } = await setup();
+      const run = await finished(await runner.start('you', pr(2041).id, 'full_review'));
+      const snapshot = github.scenario.world.pulls.find(
+        (pull) => pull.snapshot.id === run.prId,
+      )!.snapshot;
+
+      if (change === 'review')
+        snapshot.reviews.push({ ...snapshot.reviews[0], id: 'new-review', body: 'New feedback.' });
+      if (change === 'reply') snapshot.threads[0].comments[0].body = 'Updated review discussion.';
+      if (change === 'description') snapshot.body += '\nUpdated requirements.';
+      if (change === 'base') snapshot.baseOid = 'a'.repeat(40);
+      await sync.refresh(run.prId);
+
+      expect(runner.runs('you', run.prId)[0]).toMatchObject({ stale: true, headOid: run.headOid });
+      await expect(runner.prepareReview('you', run.id, [])).rejects.toThrow('out of date');
+
+      if (change !== 'base') {
+        const fresh = await finished(await runner.start('you', run.prId, 'full_review'));
+
+        expect(fresh.id).not.toBe(run.id);
+        expect(fresh.stale).toBe(false);
+      }
+    },
+  );
+
+  it('keeps summaries reusable after body edits but requires regeneration after verdict or comment changes', async () => {
+    const { runner, pr, finished, reviews } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'draft_summary'));
+
+    await reviews.saveDraft('you', run.prId, { body: 'My own text.' });
+    expect(runner.runs('you', run.prId)[0].stale).toBe(false);
+
+    const applied = await runner.applySummary('you', run.id);
+
+    expect(applied.body).toBe((run.result as { body: string }).body);
+    await reviews.saveDraft('you', run.prId, { event: 'REQUEST_CHANGES' });
+    expect(runner.runs('you', run.prId)[0]).toMatchObject({
+      stale: true,
+      staleReason: expect.stringContaining('verdict'),
+    });
+    await expect(runner.applySummary('you', run.id)).rejects.toThrow('Generate a new summary');
+
+    const next = await finished(await runner.start('you', run.prId, 'draft_summary'));
+
+    expect(next.id).not.toBe(run.id);
+    expect(next.stale).toBe(false);
+    await reviews.addComment(run.prId, {
+      account: 'you',
+      path: 'src/scheduling/CalendarTabs.tsx',
+      line: null,
+      body: 'Another issue.',
+    });
+
+    expect(runner.runs('you', run.prId)[0].stale).toBe(true);
+    await expect(runner.applySummary('you', next.id)).rejects.toThrow('draft comments changed');
+  });
+
+  it('invalidates a saved summary when a newer full review completes even with identical output', async () => {
+    const { runner, pr, finished } = await setup();
+    const first = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const summary = await finished(await runner.start('you', first.prId, 'draft_summary'));
+    const newer = await finished(
+      await runner.start('you', first.prId, 'full_review', { force: true }),
+    );
+
+    expect(newer.result).toEqual(first.result);
+    expect(runner.runs('you', first.prId).find((run) => run.id === summary.id)).toMatchObject({
+      stale: true,
+      staleReason: expect.stringContaining('newer full review'),
+    });
+    await expect(runner.applySummary('you', summary.id)).rejects.toThrow('newer full review');
+
+    const fresh = await finished(await runner.start('you', first.prId, 'draft_summary'));
+
+    expect(fresh.id).not.toBe(summary.id);
+    expect(fresh.stale).toBe(false);
+  });
+
+  it('retains a completed review when a replacement fails and ignores refresh-only changes', async () => {
+    const { runner, providers, pr, finished, sync } = await setup();
+    const saved = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+
+    await sync.refresh(saved.prId);
+    expect((await runner.start('you', saved.prId, 'full_review')).id).toBe(saved.id);
+    providers.codex.failNext = 'Replacement failed';
+
+    const failed = await finished(
+      await runner.start('you', saved.prId, 'full_review', { force: true }),
+    );
+    const runs = runner.runs('you', saved.prId);
+
+    expect(runs[0]).toMatchObject({ id: failed.id, status: 'failed' });
+    expect(runs[1]).toMatchObject({ id: saved.id, status: 'done', stale: false });
+  });
+
+  it('marks a result out of date if review activity changes while it is generating', async () => {
+    const { runner, providers, pr, finished, root, github, sync } = await setup();
+    const controls = holdRuns(providers.codex);
+
+    try {
+      const run = await runner.start('you', pr(1839).id, 'full_review');
+
+      await vi.waitFor(() => expect(controls.size).toBe(1));
+      github.scenario.world.pulls.find((pull) => pull.snapshot.id === run.prId)!.snapshot.body +=
+        ' Changed requirements.';
+      await sync.refresh(run.prId);
+      controls.get(join(root, run.id))!.complete();
+
+      expect(await finished(run)).toMatchObject({ status: 'done', stale: true });
+      await expect(runner.prepareReview('you', run.id, [])).rejects.toThrow('out of date');
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('deduplicates simultaneous requests for the same review', async () => {
+    const { runner, providers, pr, finished, root } = await setup();
+    const controls = holdRuns(providers.codex);
+
+    try {
+      const runs = await Promise.all([
+        runner.start('you', pr(1839).id, 'full_review'),
+        runner.start('you', pr(1839).id, 'full_review'),
+      ]);
+
+      expect(runs[0].id).toBe(runs[1].id);
+      await vi.waitFor(() => expect(controls.size).toBe(1));
+      controls.get(join(root, runs[0].id))!.complete();
+      expect((await finished(runs[0])).status).toBe('done');
+    } finally {
+      await runner.close();
+    }
+  });
+
   it('provides full repository content beyond the prompt and reports omitted archive entries', async () => {
     const { pr, sync, diffs, github, exportRepository } = await setup();
     const snapshot = sync.detail(pr(1839).id)!.snapshot;

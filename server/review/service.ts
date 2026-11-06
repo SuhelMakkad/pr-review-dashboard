@@ -151,6 +151,7 @@ export class ReviewService {
       event: draft?.event ?? 'COMMENT',
       comments: draft?.comments ?? [],
       updatedAt: draft?.updatedAt ?? null,
+      preparedReview: draft?.preparedReview ?? null,
       githubPendingReview: pr.pendingReview
         ? { id: pr.pendingReview.id, commentCount: pr.pendingReview.commentCount }
         : null,

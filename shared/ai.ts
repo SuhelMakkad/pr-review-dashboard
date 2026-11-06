@@ -74,10 +74,18 @@ export interface AiRun {
   error: string | null;
   createdAt: string;
   finishedAt: string | null;
-  /** True when the PR head has moved since this run. */
+  /** True when the code, review discussion, or task inputs changed since this run. */
   stale: boolean;
+  staleReason: string | null;
   /** How far the Codex credit balance fell during the run; null when it did not or is unknown. */
   creditsUsed: number | null;
+}
+
+/** Fingerprints of the evidence used to generate a review, persisted with the run. */
+export interface AiRunContext {
+  review: string;
+  draft?: string;
+  fullReviewId?: string | null;
 }
 
 export interface AiTaskSettings {

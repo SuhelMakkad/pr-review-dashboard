@@ -42,7 +42,9 @@ function demoService() {
 }
 
 describe('database migrations', () => {
-  const baseline = readMigrationFiles({ migrationsFolder })[0]!.name;
+  const migrations = readMigrationFiles({ migrationsFolder }).map((migration) => migration.name);
+  const baseline = migrations[0]!;
+  const upgradeBackups = migrations.length > 1 ? [`backup-before-${migrations[1]}.sqlite`] : [];
 
   /** Tables, columns and indexes as SQLite reports them, ignoring Drizzle's own bookkeeping. */
   function describeSchema(db: DatabaseSync) {
@@ -79,22 +81,25 @@ describe('database migrations', () => {
 
     cleanups.push(() => store.close());
 
-    expect(appliedMigrations(store.db.$client)).toEqual([baseline]);
+    expect(appliedMigrations(store.db.$client)).toEqual(migrations);
     expect(store.db.select().from(aiRuns).all()).toEqual([]);
   });
 
   it('keeps the Drizzle baseline identical to the legacy version 5 schema', () => {
     const legacy = new DatabaseSync(':memory:');
-    const store = new Store(':memory:');
+    const baselineDb = drizzle({ client: new DatabaseSync(':memory:') });
+    const folder = temporaryDirectory();
 
     cleanups.push(() => legacy.close());
-    cleanups.push(() => store.close());
+    cleanups.push(() => baselineDb.$client.close());
+    cpSync(join(migrationsFolder, baseline), join(folder, baseline), { recursive: true });
+    migrateDatabase(baselineDb, ':memory:', folder);
 
     expect(migrate(legacy, ':memory:')).toBe(5);
-    expect(describeSchema(store.db.$client)).toEqual(describeSchema(legacy));
+    expect(describeSchema(baselineDb.$client)).toEqual(describeSchema(legacy));
   });
 
-  it('adopts a version 5 database without re-running the baseline or backing it up', () => {
+  it('adopts a version 5 database and backs it up once before applying later migrations', () => {
     const directory = temporaryDirectory();
     const path = join(directory, 'state.sqlite');
     const legacy = new DatabaseSync(path);
@@ -111,13 +116,13 @@ describe('database migrations', () => {
 
       expect(store.getSetting('lastAccount')).toBe('me');
       expect(store.triage('me', 'pr-1').note).toBe('kept');
-      expect(appliedMigrations(store.db.$client)).toEqual([baseline]);
+      expect(appliedMigrations(store.db.$client)).toEqual(migrations);
       expect(schemaVersion(store.db.$client)).toBe(5);
 
       store.close();
     }
 
-    expect(backups(directory)).toEqual([]);
+    expect(backups(directory)).toEqual(upgradeBackups);
   });
 
   it('upgrades an older database through the legacy steps, then adopts the baseline', () => {
@@ -142,10 +147,10 @@ describe('database migrations', () => {
     cleanups.push(() => store.close());
 
     expect(store.triage('me', 'pr-1').note).toBe('kept');
-    expect(appliedMigrations(store.db.$client)).toEqual([baseline]);
+    expect(appliedMigrations(store.db.$client)).toEqual(migrations);
     expect(schemaVersion(store.db.$client)).toBe(5);
     expect(store.db.select().from(aiRuns).all()).toEqual([]);
-    expect(backups(directory)).toEqual(['backup-v1.sqlite']);
+    expect(backups(directory).sort()).toEqual([...upgradeBackups, 'backup-v1.sqlite'].sort());
   });
 
   it('applies a new Drizzle migration to an adopted database, backing it up first', () => {
@@ -160,7 +165,7 @@ describe('database migrations', () => {
     cpSync(migrationsFolder, folder, { recursive: true });
     new Store(path).close();
 
-    expect(backups(directory)).toEqual([]);
+    expect(backups(directory)).toEqual(upgradeBackups);
 
     mkdirSync(join(folder, '29990101000000_extra'));
     writeFileSync(
@@ -173,8 +178,10 @@ describe('database migrations', () => {
     cleanups.push(() => db.$client.close());
     migrateDatabase(db, path, folder);
 
-    expect(backups(directory)).toEqual(['backup-before-29990101000000_extra.sqlite']);
-    expect(appliedMigrations(db.$client)).toEqual([baseline, '29990101000000_extra']);
+    expect(backups(directory).sort()).toEqual(
+      [...upgradeBackups, 'backup-before-29990101000000_extra.sqlite'].sort(),
+    );
+    expect(appliedMigrations(db.$client)).toEqual([...migrations, '29990101000000_extra']);
     expect(db.$client.prepare('SELECT * FROM extra').all()).toEqual([]);
   });
 

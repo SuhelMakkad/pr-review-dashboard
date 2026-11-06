@@ -28,6 +28,7 @@ export interface ReviewDraft {
   event: ReviewEvent;
   comments: DraftComment[];
   updatedAt: string | null;
+  preparedReview?: { runId: string; preparedAt: string; indices: number[] } | null;
   /** A pending review that already exists on GitHub (started there or by an interrupted submit). */
   githubPendingReview: { id: string; commentCount: number } | null;
 }

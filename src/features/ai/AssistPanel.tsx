@@ -154,7 +154,7 @@ export function AiCard({
         {run.stale && (
           <span
             className="rounded-xs bg-pending/15 px-1 text-2xs font-medium text-pending"
-            title="New commits arrived after this was written"
+            title={run.staleReason ?? 'New commits arrived after this was written'}
           >
             Out of date
           </span>
