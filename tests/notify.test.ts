@@ -5,8 +5,8 @@ import { defaultScenario } from '../apps/server/src/demo/scenario';
 import { EventBus } from '../apps/server/src/events';
 import { Notifier } from '../apps/server/src/notify/notifier';
 import { SyncService } from '../apps/server/src/sync/index';
-import { defaultNotificationSettings, inQuietHours } from '../packages/shared/src/notify';
-import type { ServerEvent } from '../packages/shared/src/events';
+import { defaultNotificationSettings, inQuietHours } from '@review-desk/shared/notify';
+import type { ServerEvent } from '@review-desk/shared/events';
 
 const stores: Store[] = [];
 

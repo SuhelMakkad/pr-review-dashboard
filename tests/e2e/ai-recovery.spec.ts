@@ -15,7 +15,7 @@ test('keeps a user-paused review across navigation and restart, then resumes the
   let child: ChildProcess | null = null;
 
   try {
-    child = await startServer(directory, port, 60_000, resolve('dist/web'));
+    child = await startServer(directory, port, 60_000, resolve('apps/web/dist'));
     await page.goto(`${base}/pr/acme/web/1839`);
     const report = page.getByRole('region', { name: 'Full review' });
     const started = page.waitForResponse(
@@ -34,7 +34,7 @@ test('keeps a user-paused review across navigation and restart, then resumes the
     await expectAccessible(page);
 
     await stopServer(child);
-    child = await startServer(directory, port, 5, resolve('dist/web'));
+    child = await startServer(directory, port, 5, resolve('apps/web/dist'));
     await page.reload();
     await expect(report.getByRole('status')).toHaveText('Paused. Your progress is saved.');
     await page.route(
@@ -75,14 +75,14 @@ test('automatically resumes a running review after a server restart without star
   });
 
   try {
-    child = await startServer(directory, port, 60_000, resolve('dist/web'));
+    child = await startServer(directory, port, 60_000, resolve('apps/web/dist'));
     await page.goto(`${base}/pr/acme/web/1839`);
     const report = page.getByRole('region', { name: 'Full review' });
 
     await report.getByRole('button', { name: 'Run review', exact: true }).click();
     await expect(report.getByRole('status')).toContainText('Thinking…');
     await stopServer(child);
-    child = await startServer(directory, port, 5, resolve('dist/web'));
+    child = await startServer(directory, port, 5, resolve('apps/web/dist'));
     await page.reload();
 
     await expect(report.getByText('No blocking findings')).toBeVisible();

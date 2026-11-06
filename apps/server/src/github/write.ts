@@ -1,4 +1,4 @@
-import type { ReviewEvent, Side } from '../../../../packages/shared/src/review.js';
+import type { ReviewEvent, Side } from '@review-desk/shared/review';
 import { GitHubError } from './errors.js';
 import { mutations } from './queries.js';
 import type { GitHubTransport } from './transport.js';

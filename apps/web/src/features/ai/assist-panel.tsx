@@ -22,7 +22,7 @@ import {
   type AuthorFeedbackResult,
   type BriefResult,
   type SinceReviewResult,
-} from '../../../../../packages/shared/src/ai';
+} from '@review-desk/shared/ai';
 import { useShortcuts } from '../../lib/shortcuts';
 import { relativePhrase } from '../../lib/time';
 import { Button } from '../../ui/button';

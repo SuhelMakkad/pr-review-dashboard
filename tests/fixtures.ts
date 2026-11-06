@@ -1,4 +1,4 @@
-import type { PullRequestSnapshot, Review, ReviewThread } from '../packages/shared/src/types';
+import type { PullRequestSnapshot, Review, ReviewThread } from '@review-desk/shared/types';
 
 export const t = (hour: number) => `2026-11-05T${String(hour).padStart(2, '0')}:00:00.000Z`;
 

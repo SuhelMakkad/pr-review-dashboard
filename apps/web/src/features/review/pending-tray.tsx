@@ -1,5 +1,5 @@
 import { AlertTriangle, Send, Trash2 } from 'lucide-react';
-import { reviewEventLabels, type ReviewDraft } from '../../../../../packages/shared/src/review';
+import { reviewEventLabels, type ReviewDraft } from '@review-desk/shared/review';
 import { Button } from '../../ui/button';
 import { Kbd } from '../../ui/kbd';
 

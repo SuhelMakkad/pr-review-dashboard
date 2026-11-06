@@ -5,10 +5,10 @@ import type {
   PullRequestList,
   SyncStatus,
   TriageUpdate,
-} from '../../../../packages/shared/src/types';
-import type { AuthorItem } from '../../../../packages/shared/src/author';
-import type { NotificationSettings } from '../../../../packages/shared/src/notify';
-import type { DiffManifest, DiffMode } from '../../../../packages/shared/src/diff';
+} from '@review-desk/shared/types';
+import type { AuthorItem } from '@review-desk/shared/author';
+import type { NotificationSettings } from '@review-desk/shared/notify';
+import type { DiffManifest, DiffMode } from '@review-desk/shared/diff';
 
 export interface MineList {
   account: string | null;

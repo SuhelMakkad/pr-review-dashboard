@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { computeInsights } from '../../../../packages/shared/src/insights.js';
+import { computeInsights } from '@review-desk/shared/insights';
 import type { Backfill } from '../insights/backfill.js';
 import type { SyncService } from '../sync/service.js';
 

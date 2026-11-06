@@ -19,9 +19,7 @@ export interface Config {
 
 /** These paths are stable in both `src/` (tsx) and the built `dist/` directory. */
 export const serverRoot = fileURLToPath(new URL('../', import.meta.url));
-export const projectRoot = fileURLToPath(
-  new URL(import.meta.url.includes('/dist/') ? '../../../../' : '../../../', import.meta.url),
-);
+export const projectRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 const PORTS = {
   production: { ui: 4317, api: 4317 },
@@ -64,6 +62,6 @@ export function loadConfig(argv = process.argv, env = process.env): Config {
     projectRoot,
     dataDir,
     databasePath: resolve(dataDir, 'review-desk.sqlite'),
-    webRoot: viteDev ? null : resolve(projectRoot, 'dist/web'),
+    webRoot: viteDev ? null : resolve(projectRoot, 'apps/web/dist'),
   };
 }

@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
 import { Check, ChevronRight, ListFilter, Search, X } from 'lucide-react';
-import type { PullRequestItem } from '../../../../../packages/shared/src/types';
+import type { PullRequestItem } from '@review-desk/shared/types';
 import { cn } from '../../ui/cn';
 import { Kbd } from '../../ui/kbd';
 import { ciMeta, reasonMeta } from '../pulls/meta';

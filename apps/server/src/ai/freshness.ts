@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { ReviewDraft } from '../../../../packages/shared/src/review.js';
-import type { PullRequestSnapshot } from '../../../../packages/shared/src/types.js';
+import type { ReviewDraft } from '@review-desk/shared/review';
+import type { PullRequestSnapshot } from '@review-desk/shared/types';
 
 const fingerprint = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { PullRequestItem } from '../../../../../packages/shared/src/types';
+import type { PullRequestItem } from '@review-desk/shared/types';
 
 /** Queue filters live in the URL so views are shareable and survive reloads and Back. */
 export const inboxSearchSchema = z.object({

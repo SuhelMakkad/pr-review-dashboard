@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { toast } from 'sonner';
-import type { PullRequestItem } from '../../../../../packages/shared/src/types';
+import type { PullRequestItem } from '@review-desk/shared/types';
 import { useQueryClient } from '@tanstack/react-query';
 import { runTriage, usePulls, type TriageVariables } from '../../lib/queries';
 import { shortDateTime } from '../../lib/time';

@@ -24,7 +24,7 @@ import type {
   PullRequestItem,
   Queue,
   ReviewState,
-} from '../../../../../packages/shared/src/types';
+} from '@review-desk/shared/types';
 import { cn } from '../../ui/cn';
 
 export const tone = (variable: string): CSSProperties =>

@@ -1,6 +1,6 @@
-import { SNAPSHOT_VERSION } from '../../../../packages/shared/src/snapshot.js';
-import type { ReviewEvent } from '../../../../packages/shared/src/review.js';
-import type { Actor, PullRequestSnapshot, ReviewState, Source } from '../../../../packages/shared/src/types.js';
+import { SNAPSHOT_VERSION } from '@review-desk/shared/snapshot';
+import type { ReviewEvent } from '@review-desk/shared/review';
+import type { Actor, PullRequestSnapshot, ReviewState, Source } from '@review-desk/shared/types';
 import type { ThreadInput } from '../github/write.js';
 import { createHash } from 'node:crypto';
 import type {

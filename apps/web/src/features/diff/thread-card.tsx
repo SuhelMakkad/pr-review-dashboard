@@ -8,7 +8,7 @@ import {
   Reply,
   RotateCcw,
 } from 'lucide-react';
-import type { ReviewThread } from '../../../../../packages/shared/src/types';
+import type { ReviewThread } from '@review-desk/shared/types';
 import { dateTime, relativePhrase } from '../../lib/time';
 import { Avatar } from '../../ui/avatar';
 import { cn } from '../../ui/cn';

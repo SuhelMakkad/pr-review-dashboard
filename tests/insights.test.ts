@@ -5,7 +5,7 @@ import { defaultScenario } from '../apps/server/src/demo/scenario';
 import { EventBus } from '../apps/server/src/events';
 import { Backfill } from '../apps/server/src/insights/backfill';
 import { SyncService } from '../apps/server/src/sync/index';
-import { computeInsights, percentile, turnarounds, type ActivityEvent } from '../packages/shared/src/insights';
+import { computeInsights, percentile, turnarounds, type ActivityEvent } from '@review-desk/shared/insights';
 
 const HOUR = 3_600_000;
 const now = Date.parse('2026-11-05T12:00:00Z');

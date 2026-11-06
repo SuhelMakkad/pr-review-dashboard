@@ -11,10 +11,10 @@ import {
   type AiProvider,
   type AiTask,
   type CodexAccountStatus,
-} from '../../../../../packages/shared/src/ai';
+} from '@review-desk/shared/ai';
 import { useAiOverview, useAiSettings } from '../ai/use-ai';
 import { useLinearStatus } from '../linear/use-linear';
-import type { LinearStatus } from '../../../../../packages/shared/src/tickets';
+import type { LinearStatus } from '@review-desk/shared/tickets';
 import { Button } from '../../ui/button';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -26,7 +26,7 @@ import {
   notificationKindLabels,
   type NotificationKind,
   type NotificationSettings,
-} from '../../../../../packages/shared/src/notify';
+} from '@review-desk/shared/notify';
 import { toast } from 'sonner';
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {

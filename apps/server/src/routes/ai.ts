@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { AiRunner } from '../ai/runner.js';
 import { safeError } from '../github/errors.js';
 import { ReviewError } from '../review/service.js';
-import { defaultAiSettings } from '../../../../packages/shared/src/ai.js';
+import { defaultAiSettings } from '@review-desk/shared/ai';
 
 const account = z.string().min(1).max(100);
 const provider = z.enum(['codex', 'claude']);

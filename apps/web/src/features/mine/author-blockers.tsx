@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { ArrowUpRight, CircleCheck, CircleDot, RotateCcw } from 'lucide-react';
-import type { AuthorItem, Blocker } from '../../../../../packages/shared/src/author';
+import type { AuthorItem, Blocker } from '@review-desk/shared/author';
 import { api } from '../../lib/api';
 import { refOf } from '../../lib/pr-ref';
 import { queryKeys } from '../../lib/query-keys';

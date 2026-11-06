@@ -1,7 +1,7 @@
 import type React from 'react';
 import { Link } from '@tanstack/react-router';
 import { ArrowUpRight } from 'lucide-react';
-import type { LinearIssue } from '../../../../../packages/shared/src/tickets';
+import type { LinearIssue } from '@review-desk/shared/tickets';
 import { LinearMark } from '../../ui/brand-icons';
 import { useTickets } from './use-linear';
 

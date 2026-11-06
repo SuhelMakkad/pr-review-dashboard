@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { commentableLines, mapLine, parseHunks, withFileHeaders } from '../packages/shared/src/diff';
+import { commentableLines, mapLine, parseHunks, withFileHeaders } from '@review-desk/shared/diff';
 import { textPatch } from '../apps/server/src/diff/patch';
 import { DiffService } from '../apps/server/src/diff/service';
 import { Store } from '../apps/server/src/db/store';

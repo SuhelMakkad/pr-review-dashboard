@@ -1,4 +1,4 @@
-import type { ServerEvent } from '../../../packages/shared/src/events.js';
+import type { ServerEvent } from '@review-desk/shared/events';
 
 export interface StoredEvent {
   id: number;

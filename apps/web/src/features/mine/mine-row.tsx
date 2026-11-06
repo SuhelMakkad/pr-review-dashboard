@@ -1,5 +1,5 @@
 import { forwardRef } from 'react';
-import type { AuthorItem } from '../../../../../packages/shared/src/author';
+import type { AuthorItem } from '@review-desk/shared/author';
 import { shortAge } from '../../lib/time';
 import { LinearMark } from '../../ui/brand-icons';
 import { cn } from '../../ui/cn';

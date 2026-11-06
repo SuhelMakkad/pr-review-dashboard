@@ -15,7 +15,7 @@ import { parseIncludedResponse, redact, retryAtFromHeaders } from '../apps/serve
 import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
 import { defaultScenario } from '../apps/server/src/demo/scenario';
 import { SyncService } from '../apps/server/src/sync/index';
-import type { ServerEvent } from '../packages/shared/src/events';
+import type { ServerEvent } from '@review-desk/shared/events';
 
 const cleanups: (() => void | Promise<void>)[] = [];
 

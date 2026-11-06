@@ -1,5 +1,5 @@
 import { toast } from 'sonner';
-import type { ReviewNotification } from '../../../../packages/shared/src/notify';
+import type { ReviewNotification } from '@review-desk/shared/notify';
 
 let leader = false;
 let navigateTo: (path: string) => void = (path) => window.location.assign(path);

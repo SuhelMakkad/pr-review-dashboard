@@ -1,4 +1,4 @@
-import { commentableLines, mapLine } from '../../../../packages/shared/src/diff.js';
+import { commentableLines, mapLine } from '@review-desk/shared/diff';
 import type {
   DraftComment,
   NewDraftComment,
@@ -6,8 +6,8 @@ import type {
   ReviewEvent,
   SubmitReviewRequest,
   SubmitReviewResult,
-} from '../../../../packages/shared/src/review.js';
-import type { PullRequestSnapshot } from '../../../../packages/shared/src/types.js';
+} from '@review-desk/shared/review';
+import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { DiffService } from '../diff/service.js';
 import { textPatch } from '../diff/patch.js';
 import type { EventBus } from '../events.js';

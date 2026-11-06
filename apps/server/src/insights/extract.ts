@@ -1,7 +1,7 @@
-import type { ActivityEvent } from '../../../../packages/shared/src/insights.js';
-import type { PullRequestSnapshot, Reviewer } from '../../../../packages/shared/src/types.js';
+import type { ActivityEvent } from '@review-desk/shared/insights';
+import type { PullRequestSnapshot, Reviewer } from '@review-desk/shared/types';
 
-export type { ActivityEvent, ActivityKind } from '../../../../packages/shared/src/insights.js';
+export type { ActivityEvent, ActivityKind } from '@review-desk/shared/insights';
 
 const same = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
 

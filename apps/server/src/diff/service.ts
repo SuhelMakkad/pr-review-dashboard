@@ -4,8 +4,8 @@ import {
   type DiffManifest,
   type DiffMode,
   type FileStatus,
-} from '../../../../packages/shared/src/diff.js';
-import type { PullRequestSnapshot } from '../../../../packages/shared/src/types.js';
+} from '@review-desk/shared/diff';
+import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi, RemoteFile } from '../github/api.js';
 import { textPatch } from './patch.js';
 

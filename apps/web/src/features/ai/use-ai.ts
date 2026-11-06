@@ -7,8 +7,8 @@ import type {
   AiSettings,
   AiTask,
   CodexAccountStatus,
-} from '../../../../../packages/shared/src/ai';
-import type { DraftComment, ReviewDraft, ReviewEvent } from '../../../../../packages/shared/src/review';
+} from '@review-desk/shared/ai';
+import type { DraftComment, ReviewDraft, ReviewEvent } from '@review-desk/shared/review';
 import { api } from '../../lib/api';
 
 export const aiKey = (prId: string) => ['ai', prId] as const;

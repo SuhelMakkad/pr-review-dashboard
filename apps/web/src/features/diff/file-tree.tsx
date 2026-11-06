@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useRef, useState } from 'react';
 import { CircleCheck, Search, X } from 'lucide-react';
-import type { DiffFile } from '../../../../../packages/shared/src/diff';
+import type { DiffFile } from '@review-desk/shared/diff';
 import { cn } from '../../ui/cn';
 import { Kbd } from '../../ui/kbd';
 

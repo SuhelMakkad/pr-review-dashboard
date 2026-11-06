@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react';
 import { FileWarning, Info, MessageSquarePlus } from 'lucide-react';
-import type { DiffFile } from '../../../../../packages/shared/src/diff';
-import type { DraftComment } from '../../../../../packages/shared/src/review';
-import type { ReviewThread } from '../../../../../packages/shared/src/types';
+import type { DiffFile } from '@review-desk/shared/diff';
+import type { DraftComment } from '@review-desk/shared/review';
+import type { ReviewThread } from '@review-desk/shared/types';
 import { Button } from '../../ui/button';
 import { EmptyState } from '../../ui/empty-state';
 import { anchoredThreads, DiffPane, type Anchor, type LineTarget } from '../diff/diff-pane';

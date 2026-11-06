@@ -1,5 +1,5 @@
 import { useParams } from '@tanstack/react-router';
-import type { PullRequestItem } from '../../../../../packages/shared/src/types';
+import type { PullRequestItem } from '@review-desk/shared/types';
 import { sameRef, type PrRef } from '../../lib/pr-ref';
 import { useMine, usePulls } from '../../lib/queries';
 

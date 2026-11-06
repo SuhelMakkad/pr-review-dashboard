@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CodexAccountStatus, CodexModel } from '../../../../packages/shared/src/ai.js';
+import type { CodexAccountStatus, CodexModel } from '@review-desk/shared/ai';
 import { redact } from '../github/errors.js';
 import { CodexAppServer, type Notification } from './codex-app-server.js';
 import {

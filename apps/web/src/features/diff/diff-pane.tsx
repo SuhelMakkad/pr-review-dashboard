@@ -5,9 +5,9 @@ import {
   type DiffLineAnnotation,
   type SelectedLineRange,
 } from '@pierre/diffs/react';
-import { withFileHeaders, type DiffFile } from '../../../../../packages/shared/src/diff';
-import type { DraftComment, Side } from '../../../../../packages/shared/src/review';
-import type { ReviewThread } from '../../../../../packages/shared/src/types';
+import { withFileHeaders, type DiffFile } from '@review-desk/shared/diff';
+import type { DraftComment, Side } from '@review-desk/shared/review';
+import type { ReviewThread } from '@review-desk/shared/types';
 
 export type Anchor =
   { kind: 'thread'; id: string } | { kind: 'draft'; id: string } | { kind: 'composer' };

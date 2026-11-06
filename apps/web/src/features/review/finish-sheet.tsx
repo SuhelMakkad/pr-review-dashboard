@@ -8,13 +8,13 @@ import {
   MessageSquare,
   X,
 } from 'lucide-react';
-import type { CiState } from '../../../../../packages/shared/src/types';
+import type { CiState } from '@review-desk/shared/types';
 import {
   reviewEventLabels,
   type ReviewDraft,
   type ReviewEvent,
   type SubmitReviewResult,
-} from '../../../../../packages/shared/src/review';
+} from '@review-desk/shared/review';
 import { ApiError } from '../../lib/api';
 import { dateTime } from '../../lib/time';
 import { Button, IconButton } from '../../ui/button';

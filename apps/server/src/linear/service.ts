@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import type { LinearIssue, LinearMethod, LinearStatus } from '../../../../packages/shared/src/tickets.js';
-import { extractTickets } from '../../../../packages/shared/src/tickets.js';
-import type { PullRequestSnapshot } from '../../../../packages/shared/src/types.js';
+import type { LinearIssue, LinearMethod, LinearStatus } from '@review-desk/shared/tickets';
+import { extractTickets } from '@review-desk/shared/tickets';
+import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { safeError } from '../github/errors.js';
 import { SETUP_COMMAND, type KeySource } from './keychain.js';
 import { LinearAuthError, type CallbackParams, type LinearConnector } from './oauth.js';

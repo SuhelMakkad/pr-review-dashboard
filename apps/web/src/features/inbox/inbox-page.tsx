@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 import { CircleAlert, Inbox } from 'lucide-react';
-import type { PullRequestItem } from '../../../../../packages/shared/src/types';
+import type { PullRequestItem } from '@review-desk/shared/types';
 import { refOf } from '../../lib/pr-ref';
 import { usePulls } from '../../lib/queries';
 import { useShortcuts } from '../../lib/shortcuts';

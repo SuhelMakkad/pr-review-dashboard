@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveItem, emptyTriage } from '../packages/shared/src/attention';
+import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { matchesFilters } from '../apps/web/src/features/inbox/filters';
 import { parsePrUrl } from '../apps/web/src/lib/pr-ref';
 import { applyOptimistic } from '../apps/web/src/lib/queries';

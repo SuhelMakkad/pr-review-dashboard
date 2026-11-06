@@ -1,6 +1,6 @@
-import { deriveItem, sortItems } from '../../../../packages/shared/src/attention.js';
-import { deriveAuthorItem, sortAuthorItems, type AuthorItem } from '../../../../packages/shared/src/author.js';
-import { isLegacySnapshot } from '../../../../packages/shared/src/snapshot.js';
+import { deriveItem, sortItems } from '@review-desk/shared/attention';
+import { deriveAuthorItem, sortAuthorItems, type AuthorItem } from '@review-desk/shared/author';
+import { isLegacySnapshot } from '@review-desk/shared/snapshot';
 import {
   REVIEW_SOURCES,
   type PullRequestDetail,
@@ -9,7 +9,7 @@ import {
   type Source,
   type SyncStatus,
   type TriageUpdate,
-} from '../../../../packages/shared/src/types.js';
+} from '@review-desk/shared/types';
 import type { Store } from '../db/store.js';
 import { EventBus } from '../events.js';
 import type { DetectResult, GitHubApi } from '../github/api.js';

@@ -38,7 +38,7 @@ import {
   type DraftCommentsResult,
   type FullReviewResult,
   type SinceReviewResult,
-} from '../packages/shared/src/ai';
+} from '@review-desk/shared/ai';
 
 const cleanups: (() => void)[] = [];
 

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { AlertTriangle, Pencil, Trash2 } from 'lucide-react';
-import type { DraftComment } from '../../../../../packages/shared/src/review';
+import type { DraftComment } from '@review-desk/shared/review';
 import { IconButton } from '../../ui/button';
 import { cn } from '../../ui/cn';
 import { MarkdownView } from '../../ui/markdown';

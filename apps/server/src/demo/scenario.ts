@@ -8,7 +8,7 @@ import type {
   ReviewThread,
   Source,
   ThreadComment,
-} from '../../../../packages/shared/src/types.js';
+} from '@review-desk/shared/types';
 
 export interface ScenarioPull {
   /** Discovery feeds that return this PR. */

@@ -1,4 +1,4 @@
-import type { AuthorGroup, AuthorItem, BlockerKind } from '../../../../../packages/shared/src/author';
+import type { AuthorGroup, AuthorItem, BlockerKind } from '@review-desk/shared/author';
 
 export const groupMeta: Record<AuthorGroup, { label: string; hint: string }> = {
   needs_you: { label: 'Needs you', hint: 'Something only you can unblock.' },

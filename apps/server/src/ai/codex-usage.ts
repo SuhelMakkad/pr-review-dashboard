@@ -1,4 +1,4 @@
-import type { CodexAccountStatus, CodexUsageWindow } from '../../../../packages/shared/src/ai.js';
+import type { CodexAccountStatus, CodexUsageWindow } from '@review-desk/shared/ai';
 
 /** The parts of app-server's `account/rateLimits/read` the dashboard relies on (codex-cli 0.153). */
 export interface RateLimitWindow {

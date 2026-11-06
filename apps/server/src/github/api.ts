@@ -1,4 +1,4 @@
-import type { Actor, PullRequestSnapshot, Source } from '../../../../packages/shared/src/types.js';
+import type { Actor, PullRequestSnapshot, Source } from '@review-desk/shared/types';
 import type { GitHubWrites } from './write.js';
 
 export interface RateBudget {

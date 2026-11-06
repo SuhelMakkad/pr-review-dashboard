@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { AiTask } from '../../../../packages/shared/src/ai.js';
+import type { AiTask } from '@review-desk/shared/ai';
 
 const brief = z.strictObject({
   summary: z.string(),

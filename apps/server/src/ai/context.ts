@@ -1,7 +1,7 @@
-import { parseHunks, type DiffFile, type DiffManifest } from '../../../../packages/shared/src/diff.js';
-import type { FullReviewResult } from '../../../../packages/shared/src/ai.js';
-import type { ReviewDraft } from '../../../../packages/shared/src/review.js';
-import type { PullRequestSnapshot, ReviewThread } from '../../../../packages/shared/src/types.js';
+import { parseHunks, type DiffFile, type DiffManifest } from '@review-desk/shared/diff';
+import type { FullReviewResult } from '@review-desk/shared/ai';
+import type { ReviewDraft } from '@review-desk/shared/review';
+import type { PullRequestSnapshot, ReviewThread } from '@review-desk/shared/types';
 
 const BODY_LIMIT = 8_000;
 const FILE_LIMIT = 20_000;

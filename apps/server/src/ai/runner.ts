@@ -15,10 +15,10 @@ import {
   type CodexAccountStatus,
   type DraftCommentsResult,
   type FullReviewResult,
-} from '../../../../packages/shared/src/ai.js';
-import { commentableLines } from '../../../../packages/shared/src/diff.js';
-import type { DraftComment, ReviewDraft } from '../../../../packages/shared/src/review.js';
-import type { PullRequestDetail } from '../../../../packages/shared/src/types.js';
+} from '@review-desk/shared/ai';
+import { commentableLines } from '@review-desk/shared/diff';
+import type { DraftComment, ReviewDraft } from '@review-desk/shared/review';
+import type { PullRequestDetail } from '@review-desk/shared/types';
 import { aiRuns, type AiRunRow } from '../db/schema.js';
 import type { DiffService } from '../diff/service.js';
 import type { EventBus } from '../events.js';

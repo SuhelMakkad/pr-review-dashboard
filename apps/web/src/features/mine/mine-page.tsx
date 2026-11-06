@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import { Outlet, useNavigate } from '@tanstack/react-router';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 import { GitPullRequestDraft } from 'lucide-react';
-import type { AuthorItem } from '../../../../../packages/shared/src/author';
+import type { AuthorItem } from '@review-desk/shared/author';
 import { refOf } from '../../lib/pr-ref';
 import { useMine } from '../../lib/queries';
 import { useShortcuts } from '../../lib/shortcuts';

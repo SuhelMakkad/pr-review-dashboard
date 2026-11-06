@@ -1,12 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { DiffManifest } from '../../../../../packages/shared/src/diff';
+import type { DiffManifest } from '@review-desk/shared/diff';
 import type {
   DraftComment,
   ReviewDraft,
   ReviewEvent,
   Side,
   SubmitReviewResult,
-} from '../../../../../packages/shared/src/review';
+} from '@review-desk/shared/review';
 import { api, ApiError } from '../../lib/api';
 import { queryKeys } from '../../lib/query-keys';
 

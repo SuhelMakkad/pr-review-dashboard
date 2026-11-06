@@ -11,8 +11,8 @@ import {
   PanelRightClose,
   PanelRightOpen,
 } from 'lucide-react';
-import type { DraftComment } from '../../../../../packages/shared/src/review';
-import type { ReviewThread } from '../../../../../packages/shared/src/types';
+import type { DraftComment } from '@review-desk/shared/review';
+import type { ReviewThread } from '@review-desk/shared/types';
 import { refOf } from '../../lib/pr-ref';
 import { useDiff, usePullDetail, usePulls } from '../../lib/queries';
 import { useShortcuts } from '../../lib/shortcuts';

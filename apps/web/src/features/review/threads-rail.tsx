@@ -1,5 +1,5 @@
-import type { DiffFile } from '../../../../../packages/shared/src/diff';
-import type { ReviewThread } from '../../../../../packages/shared/src/types';
+import type { DiffFile } from '@review-desk/shared/diff';
+import type { ReviewThread } from '@review-desk/shared/types';
 import { cn } from '../../ui/cn';
 import { Kbd } from '../../ui/kbd';
 

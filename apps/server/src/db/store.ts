@@ -3,14 +3,14 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { and, asc, eq, gte, max } from 'drizzle-orm';
 import { drizzle, type NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite';
-import { emptyTriage } from '../../../../packages/shared/src/attention.js';
-import { normalizeSnapshot } from '../../../../packages/shared/src/snapshot.js';
+import { emptyTriage } from '@review-desk/shared/attention';
+import { normalizeSnapshot } from '@review-desk/shared/snapshot';
 import type {
   LocalTriageState,
   PullRequestSnapshot,
   Source,
   SyncStatus,
-} from '../../../../packages/shared/src/types.js';
+} from '@review-desk/shared/types';
 import type { ActivityEvent } from '../insights/extract.js';
 import { migrateDatabase } from './migrate.js';
 import {

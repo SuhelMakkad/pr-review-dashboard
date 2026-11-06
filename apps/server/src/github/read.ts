@@ -10,9 +10,9 @@ import type {
   ReviewState,
   Source,
   ThreadComment,
-} from '../../../../packages/shared/src/types.js';
+} from '@review-desk/shared/types';
 import { createHash } from 'node:crypto';
-import { SNAPSHOT_VERSION } from '../../../../packages/shared/src/snapshot.js';
+import { SNAPSHOT_VERSION } from '@review-desk/shared/snapshot';
 import type {
   BlobText,
   CompareResult,
@@ -37,7 +37,7 @@ import {
 } from './queries.js';
 import { GhCli, type GitHubTransport } from './transport.js';
 import { createWriter, type GitHubWrites, type ThreadInput } from './write.js';
-import type { ReviewEvent } from '../../../../packages/shared/src/review.js';
+import type { ReviewEvent } from '@review-desk/shared/review';
 
 interface PageInfo {
   hasNextPage: boolean;

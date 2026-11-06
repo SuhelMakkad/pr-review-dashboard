@@ -1,4 +1,4 @@
-import type { Reviewer, PullRequestSnapshot, ReviewState } from '../../../../packages/shared/src/types.js';
+import type { Reviewer, PullRequestSnapshot, ReviewState } from '@review-desk/shared/types';
 import type { Store } from '../db/store.js';
 
 /** Small seeded PRNG so the demo history is identical on every run. */

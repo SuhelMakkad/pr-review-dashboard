@@ -1,8 +1,8 @@
 import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
-import type { AiEffort, AiProvider, AiRunContext, AiRunStatus, AiTask } from '../../../../packages/shared/src/ai.js';
-import type { ActivityKind } from '../../../../packages/shared/src/insights.js';
-import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '../../../../packages/shared/src/review.js';
-import type { LocalTriageState, PullRequestSnapshot, Source } from '../../../../packages/shared/src/types.js';
+import type { AiEffort, AiProvider, AiRunContext, AiRunStatus, AiTask } from '@review-desk/shared/ai';
+import type { ActivityKind } from '@review-desk/shared/insights';
+import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
+import type { LocalTriageState, PullRequestSnapshot, Source } from '@review-desk/shared/types';
 
 /**
  * The database schema, and the source of truth for migrations: after changing it, run

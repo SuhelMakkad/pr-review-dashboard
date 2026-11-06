@@ -2,7 +2,7 @@ import type React from 'react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Check, X } from 'lucide-react';
-import type { DraftCommentsResult } from '../../../../../packages/shared/src/ai';
+import type { DraftCommentsResult } from '@review-desk/shared/ai';
 import { Button } from '../../ui/button';
 import { MarkdownView } from '../../ui/markdown';
 import { AiCard, RunButton } from './assist-panel';

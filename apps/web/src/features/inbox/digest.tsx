@@ -1,4 +1,4 @@
-import type { AttentionKind, PullRequestItem } from '../../../../../packages/shared/src/types';
+import type { AttentionKind, PullRequestItem } from '@review-desk/shared/types';
 import { reasonMeta } from '../pulls/meta';
 import type { InboxSearch } from './filters';
 

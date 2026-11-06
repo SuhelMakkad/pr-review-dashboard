@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, ne, or, sql } from 'drizzle-orm';
 import { union } from 'drizzle-orm/sqlite-core';
-import type { DraftComment, ReviewDraft, ReviewEvent } from '../../../../packages/shared/src/review.js';
+import type { DraftComment, ReviewDraft, ReviewEvent } from '@review-desk/shared/review';
 import { draftComments, reviewDrafts, type ReviewDraftRow } from '../db/schema.js';
 import type { Store } from '../db/store.js';
 

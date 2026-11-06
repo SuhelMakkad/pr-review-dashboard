@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, LoaderCircle, RefreshCw, Table2 } from 'lucide-react';
-import type { Insights } from '../../../../../packages/shared/src/insights';
+import type { Insights } from '@review-desk/shared/insights';
 import { api } from '../../lib/api';
 import { usePulls } from '../../lib/queries';
 import { relativePhrase } from '../../lib/time';

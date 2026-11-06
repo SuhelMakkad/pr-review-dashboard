@@ -1,13 +1,13 @@
 import { and, eq } from 'drizzle-orm';
-import type { AuthorItem } from '../../../../packages/shared/src/author.js';
+import type { AuthorItem } from '@review-desk/shared/author';
 import {
   defaultNotificationSettings,
   inQuietHours,
   type NotificationKind,
   type NotificationSettings,
   type ReviewNotification,
-} from '../../../../packages/shared/src/notify.js';
-import type { PullRequestItem } from '../../../../packages/shared/src/types.js';
+} from '@review-desk/shared/notify';
+import type { PullRequestItem } from '@review-desk/shared/types';
 import { notificationLog } from '../db/schema.js';
 import { batches, type Store } from '../db/store.js';
 import type { EventBus } from '../events.js';

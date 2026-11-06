@@ -1,6 +1,6 @@
 import { forwardRef } from 'react';
 import { AlarmClock, CheckCheck, MessageSquare, StickyNote } from 'lucide-react';
-import type { PullRequestItem } from '../../../../../packages/shared/src/types';
+import type { PullRequestItem } from '@review-desk/shared/types';
 import { shortAge, shortDateTime } from '../../lib/time';
 import { Avatar } from '../../ui/avatar';
 import { LinearMark } from '../../ui/brand-icons';

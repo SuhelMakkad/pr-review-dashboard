@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveAuthorItem, sortAuthorItems } from '../packages/shared/src/author';
+import { deriveAuthorItem, sortAuthorItems } from '@review-desk/shared/author';
 import { extractActivity } from '../apps/server/src/insights/extract';
 import { review, snapshot, t, thread } from './fixtures';
 

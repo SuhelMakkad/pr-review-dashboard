@@ -1,4 +1,4 @@
-import type { LinearIssue } from '../../../../packages/shared/src/tickets.js';
+import type { LinearIssue } from '@review-desk/shared/tickets';
 import { LINEAR_MCP_URL, LinearAuthError, type LinearOAuth } from './oauth.js';
 import type { LinearSource } from './service.js';
 

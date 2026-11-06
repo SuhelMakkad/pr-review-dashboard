@@ -17,7 +17,7 @@ import type {
   PullRequestItem,
   PullRequestSnapshot,
   ReviewThread,
-} from '../../../../../packages/shared/src/types';
+} from '@review-desk/shared/types';
 import { api } from '../../lib/api';
 import { usePullDetail, useTriage } from '../../lib/queries';
 import { useShortcuts } from '../../lib/shortcuts';

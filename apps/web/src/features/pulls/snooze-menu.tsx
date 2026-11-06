@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { Popover } from 'radix-ui';
 import { AlarmClock } from 'lucide-react';
-import type { PullRequestItem } from '../../../../../packages/shared/src/types';
+import type { PullRequestItem } from '@review-desk/shared/types';
 import { parseSnooze, shortDateTime, snoozePresets } from '../../lib/time';
 import { Button } from '../../ui/button';
 import { Kbd } from '../../ui/kbd';
