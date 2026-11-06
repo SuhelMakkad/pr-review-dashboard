@@ -436,6 +436,33 @@ export function FinishSheet({
               />
             </label>
 
+            {Boolean(draft.preparedReview?.previousDrafts?.length) && (
+              <details className="space-y-2 rounded-sm border border-line p-3 text-xs">
+                <summary className="cursor-pointer font-medium text-fg-muted">
+                  Saved drafts before replacement
+                </summary>
+                {[...draft.preparedReview!.previousDrafts!].reverse().map((saved, index) => (
+                  <details key={index} className="space-y-2 border-t border-line pt-2">
+                    <summary className="cursor-pointer text-fg-muted">
+                      Draft saved {dateTime(saved.savedAt)}
+                    </summary>
+                    <pre className="whitespace-pre-wrap break-words font-sans">{saved.body}</pre>
+                    {saved.comments.map((comment) => (
+                      <div key={comment.id} className="space-y-1">
+                        <code className="break-all text-fg-subtle">
+                          {comment.path}
+                          {comment.line === null ? '' : `:${comment.line}`}
+                        </code>
+                        <pre className="whitespace-pre-wrap break-words font-sans">
+                          {comment.body}
+                        </pre>
+                      </div>
+                    ))}
+                  </details>
+                ))}
+              </details>
+            )}
+
             <div>
               <h3 className="mb-1.5 text-xs font-medium text-fg-muted">
                 {pending.length === 0

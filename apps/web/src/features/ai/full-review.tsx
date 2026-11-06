@@ -3,7 +3,9 @@ import { Link } from '@tanstack/react-router';
 import { LoaderCircle, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { codexBlocked, type FullReviewResult } from '@review-desk/shared/ai';
+import type { PrepareReviewOptions } from '@review-desk/shared/review';
 import type { CiState } from '@review-desk/shared/types';
+import { ApiError } from '@/lib/api';
 import { dateTime } from '@/lib/time';
 import { Button } from '@/ui/button';
 import { MarkdownView } from '@/ui/markdown';
@@ -58,7 +60,19 @@ export function FullReview({
     prepared?.runId === run?.id &&
     [...selected].sort((a, b) => a - b).join(',') === prepared?.indices.join(',');
   const preparing = ai.preparation?.status === 'pending';
-  const prepareError = ai.preparation?.status === 'error' ? ai.preparation.error : null;
+  const prepareError =
+    ai.preparation?.status === 'error' &&
+    ai.preparation.runId === run?.id &&
+    [...ai.preparation.indices].sort((a, b) => a - b).join(',') ===
+      [...selected].sort((a, b) => a - b).join(',')
+      ? ai.preparation.error
+      : null;
+  const replacementRevision =
+    prepareError instanceof ApiError &&
+    prepareError.code === 'PREPARED_REVIEW_EDITED' &&
+    typeof prepareError.details.draftRevision === 'string'
+      ? prepareError.details.draftRevision
+      : null;
   const launch = () => ai.start.mutate({ task: 'full_review', force: Boolean(run) });
   const target = {
     owner: repository.split('/')[0],
@@ -66,10 +80,11 @@ export function FullReview({
     number: String(number),
   };
 
-  const prepare = () => {
+  const prepare = (options: PrepareReviewOptions = {}) => {
     if (!run || locked) return;
+
     ai.prepare.mutate(
-      { runId: run.id, indices: selected },
+      { runId: run.id, indices: selected, ...options },
       {
         onSuccess: () => setFinishOpen(true),
         onError: (error) => toast.error(error.message),
@@ -222,7 +237,7 @@ export function FullReview({
                   size="sm"
                   disabled={!locked && (run.stale || preparing)}
                   aria-busy={preparing}
-                  onClick={locked ? openActivity : prepare}
+                  onClick={locked ? openActivity : () => prepare()}
                 >
                   {locked
                     ? 'Review queued · View activity'
@@ -258,13 +273,29 @@ export function FullReview({
                   </p>
                 )}
                 {prepareError && (
-                  <p role="alert" className="text-xs text-fail">
-                    {prepareError.message}
-                  </p>
+                  <div role="alert" className="space-y-2 text-xs text-fail">
+                    <p>{prepareError.message}</p>
+                    {replacementRevision && (
+                      <div className="flex flex-wrap gap-2">
+                        <Button size="sm" onClick={() => setFinishOpen(true)}>
+                          View current draft
+                        </Button>
+                        <Button
+                          size="sm"
+                          disabled={locked || preparing || run.stale}
+                          onClick={() =>
+                            prepare({ replace: true, expectedDraftRevision: replacementRevision })
+                          }
+                        >
+                          Save a copy and replace
+                        </Button>
+                      </div>
+                    )}
+                  </div>
                 )}
                 <p className="text-2xs text-fg-subtle">
                   {selected.length} selected. Edit the summary and choose a verdict before posting.
-                  Existing draft comments are kept.
+                  Previously prepared findings follow your selection. Independent comments are kept.
                 </p>
               </div>
             </div>

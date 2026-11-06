@@ -214,6 +214,79 @@ test('lets the user exclude findings and post only the review summary', async ({
   expect(writes[1].details).toMatchObject({ event: 'COMMENT', comments: 0 });
 });
 
+test('removes previously prepared findings when the selection changes, including after reload', async ({
+  page,
+}) => {
+  await openFresh(page, '/pr/acme/web/1839');
+
+  const report = page.getByRole('region', { name: 'Full review' });
+  const sheet = page.getByRole('dialog', { name: 'Finish your review' });
+
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+  await expect(sheet.getByText('1 inline comment')).toBeVisible();
+  await sheet.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.reload();
+  await report.getByRole('checkbox', { name: 'Include finding 1' }).uncheck();
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+
+  await expect(sheet.getByText('No inline comments')).toBeVisible();
+  await expect(sheet.getByRole('textbox')).toHaveValue(
+    'The implementation is mostly sound, but the empty-input behavior needs a regression test.',
+  );
+  await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
+
+  await expect
+    .poll(async () => (await demoWrites(page)).map((write) => write.op))
+    .toEqual(['AddPendingReview', 'SubmitReview']);
+});
+
+test('confirms replacement of edited prepared content and keeps the old draft accessible', async ({
+  page,
+}) => {
+  await openFresh(page, '/pr/acme/web/1839');
+
+  const report = page.getByRole('region', { name: 'Full review' });
+  const sheet = page.getByRole('dialog', { name: 'Finish your review' });
+
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+  await sheet.getByRole('textbox').fill('My edited review, saved before replacement.');
+  await sheet.getByRole('button', { name: 'Close', exact: true }).click();
+  await report.getByRole('checkbox', { name: 'Include finding 1' }).uncheck();
+  await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
+
+  await expect(report.getByRole('alert')).toContainText('Your prepared review has edits.');
+  await expect(sheet).not.toBeVisible();
+  await report.getByRole('button', { name: 'View current draft' }).click();
+  await expect(sheet.getByRole('textbox')).toHaveValue(
+    'My edited review, saved before replacement.',
+  );
+  await sheet.getByRole('button', { name: 'Close', exact: true }).click();
+  await report.getByRole('button', { name: 'Save a copy and replace' }).click();
+
+  await expect(sheet.getByText('No inline comments')).toBeVisible();
+  await expect(sheet.getByRole('textbox')).toHaveValue(
+    'The implementation is mostly sound, but the empty-input behavior needs a regression test.',
+  );
+  await expectAccessible(page);
+  await page.reload();
+  await report.getByRole('button', { name: 'Use prepared review' }).click();
+  await sheet.getByText('Saved drafts before replacement', { exact: true }).click();
+  await sheet.getByText(/^Draft saved /).click();
+
+  await expect(
+    sheet.getByText('My edited review, saved before replacement.', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    sheet
+      .locator('details')
+      .filter({ hasText: /^Draft saved / })
+      .getByText(/regression test for empty input/),
+  ).toBeVisible();
+  expect(await demoWrites(page)).toEqual([]);
+});
+
 test('writes a brief with Codex by default, and with Claude on request', async ({ page }) => {
   await openFresh(page, '/inbox/attention/acme/web/1839');
   await expect(page.getByRole('heading', { level: 2 })).toHaveText(

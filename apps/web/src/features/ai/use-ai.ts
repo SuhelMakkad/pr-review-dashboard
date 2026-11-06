@@ -8,7 +8,12 @@ import type {
   AiTask,
   CodexAccountStatus,
 } from '@review-desk/shared/ai';
-import type { DraftComment, ReviewDraft, ReviewEvent } from '@review-desk/shared/review';
+import type {
+  DraftComment,
+  PrepareReviewOptions,
+  ReviewDraft,
+  ReviewEvent,
+} from '@review-desk/shared/review';
 import { api } from '@/lib/api';
 
 export const aiKey = (prId: string) => ['ai', prId] as const;
@@ -54,6 +59,7 @@ export function useAi(prId: string | null, account: string) {
     filters: { mutationKey: prepareKey, exact: true },
     select: (mutation) => ({
       runId: (mutation.state.variables as { runId: string }).runId,
+      indices: (mutation.state.variables as { indices: number[] }).indices,
       status: mutation.state.status,
       error: mutation.state.error,
     }),
@@ -155,15 +161,22 @@ export function useAi(prId: string | null, account: string) {
 
   const prepare = useMutation({
     mutationKey: prepareKey,
-    mutationFn: ({ runId, indices }: { runId: string; indices: number[] }) =>
+    mutationFn: ({
+      runId,
+      ...options
+    }: { runId: string; indices: number[] } & PrepareReviewOptions) =>
       api<ReviewDraft>(`/api/ai/runs/${encodeURIComponent(runId)}/draft`, {
         method: 'POST',
-        body: { account, indices },
+        body: { account, ...options },
       }),
     onSuccess: (draft) => {
       client.setQueryData(['draft', prId], draft);
     },
-    onSettled: () => client.invalidateQueries({ queryKey: key }),
+    onSettled: () =>
+      Promise.all([
+        client.invalidateQueries({ queryKey: key }),
+        client.invalidateQueries({ queryKey: ['draft', prId] }),
+      ]),
   });
 
   const applySummary = useMutation({
