@@ -94,14 +94,38 @@ export class SyncService {
     await this.running;
   }
 
+  /** Share write cooldowns with reads so a manual/background sync cannot bypass GitHub's limit. */
+  deferUntil(retryAt: string): void {
+    const account = this.status.account?.login;
+    if (!account) return;
+
+    const until = new Date(
+      Math.max(Date.parse(retryAt), this.status.retryAt ? Date.parse(this.status.retryAt) : 0),
+    ).toISOString();
+    this.store.setSetting(`github-write-retry:${account}`, until);
+    this.status = { ...this.status, retryAt: until, nextSyncAt: until };
+    this.store.saveStatus(this.status);
+    this.emitStatus();
+  }
+
+  private cooldown(): string | null {
+    const account = this.status.account?.login;
+    const saved = account ? this.store.getSetting<string>(`github-write-retry:${account}`) : null;
+    const until = Math.max(
+      saved ? Date.parse(saved) : 0,
+      this.status.retryAt ? Date.parse(this.status.retryAt) : 0,
+    );
+
+    return until > Date.now() ? new Date(until).toISOString() : null;
+  }
+
   /**
    * Runs one sync. Scheduled runs respect per-feed cadences; explicit runs (startup, "Sync now",
    * tests) run every feed. Concurrent calls share the run in progress.
    */
   sync(options: { scheduled?: boolean } = {}): Promise<void> {
     if (this.running) return this.running;
-    if (this.status.retryAt && Date.parse(this.status.retryAt) > Date.now())
-      return Promise.resolve();
+    if (this.cooldown()) return Promise.resolve();
 
     this.running = this.perform(Boolean(options.scheduled)).finally(() => {
       this.running = null;
@@ -112,6 +136,15 @@ export class SyncService {
 
   /** Refetches one PR immediately (after opening it or after a write), bypassing detection. */
   async refresh(id: string): Promise<PullRequestDetail | null> {
+    const retryAt = this.cooldown();
+    if (retryAt)
+      throw new GitHubError(
+        'GitHub is rate limited. Saved data is still available.',
+        retryAt,
+        429,
+        'rate_limit',
+      );
+
     const account = this.status.account?.login;
     const cached = account ? this.store.snapshot(account, id) : null;
 
