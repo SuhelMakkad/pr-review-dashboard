@@ -1,11 +1,11 @@
-import { extractTickets } from './tickets.js';
+import { extractTickets } from '@/tickets.js';
 import type {
   AttentionReason,
   LocalTriageState,
   PullRequestItem,
   PullRequestSnapshot,
   Review,
-} from './types.js';
+} from '@/types.js';
 
 export const emptyTriage = (): LocalTriageState => ({
   note: '',

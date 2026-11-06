@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { deriveItem, emptyTriage, sortItems } from '@review-desk/shared/attention';
-import { review, snapshot, t, thread } from './fixtures';
+import { deriveItem, emptyTriage, sortItems } from '@/attention.js';
+import { review, snapshot, t, thread } from '@test/fixtures.js';
 
 describe('review attention', () => {
   it('requests a first review for direct requests and assignments', () => {

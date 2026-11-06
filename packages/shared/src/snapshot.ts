@@ -1,4 +1,4 @@
-import type { PullRequestSnapshot } from './types.js';
+import type { PullRequestSnapshot } from '@/types.js';
 
 /** Bumped whenever snapshots gain fields that require a refetch of cached PRs. */
 export const SNAPSHOT_VERSION = 2;

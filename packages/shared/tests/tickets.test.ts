@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractTickets } from '@review-desk/shared/tickets';
+import { extractTickets } from '@/tickets.js';
 
 const ids = (
   pr: { headRefName?: string; title?: string; body?: string },

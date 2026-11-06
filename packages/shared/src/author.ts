@@ -1,5 +1,5 @@
-import { extractTickets } from './tickets.js';
-import type { CiState, PullRequestSnapshot, Reviewer, ReviewerVerdict } from './types.js';
+import { extractTickets } from '@/tickets.js';
+import type { CiState, PullRequestSnapshot, Reviewer, ReviewerVerdict } from '@/types.js';
 
 export type BlockerKind =
   | 'ci_failing'

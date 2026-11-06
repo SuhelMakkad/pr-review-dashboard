@@ -1,5 +1,5 @@
-import type { ReviewNotification } from './notify.js';
-import type { SyncStatus } from './types.js';
+import type { ReviewNotification } from '@/notify.js';
+import type { SyncStatus } from '@/types.js';
 
 /** Events pushed to the browser over `GET /api/events` (Server-Sent Events). */
 export type ServerEvent =
