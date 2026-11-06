@@ -202,11 +202,13 @@ export function InboxPage() {
               {pulls.isPending && <ListSkeleton />}
 
               {pulls.error && !pulls.data && (
-                <EmptyState
-                  icon={<CircleAlert size={28} />}
-                  title="Can't reach Review Desk"
-                  hint={pulls.error.message}
-                />
+                <div className="grid min-h-full place-items-center">
+                  <EmptyState
+                    icon={<CircleAlert size={28} />}
+                    title="Can't reach Review Desk"
+                    hint={pulls.error.message}
+                  />
+                </div>
               )}
 
               {pulls.data && flat.length === 0 && (
