@@ -77,7 +77,9 @@ Syncing is incremental: a cheap fingerprint per PR decides when a full refresh i
 
 ## Development
 
-React, TypeScript and Vite (TanStack Router and Query, Tailwind CSS, Radix primitives, `@pierre/diffs`) on the front end; Fastify and Drizzle ORM over Node's built-in SQLite on the server. `shared/` holds the pure rules (attention, author blockers, diffs, tickets, insights), `server/` the GitHub layer, sync, reviews, AI, Linear, notifications and insights, and `src/features/` the UI.
+The repository is a pnpm workspace with one lockfile. `apps/web` (`@review-desk/web`) contains the React, TypeScript and Vite frontend (TanStack Router and Query, Tailwind CSS, Radix primitives, `@pierre/diffs`). `apps/server` (`@review-desk/server`) contains Fastify, Drizzle ORM over Node's built-in SQLite, GitHub, sync, reviews, AI, Linear, notifications and insights. `packages/shared` (`@review-desk/shared`) contains browser-safe contracts and pure rules for attention, author blockers, diffs, tickets and insights.
+
+Each workspace has its own dependencies, TypeScript configuration and unit or component tests under `tests/`. End-to-end tests, common test fixtures and the GitHub GraphQL schema stay in the root `tests/` directory. The root commands run the complete app and test suite:
 
 ```bash
 pnpm test          # unit and component tests (Vitest)
@@ -86,6 +88,12 @@ pnpm typecheck
 pnpm format:check
 ```
 
-To change the database schema, edit `server/db/schema.ts`, run `pnpm db:generate --name <change>` and commit the new folder under `drizzle/`. The app applies pending migrations on start. Never edit a migration that has already been released; generate a new one instead.
+Within a workspace, `@/` points to that workspace's `src/` directory. For example, the web app imports `@/ui/button`, and the server imports `@/db/store.js`. Node ESM imports in the server and shared package retain their `.js` extension; their builds rewrite aliases to relative JavaScript imports so production runs with plain Node. Imports between workspaces use package names such as `@review-desk/shared/ai`, declared with `workspace:*` dependencies. Tests use `@test/fixtures` for the common root fixtures. Vite and Vitest resolve aliases from the importing workspace; TypeScript and tsx use that workspace's configuration.
 
-Every GraphQL document is validated against GitHub's published schema (`tests/schema/github.graphql`). Demo mode (`server/demo/`) models commit graphs, force pushes, GitHub writes with a write log and failure injection, Linear issues, AI answers and review history, so end-to-end tests never touch GitHub or spend AI quota.
+`pnpm dev` builds shared code, then watches the shared package, API and web app together. `pnpm build` typechecks all workspaces and tests before building their production outputs. `pnpm start` serves `apps/web/dist` from the built server at `apps/server/dist/index.js`. Existing `.data/` and `.data-demo/` directories remain at the repository root, including when commands run from a workspace directory.
+
+To run a package's tests alone, use `pnpm --filter @review-desk/web test`, `pnpm --filter @review-desk/server test` or `pnpm --filter @review-desk/shared test`. After shared code has been built, `pnpm --filter <package> typecheck` checks that workspace and its tests.
+
+To change the database schema, edit `apps/server/src/db/schema.ts`, run `pnpm db:generate --name <change>` and commit the new folder under `apps/server/drizzle/`. The app applies pending migrations on start. Never edit a migration that has already been released; generate a new one instead.
+
+Every GraphQL document is validated against GitHub's published schema (`tests/schema/github.graphql`). Demo mode (`apps/server/src/demo/`) models commit graphs, force pushes, GitHub writes with a write log and failure injection, Linear issues, AI answers and review history, so end-to-end tests never touch GitHub or spend AI quota.
