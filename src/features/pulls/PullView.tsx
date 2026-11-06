@@ -426,7 +426,7 @@ function PullDetailView({
           </p>
         )}
 
-        <Section title="Codex review">
+        <Section title="Full review">
           <FullReview
             prId={item.id}
             account={account}

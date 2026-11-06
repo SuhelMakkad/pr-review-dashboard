@@ -112,12 +112,14 @@ export function RunButton({
 export function AiCard({
   run,
   title,
+  showProvider = true,
   onCancel,
   onRerun,
   children,
 }: {
   run: AiRun;
   title: string;
+  showProvider?: boolean;
   onCancel: () => void;
   onRerun: () => void;
   children?: ReactNode;
@@ -130,7 +132,8 @@ export function AiCard({
         <Sparkles size={12} className="shrink-0 text-ai" aria-hidden="true" />
         <span className="shrink-0 font-medium text-ai">{title}</span>
         <span className="order-1 w-full text-fg-subtle">
-          {providerLabel[run.provider]} · {run.headOid.slice(0, 7)}
+          {showProvider && `${providerLabel[run.provider]} · `}
+          {run.headOid.slice(0, 7)}
           {run.finishedAt && ` · ${relativePhrase(run.finishedAt)}`}
         </span>
         {run.stale && (

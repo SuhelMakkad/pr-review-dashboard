@@ -338,7 +338,7 @@ export class AiRunner {
       mkdirSync(workDir, { recursive: true, mode: 0o700 });
 
       if (row.task === 'full_review') {
-        this.update(id, { progress: 'Downloading repository snapshots…' });
+        this.update(id, { progress: 'Preparing review…' });
         this.emit(row);
 
         const snapshot = this.snapshots.get(id)!;
@@ -523,7 +523,7 @@ export class AiRunner {
       throw new ReviewError(
         'HEAD_MOVED',
         409,
-        'This Codex review is out of date. Regenerate it before preparing a GitHub review.',
+        'This review is out of date. Regenerate it before preparing a GitHub review.',
       );
     }
 
@@ -538,12 +538,8 @@ export class AiRunner {
     const draft = this.reviews.draft(account, row.prId);
     const general = selected.filter((comment) => !changedPaths.has(comment.path));
     const summary = [
-      '## Codex review',
       result.overall,
       ...general.map((comment) => `### ${comment.path}\n${comment.body}`),
-      ...(result.coverage.length
-        ? ['### Review coverage', ...result.coverage.map((item) => `- ${item}`)]
-        : []),
     ].join('\n\n');
     const body = draft.body.includes(summary)
       ? draft.body

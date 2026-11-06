@@ -99,7 +99,7 @@ export interface AiProviderStatus {
 }
 
 export const aiTaskLabels: Record<AiTask, string> = {
-  full_review: 'Full Codex review',
+  full_review: 'Full review',
   brief: 'Brief',
   since_review: 'What changed since your review',
   draft_comments: 'Draft review comments',

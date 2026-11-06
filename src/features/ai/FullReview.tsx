@@ -58,16 +58,15 @@ export function FullReview({
   };
 
   return (
-    <section aria-label="Codex review" className="space-y-3">
+    <section aria-label="Full review" className="space-y-3">
       {!run ? (
         <div className="space-y-3 rounded-md border border-ai/40 bg-ai/[0.03] p-3">
           <div>
             <h3 className="flex items-center gap-1.5 text-sm font-medium text-ai">
-              <Sparkles size={14} aria-hidden="true" /> Full Codex review
+              <Sparkles size={14} aria-hidden="true" /> Full review
             </h3>
             <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-              Review the complete PR with repository context. Results stay here until you choose to
-              post.
+              Find issues across the complete PR. Review the findings before posting.
             </p>
           </div>
           <Button
@@ -82,18 +81,23 @@ export function FullReview({
             disabled={ai.start.isPending || codex?.available === false}
             onClick={launch}
           >
-            {ai.start.isPending ? 'Preparing review…' : 'Run Codex review'}
+            {ai.start.isPending ? 'Preparing review…' : 'Run review'}
           </Button>
           {codex?.available === false && (
             <p className="text-xs text-fail">
-              {codex.reason} Install and log in to Codex, then refresh Settings.
+              Review agent unavailable. Check installed agents in{' '}
+              <Link to="/settings" className="underline">
+                Settings
+              </Link>
+              .
             </p>
           )}
         </div>
       ) : (
         <AiCard
           run={run}
-          title="Full Codex review"
+          title="Full review"
+          showProvider={false}
           onCancel={() => ai.cancel.mutate(run.id)}
           onRerun={launch}
         >
@@ -202,7 +206,7 @@ export function FullReview({
           }}
           onReviewNewCommits={() => {
             setFinishOpen(false);
-            toast('Run Codex review again to review the new commits.');
+            toast('Run review again to review the new commits.');
           }}
         />
       )}

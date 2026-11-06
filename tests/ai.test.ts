@@ -245,8 +245,9 @@ describe('AI runner', () => {
     const summaryOnly = await runner.prepareReview('you', run.id, []);
 
     expect(summaryOnly.comments).toEqual([]);
-    expect(summaryOnly.body).toContain('My existing summary.');
-    expect(summaryOnly.body).toContain('## Codex review');
+    expect(summaryOnly.body).toBe(
+      `My existing summary.\n\n${(run.result as FullReviewResult).overall}`,
+    );
 
     await expect(runner.prepareReview('someone-else', run.id, [0])).rejects.toThrow('unavailable');
     await expect(runner.prepareReview('you', run.id, [999])).rejects.toThrow('unavailable');
