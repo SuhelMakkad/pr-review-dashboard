@@ -1,11 +1,11 @@
-import { redact } from '../github/errors.js';
+import { redact } from '@/github/errors.js';
 import {
   AgentError,
   probeVersion,
   runAgentProcess,
   type AgentProvider,
   type AgentRequest,
-} from './provider.js';
+} from '@/ai/provider.js';
 
 /** Turns `claude -p --output-format stream-json` events into short progress labels. */
 export function claudeProgress(event: Record<string, unknown>): string | null {

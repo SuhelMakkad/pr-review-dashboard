@@ -1,5 +1,11 @@
 import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
-import type { AiEffort, AiProvider, AiRunContext, AiRunStatus, AiTask } from '@review-desk/shared/ai';
+import type {
+  AiEffort,
+  AiProvider,
+  AiRunContext,
+  AiRunStatus,
+  AiTask,
+} from '@review-desk/shared/ai';
 import type { ActivityKind } from '@review-desk/shared/insights';
 import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
 import type { LocalTriageState, PullRequestSnapshot, Source } from '@review-desk/shared/types';

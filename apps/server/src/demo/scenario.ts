@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { buildDemoRepos } from './content.js';
-import type { FixtureRepos } from './repo.js';
+import { buildDemoRepos } from '@/demo/content.js';
+import type { FixtureRepos } from '@/demo/repo.js';
 import type {
   Actor,
   PullRequestSnapshot,

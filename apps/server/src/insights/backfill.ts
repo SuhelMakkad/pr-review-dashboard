@@ -1,9 +1,9 @@
 import { eq } from 'drizzle-orm';
-import { activityEvents } from '../db/schema.js';
-import type { EventBus } from '../events.js';
-import { safeError } from '../github/errors.js';
-import type { SyncService } from '../sync/service.js';
-import { extractActivity } from './extract.js';
+import { activityEvents } from '@/db/schema.js';
+import type { EventBus } from '@/events.js';
+import { safeError } from '@/github/errors.js';
+import type { SyncService } from '@/sync/service.js';
+import { extractActivity } from '@/insights/extract.js';
 
 const DAY = 24 * 60 * 60_000;
 const WINDOW_DAYS = 30;

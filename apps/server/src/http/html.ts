@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { inlineScriptHashes } from './security.js';
+import { inlineScriptHashes } from '@/http/security.js';
 
 export interface SessionMeta {
   token: string;

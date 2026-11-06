@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Store } from '../apps/server/src/db/store';
-import { GitHub, GitHubError } from '../apps/server/src/github/index';
-import type { DetectResult } from '../apps/server/src/github/api';
-import { SyncService } from '../apps/server/src/sync/index';
-import { snapshot } from './fixtures';
+import { Store } from '@/db/store.js';
+import { GitHub, GitHubError } from '@/github/index.js';
+import type { DetectResult } from '@/github/api.js';
+import { SyncService } from '@/sync/index.js';
+import { snapshot } from '@test/fixtures.js';
 
 const stores: Store[] = [];
 

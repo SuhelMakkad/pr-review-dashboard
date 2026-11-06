@@ -1,11 +1,11 @@
 import type { FastifyInstance } from 'fastify';
-import type { AiRunner } from '../ai/runner.js';
-import type { Notifier } from '../notify/notifier.js';
-import type { FixtureProvider } from '../ai/fixture.js';
-import type { FixtureGitHub } from '../demo/fixture-github.js';
-import { seedDemoQueue } from '../demo/history.js';
-import type { LinearService } from '../linear/service.js';
-import type { SyncService } from '../sync/service.js';
+import type { AiRunner } from '@/ai/runner.js';
+import type { Notifier } from '@/notify/notifier.js';
+import type { FixtureProvider } from '@/ai/fixture.js';
+import type { FixtureGitHub } from '@/demo/fixture-github.js';
+import { seedDemoQueue } from '@/demo/history.js';
+import type { LinearService } from '@/linear/service.js';
+import type { SyncService } from '@/sync/service.js';
 
 /** Demo-only controls for stepping the scripted scenario. Never registered against real GitHub. */
 export function registerDevRoutes(

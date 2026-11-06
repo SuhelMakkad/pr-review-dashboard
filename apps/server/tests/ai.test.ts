@@ -11,26 +11,26 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { c } from 'tar';
-import { ClaudeProvider, claudeProgress } from '../apps/server/src/ai/claude';
-import { CodexProvider, codexProgress, withDefault } from '../apps/server/src/ai/codex';
-import { mergeSnapshot, summariseUsage, type RateLimitSnapshot } from '../apps/server/src/ai/codex-usage';
-import { annotatePatch } from '../apps/server/src/ai/context';
-import { FixtureProvider } from '../apps/server/src/ai/fixture';
-import { spawnAgentProcess } from '../apps/server/src/ai/provider';
-import { AiRunner } from '../apps/server/src/ai/runner';
-import { jsonSchemaFor } from '../apps/server/src/ai/tasks';
+import { ClaudeProvider, claudeProgress } from '@/ai/claude.js';
+import { CodexProvider, codexProgress, withDefault } from '@/ai/codex.js';
+import { mergeSnapshot, summariseUsage, type RateLimitSnapshot } from '@/ai/codex-usage.js';
+import { annotatePatch } from '@/ai/context.js';
+import { FixtureProvider } from '@/ai/fixture.js';
+import { spawnAgentProcess } from '@/ai/provider.js';
+import { AiRunner } from '@/ai/runner.js';
+import { jsonSchemaFor } from '@/ai/tasks.js';
 import {
   extractRepository,
   prepareReviewWorkspace,
   type RepositoryExporter,
-} from '../apps/server/src/ai/workspace';
-import { Store } from '../apps/server/src/db/store';
-import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
-import { defaultScenario } from '../apps/server/src/demo/scenario';
-import { DiffService } from '../apps/server/src/diff/service';
-import { EventBus } from '../apps/server/src/events';
-import { ReviewService } from '../apps/server/src/review/service';
-import { SyncService } from '../apps/server/src/sync/index';
+} from '@/ai/workspace.js';
+import { Store } from '@/db/store.js';
+import { FixtureGitHub } from '@/demo/fixture-github.js';
+import { defaultScenario } from '@/demo/scenario.js';
+import { DiffService } from '@/diff/service.js';
+import { EventBus } from '@/events.js';
+import { ReviewService } from '@/review/service.js';
+import { SyncService } from '@/sync/index.js';
 import {
   defaultAiSettings,
   type AiRun,
@@ -53,7 +53,7 @@ afterEach(() => {
   delete process.env.OPENAI_API_KEY;
 });
 
-const fixturesDir = new URL('./fixtures/ai/', import.meta.url).pathname;
+const fixturesDir = new URL('../../../tests/fixtures/ai/', import.meta.url).pathname;
 
 function workDir() {
   const directory = mkdtempSync(join(tmpdir(), 'review-desk-ai-test-'));

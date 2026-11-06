@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { z } from 'zod';
-import { registerSecret } from '../github/errors.js';
+import { registerSecret } from '@/github/errors.js';
 
 /** The OAuth client Review Desk registered with Linear's MCP server, and the tokens it holds. */
 export interface LinearCredentials {

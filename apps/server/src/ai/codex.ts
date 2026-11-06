@@ -2,8 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CodexAccountStatus, CodexModel } from '@review-desk/shared/ai';
-import { redact } from '../github/errors.js';
-import { CodexAppServer, type Notification } from './codex-app-server.js';
+import { redact } from '@/github/errors.js';
+import { CodexAppServer, type Notification } from '@/ai/codex-app-server.js';
 import {
   accountProblem,
   accountType,
@@ -15,14 +15,14 @@ import {
   type PlanUsage,
   type RateLimitSnapshot,
   type RateLimitsResponse,
-} from './codex-usage.js';
+} from '@/ai/codex-usage.js';
 import {
   AgentError,
   probeVersion,
   type AgentProvider,
   type AgentRequest,
   type AgentResult,
-} from './provider.js';
+} from '@/ai/provider.js';
 
 const STATUS_TIMEOUT_MS = 30_000;
 /** How long a stopped run waits for Codex to acknowledge the interrupt before closing anyway. */

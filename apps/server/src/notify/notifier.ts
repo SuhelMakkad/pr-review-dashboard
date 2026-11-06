@@ -8,9 +8,9 @@ import {
   type ReviewNotification,
 } from '@review-desk/shared/notify';
 import type { PullRequestItem } from '@review-desk/shared/types';
-import { notificationLog } from '../db/schema.js';
-import { batches, type Store } from '../db/store.js';
-import type { EventBus } from '../events.js';
+import { notificationLog } from '@/db/schema.js';
+import { batches, type Store } from '@/db/store.js';
+import type { EventBus } from '@/events.js';
 
 const SETTINGS_KEY = 'notification-settings';
 

@@ -20,8 +20,8 @@ import type {
   GitHubApi,
   RateBudget,
   RemoteFile,
-} from './api.js';
-import { GitHubError } from './errors.js';
+} from '@/github/api.js';
+import { GitHubError } from '@/github/errors.js';
 import {
   blobsQuery,
   checksPageQuery,
@@ -34,9 +34,9 @@ import {
   snapshotQuery,
   threadCommentsQuery,
   type ConnectionKey,
-} from './queries.js';
-import { GhCli, type GitHubTransport } from './transport.js';
-import { createWriter, type GitHubWrites, type ThreadInput } from './write.js';
+} from '@/github/queries.js';
+import { GhCli, type GitHubTransport } from '@/github/transport.js';
+import { createWriter, type GitHubWrites, type ThreadInput } from '@/github/write.js';
 import type { ReviewEvent } from '@review-desk/shared/review';
 
 interface PageInfo {

@@ -1,15 +1,15 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createApp } from '../apps/server/src/app';
-import { Store } from '../apps/server/src/db/store';
-import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
-import { defaultScenario } from '../apps/server/src/demo/scenario';
-import { EventBus } from '../apps/server/src/events';
-import { MemoryCredentialStore, type LinearCredentials } from '../apps/server/src/linear/credentials';
-import { issueFromMcp, LinearMcp, McpHttpClient, readMessages } from '../apps/server/src/linear/mcp';
-import { LinearAuthError, LinearOAuth } from '../apps/server/src/linear/oauth';
-import { FixtureLinear, LinearService } from '../apps/server/src/linear/service';
-import { SyncService } from '../apps/server/src/sync/index';
+import { createApp } from '@/app.js';
+import { Store } from '@/db/store.js';
+import { FixtureGitHub } from '@/demo/fixture-github.js';
+import { defaultScenario } from '@/demo/scenario.js';
+import { EventBus } from '@/events.js';
+import { MemoryCredentialStore, type LinearCredentials } from '@/linear/credentials.js';
+import { issueFromMcp, LinearMcp, McpHttpClient, readMessages } from '@/linear/mcp.js';
+import { LinearAuthError, LinearOAuth } from '@/linear/oauth.js';
+import { FixtureLinear, LinearService } from '@/linear/service.js';
+import { SyncService } from '@/sync/index.js';
 
 const ISSUER = 'https://mcp.linear.app';
 const REDIRECT = 'http://127.0.0.1:4317/api/linear/callback';

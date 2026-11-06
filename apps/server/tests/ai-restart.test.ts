@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { expect, it } from 'vitest';
-import { startServer, stopServer, unusedPort } from './fixtures/ai/restart-helper';
+import type { AiRun } from '@review-desk/shared/ai';
+import type { PullRequestList } from '@review-desk/shared/types';
+import { startServer, stopServer, unusedPort } from '@test/fixtures/ai/restart-helper.js';
 
 it.each(['SIGTERM', 'SIGKILL'] as const)(
   'automatically recovers running and queued reviews after %s and a new server process',
@@ -13,7 +15,7 @@ it.each(['SIGTERM', 'SIGKILL'] as const)(
     const port = await unusedPort();
     const base = `http://127.0.0.1:${port}`;
     let child: ChildProcess | null = null;
-    const request = async (path: string, body?: unknown) => {
+    const request = async <T>(path: string, body?: unknown): Promise<T> => {
       const response = await fetch(
         `${base}${path}`,
         body
@@ -30,21 +32,24 @@ it.each(['SIGTERM', 'SIGKILL'] as const)(
       );
 
       expect(response.ok).toBe(true);
-      return response.json();
+      return (await response.json()) as T;
     };
 
     try {
       child = await startServer(directory, port, 60_000);
-      const pulls = await request('/api/pulls');
-      const ids = [1839, 2041, 2050].map(
-        (number) =>
-          pulls.items.find((pull: { number: number }) => pull.number === number).id as string,
-      );
-      const runs = [];
+      const pulls = await request<PullRequestList>('/api/pulls');
+      const ids = [1839, 2041, 2050].map((number) => {
+        const pull = pulls.items.find((item) => item.number === number);
+
+        if (!pull) throw new Error(`Missing fixture pull request ${number}.`);
+
+        return pull.id;
+      });
+      const runs: AiRun[] = [];
 
       for (const id of ids)
         runs.push(
-          await request(`/api/pulls/${encodeURIComponent(id)}/ai`, {
+          await request<AiRun>(`/api/pulls/${encodeURIComponent(id)}/ai`, {
             account: 'you',
             task: 'full_review',
           }),
@@ -53,8 +58,11 @@ it.each(['SIGTERM', 'SIGKILL'] as const)(
         await expect
           .poll(
             async () =>
-              (await request(`/api/pulls/${encodeURIComponent(id)}/ai?account=you`)).runs[0]
-                .progress,
+              (
+                await request<{ runs: AiRun[] }>(
+                  `/api/pulls/${encodeURIComponent(id)}/ai?account=you`,
+                )
+              ).runs[0].progress,
           )
           .toBe('Thinking…');
       }
@@ -78,17 +86,23 @@ it.each(['SIGTERM', 'SIGKILL'] as const)(
         await expect
           .poll(
             async () =>
-              (await request(`/api/pulls/${encodeURIComponent(run.prId)}/ai?account=you`)).runs[0]
-                .status,
+              (
+                await request<{ runs: AiRun[] }>(
+                  `/api/pulls/${encodeURIComponent(run.prId)}/ai?account=you`,
+                )
+              ).runs[0].status,
           )
           .toBe('done');
-        const saved = (await request(`/api/pulls/${encodeURIComponent(run.prId)}/ai?account=you`))
-          .runs[0];
+        const saved = (
+          await request<{ runs: AiRun[] }>(
+            `/api/pulls/${encodeURIComponent(run.prId)}/ai?account=you`,
+          )
+        ).runs[0];
 
         expect(saved.id).toBe(run.id);
         expect(saved.createdAt).toBe(run.createdAt);
       }
-      expect((await request('/api/dev/writes')).writes).toEqual([]);
+      expect((await request<{ writes: unknown[] }>('/api/dev/writes')).writes).toEqual([]);
     } finally {
       if (child) await stopServer(child);
       rmSync(directory, { recursive: true, force: true });

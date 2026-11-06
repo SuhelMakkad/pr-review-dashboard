@@ -1,7 +1,7 @@
 import type { ReviewEvent, Side } from '@review-desk/shared/review';
-import { GitHubError } from './errors.js';
-import { mutations } from './queries.js';
-import type { GitHubTransport } from './transport.js';
+import { GitHubError } from '@/github/errors.js';
+import { mutations } from '@/github/queries.js';
+import type { GitHubTransport } from '@/github/transport.js';
 
 export interface ThreadInput {
   path: string;

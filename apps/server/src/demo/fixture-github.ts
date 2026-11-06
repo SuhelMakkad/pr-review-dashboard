@@ -1,7 +1,7 @@
 import { SNAPSHOT_VERSION } from '@review-desk/shared/snapshot';
 import type { ReviewEvent } from '@review-desk/shared/review';
 import type { Actor, PullRequestSnapshot, ReviewState, Source } from '@review-desk/shared/types';
-import type { ThreadInput } from '../github/write.js';
+import type { ThreadInput } from '@/github/write.js';
 import { createHash } from 'node:crypto';
 import type {
   BlobText,
@@ -10,10 +10,10 @@ import type {
   GitHubApi,
   RateBudget,
   RemoteFile,
-} from '../github/api.js';
-import { GitHubError } from '../github/errors.js';
-import { demoHistory } from './history.js';
-import type { Scenario } from './scenario.js';
+} from '@/github/api.js';
+import { GitHubError } from '@/github/errors.js';
+import { demoHistory } from '@/demo/history.js';
+import type { Scenario } from '@/demo/scenario.js';
 
 /** A GitHub stand-in backed by an in-memory scenario. Used by demo mode and end-to-end tests. */
 export interface FixtureWrite {

@@ -3,11 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Store } from '../apps/server/src/db/store';
-import { SyncService } from '../apps/server/src/sync/index';
-import { GitHub, GitHubError } from '../apps/server/src/github/index';
-import { createApp } from '../apps/server/src/app';
-import { snapshot, thread } from './fixtures';
+import { Store } from '@/db/store.js';
+import { SyncService } from '@/sync/index.js';
+import { GitHub, GitHubError } from '@/github/index.js';
+import { createApp } from '@/app.js';
+import { snapshot, thread } from '@test/fixtures.js';
 
 const stores: Store[] = [];
 const store = (path = ':memory:') => {

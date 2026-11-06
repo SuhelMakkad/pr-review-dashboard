@@ -6,8 +6,8 @@ import {
   type FileStatus,
 } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
-import type { GitHubApi, RemoteFile } from '../github/api.js';
-import { textPatch } from './patch.js';
+import type { GitHubApi, RemoteFile } from '@/github/api.js';
+import { textPatch } from '@/diff/patch.js';
 
 const CACHE_LIMIT = 40;
 const MAX_INTERDIFF_FILES = 300;

@@ -8,14 +8,14 @@ import type {
   SubmitReviewResult,
 } from '@review-desk/shared/review';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
-import type { DiffService } from '../diff/service.js';
-import { textPatch } from '../diff/patch.js';
-import type { EventBus } from '../events.js';
-import type { GitHubApi } from '../github/api.js';
-import { GitHubError, safeError } from '../github/errors.js';
-import type { ThreadInput } from '../github/write.js';
-import type { SyncService } from '../sync/service.js';
-import { DraftStore } from './drafts.js';
+import type { DiffService } from '@/diff/service.js';
+import { textPatch } from '@/diff/patch.js';
+import type { EventBus } from '@/events.js';
+import type { GitHubApi } from '@/github/api.js';
+import { GitHubError, safeError } from '@/github/errors.js';
+import type { ThreadInput } from '@/github/write.js';
+import type { SyncService } from '@/sync/service.js';
+import { DraftStore } from '@/review/drafts.js';
 
 export class ReviewError extends Error {
   constructor(

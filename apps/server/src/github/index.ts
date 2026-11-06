@@ -1,6 +1,6 @@
-export type { GitHubApi } from './api.js';
-export { GitHubError, redact, registerSecret, safeError } from './errors.js';
-export { ciState, GitHub } from './read.js';
+export type { GitHubApi } from '@/github/api.js';
+export { GitHubError, redact, registerSecret, safeError } from '@/github/errors.js';
+export { ciState, GitHub } from '@/github/read.js';
 export {
   GhCli,
   parseIncludedResponse,
@@ -8,4 +8,4 @@ export {
   type GitHubRequest,
   type GitHubResponse,
   type GitHubTransport,
-} from './transport.js';
+} from '@/github/transport.js';

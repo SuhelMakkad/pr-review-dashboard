@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { registerSecret } from '../github/errors.js';
+import { registerSecret } from '@/github/errors.js';
 
 export const KEYCHAIN_SERVICE = 'review-desk.linear';
 export const KEYCHAIN_ACCOUNT = 'api-key';

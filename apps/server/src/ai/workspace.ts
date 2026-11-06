@@ -7,9 +7,9 @@ import { pipeline } from 'node:stream/promises';
 import { x } from 'tar';
 import type { DiffManifest } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
-import type { GitHubApi } from '../github/api.js';
-import { safeError } from '../github/errors.js';
-import { AgentError } from './provider.js';
+import type { GitHubApi } from '@/github/api.js';
+import { safeError } from '@/github/errors.js';
+import { AgentError } from '@/ai/provider.js';
 
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 512 * 1024 * 1024;

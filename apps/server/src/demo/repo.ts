@@ -1,5 +1,5 @@
-import type { BlobText, CompareResult, RemoteFile } from '../github/api.js';
-import { textPatch } from '../diff/patch.js';
+import type { BlobText, CompareResult, RemoteFile } from '@/github/api.js';
+import { textPatch } from '@/diff/patch.js';
 
 interface Commit {
   oid: string;

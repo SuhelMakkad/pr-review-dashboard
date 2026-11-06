@@ -50,12 +50,6 @@ importers:
       concurrently:
         specifier: ^9.2.0
         version: 9.2.5
-      drizzle-orm:
-        specifier: 1.0.0-rc.5
-        version: 1.0.0-rc.5(zod@4.6.7)
-      graphql:
-        specifier: ^16.15.0
-        version: 16.15.0
       jsdom:
         specifier: ^27.2.0
         version: 27.4.0
@@ -68,9 +62,6 @@ importers:
       react-dom:
         specifier: ^19.2.0
         version: 19.3.1(react@19.3.1)
-      tar:
-        specifier: ^7.5.22
-        version: 7.5.22
       tsx:
         specifier: ^4.20.0
         version: 4.23.15

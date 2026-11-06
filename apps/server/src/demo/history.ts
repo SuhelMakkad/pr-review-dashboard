@@ -1,5 +1,5 @@
 import type { Reviewer, PullRequestSnapshot, ReviewState } from '@review-desk/shared/types';
-import type { Store } from '../db/store.js';
+import type { Store } from '@/db/store.js';
 
 /** Small seeded PRNG so the demo history is identical on every run. */
 function random(seed: number) {

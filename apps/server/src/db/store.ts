@@ -11,8 +11,8 @@ import type {
   Source,
   SyncStatus,
 } from '@review-desk/shared/types';
-import type { ActivityEvent } from '../insights/extract.js';
-import { migrateDatabase } from './migrate.js';
+import type { ActivityEvent } from '@/insights/extract.js';
+import { migrateDatabase } from '@/db/migrate.js';
 import {
   activityEvents,
   aiRuns,
@@ -25,7 +25,7 @@ import {
   settings,
   snapshots,
   triage,
-} from './schema.js';
+} from '@/db/schema.js';
 
 /** The Drizzle database, with the underlying `node:sqlite` connection as `$client`. */
 export type Database = NodeSQLiteDatabase & { $client: DatabaseSync };

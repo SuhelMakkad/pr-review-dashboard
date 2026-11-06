@@ -1,4 +1,25 @@
-import type { PullRequestSnapshot, Review, ReviewThread } from '@review-desk/shared/types';
+import type {
+  PullRequestSnapshot,
+  Review,
+  ReviewThread,
+  SyncStatus,
+} from '@review-desk/shared/types';
+
+export function status(overrides: Partial<SyncStatus> = {}): SyncStatus {
+  return {
+    account: null,
+    teams: [],
+    syncing: false,
+    lastAttemptAt: null,
+    lastCompletedAt: null,
+    lastSuccessfulSync: null,
+    nextSyncAt: null,
+    retryAt: null,
+    error: null,
+    warnings: [],
+    ...overrides,
+  };
+}
 
 export const t = (hour: number) => `2026-11-05T${String(hour).padStart(2, '0')}:00:00.000Z`;
 

@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import type { AiRunner } from '../ai/runner.js';
-import { safeError } from '../github/errors.js';
-import { ReviewError } from '../review/service.js';
+import type { AiRunner } from '@/ai/runner.js';
+import { safeError } from '@/github/errors.js';
+import { ReviewError } from '@/review/service.js';
 import { defaultAiSettings } from '@review-desk/shared/ai';
 
 const account = z.string().min(1).max(100);

@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { DiffMode } from '@review-desk/shared/diff';
-import type { DiffService } from '../diff/service.js';
-import { safeError } from '../github/errors.js';
-import type { SyncService } from '../sync/service.js';
+import type { DiffService } from '@/diff/service.js';
+import { safeError } from '@/github/errors.js';
+import type { SyncService } from '@/sync/service.js';
 
 export function registerDiffRoutes(
   app: FastifyInstance,

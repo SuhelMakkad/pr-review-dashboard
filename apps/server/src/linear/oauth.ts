@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { registerSecret, safeError } from '../github/errors.js';
-import type { CredentialStore, LinearCredentials } from './credentials.js';
+import { registerSecret, safeError } from '@/github/errors.js';
+import type { CredentialStore, LinearCredentials } from '@/linear/credentials.js';
 
 /** Linear's hosted MCP server; it is also the OAuth authorization server for it. */
 export const LINEAR_MCP_URL = 'https://mcp.linear.app/mcp';

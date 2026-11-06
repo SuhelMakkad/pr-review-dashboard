@@ -1,4 +1,4 @@
-import { FixtureRepos } from './repo.js';
+import { FixtureRepos } from '@/demo/repo.js';
 
 /** Fictional source files for the demo scenario. Line numbers matter where threads anchor. */
 

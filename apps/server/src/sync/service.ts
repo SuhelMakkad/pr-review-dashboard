@@ -10,12 +10,12 @@ import {
   type SyncStatus,
   type TriageUpdate,
 } from '@review-desk/shared/types';
-import type { Store } from '../db/store.js';
-import { EventBus } from '../events.js';
-import type { DetectResult, GitHubApi } from '../github/api.js';
-import { GitHubError, safeError } from '../github/errors.js';
-import { GitHub } from '../github/read.js';
-import { extractActivity } from '../insights/extract.js';
+import type { Store } from '@/db/store.js';
+import { EventBus } from '@/events.js';
+import type { DetectResult, GitHubApi } from '@/github/api.js';
+import { GitHubError, safeError } from '@/github/errors.js';
+import { GitHub } from '@/github/read.js';
+import { extractActivity } from '@/insights/extract.js';
 
 export const initialStatus = (): SyncStatus => ({
   account: null,

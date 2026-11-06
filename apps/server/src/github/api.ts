@@ -1,5 +1,5 @@
 import type { Actor, PullRequestSnapshot, Source } from '@review-desk/shared/types';
-import type { GitHubWrites } from './write.js';
+import type { GitHubWrites } from '@/github/write.js';
 
 export interface RateBudget {
   limit: number;

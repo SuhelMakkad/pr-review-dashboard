@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { safeError } from '../github/errors.js';
-import type { SyncService } from '../sync/service.js';
+import { safeError } from '@/github/errors.js';
+import type { SyncService } from '@/sync/service.js';
 
 const updateSchema = z
   .object({

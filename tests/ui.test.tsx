@@ -7,12 +7,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router';
 import { createAppRouter } from '../apps/web/src/router';
 import { resetInboxAutoSelect } from '../apps/web/src/features/inbox/inbox-page';
-import { initialStatus } from '../apps/server/src/sync/index';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { defaultAiSettings } from '@review-desk/shared/ai';
 import { defaultNotificationSettings } from '@review-desk/shared/notify';
 import type { LocalTriageState } from '@review-desk/shared/types';
-import { review, snapshot } from './fixtures';
+import { review, snapshot, status } from './fixtures';
 
 const followUp = snapshot({
   id: 'follow',
@@ -87,7 +86,7 @@ beforeEach(() => {
         };
       } else if (path === '/api/status') {
         data = {
-          ...initialStatus(),
+          ...status(),
           account: { login: 'me' },
           lastSuccessfulSync: new Date().toISOString(),
         };

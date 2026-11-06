@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Store } from '../apps/server/src/db/store';
-import { FixtureGitHub } from '../apps/server/src/demo/fixture-github';
-import { defaultScenario } from '../apps/server/src/demo/scenario';
-import { EventBus } from '../apps/server/src/events';
-import { Backfill } from '../apps/server/src/insights/backfill';
-import { SyncService } from '../apps/server/src/sync/index';
-import { computeInsights, percentile, turnarounds, type ActivityEvent } from '@review-desk/shared/insights';
+import { Store } from '@/db/store.js';
+import { FixtureGitHub } from '@/demo/fixture-github.js';
+import { defaultScenario } from '@/demo/scenario.js';
+import { EventBus } from '@/events.js';
+import { Backfill } from '@/insights/backfill.js';
+import { SyncService } from '@/sync/index.js';
+import {
+  computeInsights,
+  percentile,
+  turnarounds,
+  type ActivityEvent,
+} from '@review-desk/shared/insights';
 
 const HOUR = 3_600_000;
 const now = Date.parse('2026-11-05T12:00:00Z');

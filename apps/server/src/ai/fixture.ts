@@ -1,11 +1,11 @@
 import type { AiProvider, CodexAccountStatus } from '@review-desk/shared/ai';
-import type { AgentProvider, AgentRequest } from './provider.js';
-import { AgentError } from './provider.js';
+import type { AgentProvider, AgentRequest } from '@/ai/provider.js';
+import { AgentError } from '@/ai/provider.js';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { DiffFile } from '@review-desk/shared/diff';
-import { annotatePatch } from './context.js';
+import { annotatePatch } from '@/ai/context.js';
 
 const wait = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {

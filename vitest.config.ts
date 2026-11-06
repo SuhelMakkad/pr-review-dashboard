@@ -7,6 +7,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     projects: [
+      { extends: true, test: { name: 'server', include: ['apps/server/tests/**/*.test.ts'] } },
       { extends: true, test: { name: 'shared', include: ['packages/shared/tests/**/*.test.ts'] } },
       { extends: true, test: { name: 'legacy', include: ['tests/**/*.test.{ts,tsx}'], exclude: ['tests/e2e/**'] } },
     ],

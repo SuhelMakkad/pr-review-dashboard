@@ -1,1 +1,1 @@
-export { initialStatus, SyncService } from './service.js';
+export { initialStatus, SyncService } from '@/sync/service.js';

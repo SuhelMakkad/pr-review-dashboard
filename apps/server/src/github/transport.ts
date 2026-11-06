@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { GitHubError, safeError } from './errors.js';
+import { GitHubError, safeError } from '@/github/errors.js';
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 

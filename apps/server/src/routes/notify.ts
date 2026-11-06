@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { Notifier } from '../notify/notifier.js';
-import type { SyncService } from '../sync/service.js';
+import type { Notifier } from '@/notify/notifier.js';
+import type { SyncService } from '@/sync/service.js';
 
 const time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const kinds = z.strictObject({

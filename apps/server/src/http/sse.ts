@@ -1,7 +1,7 @@
 import type { ServerResponse } from 'node:http';
 import type { FastifyInstance } from 'fastify';
 import type { ServerEvent } from '@review-desk/shared/events';
-import type { EventBus, StoredEvent } from '../events.js';
+import type { EventBus, StoredEvent } from '@/events.js';
 
 export interface SseOptions {
   bus: EventBus;

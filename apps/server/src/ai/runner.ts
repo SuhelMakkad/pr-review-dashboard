@@ -19,12 +19,12 @@ import {
 import { commentableLines } from '@review-desk/shared/diff';
 import type { DraftComment, ReviewDraft } from '@review-desk/shared/review';
 import type { PullRequestDetail } from '@review-desk/shared/types';
-import { aiRuns, type AiRunRow } from '../db/schema.js';
-import type { DiffService } from '../diff/service.js';
-import type { EventBus } from '../events.js';
-import { redact, safeError } from '../github/errors.js';
-import { ReviewError, type ReviewService } from '../review/service.js';
-import type { SyncService } from '../sync/service.js';
+import { aiRuns, type AiRunRow } from '@/db/schema.js';
+import type { DiffService } from '@/diff/service.js';
+import type { EventBus } from '@/events.js';
+import { redact, safeError } from '@/github/errors.js';
+import { ReviewError, type ReviewService } from '@/review/service.js';
+import type { SyncService } from '@/sync/service.js';
 import {
   authorFeedbackInput,
   briefInput,
@@ -32,15 +32,15 @@ import {
   draftSummaryInput,
   fullReviewInput,
   sinceReviewInput,
-} from './context.js';
-import type { AgentProvider } from './provider.js';
-import { draftFingerprint, reviewFingerprint } from './freshness.js';
-import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from './tasks.js';
+} from '@/ai/context.js';
+import type { AgentProvider } from '@/ai/provider.js';
+import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
+import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
 import {
   downloadRepository,
   prepareReviewWorkspace,
   type RepositoryExporter,
-} from './workspace.js';
+} from '@/ai/workspace.js';
 
 const MAX_CONCURRENT = 2;
 const PROBE_TTL_MS = 5 * 60_000;

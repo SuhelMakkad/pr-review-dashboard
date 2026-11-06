@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
 
 export async function unusedPort(): Promise<number> {
   const server = createServer();
@@ -21,10 +22,19 @@ export async function startServer(
 ) {
   const child = spawn(
     process.execPath,
-    ['--import', 'tsx', 'tests/fixtures/ai/restart-server.mjs'],
+    [
+      '--import',
+      'tsx',
+      fileURLToPath(
+        new URL('../../../apps/server/tests/fixtures/restart-server.mjs', import.meta.url),
+      ),
+    ],
     {
       env: {
         ...process.env,
+        TSX_TSCONFIG_PATH: fileURLToPath(
+          new URL('../../../apps/server/tsconfig.json', import.meta.url),
+        ),
         REVIEW_RESTART_DATA: directory,
         REVIEW_RESTART_PORT: String(port),
         REVIEW_RESTART_DELAY: String(delay),

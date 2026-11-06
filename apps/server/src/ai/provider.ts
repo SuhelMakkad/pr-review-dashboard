@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AiEffort, AiProvider, CodexAccountStatus } from '@review-desk/shared/ai';
-import { redact } from '../github/errors.js';
+import { redact } from '@/github/errors.js';
 
 export interface AgentRequest {
   /** Instructions (system role). */

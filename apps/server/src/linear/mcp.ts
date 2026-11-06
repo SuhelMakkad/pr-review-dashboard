@@ -1,6 +1,6 @@
 import type { LinearIssue } from '@review-desk/shared/tickets';
-import { LINEAR_MCP_URL, LinearAuthError, type LinearOAuth } from './oauth.js';
-import type { LinearSource } from './service.js';
+import { LINEAR_MCP_URL, LinearAuthError, type LinearOAuth } from '@/linear/oauth.js';
+import type { LinearSource } from '@/linear/service.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const TIMEOUT_MS = 20_000;

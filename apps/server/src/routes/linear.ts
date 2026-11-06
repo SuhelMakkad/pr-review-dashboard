@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { safeError } from '../github/errors.js';
-import type { LinearService } from '../linear/service.js';
-import type { SyncService } from '../sync/service.js';
+import { safeError } from '@/github/errors.js';
+import type { LinearService } from '@/linear/service.js';
+import type { SyncService } from '@/sync/service.js';
 
 const callbackQuery = z.object({
   state: z.string().max(200).optional(),

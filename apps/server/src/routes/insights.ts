@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { computeInsights } from '@review-desk/shared/insights';
-import type { Backfill } from '../insights/backfill.js';
-import type { SyncService } from '../sync/service.js';
+import type { Backfill } from '@/insights/backfill.js';
+import type { SyncService } from '@/sync/service.js';
 
 const DAY = 24 * 60 * 60_000;
 const SLA_KEY = 'review-sla-hours';

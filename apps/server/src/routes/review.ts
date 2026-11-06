@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { safeError } from '../github/errors.js';
-import { ReviewError, type ReviewService } from '../review/service.js';
+import { safeError } from '@/github/errors.js';
+import { ReviewError, type ReviewService } from '@/review/service.js';
 
 const account = z.string().min(1).max(100);
 const body = z.string().trim().min(1).max(65_536);

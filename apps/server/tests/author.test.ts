@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { deriveAuthorItem, sortAuthorItems } from '@review-desk/shared/author';
-import { extractActivity } from '../apps/server/src/insights/extract';
-import { review, snapshot, t, thread } from './fixtures';
+import { extractActivity } from '@/insights/extract.js';
+import { review, snapshot, t, thread } from '@test/fixtures.js';
 
 const mine = (overrides: Parameters<typeof snapshot>[0] = {}) =>
   snapshot({ author: { login: 'me' }, reviews: [], mergeStateStatus: 'BLOCKED', ...overrides });

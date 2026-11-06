@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { buildSchema, parse, validate } from 'graphql';
 import { describe, expect, it } from 'vitest';
-import { allDocuments } from '../apps/server/src/github/queries';
+import { allDocuments } from '@/github/queries.js';
 
 // GitHub's published schema (https://docs.github.com/public/fpt/schema.docs.graphql).
 const schema = buildSchema(
-  readFileSync(new URL('./schema/github.graphql', import.meta.url), 'utf8'),
+  readFileSync(new URL('../../../tests/schema/github.graphql', import.meta.url), 'utf8'),
 );
 
 describe('GitHub GraphQL contract', () => {

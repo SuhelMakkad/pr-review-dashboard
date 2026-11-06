@@ -1,5 +1,10 @@
-import { redact } from '../github/errors.js';
-import { AgentError, codexEnvironment, spawnAgentProcess, type AgentProcess } from './provider.js';
+import { redact } from '@/github/errors.js';
+import {
+  AgentError,
+  codexEnvironment,
+  spawnAgentProcess,
+  type AgentProcess,
+} from '@/ai/provider.js';
 
 /**
  * Codex features the agent must not have: account connectors and plugins (which can reach other

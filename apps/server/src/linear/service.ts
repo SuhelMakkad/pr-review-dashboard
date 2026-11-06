@@ -2,9 +2,9 @@ import { randomBytes } from 'node:crypto';
 import type { LinearIssue, LinearMethod, LinearStatus } from '@review-desk/shared/tickets';
 import { extractTickets } from '@review-desk/shared/tickets';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
-import { safeError } from '../github/errors.js';
-import { SETUP_COMMAND, type KeySource } from './keychain.js';
-import { LinearAuthError, type CallbackParams, type LinearConnector } from './oauth.js';
+import { safeError } from '@/github/errors.js';
+import { SETUP_COMMAND, type KeySource } from '@/linear/keychain.js';
+import { LinearAuthError, type CallbackParams, type LinearConnector } from '@/linear/oauth.js';
 
 const CACHE_MS = 10 * 60_000;
 const ENDPOINT = 'https://api.linear.app/graphql';
