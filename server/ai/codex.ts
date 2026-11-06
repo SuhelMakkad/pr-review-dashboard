@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CodexAccountStatus, CodexModel } from '../../shared/ai.js';
 import { redact } from '../github/errors.js';
-import { CodexAppServer, type Notification } from './codexAppServer.js';
+import { CodexAppServer, type Notification } from './codex-app-server.js';
 import {
   accountProblem,
   accountType,
@@ -15,7 +15,7 @@ import {
   type PlanUsage,
   type RateLimitSnapshot,
   type RateLimitsResponse,
-} from './codexUsage.js';
+} from './codex-usage.js';
 import {
   AgentError,
   probeVersion,

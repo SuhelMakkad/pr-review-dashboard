@@ -7,17 +7,17 @@ import {
   type RouterHistory,
 } from '@tanstack/react-router';
 import { inboxSearchSchema } from './features/inbox/filters';
-import { InboxPage } from './features/inbox/InboxPage';
-import { InboxReader } from './features/inbox/InboxReader';
+import { InboxPage } from './features/inbox/inbox-page';
+import { InboxReader } from './features/inbox/inbox-reader';
 import { queueSlugs, type QueueSlug } from './features/pulls/meta';
-import { PullLayout } from './features/pulls/PullLayout';
-import { PullOverview } from './features/pulls/PullOverview';
+import { PullLayout } from './features/pulls/pull-layout';
+import { PullOverview } from './features/pulls/pull-overview';
 import { filesSearchSchema } from './features/review/search';
-import { SettingsPage } from './features/settings/SettingsPage';
-import { MinePage } from './features/mine/MinePage';
-import { MineReader } from './features/mine/MineReader';
-import { NotFound } from './features/shell/NotFound';
-import { Shell } from './features/shell/Shell';
+import { SettingsPage } from './features/settings/settings-page';
+import { MinePage } from './features/mine/mine-page';
+import { MineReader } from './features/mine/mine-reader';
+import { NotFound } from './features/shell/not-found';
+import { Shell } from './features/shell/shell';
 
 const rootRoute = createRootRoute({ component: Shell, notFoundComponent: NotFound });
 
@@ -64,7 +64,10 @@ const pullFilesRoute = createRoute({
   path: 'files',
   validateSearch: filesSearchSchema,
   // The diff renderer and syntax highlighter load only when a diff is opened.
-  component: lazyRouteComponent(() => import('./features/review/FilesWorkspace'), 'FilesWorkspace'),
+  component: lazyRouteComponent(
+    () => import('./features/review/files-workspace'),
+    'FilesWorkspace',
+  ),
 });
 
 /** Swap github.com for this app's host in any PR URL and it opens here. */
@@ -104,7 +107,7 @@ const minePullRoute = createRoute({
 const insightsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'insights',
-  component: lazyRouteComponent(() => import('./features/insights/InsightsPage'), 'InsightsPage'),
+  component: lazyRouteComponent(() => import('./features/insights/insights-page'), 'InsightsPage'),
 });
 
 const settingsRoute = createRoute({

@@ -16,7 +16,7 @@ export interface MineList {
 }
 import { api } from './api';
 import { fallbackInterval, useLive } from './live';
-import { queryKeys } from './queryKeys';
+import { queryKeys } from './query-keys';
 
 export function useStatus() {
   const live = useLive();

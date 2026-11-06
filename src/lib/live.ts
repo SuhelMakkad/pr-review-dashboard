@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 import type { QueryClient } from '@tanstack/react-query';
 import type { ServerEvent } from '../../shared/events';
 import type { PullRequestList, SyncStatus } from '../../shared/types';
-import { queryKeys } from './queryKeys';
+import { queryKeys } from './query-keys';
 import { session } from './session';
 import { present } from './notifications';
 

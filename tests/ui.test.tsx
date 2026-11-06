@@ -6,7 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router';
 import { createAppRouter } from '../src/router';
-import { resetInboxAutoSelect } from '../src/features/inbox/InboxPage';
+import { resetInboxAutoSelect } from '../src/features/inbox/inbox-page';
 import { initialStatus } from '../server/sync';
 import { deriveItem, emptyTriage } from '../shared/attention';
 import { defaultAiSettings } from '../shared/ai';

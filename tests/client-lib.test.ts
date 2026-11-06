@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { deriveItem, emptyTriage } from '../shared/attention';
 import { matchesFilters } from '../src/features/inbox/filters';
-import { parsePrUrl } from '../src/lib/prRef';
+import { parsePrUrl } from '../src/lib/pr-ref';
 import { applyOptimistic } from '../src/lib/queries';
 import { keyCaps } from '../src/lib/shortcuts';
 import { parseSnooze, shortAge, snoozePresets } from '../src/lib/time';
