@@ -49,7 +49,17 @@ const schemas = {
     index: z.number().int().min(0),
     body: z.string().trim().min(1).max(65_536).optional(),
   }),
-  prepare: z.strictObject({ account, indices: z.array(z.number().int().min(0)).max(100) }),
+  prepare: z
+    .strictObject({
+      account,
+      indices: z.array(z.number().int().min(0)).max(100),
+      replace: z.boolean().optional(),
+      expectedDraftRevision: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
+    })
+    .refine((value) => !value.replace || Boolean(value.expectedDraftRevision)),
 };
 
 async function handle(reply: FastifyReply, work: () => Promise<unknown> | unknown) {
@@ -57,7 +67,11 @@ async function handle(reply: FastifyReply, work: () => Promise<unknown> | unknow
     return (await work()) ?? { ok: true };
   } catch (error) {
     if (error instanceof ReviewError)
-      return reply.code(error.status).send({ error: error.message, code: error.code });
+      return reply.code(error.status).send({
+        ...error.details,
+        error: error.message,
+        code: error.code,
+      });
 
     return reply.code(500).send({ error: safeError(error) });
   }
@@ -138,7 +152,9 @@ export function registerAiRoutes(app: FastifyInstance, runner: AiRunner): void {
 
     return (
       input &&
-      handle(reply, () => runner.prepareReview(input.account, request.params.runId, input.indices))
+      handle(reply, () =>
+        runner.prepareReview(input.account, request.params.runId, input.indices, input),
+      )
     );
   });
 

@@ -29,10 +29,23 @@ export interface ReviewDraft {
   event: ReviewEvent;
   comments: DraftComment[];
   updatedAt: string | null;
-  preparedReview?: { runId: string; preparedAt: string; indices: number[] } | null;
+  preparedReview?: {
+    runId: string;
+    preparedAt: string;
+    indices: number[];
+    /** Only content created by this preparation may be replaced by another preparation. */
+    content?: { summary: string; comments: { id: string; fingerprint: string }[] };
+    previousDrafts?: { body: string; comments: DraftComment[]; savedAt: string }[];
+  } | null;
   /** A pending review that already exists on GitHub (started there or by an interrupted submit). */
   githubPendingReview: { id: string; commentCount: number } | null;
   activeOperationId?: string | null;
+}
+
+export interface PrepareReviewOptions {
+  replace?: boolean;
+  /** Confirmation applies only to the exact draft the user was shown. */
+  expectedDraftRevision?: string;
 }
 
 export interface NewDraftComment {

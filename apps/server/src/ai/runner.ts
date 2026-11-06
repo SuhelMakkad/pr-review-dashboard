@@ -17,7 +17,7 @@ import {
   type FullReviewResult,
 } from '@review-desk/shared/ai';
 import { commentableLines } from '@review-desk/shared/diff';
-import type { DraftComment, ReviewDraft } from '@review-desk/shared/review';
+import type { DraftComment, PrepareReviewOptions, ReviewDraft } from '@review-desk/shared/review';
 import type { PullRequestDetail } from '@review-desk/shared/types';
 import { aiRuns, type AiRunRow } from '@/db/schema.js';
 import type { DiffService } from '@/diff/service.js';
@@ -35,6 +35,12 @@ import {
 } from '@/ai/context.js';
 import type { AgentProvider } from '@/ai/provider.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
+import {
+  draftChanged,
+  planPreparation,
+  preparationRevision,
+  preparedCommentFingerprint,
+} from '@/ai/preparation.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
 import {
   downloadRepository,
@@ -885,7 +891,12 @@ export class AiRunner {
   }
 
   /** Stage selected findings locally. Posting still happens only through ReviewService.submit. */
-  async prepareReview(account: string, id: string, indices: number[]): Promise<ReviewDraft> {
+  async prepareReview(
+    account: string,
+    id: string,
+    indices: number[],
+    options: PrepareReviewOptions = {},
+  ): Promise<ReviewDraft> {
     const row = this.row(id);
 
     if (
@@ -900,6 +911,9 @@ export class AiRunner {
 
     this.detail(account, row.prId);
     this.reviews.drafts.assertEditable(account, row.prId);
+
+    const initialRevision = preparationRevision(this.reviews.draft(account, row.prId));
+
     await this.sync.refresh(row.prId);
 
     const detail = this.detail(account, row.prId);
@@ -970,6 +984,8 @@ export class AiRunner {
 
     // One synchronous transaction avoids partial drafts or duplicate comments on retries.
     this.sync.store.transaction(() => {
+      this.reviews.drafts.assertEditable(account, row.prId);
+
       const current = this.reviews.draft(account, row.prId);
 
       if (
@@ -978,9 +994,13 @@ export class AiRunner {
       )
         return;
 
-      const body = current.body.includes(summary)
-        ? current.body
-        : [current.body, summary].filter(Boolean).join('\n\n');
+      if (preparationRevision(current) !== initialRevision) throw draftChanged();
+
+      const previousRun = current.preparedReview && this.row(current.preparedReview.runId);
+
+      if (previousRun && previousRun.createdAt > row.createdAt) throw draftChanged();
+
+      const { body, removeIds, previousDrafts } = planPreparation(current, summary, options);
 
       if (body.length > 65_536)
         throw new ReviewError(
@@ -989,8 +1009,13 @@ export class AiRunner {
           'This review is too large to post. Select fewer findings.',
         );
 
+      for (const commentId of removeIds) this.reviews.drafts.deleteComment(account, commentId);
+
+      const remaining = current.comments.filter((comment) => !removeIds.includes(comment.id));
+      const ownedComments: { id: string; fingerprint: string }[] = [];
+
       for (const comment of comments) {
-        const exists = current.comments.some(
+        const exists = remaining.some(
           (existing) =>
             existing.origin === 'ai' &&
             existing.anchorOid === row.headOid &&
@@ -1002,7 +1027,7 @@ export class AiRunner {
 
         if (exists) continue;
 
-        this.reviews.drafts.addComment(account, row.prId, {
+        const added = this.reviews.drafts.addComment(account, row.prId, {
           ...comment,
           startLine: null,
           startSide: null,
@@ -1010,6 +1035,9 @@ export class AiRunner {
           origin: 'ai',
           anchorOid: row.headOid,
         });
+
+        remaining.push(added);
+        ownedComments.push({ id: added.id, fingerprint: preparedCommentFingerprint(added) });
       }
 
       this.reviews.drafts.saveMeta(account, row.prId, {
@@ -1018,6 +1046,8 @@ export class AiRunner {
           runId: id,
           preparedAt: new Date().toISOString(),
           indices: [...new Set(indices)].sort((a, b) => a - b),
+          content: { summary, comments: ownedComments },
+          ...(previousDrafts.length ? { previousDrafts } : {}),
         },
       });
     });

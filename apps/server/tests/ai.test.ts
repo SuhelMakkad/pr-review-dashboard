@@ -30,6 +30,7 @@ import { defaultScenario } from '@/demo/scenario.js';
 import { DiffService } from '@/diff/service.js';
 import { EventBus } from '@/events.js';
 import { ReviewService } from '@/review/service.js';
+import { ReviewError } from '@/review/errors.js';
 import { SyncService } from '@/sync/index.js';
 import {
   defaultAiSettings,
@@ -789,6 +790,266 @@ describe('AI runner', () => {
 
     expect(github.writes.map((write) => write.op)).toEqual(['AddPendingReview', 'SubmitReview']);
     expect(github.writes[1].details).toMatchObject({ body: overall, comments: 0 });
+  });
+
+  it('replaces an earlier prepared review when a later run has no findings', async () => {
+    const { runner, providers, pr, finished, reviews, github } = await setup();
+    const first = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+
+    await runner.prepareReview('you', first.id, [0]);
+
+    const overall = 'No changes are needed. The previously reported issues are resolved.';
+
+    vi.spyOn(providers.codex, 'run').mockResolvedValueOnce({
+      output: {
+        overall,
+        assessment: 'no_blocking_findings',
+        comments: [],
+        coverage: ['Checked the current implementation.'],
+      },
+      model: 'test',
+      usage: null,
+    });
+
+    const second = await finished(
+      await runner.start('you', first.prId, 'full_review', { force: true }),
+    );
+    const draft = await runner.prepareReview('you', second.id, []);
+
+    expect(draft.body).toBe(overall);
+    expect(draft.comments).toEqual([]);
+    expect(draft.preparedReview).toMatchObject({ runId: second.id, indices: [] });
+
+    await expect(runner.prepareReview('you', first.id, [0])).rejects.toMatchObject({
+      code: 'DRAFT_CHANGED',
+    });
+    expect(reviews.draft('you', first.prId)).toEqual(draft);
+
+    await reviews.submit(second.prId, {
+      account: 'you',
+      event: 'COMMENT',
+      body: draft.body,
+      expectedHeadOid: second.headOid,
+    });
+
+    expect(github.writes.map((write) => write.op)).toEqual(['AddPendingReview', 'SubmitReview']);
+    expect(github.writes[1].details).toMatchObject({ body: overall, comments: 0 });
+  });
+
+  it('removes deselected prepared findings and keeps independent comments and summary text', async () => {
+    const { runner, pr, finished, reviews } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const finding = (run.result as FullReviewResult).comments[0];
+
+    await reviews.saveDraft('you', run.prId, { body: 'My introduction.' });
+
+    const manual = await reviews.addComment(run.prId, {
+      account: 'you',
+      path: finding.path,
+      line: finding.line,
+      side: finding.side,
+      body: 'My independent comment.',
+    });
+    const suggestion = await reviews.addComment(run.prId, {
+      account: 'you',
+      path: finding.path,
+      line: finding.line,
+      side: finding.side,
+      body: 'An independently accepted AI suggestion.',
+      origin: 'ai',
+    });
+    const prepared = await runner.prepareReview('you', run.id, [0]);
+
+    await reviews.saveDraft('you', run.prId, { body: `${prepared.body}\n\nMy conclusion.` });
+
+    const deselected = await runner.prepareReview('you', run.id, []);
+
+    expect(deselected.body).toBe(`${prepared.body}\n\nMy conclusion.`);
+    expect(deselected.comments.map((comment) => comment.id)).toEqual([manual.id, suggestion.id]);
+    expect(deselected.preparedReview).toMatchObject({ indices: [] });
+  });
+
+  it('does not repeat a generated summary already saved in an unprepared draft', async () => {
+    const { runner, pr, finished, reviews } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const overall = (run.result as FullReviewResult).overall;
+
+    await reviews.saveDraft('you', run.prId, { body: overall });
+
+    const draft = await runner.prepareReview('you', run.id, [0]);
+
+    expect(draft.body).toBe(overall);
+    expect(draft.comments).toHaveLength(1);
+  });
+
+  it.each(['summary', 'comment'] as const)(
+    'requires confirmation before replacing an edited %s and preserves a recoverable copy',
+    async (edited) => {
+      const { runner, pr, finished, reviews, github } = await setup();
+      const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+      const prepared = await runner.prepareReview('you', run.id, [0]);
+
+      if (edited === 'summary')
+        await reviews.saveDraft('you', run.prId, { body: 'My revised assessment.' });
+      else
+        await reviews.updateComment(
+          'you',
+          run.prId,
+          prepared.comments[0].id,
+          'My revised finding.',
+        );
+
+      const saved = reviews.draft('you', run.prId);
+      const conflict = await runner
+        .prepareReview('you', run.id, [])
+        .catch((error: unknown) => error);
+
+      expect(conflict).toBeInstanceOf(ReviewError);
+      expect(conflict).toMatchObject({ code: 'PREPARED_REVIEW_EDITED', status: 409 });
+      expect(reviews.draft('you', run.prId)).toEqual(saved);
+
+      const replacement = await runner.prepareReview('you', run.id, [], {
+        replace: true,
+        expectedDraftRevision: (conflict as ReviewError).details.draftRevision as string,
+      });
+
+      expect(replacement.body).toBe((run.result as FullReviewResult).overall);
+      expect(replacement.comments).toEqual([]);
+      expect(replacement.preparedReview?.previousDrafts).toEqual([
+        { body: saved.body, comments: saved.comments, savedAt: expect.any(String) },
+      ]);
+      expect(github.writes).toEqual([]);
+    },
+  );
+
+  it('rejects replacement confirmation after another tab edits the draft', async () => {
+    const { runner, pr, finished, reviews } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+
+    await runner.prepareReview('you', run.id, [0]);
+    await reviews.saveDraft('you', run.prId, { body: 'First edit.' });
+
+    const conflict = await runner.prepareReview('you', run.id, []).catch((error: unknown) => error);
+
+    await reviews.saveDraft('you', run.prId, { body: 'Newer edit from another tab.' });
+
+    const saved = reviews.draft('you', run.prId);
+
+    await expect(
+      runner.prepareReview('you', run.id, [], {
+        replace: true,
+        expectedDraftRevision: (conflict as ReviewError).details.draftRevision as string,
+      }),
+    ).rejects.toMatchObject({ code: 'DRAFT_CHANGED', status: 409 });
+    expect(reviews.draft('you', run.prId)).toEqual(saved);
+  });
+
+  it('requires confirmation to replace legacy prepared content and keeps its saved copy', async () => {
+    const { runner, pr, finished, reviews } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const prepared = await runner.prepareReview('you', run.id, [0]);
+
+    reviews.drafts.saveMeta('you', run.prId, {
+      preparedReview: {
+        runId: run.id,
+        preparedAt: prepared.preparedReview!.preparedAt,
+        indices: [0],
+      },
+    });
+
+    const saved = reviews.draft('you', run.prId);
+    const conflict = await runner.prepareReview('you', run.id, []).catch((error: unknown) => error);
+
+    expect(conflict).toMatchObject({ code: 'PREPARED_REVIEW_EDITED', status: 409 });
+    expect(reviews.draft('you', run.prId)).toEqual(saved);
+
+    const replacement = await runner.prepareReview('you', run.id, [], {
+      replace: true,
+      expectedDraftRevision: (conflict as ReviewError).details.draftRevision as string,
+    });
+
+    expect(replacement.comments).toEqual([]);
+    expect(replacement.preparedReview?.previousDrafts?.[0]).toMatchObject({
+      body: saved.body,
+      comments: saved.comments,
+    });
+  });
+
+  it.each(['edit', 'prepare', 'queue'] as const)(
+    'does not overwrite a concurrent %s while checking the diff',
+    async (change) => {
+      const { runner, pr, finished, reviews, diffs } = await setup();
+      const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+      const manifest = diffs.manifest.bind(diffs);
+      let reached!: () => void;
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      vi.spyOn(diffs, 'manifest').mockImplementationOnce(async (...args) => {
+        reached();
+        await released;
+
+        return manifest(...args);
+      });
+
+      const preparing = runner.prepareReview('you', run.id, [0]);
+
+      await waiting;
+
+      if (change === 'edit')
+        await reviews.saveDraft('you', run.prId, { body: 'Newer manual edit.' });
+      if (change === 'prepare') await runner.prepareReview('you', run.id, []);
+      if (change === 'queue') reviews.drafts.lock('you', run.prId, 'queued-review');
+
+      const saved = reviews.draft('you', run.prId);
+
+      release();
+      await expect(preparing).rejects.toMatchObject({
+        code: change === 'queue' ? 'REVIEW_QUEUED' : 'DRAFT_CHANGED',
+      });
+      expect(reviews.draft('you', run.prId)).toEqual(saved);
+    },
+  );
+
+  it('does not take ownership of an independently accepted identical AI comment', async () => {
+    const { runner, pr, finished, reviews } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const finding = (run.result as FullReviewResult).comments[0];
+    const accepted = await reviews.addComment(run.prId, {
+      ...finding,
+      account: 'you',
+      origin: 'ai',
+    });
+
+    await runner.prepareReview('you', run.id, [0]);
+
+    const deselected = await runner.prepareReview('you', run.id, []);
+
+    expect(deselected.comments.map((comment) => comment.id)).toEqual([accepted.id]);
+  });
+
+  it('does not replace prepared findings that were already added to GitHub', async () => {
+    const { runner, pr, finished, reviews, github } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const prepared = await runner.prepareReview('you', run.id, [0]);
+
+    reviews.drafts.updateComment('you', prepared.comments[0].id, {
+      status: 'pushed',
+      githubThreadId: 'remote-thread',
+    });
+
+    const saved = reviews.draft('you', run.prId);
+
+    await expect(runner.prepareReview('you', run.id, [])).rejects.toMatchObject({
+      code: 'PENDING_REVIEW',
+    });
+    expect(reviews.draft('you', run.prId)).toEqual(saved);
+    expect(github.writes).toEqual([]);
   });
 
   it('grounds summaries with no pending comments in the diff and the current completed review', async () => {
