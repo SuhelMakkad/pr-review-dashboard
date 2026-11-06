@@ -1,5 +1,6 @@
 import { parseHunks, type DiffFile, type DiffManifest } from '../../shared/diff.js';
-import type { DraftComment, ReviewEvent } from '../../shared/review.js';
+import type { FullReviewResult } from '../../shared/ai.js';
+import type { ReviewDraft } from '../../shared/review.js';
 import type { PullRequestSnapshot, ReviewThread } from '../../shared/types.js';
 
 const BODY_LIMIT = 8_000;
@@ -142,17 +143,22 @@ export function authorFeedbackInput(pr: PullRequestSnapshot): string {
 
 export function draftSummaryInput(
   pr: PullRequestSnapshot,
-  event: ReviewEvent,
-  comments: DraftComment[],
+  diff: DiffManifest,
+  draft: ReviewDraft,
+  review: Pick<FullReviewResult, 'overall' | 'coverage'> | null,
 ): string {
-  const pending = comments
+  const pending = draft.comments
+    .filter((comment) => comment.status !== 'stale')
     .map(
       (comment) =>
         `${comment.path}${comment.line ? `:${comment.line}` : ''}: ${fence(comment.body)}`,
     )
     .join('\n');
+  const completed = review
+    ? `\n\n<completed_review>\n${fence(JSON.stringify({ overall: review.overall, coverage: review.coverage }))}\n</completed_review>`
+    : '';
 
   return wrap(
-    `${header(pr)}\n\n<verdict>${event}</verdict>\n\n<pending_comments>\n${pending || '(none)'}\n</pending_comments>`,
+    `${header(pr)}\n\n<verdict>${draft.event}</verdict>\n\n<pending_comments>\n${pending || '(none)'}\n</pending_comments>${completed}\n\n<diff kind="full">\n${filesBlock(diff.files, 160_000)}\n</diff>`,
   );
 }

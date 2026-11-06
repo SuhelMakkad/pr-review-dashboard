@@ -191,8 +191,16 @@ export class AiRunner {
 
     if (task === 'draft_summary') {
       const draft = this.reviews.draft(account, pr.id);
+      const review = this.runs(account, pr.id).find(
+        (run) => run.task === 'full_review' && run.status === 'done' && !run.stale,
+      );
 
-      return draftSummaryInput(pr, draft.event, draft.comments);
+      return draftSummaryInput(
+        pr,
+        await this.diffs.manifest(pr, 'full', null),
+        draft,
+        (review?.result as FullReviewResult | null) ?? null,
+      );
     }
 
     const reviewOid = detail.item.latestReview?.commitOid;

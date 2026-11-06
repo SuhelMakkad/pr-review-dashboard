@@ -495,6 +495,84 @@ describe('AI runner', () => {
     ).toBe('done');
   });
 
+  it('includes the checks and correct behavior in a GitHub review with no requested changes', async () => {
+    const { runner, providers, pr, finished, reviews, github } = await setup();
+    const overall =
+      'I checked the arithmetic changes in `src/scheduling/CalendarTabs.tsx`: the updated helpers apply the new offset after multiplication and retain numeric parameters. No changes are needed in that scope. Tests were not run.';
+
+    vi.spyOn(providers.codex, 'run').mockResolvedValueOnce({
+      output: {
+        overall,
+        assessment: 'no_blocking_findings',
+        comments: [],
+        coverage: ['Compared the changed exports with the previous implementation.'],
+      },
+      model: 'test',
+      usage: null,
+    });
+
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const draft = await runner.prepareReview('you', run.id, []);
+
+    expect(draft.body).toBe(overall);
+    expect(draft.comments).toEqual([]);
+    expect(github.writes).toEqual([]);
+
+    await reviews.submit(run.prId, {
+      account: 'you',
+      event: 'COMMENT',
+      body: draft.body,
+      expectedHeadOid: run.headOid,
+    });
+
+    expect(github.writes.map((write) => write.op)).toEqual(['AddPendingReview', 'SubmitReview']);
+    expect(github.writes[1].details).toMatchObject({ body: overall, comments: 0 });
+  });
+
+  it('grounds summaries with no pending comments in the diff and the current completed review', async () => {
+    const { runner, providers, pr, finished, sync, diffs } = await setup();
+    const providerRun = vi.spyOn(providers.codex, 'run');
+    const first = await finished(await runner.start('you', pr(1839).id, 'draft_summary'));
+    const snapshot = sync.detail(first.prId)!.snapshot;
+    const diff = await diffs.manifest(snapshot, 'full', null);
+    const patch = diff.files.find((file) => file.patch)!.patch!;
+    const initialInput = providerRun.mock.calls[0][0].input;
+
+    expect(first.status).toBe('done');
+    expect(initialInput).toContain('<pending_comments>\n(none)\n</pending_comments>');
+    expect(initialInput).toContain(annotatePatch(patch));
+    expect(initialInput).not.toContain('<completed_review>');
+
+    const review = await finished(await runner.start('you', first.prId, 'full_review'));
+    const result = review.result as FullReviewResult;
+    const summary = await finished(await runner.start('you', first.prId, 'draft_summary'));
+    const input = providerRun.mock.lastCall![0].input;
+    const evidence = JSON.parse(
+      /<completed_review>\n([\s\S]*?)\n<\/completed_review>/.exec(input)![1],
+    );
+
+    expect(summary.status).toBe('done');
+    expect(summary.id).not.toBe(first.id);
+    expect(evidence).toEqual({ overall: result.overall, coverage: result.coverage });
+    expect(input).toContain(annotatePatch(patch));
+    expect(input).not.toContain(result.comments[0].body);
+  });
+
+  it('omits completed review evidence after the PR head moves', async () => {
+    const { runner, providers, pr, finished, github, sync } = await setup();
+    const review = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+    const providerRun = vi.spyOn(providers.codex, 'run');
+    const pull = github.scenario.world.pulls.find((item) => item.snapshot.id === review.prId)!;
+
+    pull.snapshot.headOid = pull.snapshot.baseOid!;
+    await sync.refresh(review.prId);
+
+    const summary = await finished(await runner.start('you', review.prId, 'draft_summary'));
+
+    expect(summary.status).toBe('done');
+    expect(providerRun.mock.lastCall![0].input).not.toContain('<completed_review>');
+  });
+
   it('refuses to prepare a full review after the PR head moves, even before the next background sync', async () => {
     const { runner, pr, finished, github, reviews } = await setup();
     const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
