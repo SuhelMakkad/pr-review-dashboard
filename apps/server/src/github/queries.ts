@@ -37,6 +37,11 @@ export const reviewReceiptQuery = `query ReviewReceipt($id: ID!, $cursor: String
   } }
 }`;
 
+/** Looks up a PR by repository and number, for adding it to the queue by hand. */
+export const resolvePullQuery = `query ResolvePull($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) { id state } }
+}`;
+
 export const discoverQuery = `query Discover($query: String!, $cursor: String) {
   search(query: $query, type: ISSUE, first: 100, after: $cursor) { issueCount nodes { ... on PullRequest { id } } ${pageInfo} }
 }`;
@@ -173,6 +178,7 @@ export function allDocuments(): Record<string, string> {
     Identity: identityQuery,
     ReviewReceipt: reviewReceiptQuery,
     Discover: discoverQuery,
+    ResolvePull: resolvePullQuery,
     Snapshot: snapshotQuery,
     Detect: detectQuery,
     Comments: threadCommentsQuery,

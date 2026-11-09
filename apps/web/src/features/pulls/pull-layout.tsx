@@ -7,6 +7,7 @@ import { cn } from '@/ui/cn';
 import { EmptyState } from '@/ui/empty-state';
 import { Kbd } from '@/ui/kbd';
 import { useCurrentPull } from '@/features/pulls/use-current-pull';
+import { NotTrackedActions } from '@/features/pulls/use-track';
 
 const tabClass = (active: boolean) =>
   cn(
@@ -92,19 +93,8 @@ export function PullLayout() {
           <div className="grid h-full place-items-center">
             <EmptyState
               title="This PR isn't in your review workload"
-              hint="Review Desk tracks PRs requesting your review, assigned to you, reviewed by you, or authored by you."
-              action={
-                ref && (
-                  <a
-                    className="inline-flex items-center gap-1 text-sm text-accent underline"
-                    href={`https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open on GitHub <ArrowUpRight size={13} />
-                  </a>
-                )
-              }
+              hint="Review Desk tracks PRs requesting your review, assigned to you, reviewed by you, or authored by you. You can add any other open PR yourself."
+              action={ref && <NotTrackedActions pullRef={ref} />}
             />
           </div>
         ) : null}

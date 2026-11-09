@@ -3,6 +3,7 @@ import type {
   Check,
   CiState,
   DiffSide,
+  FeedSource,
   PullFile,
   PullRequestSnapshot,
   RequestEvent,
@@ -20,6 +21,7 @@ import type {
   GitHubApi,
   RateBudget,
   RemoteFile,
+  ResolvedPull,
   ReviewReceipt,
 } from '@/github/api.js';
 import { GitHubError } from '@/github/errors.js';
@@ -32,6 +34,7 @@ import {
   historyQuery,
   searchQuery,
   identityQuery,
+  resolvePullQuery,
   reviewReceiptQuery,
   snapshotQuery,
   threadCommentsQuery,
@@ -310,7 +313,7 @@ function historySnapshot(raw: RawHistory): PullRequestSnapshot {
   };
 }
 
-const searchQualifiers: Record<Source, string> = {
+const searchQualifiers: Record<FeedSource, string> = {
   requested: 'review-requested',
   assigned: 'assignee',
   reviewed: 'reviewed-by',
@@ -441,7 +444,30 @@ export class GitHub implements GitHubApi {
     }
   }
 
-  async discover(login: string, source: Source): Promise<string[]> {
+  async resolvePull(repository: string, number: number): Promise<ResolvedPull | null> {
+    const [owner, name] = repository.split('/');
+
+    try {
+      const result = await this.transport.graphql<{
+        repository: { pullRequest: ResolvedPull | null } | null;
+      }>(resolvePullQuery, { owner, name, number });
+
+      return result.repository?.pullRequest ?? null;
+    } catch (error) {
+      // GraphQL reports a missing (or invisible) repository or PR as a NOT_FOUND error. A missing
+      // PR in an existing repository comes with partial data, which the transport calls `unknown`.
+      if (
+        error instanceof GitHubError &&
+        (error.outcome === 'rejected' || error.outcome === 'unknown') &&
+        /Could not resolve to a (Repository|PullRequest)/i.test(error.message)
+      )
+        return null;
+
+      throw error;
+    }
+  }
+
+  async discover(login: string, source: FeedSource): Promise<string[]> {
     const qualifier = searchQualifiers[source];
     const base = `is:pr is:open ${qualifier}:${login}`;
     const search = async (query: string, start: number, end: number): Promise<string[]> => {

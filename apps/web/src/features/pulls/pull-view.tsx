@@ -10,13 +10,16 @@ import {
   FileDiff,
   GitBranch,
   GitCommitHorizontal,
+  ListMinus,
   MessageSquare,
 } from 'lucide-react';
+import { addedByHand } from '@review-desk/shared/attention';
 import type {
   PullRequestDetail,
   PullRequestItem,
   PullRequestSnapshot,
   ReviewThread,
+  Source,
 } from '@review-desk/shared/types';
 import { api } from '@/lib/api';
 import { usePullDetail, useTriage } from '@/lib/queries';
@@ -35,8 +38,19 @@ import { usePullActions } from '@/features/pulls/actions';
 import { CiIndicator, ciMeta, reasonMeta, reviewMeta, tone } from '@/features/pulls/meta';
 import { Notes } from '@/features/pulls/notes';
 import { SnoozeMenu } from '@/features/pulls/snooze-menu';
+import { onlyAddedByHand, useUntrackPull } from '@/features/pulls/use-track';
 
 const shortSha = (oid: string | null | undefined) => oid?.slice(0, 7) ?? 'unknown';
+
+/** Completes "Tracked because …" for each source. */
+const trackedBecause: Record<Source, string> = {
+  requested: 'your review was requested',
+  assigned: 'you are assigned',
+  reviewed: 'you reviewed it',
+  authored: 'you opened it',
+  mentioned: 'you were mentioned',
+  manual: 'you added it',
+};
 
 function Section({
   title,
@@ -73,9 +87,11 @@ function whyLines(
 
     const text =
       reason.kind === 'first_review'
-        ? item.requestedVia.some((via) => via !== 'Direct request')
-          ? `Review requested via ${item.requestedVia.filter((via) => via !== 'Direct request').join(', ')}`
-          : 'Your review was requested'
+        ? addedByHand(item)
+          ? 'You added this PR to your queue'
+          : item.requestedVia.some((via) => via !== 'Direct request')
+            ? `Review requested via ${item.requestedVia.filter((via) => via !== 'Direct request').join(', ')}`
+            : 'Your review was requested'
         : reason.kind === 'changed'
           ? `New commits since your review · ${shortSha(item.latestReview?.commitOid)} → ${shortSha(pr.headOid)}`
           : reason.kind === 'requested_again'
@@ -200,6 +216,7 @@ function PullDetailView({
   const actions = usePullActions();
   const triage = useTriage();
   const inbox = useInboxNavigation();
+  const untrack = useUntrackPull();
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [showAllFiles, setShowAllFiles] = useState(false);
   const noteRef = useRef<HTMLTextAreaElement>(null);
@@ -403,6 +420,17 @@ function PullDetailView({
                 </Button>
               )}
             </>
+          )}
+          {!authored && onlyAddedByHand(item) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<ListMinus size={13} />}
+              disabled={untrack.isPending}
+              onClick={() => leaveQueue(() => untrack.mutate(item))}
+            >
+              Remove from queue
+            </Button>
           )}
           <Button
             size="sm"
@@ -685,17 +713,8 @@ function PullDetailView({
 
         <footer className="border-t border-line px-6 py-4 text-2xs text-fg-subtle">
           <p>
-            Tracked because{' '}
-            {pr.sources
-              .map((source) =>
-                source === 'reviewed'
-                  ? 'you reviewed it'
-                  : source === 'assigned'
-                    ? 'you are assigned'
-                    : 'your review was requested',
-              )
-              .join(', ')}
-            . Fetched {relativePhrase(pr.fetchedAt)} ({dateTime(pr.fetchedAt)}).
+            Tracked because {pr.sources.map((source) => trackedBecause[source]).join(', ')}. Fetched{' '}
+            {relativePhrase(pr.fetchedAt)} ({dateTime(pr.fetchedAt)}).
           </p>
         </footer>
       </div>

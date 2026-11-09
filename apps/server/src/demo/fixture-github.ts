@@ -1,6 +1,12 @@
 import { SNAPSHOT_VERSION } from '@review-desk/shared/snapshot';
 import type { ReviewEvent } from '@review-desk/shared/review';
-import type { Actor, PullRequestSnapshot, ReviewState, Source } from '@review-desk/shared/types';
+import type {
+  Actor,
+  FeedSource,
+  PullRequestSnapshot,
+  ReviewState,
+  Source,
+} from '@review-desk/shared/types';
 import type { ThreadInput } from '@/github/write.js';
 import { createHash } from 'node:crypto';
 import type {
@@ -10,6 +16,7 @@ import type {
   GitHubApi,
   RateBudget,
   RemoteFile,
+  ResolvedPull,
 } from '@/github/api.js';
 import { GitHubError } from '@/github/errors.js';
 import { demoHistory } from '@/demo/history.js';
@@ -79,10 +86,20 @@ export class FixtureGitHub implements GitHubApi {
     return [...this.scenario.world.teams];
   }
 
-  async discover(_login: string, source: Source): Promise<string[]> {
+  async discover(_login: string, source: FeedSource): Promise<string[]> {
     return this.scenario.world.pulls
       .filter((pull) => pull.snapshot.state === 'OPEN' && pull.feeds.includes(source))
       .map((pull) => pull.snapshot.id);
+  }
+
+  async resolvePull(repository: string, number: number): Promise<ResolvedPull | null> {
+    const pull = this.scenario.world.pulls.find(
+      (item) =>
+        item.snapshot.repository.toLowerCase() === repository.toLowerCase() &&
+        item.snapshot.number === number,
+    );
+
+    return pull ? { id: pull.snapshot.id, state: pull.snapshot.state } : null;
   }
 
   async detect(ids: string[]): Promise<{ results: DetectResult[]; budget: RateBudget | null }> {

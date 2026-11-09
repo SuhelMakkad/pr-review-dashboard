@@ -5,14 +5,14 @@ import type {
   Actor,
   PullRequestSnapshot,
   Review,
+  FeedSource,
   ReviewThread,
-  Source,
   ThreadComment,
 } from '@review-desk/shared/types';
 
 export interface ScenarioPull {
-  /** Discovery feeds that return this PR. */
-  feeds: Source[];
+  /** Discovery feeds that return this PR; empty for a PR you can only add by hand. */
+  feeds: FeedSource[];
   snapshot: Omit<PullRequestSnapshot, 'sources' | 'fetchedAt' | 'headObservedAt'>;
 }
 
@@ -424,6 +424,18 @@ export function defaultScenario(anchor = Date.now()): Scenario {
     },
   );
 
+  // No search finds this PR, so it is only tracked once you add it to the queue by hand.
+  pulls.push({
+    feeds: [],
+    snapshot: base(2066, 'acme/api', 'Cache product summaries per region', 'priya', {
+      body: 'Caches the regional product summaries for an hour, so the catalog overview stops timing out.',
+      headRefName: 'feat/summary-cache',
+      additions: 64,
+      deletions: 9,
+      changedFiles: 2,
+    }),
+  });
+
   // Arrives through the second scripted step, so automatic review has a new request to pick up.
   const incoming: ScenarioPull = {
     feeds: ['requested'],
@@ -481,6 +493,10 @@ export function defaultScenario(anchor = Date.now()): Scenario {
       { path: 'Dockerfile', lines: 10 },
     ],
     45: [{ path: 'infra/alerts/preview-costs.tf', added: true, lines: 22 }],
+    2066: [
+      { path: 'src/summaries/cache.ts', added: true, lines: 30 },
+      { path: 'src/summaries/routes.ts', lines: 12 },
+    ],
   };
   const repos = buildDemoRepos(
     sha,

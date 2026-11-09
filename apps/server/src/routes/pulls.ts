@@ -1,6 +1,7 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { safeError } from '@/github/errors.js';
+import { GitHubError, safeError } from '@/github/errors.js';
+import { ReviewError } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
 
 const updateSchema = z
@@ -12,6 +13,35 @@ const updateSchema = z
     done: z.boolean().optional(),
   })
   .strict();
+
+const trackSchema = z
+  .object({
+    account: z.string().min(1).max(100),
+    repository: z
+      .string()
+      .max(200)
+      .regex(/^[\w.-]+\/[\w.-]+$/),
+    number: z.number().int().positive().max(1_000_000_000),
+  })
+  .strict();
+
+const untrackSchema = z.object({ account: z.string().min(1).max(100) }).strict();
+
+/** Maps queue-change failures to `{ error, code }` responses. */
+function queueError(reply: FastifyReply, error: unknown) {
+  if (error instanceof ReviewError)
+    return reply.code(error.status).send({ error: error.message, code: error.code });
+
+  if (error instanceof GitHubError && error.outcome === 'rate_limit')
+    return reply
+      .code(429)
+      .send({ error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
+
+  if (error instanceof GitHubError)
+    return reply.code(502).send({ error: safeError(error), code: 'GITHUB_ERROR' });
+
+  throw error;
+}
 
 export function registerPullRoutes(app: FastifyInstance, service: SyncService): void {
   app.get('/api/status', async () => service.status);
@@ -34,6 +64,39 @@ export function registerPullRoutes(app: FastifyInstance, service: SyncService): 
       return detail ?? reply.code(404).send({ error: 'PR not found.' });
     } catch (error) {
       return reply.code(502).send({ error: safeError(error) });
+    }
+  });
+
+  app.post('/api/pulls/track', async (request, reply) => {
+    const parsed = trackSchema.safeParse(request.body);
+
+    if (!parsed.success)
+      return reply.code(400).send({
+        error: 'Enter a PR as owner/repo#123 or a GitHub PR link.',
+        details: z.flattenError(parsed.error),
+      });
+
+    const { account, repository, number } = parsed.data;
+
+    try {
+      return await service.track(account, repository, number);
+    } catch (error) {
+      return queueError(reply, error);
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/pulls/:id/track', async (request, reply) => {
+    const parsed = untrackSchema.safeParse(request.body);
+
+    if (!parsed.success)
+      return reply
+        .code(400)
+        .send({ error: 'Invalid request.', details: z.flattenError(parsed.error) });
+
+    try {
+      return service.untrack(parsed.data.account, request.params.id);
+    } catch (error) {
+      return queueError(reply, error);
     }
   });
 

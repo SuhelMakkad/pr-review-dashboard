@@ -6,6 +6,7 @@ import { drizzle, type NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite';
 import { emptyTriage } from '@review-desk/shared/attention';
 import { normalizeSnapshot } from '@review-desk/shared/snapshot';
 import type {
+  FeedSource,
   LocalTriageState,
   PullRequestSnapshot,
   Source,
@@ -176,7 +177,7 @@ export class Store {
   }
 
   /** Records a successful feed run: exactly `ids` are now members of `feed`. */
-  replaceFeed(account: string, feed: Source, ids: string[], at: string): void {
+  replaceFeed(account: string, feed: FeedSource, ids: string[], at: string): void {
     this.transaction(() => {
       this.db
         .delete(feedMembership)
@@ -190,6 +191,62 @@ export class Store {
           .onConflictDoNothing()
           .run();
       }
+    });
+  }
+
+  /** Marks a PR as added by hand. Discovery never replaces the `manual` feed. */
+  addManual(account: string, id: string, at: string): void {
+    this.db
+      .insert(feedMembership)
+      .values({ account, id, feed: 'manual', seenAt: at })
+      .onConflictDoNothing()
+      .run();
+  }
+
+  /** When the PR was added by hand; null when it was not. */
+  manualAddedAt(account: string, id: string): string | null {
+    const row = this.db
+      .select({ seenAt: feedMembership.seenAt })
+      .from(feedMembership)
+      .where(
+        and(
+          eq(feedMembership.account, account),
+          eq(feedMembership.id, id),
+          eq(feedMembership.feed, 'manual'),
+        ),
+      )
+      .get();
+
+    return row?.seenAt ?? null;
+  }
+
+  removeManual(account: string, id: string): void {
+    this.db
+      .delete(feedMembership)
+      .where(
+        and(
+          eq(feedMembership.account, account),
+          eq(feedMembership.id, id),
+          eq(feedMembership.feed, 'manual'),
+        ),
+      )
+      .run();
+  }
+
+  /**
+   * Stops tracking a PR: drops its cached snapshot and sync bookkeeping. Notes, activity history,
+   * drafts and AI runs are kept, so adding the PR again brings them back.
+   */
+  forgetPull(account: string, id: string): void {
+    this.transaction(() => {
+      this.db
+        .delete(snapshots)
+        .where(and(eq(snapshots.account, account), eq(snapshots.id, id)))
+        .run();
+      this.db
+        .delete(prSync)
+        .where(and(eq(prSync.account, account), eq(prSync.id, id)))
+        .run();
     });
   }
 

@@ -530,9 +530,15 @@ export class ReviewService {
   async setViewed(account: string, prId: string, path: string, viewed: boolean): Promise<void> {
     await this.guard(account, true);
 
-    const pr = this.snapshot(prId);
+    // Fails with NOT_FOUND before writing when the PR is not tracked.
+    this.snapshot(prId);
 
     await this.write(() => this.github.setFileViewed(prId, path, viewed));
+
+    // Reread after the write: the PR may have been refreshed, or removed from the queue, meanwhile.
+    const pr = this.sync.store.snapshot(account, prId);
+
+    if (!pr) return;
 
     // Update the cached snapshot directly; viewed state does not change the PR's fingerprint.
     this.sync.store.saveSnapshot(account, {

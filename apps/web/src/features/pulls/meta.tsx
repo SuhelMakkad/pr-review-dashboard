@@ -204,7 +204,8 @@ export const queueMeta: Record<
     icon: Layers3,
     keys: 'g a',
     empty: 'No tracked PRs',
-    emptyHint: 'PRs requesting your review, assigned to you, or reviewed by you appear here.',
+    emptyHint:
+      'PRs requesting your review, assigned to you, reviewed by you, or added by you appear here.',
   },
 };
 

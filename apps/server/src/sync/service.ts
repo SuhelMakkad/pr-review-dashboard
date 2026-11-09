@@ -2,7 +2,9 @@ import { deriveItem, sortItems } from '@review-desk/shared/attention';
 import { deriveAuthorItem, sortAuthorItems, type AuthorItem } from '@review-desk/shared/author';
 import { isLegacySnapshot } from '@review-desk/shared/snapshot';
 import {
+  FEED_SOURCES,
   REVIEW_SOURCES,
+  type FeedSource,
   type PullRequestDetail,
   type PullRequestList,
   type PullRequestSnapshot,
@@ -16,6 +18,7 @@ import type { DetectResult, GitHubApi } from '@/github/api.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { GitHub } from '@/github/read.js';
 import { extractActivity } from '@/insights/extract.js';
+import { ReviewError } from '@/review/errors.js';
 
 export const initialStatus = (): SyncStatus => ({
   account: null,
@@ -31,10 +34,10 @@ export const initialStatus = (): SyncStatus => ({
 });
 
 /** Canonical order for a PR's sources. */
-const SOURCE_ORDER: Source[] = ['requested', 'assigned', 'reviewed', 'authored', 'mentioned'];
+const SOURCE_ORDER: Source[] = [...FEED_SOURCES, 'manual'];
 
 /** How often each discovery feed runs on the background schedule. Manual syncs run them all. */
-const FEED_INTERVAL_MS: Record<Source, number> = {
+const FEED_INTERVAL_MS: Record<FeedSource, number> = {
   requested: 60_000,
   authored: 120_000,
   assigned: 300_000,
@@ -134,9 +137,9 @@ export class SyncService {
     return this.running;
   }
 
-  /** Refetches one PR immediately (after opening it or after a write), bypassing detection. */
-  async refresh(id: string): Promise<PullRequestDetail | null> {
+  private assertNotCoolingDown(): void {
     const retryAt = this.cooldown();
+
     if (retryAt)
       throw new GitHubError(
         'GitHub is rate limited. Saved data is still available.',
@@ -144,6 +147,25 @@ export class SyncService {
         429,
         'rate_limit',
       );
+  }
+
+  /** The active login, or ACCOUNT_CHANGED when a request was made for a different account. */
+  private activeLogin(account: string): string {
+    const login = this.status.account?.login;
+
+    if (!login || login !== account)
+      throw new ReviewError(
+        'ACCOUNT_CHANGED',
+        409,
+        'GitHub account changed. Refresh before changing your queue.',
+      );
+
+    return login;
+  }
+
+  /** Refetches one PR immediately (after opening it or after a write), bypassing detection. */
+  async refresh(id: string): Promise<PullRequestDetail | null> {
+    this.assertNotCoolingDown();
 
     const account = this.status.account?.login;
     const cached = account ? this.store.snapshot(account, id) : null;
@@ -151,11 +173,93 @@ export class SyncService {
     if (!account || !cached) return null;
 
     const snapshot = await this.github.snapshot(id, account, cached.sources, cached);
+    const current = this.store.snapshot(account, id);
 
-    this.commitSnapshot(account, snapshot, null);
+    // Removed from the queue while it was being fetched: do not bring it back.
+    if (!current) return null;
+
+    // Keep the stored sources: a PR may have been added or removed by hand during the fetch.
+    this.commitSnapshot(account, { ...snapshot, sources: current.sources }, null);
     this.events.emit({ type: 'pulls.changed', ids: [id] });
 
     return this.detail(id);
+  }
+
+  /**
+   * Adds a PR to the queue by hand. From then on it is tracked like any other PR: it stays until it
+   * is closed or merged, or until you remove it with `untrack`. Adding a tracked PR is harmless.
+   */
+  async track(account: string, repository: string, number: number): Promise<PullRequestDetail> {
+    const login = this.activeLogin(account);
+
+    this.assertNotCoolingDown();
+
+    const label = `${repository}#${number}`;
+    const resolved = await this.github.resolvePull(repository, number);
+
+    if (!resolved)
+      throw new ReviewError(
+        'NOT_FOUND',
+        404,
+        `Couldn't find ${label}. Check the link, or make sure ${login} can see that repository.`,
+      );
+
+    if (resolved.state !== 'OPEN')
+      throw new ReviewError(
+        'PR_CLOSED',
+        409,
+        `${label} is ${resolved.state === 'MERGED' ? 'merged' : 'closed'}, so there is nothing to review.`,
+      );
+
+    const cached = this.store.snapshot(login, resolved.id) ?? undefined;
+    const feeds = this.store.membership(login).get(resolved.id) ?? [];
+
+    // Fetch before writing anything, so a failure leaves the queue as it was.
+    const snapshot = await this.github.snapshot(
+      resolved.id,
+      login,
+      ordered([...feeds, 'manual']),
+      cached,
+    );
+
+    this.store.transaction(() => {
+      this.store.addManual(login, snapshot.id, new Date().toISOString());
+      this.commitSnapshot(login, snapshot, null);
+    });
+    this.events.emit({ type: 'pulls.changed', ids: [snapshot.id] });
+
+    const detail = this.detail(snapshot.id);
+
+    if (!detail) throw new ReviewError('ACCOUNT_CHANGED', 409, 'GitHub account changed. Refresh.');
+
+    return detail;
+  }
+
+  /**
+   * Removes a PR you added by hand. It stays tracked only while a GitHub feed (a review request,
+   * an assignment and so on) still returns it.
+   */
+  untrack(account: string, id: string): { tracked: boolean } {
+    const login = this.activeLogin(account);
+    const cached = this.store.snapshot(login, id);
+    const feeds = this.store.membership(login).get(id) ?? [];
+
+    // The snapshot's sources count too: a sync can save them just after the manual row changes.
+    if (!cached || (!feeds.includes('manual') && !cached.sources.includes('manual')))
+      throw new ReviewError('NOT_ADDED', 409, 'Only PRs you added yourself can be removed.');
+
+    const remaining = ordered(feeds.filter((feed) => feed !== 'manual'));
+
+    this.store.transaction(() => {
+      this.store.removeManual(login, id);
+
+      if (remaining.length > 0) this.store.saveSnapshot(login, { ...cached, sources: remaining });
+      else this.store.forgetPull(login, id);
+    });
+    this.forced.delete(id);
+    this.events.emit({ type: 'pulls.changed', ids: [id] });
+
+    return { tracked: remaining.length > 0 };
   }
 
   private async perform(scheduled: boolean): Promise<void> {
@@ -268,7 +372,15 @@ export class SyncService {
           try {
             const snapshot = await this.github.snapshot(id, account.login, sources, cached);
 
-            this.commitSnapshot(account.login, snapshot, result?.fingerprint ?? null);
+            // Removed from the queue while it was being fetched: do not bring it back.
+            if (cached && !this.store.snapshot(account.login, id)) continue;
+
+            // Added or removed by hand during the fetch: keep that change.
+            this.commitSnapshot(
+              account.login,
+              { ...snapshot, sources: this.withManual(account.login, id, snapshot.sources) },
+              result?.fingerprint ?? null,
+            );
             this.forced.delete(id);
             changed.add(id);
           } catch (error) {
@@ -315,6 +427,16 @@ export class SyncService {
     }
   }
 
+  /** `sources` with `manual` present exactly when the PR is added by hand right now. */
+  private withManual(login: string, id: string, sources: Source[]): Source[] {
+    const manual = this.store.manualAddedAt(login, id) !== null;
+
+    return ordered([
+      ...sources.filter((source) => source !== 'manual'),
+      ...(manual ? ['manual' as const] : []),
+    ]);
+  }
+
   private async refreshTeams(login: string, scheduled: boolean): Promise<void> {
     const fetchedAt = this.teamsFetched.get(login) ?? 0;
 
@@ -338,7 +460,7 @@ export class SyncService {
    */
   private async discover(login: string, scheduled: boolean): Promise<string | null> {
     const now = Date.now();
-    const due = SOURCE_ORDER.filter(
+    const due = FEED_SOURCES.filter(
       (source) =>
         !scheduled ||
         now - (this.feedRuns.get(`${login}:${source}`) ?? 0) >= FEED_INTERVAL_MS[source],

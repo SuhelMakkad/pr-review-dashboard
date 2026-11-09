@@ -5,6 +5,7 @@ import type {
   PullRequestItem,
   PullRequestSnapshot,
   Review,
+  Source,
 } from '@/types.js';
 
 export const emptyTriage = (): LocalTriageState => ({
@@ -25,6 +26,19 @@ export function mentionPattern(login: string): RegExp {
   return new RegExp(`(^|[^\\w@./-])@${escaped}(?![\\w-])`, 'i');
 }
 const later = (left: string, right: string) => Date.parse(left) > Date.parse(right);
+
+/**
+ * True when the only reason to review this PR is that you added it yourself: no request, team
+ * request or assignment. Used to skip the "asked for your review" notification.
+ */
+export function addedByHand(item: { sources: Source[]; requestedVia: string[] }): boolean {
+  return (
+    item.sources.includes('manual') &&
+    item.requestedVia.length === 0 &&
+    !item.sources.includes('requested') &&
+    !item.sources.includes('assigned')
+  );
+}
 
 export function deriveItem(
   pr: PullRequestSnapshot,
@@ -54,7 +68,8 @@ export function deriveItem(
     !latestReview &&
     (activeRequests.length > 0 ||
       pr.sources.includes('requested') ||
-      pr.sources.includes('assigned'))
+      pr.sources.includes('assigned') ||
+      pr.sources.includes('manual'))
   ) {
     const request = pr.requestEvents
       .filter((event) => !event.removed && event.reviewer && isTarget(event.reviewer))

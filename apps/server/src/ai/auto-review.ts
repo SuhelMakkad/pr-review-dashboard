@@ -1,5 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { codexBlocked, type FullReviewResult } from '@review-desk/shared/ai';
+import { addedByHand } from '@review-desk/shared/attention';
 import type { ReviewNotification } from '@review-desk/shared/notify';
 import type { AttentionReason, PullRequestItem } from '@review-desk/shared/types';
 import type { AiRunner } from '@/ai/runner.js';
@@ -50,7 +51,9 @@ export function autoReviewCandidates(items: PullRequestItem[]): AutoReviewCandid
  */
 const stillDue = (item: PullRequestItem, key: string) =>
   item.queue === 'attention' &&
-  (item.requestedVia.length > 0 || item.sources.includes('assigned')) &&
+  (item.requestedVia.length > 0 ||
+    item.sources.includes('assigned') ||
+    item.sources.includes('manual')) &&
   autoReviewCandidates([item]).some((candidate) => candidate.key === key);
 
 function readyCopy(row: AiRunRow): string {
@@ -254,9 +257,13 @@ export class AutoReviewer {
 
   /**
    * When the request was made: GitHub's request event, or for an assignment, which has no event,
-   * the PR's last update, since assigning someone moves it forward.
+   * the PR's last update, since assigning someone moves it forward. A PR you added yourself was
+   * "requested" when you added it.
    */
   private requestedAt(account: string, candidate: AutoReviewCandidate): string {
+    if (addedByHand(candidate.item))
+      return this.sync.store.manualAddedAt(account, candidate.item.id) ?? candidate.item.updatedAt;
+
     const eventId = candidate.reasonKey.slice(candidate.reasonKey.indexOf(':') + 1);
     const event = this.sync.store
       .snapshot(account, candidate.item.id)

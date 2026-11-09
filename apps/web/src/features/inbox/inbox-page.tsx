@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
-import { CircleAlert, Inbox } from 'lucide-react';
+import { CircleAlert, Inbox, Plus } from 'lucide-react';
 import type { PullRequestItem } from '@review-desk/shared/types';
 import { refOf } from '@/lib/pr-ref';
 import { usePulls } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { shortDateTime } from '@/lib/time';
+import { Button } from '@/ui/button';
 import { EmptyState } from '@/ui/empty-state';
 import { Kbd } from '@/ui/kbd';
 import { inQueue, isFollowUp, queueMeta, type QueueSlug } from '@/features/pulls/meta';
 import { useCurrentPull } from '@/features/pulls/use-current-pull';
+import { AddPullDialog } from '@/features/inbox/add-pull-dialog';
 import { Digest } from '@/features/inbox/digest';
 import { FilterBar } from '@/features/inbox/filter-bar';
 import { activeFilterCount, matchesFilters, type InboxSearch } from '@/features/inbox/filters';
@@ -46,6 +48,7 @@ export function InboxPage() {
   const search = useSearch({ from: '/inbox/$queue' });
   const navigate = useNavigate();
   const pulls = usePulls();
+  const [adding, setAdding] = useState(false);
   const operations = useOperations(pulls.data?.account ?? '');
   const aiReviews = useAiReviewStatuses(pulls.data?.account);
   const queuedReviews = new Set(
@@ -197,6 +200,10 @@ export function InboxPage() {
             </span>
           </h1>
           <FilterBar ref={filterRef} search={search} items={queued} onChange={setSearch} />
+          <Button size="sm" icon={<Plus size={13} />} onClick={() => setAdding(true)}>
+            Add PR
+          </Button>
+          <AddPullDialog open={adding} onOpenChange={setAdding} />
         </header>
 
         {queue === 'attention' && <Digest items={queued} onFilter={setSearch} />}

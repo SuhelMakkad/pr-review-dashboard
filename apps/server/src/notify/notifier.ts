@@ -1,4 +1,5 @@
 import { and, eq } from 'drizzle-orm';
+import { addedByHand } from '@review-desk/shared/attention';
 import type { AuthorItem } from '@review-desk/shared/author';
 import {
   defaultNotificationSettings,
@@ -34,6 +35,9 @@ export function candidates(reviewing: PullRequestItem[], mine: AuthorItem[]): Re
     if (item.queue !== 'attention') continue;
 
     for (const reason of item.reasons) {
+      // You added it yourself, so nobody "asked for your review".
+      if (reason.kind === 'first_review' && addedByHand(item)) continue;
+
       list.push({
         key: `review:${item.id}:${reason.key}`,
         kind: reason.kind as NotificationKind,

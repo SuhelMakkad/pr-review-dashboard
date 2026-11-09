@@ -1,4 +1,4 @@
-import type { Actor, PullRequestSnapshot, Source } from '@review-desk/shared/types';
+import type { Actor, FeedSource, PullRequestSnapshot, Source } from '@review-desk/shared/types';
 import type { GitHubWrites } from '@/github/write.js';
 
 export interface RateBudget {
@@ -13,6 +13,11 @@ export interface DetectResult {
   id: string;
   state: PullRequestSnapshot['state'] | null;
   fingerprint: string | null;
+}
+
+export interface ResolvedPull {
+  id: string;
+  state: PullRequestSnapshot['state'];
 }
 
 export interface RemoteFile {
@@ -56,7 +61,9 @@ export interface GitHubApi extends GitHubWrites {
   reviewReceipt(id: string): Promise<ReviewReceipt | null>;
   identity(): Promise<Actor>;
   teams(): Promise<string[]>;
-  discover(login: string, source: Source): Promise<string[]>;
+  discover(login: string, source: FeedSource): Promise<string[]>;
+  /** Finds a PR by repository and number; null when it does not exist or cannot be seen. */
+  resolvePull(repository: string, number: number): Promise<ResolvedPull | null>;
   detect(ids: string[]): Promise<{ results: DetectResult[]; budget: RateBudget | null }>;
   snapshot(
     id: string,

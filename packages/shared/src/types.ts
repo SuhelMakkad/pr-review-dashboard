@@ -1,9 +1,27 @@
 export type CiState = 'success' | 'failure' | 'pending' | 'none';
 export type ReviewState = 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED';
-export type Source = 'requested' | 'assigned' | 'reviewed' | 'authored' | 'mentioned';
+/** Why a PR is tracked: one of the GitHub search feeds, or `manual` when you added it yourself. */
+export type Source = 'requested' | 'assigned' | 'reviewed' | 'authored' | 'mentioned' | 'manual';
 
-/** Feeds that put a PR in the reviewer inbox (authored PRs live in the author view). */
-export const REVIEW_SOURCES: Source[] = ['requested', 'assigned', 'reviewed', 'mentioned'];
+/** Sources found by searching GitHub. `manual` is never searched for. */
+export type FeedSource = Exclude<Source, 'manual'>;
+
+export const FEED_SOURCES: FeedSource[] = [
+  'requested',
+  'assigned',
+  'reviewed',
+  'authored',
+  'mentioned',
+];
+
+/** Sources that put a PR in the reviewer inbox (authored PRs live in the author view). */
+export const REVIEW_SOURCES: Source[] = [
+  'requested',
+  'assigned',
+  'reviewed',
+  'mentioned',
+  'manual',
+];
 export type AttentionKind =
   'first_review' | 'changed' | 'requested_again' | 'reply' | 'dismissed' | 'mention';
 export type Queue = 'attention' | 'waiting' | 'caught_up' | 'snoozed' | 'all';

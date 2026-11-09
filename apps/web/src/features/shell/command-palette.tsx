@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Command } from 'cmdk';
+import { toast } from 'sonner';
 import { Dialog, VisuallyHidden } from 'radix-ui';
 import { useNavigate } from '@tanstack/react-router';
 import {
@@ -9,6 +10,8 @@ import {
   Copy,
   GitPullRequest,
   Keyboard,
+  ListMinus,
+  ListPlus,
   MessageSquare,
   Monitor,
   RefreshCw,
@@ -17,14 +20,15 @@ import {
   Settings,
   Activity,
 } from 'lucide-react';
-import { parsePrUrl, refOf } from '@/lib/pr-ref';
-import { usePulls, useSyncNow } from '@/lib/queries';
+import { formatRef, parsePrRef, refOf, sameRef } from '@/lib/pr-ref';
+import { useMine, usePulls, useSyncNow } from '@/lib/queries';
 import { appearance } from '@/lib/theme';
 import { snoozePresets } from '@/lib/time';
 import { Kbd } from '@/ui/kbd';
 import { usePullActions } from '@/features/pulls/actions';
 import { queueMeta, queueSlugs } from '@/features/pulls/meta';
 import { useCurrentPull } from '@/features/pulls/use-current-pull';
+import { onlyAddedByHand, useAddAndOpen, useUntrackPull } from '@/features/pulls/use-track';
 import { openActivity } from '@/features/activity/use-operations';
 
 const itemClass =
@@ -44,11 +48,16 @@ export function CommandPalette({
   const [query, setQuery] = useState('');
   const navigate = useNavigate();
   const pulls = usePulls();
+  const mine = useMine();
   const sync = useSyncNow();
+  const addPull = useAddAndOpen();
+  const untrack = useUntrackPull();
   const actions = usePullActions();
   const { item: current } = useCurrentPull();
   const items = pulls.data?.items ?? [];
-  const pastedRef = parsePrUrl(query);
+  const pastedRef = parsePrRef(query);
+  const pastedTracked =
+    pastedRef && [...items, ...(mine.data?.items ?? [])].some((item) => sameRef(item, pastedRef));
 
   const run = (action: () => void) => () => {
     onOpenChange(false);
@@ -96,8 +105,23 @@ export function CommandPalette({
                     )}
                   >
                     <GitPullRequest size={15} className="text-fg-subtle" aria-hidden="true" />
-                    Open {pastedRef.owner}/{pastedRef.repo}#{pastedRef.number}
+                    Open {formatRef(pastedRef)}
                   </Command.Item>
+                  {!pastedTracked && (
+                    <Command.Item
+                      value={`add-link ${query}`}
+                      className={itemClass}
+                      onSelect={run(
+                        () =>
+                          void addPull
+                            .add(pastedRef)
+                            .catch((error: Error) => toast.error(error.message)),
+                      )}
+                    >
+                      <ListPlus size={15} className="text-fg-subtle" aria-hidden="true" />
+                      Add {formatRef(pastedRef)} to review queue
+                    </Command.Item>
+                  )}
                 </Command.Group>
               )}
 
@@ -148,6 +172,15 @@ export function CommandPalette({
                     Copy GitHub link
                     <Kbd keys="y" className="ml-auto" />
                   </Command.Item>
+                  {onlyAddedByHand(current) && (
+                    <Command.Item
+                      className={itemClass}
+                      onSelect={run(() => untrack.mutate(current))}
+                    >
+                      <ListMinus size={15} className="text-fg-subtle" aria-hidden="true" />
+                      Remove from review queue
+                    </Command.Item>
+                  )}
                 </Command.Group>
               )}
 
