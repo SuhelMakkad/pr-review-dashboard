@@ -24,6 +24,7 @@ import { macosNotify } from '@/notify/macos.js';
 import { FixtureLinear, LinearService, type LinearSource } from '@/linear/service.js';
 import type { LinearConnector } from '@/linear/oauth.js';
 import { AiRunner } from '@/ai/runner.js';
+import { AutoReviewer } from '@/ai/auto-review.js';
 import { downloadRepository, type RepositoryExporter } from '@/ai/workspace.js';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -128,7 +129,6 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   registerOperationRoutes(app, operations);
   registerReviewRoutes(app, reviews, operations);
   app.addHook('onClose', () => operations.close());
-  registerAiRoutes(app, runner);
   app.addHook('onClose', () => runner.close());
   const linearSource = options.linear ?? new FixtureLinear(false);
   const linear = new LinearService(
@@ -143,6 +143,11 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   registerLinearRoutes(app, service, linear);
 
   const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);
+  const autoReviewer = new AutoReviewer(service, runner, notifier);
+
+  runner.onFinished = (row) => autoReviewer.finished(row);
+  registerAiRoutes(app, runner, autoReviewer);
+  app.addHook('onClose', () => autoReviewer.close());
 
   const backfill = new Backfill(service, service.events);
 
@@ -150,6 +155,9 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     await notifier.afterSync(login, service.list().items, service.mine().items);
     await runner.recover(login);
     operations.wake();
+
+    // Starting a review refetches the PR and builds its diff; it never delays a sync.
+    void autoReviewer.afterSync(login);
 
     // History fills in the background; it never delays a sync.
     void backfill.start(login);

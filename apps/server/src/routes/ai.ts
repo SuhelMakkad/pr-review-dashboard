@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import type { AutoReviewer } from '@/ai/auto-review.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { safeError } from '@/github/errors.js';
 import { ReviewError } from '@/review/service.js';
@@ -35,6 +36,10 @@ const schemas = {
         author_feedback: taskSettings,
         draft_summary: taskSettings,
       }),
+      // `since` is set by the server; a value sent back from the client is ignored.
+      autoReview: z
+        .strictObject({ enabled: z.boolean(), since: z.string().max(40).nullable().optional() })
+        .optional(),
     }),
   }),
   start: z.strictObject({
@@ -88,7 +93,11 @@ function parse<T>(schema: z.ZodType<T>, value: unknown, reply: FastifyReply): T 
   return result.data;
 }
 
-export function registerAiRoutes(app: FastifyInstance, runner: AiRunner): void {
+export function registerAiRoutes(
+  app: FastifyInstance,
+  runner: AiRunner,
+  autoReviewer: AutoReviewer,
+): void {
   app.get('/api/ai', async () => {
     const [providers, codex] = await Promise.all([runner.providerStatuses(), runner.codexStatus()]);
 
@@ -98,8 +107,21 @@ export function registerAiRoutes(app: FastifyInstance, runner: AiRunner): void {
   app.put('/api/ai/settings', async (request, reply) => {
     const input = parse(schemas.settings, request.body, reply);
 
-    return input && handle(reply, () => runner.saveSettings(input.settings));
+    return (
+      input &&
+      handle(reply, () => {
+        const saved = runner.saveSettings(input.settings);
+
+        autoReviewer.settingsSaved(input.account);
+
+        return saved;
+      })
+    );
   });
+
+  app.get<{ Querystring: { account?: string } }>('/api/ai/reviews', async (request, reply) =>
+    handle(reply, () => ({ reviews: runner.reviewStatuses(String(request.query.account ?? '')) })),
+  );
 
   app.get<{ Params: { id: string }; Querystring: { account?: string } }>(
     '/api/pulls/:id/ai',

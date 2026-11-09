@@ -70,6 +70,7 @@ export function registerDevRoutes(
       'ai-settings',
       'review-sla-hours',
       `backfill:${fixture.scenario.world.viewer.login}`,
+      `auto-review-primed:${fixture.scenario.world.viewer.login}`,
     ]) {
       service.store.deleteSetting(key);
     }

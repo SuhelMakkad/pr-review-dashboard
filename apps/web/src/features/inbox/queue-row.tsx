@@ -1,10 +1,12 @@
 import { forwardRef } from 'react';
 import { AlarmClock, CheckCheck, MessageSquare, StickyNote } from 'lucide-react';
+import type { AiReviewStatus } from '@review-desk/shared/ai';
 import type { PullRequestItem } from '@review-desk/shared/types';
 import { shortAge, shortDateTime } from '@/lib/time';
 import { Avatar } from '@/ui/avatar';
 import { LinearMark } from '@/ui/brand-icons';
 import { cn } from '@/ui/cn';
+import { AiReviewBadge } from '@/features/ai/ai-review-badge';
 import { CiIndicator, ReasonChips, reviewSummary } from '@/features/pulls/meta';
 
 /**
@@ -15,11 +17,13 @@ export const QueueRow = forwardRef<
   HTMLDivElement,
   {
     item: PullRequestItem;
+    /** The PR's latest full review, if any. */
+    aiReview?: AiReviewStatus;
     selected: boolean;
     onSelect: () => void;
     onOpen: () => void;
   }
->(function QueueRow({ item, selected, onSelect, onOpen }, ref) {
+>(function QueueRow({ item, aiReview, selected, onSelect, onOpen }, ref) {
   const unread = item.queue === 'attention';
 
   return (
@@ -63,6 +67,7 @@ export const QueueRow = forwardRef<
           <span className="density-compact-only shrink-0">
             <ReasonChips reasons={item.reasons} compact />
           </span>
+          <AiReviewBadge review={aiReview} className="shrink-0" />
           <CiIndicator state={item.ci} className="shrink-0" />
           <time
             className="w-7 shrink-0 text-right text-xs text-fg-subtle tabular-nums"

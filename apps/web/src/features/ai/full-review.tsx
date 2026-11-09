@@ -146,161 +146,173 @@ export function FullReview({
           )}
         </div>
       ) : (
-        <AiCard
-          run={run}
-          title="Full review"
-          showProvider={false}
-          starting={starting}
-          onCancel={() => ai.cancel.mutate(run.id)}
-          onRerun={launch}
-          onPause={() => ai.pause(run.id)}
-          onResume={() => ai.resume(run.id)}
-        >
-          {result && (
-            <div className="space-y-3">
-              <p
-                className={`text-xs font-medium ${result.assessment === 'changes_requested' ? 'text-pending' : 'text-ok'}`}
-              >
-                {result.assessment === 'changes_requested'
-                  ? 'Changes recommended'
-                  : 'No blocking findings'}
-                {' · '}
-                {result.comments.length} {result.comments.length === 1 ? 'finding' : 'findings'}
-              </p>
-              <p className="text-2xs text-fg-subtle">
-                Generated{' '}
-                <time dateTime={run.finishedAt ?? run.createdAt}>
-                  {dateTime(run.finishedAt ?? run.createdAt)}
-                </time>
-                {' · '}
-                {run.stale ? 'Out of date' : 'Up to date'}
-              </p>
-              <MarkdownView>{result.overall}</MarkdownView>
-              {result.comments.map((comment, index) => (
-                <article
-                  key={index}
-                  className="space-y-2 rounded-sm border border-line bg-panel p-3"
-                >
-                  <label className="flex items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={selected.includes(index)}
-                      aria-label={`Include finding ${index + 1}`}
-                      disabled={run.stale || preparing || locked}
-                      onChange={(event) =>
-                        setSelection({
-                          runId: run.id,
-                          indices: event.target.checked
-                            ? [...selected, index]
-                            : selected.filter((item) => item !== index),
-                        })
-                      }
-                      className="size-3.5 accent-accent"
-                    />
-                    <span
-                      className={
-                        comment.severity === 'blocking' ? 'font-medium text-fail' : 'text-fg-muted'
-                      }
-                    >
-                      {comment.severity}
-                    </span>
-                    <Link
-                      to="/pr/$owner/$repo/$number/files"
-                      params={target}
-                      search={{ file: comment.path, mode: 'all' }}
-                      className="min-w-0 truncate font-mono text-accent hover:underline"
-                    >
-                      {comment.path}
-                      {comment.line === null ? ' (whole file)' : `:${comment.line}`}
-                    </Link>
-                  </label>
-                  <MarkdownView className="text-xs">{comment.body}</MarkdownView>
-                </article>
-              ))}
-              {result.coverage.length > 0 && (
-                <details className="text-xs text-fg-muted">
-                  <summary className="cursor-pointer font-medium">Review coverage</summary>
-                  <ul className="mt-1 list-disc space-y-1 pl-4">
-                    {result.coverage.map((item, index) => (
-                      <li key={index}>{item}</li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-              {run.stale && (
-                <p className="text-xs text-pending">
-                  {run.staleReason} Regenerate this review before posting.
-                </p>
-              )}
-              <div className="space-y-1.5 border-t border-line pt-3">
-                <Button
-                  size="sm"
-                  disabled={!locked && (run.stale || preparing)}
-                  aria-busy={preparing}
-                  onClick={locked ? openActivity : () => prepare()}
-                >
-                  {locked
-                    ? 'Review queued · View activity'
-                    : preparing
-                      ? 'Preparing draft…'
-                      : reusable
-                        ? 'Use prepared review'
-                        : 'Prepare GitHub review'}
-                </Button>
-                {preparing && (
-                  <p role="status" className="text-xs text-fg-muted">
-                    Preparing your GitHub review. You can navigate away; preparation will continue.
-                  </p>
-                )}
-                {reusable && prepared && !preparing && (
-                  <p className="text-2xs text-fg-subtle">
-                    Draft prepared{' '}
-                    <time dateTime={prepared.preparedAt}>{dateTime(prepared.preparedAt)}</time>.{' '}
-                    Your saved edits are kept when you reopen it.
-                  </p>
-                )}
-                {ai.isRunning('draft_summary') && (
-                  <p role="status" className="text-xs text-fg-muted">
-                    Your review summary is being generated in the background. Open the prepared
-                    review to follow its progress.
-                  </p>
-                )}
-                {ai.completed('draft_summary') && !ai.isRunning('draft_summary') && (
-                  <p className="text-2xs text-fg-subtle">
-                    {ai.completed('draft_summary')!.stale
-                      ? 'The saved review summary is out of date. Open the prepared review to generate a new one.'
-                      : 'A generated summary is saved. Open the prepared review to use it or generate a new one.'}
-                  </p>
-                )}
-                {prepareError && (
-                  <div role="alert" className="space-y-2 text-xs text-fail">
-                    <p>{prepareError.message}</p>
-                    {replacementRevision && (
-                      <div className="flex flex-wrap gap-2">
-                        <Button size="sm" onClick={() => setFinishOpen(true)}>
-                          View current draft
-                        </Button>
-                        <Button
-                          size="sm"
-                          disabled={locked || preparing || run.stale}
-                          onClick={() =>
-                            prepare({ replace: true, expectedDraftRevision: replacementRevision })
-                          }
-                        >
-                          Save a copy and replace
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                )}
-                <p className="text-2xs text-fg-subtle">
-                  {selected.length} selected. Edit the summary and choose a verdict before posting.
-                  Previously prepared findings follow your selection. Independent comments are kept.
-                </p>
-              </div>
-            </div>
+        <>
+          {run.trigger === 'auto' && (
+            <p className="flex items-center gap-1.5 text-2xs text-fg-subtle">
+              <Sparkles size={11} aria-hidden="true" /> Started automatically when your review was
+              requested. Nothing is posted until you prepare and submit a review.
+            </p>
           )}
-        </AiCard>
+          <AiCard
+            run={run}
+            title="Full review"
+            showProvider={false}
+            starting={starting}
+            onCancel={() => ai.cancel.mutate(run.id)}
+            onRerun={launch}
+            onPause={() => ai.pause(run.id)}
+            onResume={() => ai.resume(run.id)}
+          >
+            {result && (
+              <div className="space-y-3">
+                <p
+                  className={`text-xs font-medium ${result.assessment === 'changes_requested' ? 'text-pending' : 'text-ok'}`}
+                >
+                  {result.assessment === 'changes_requested'
+                    ? 'Changes recommended'
+                    : 'No blocking findings'}
+                  {' · '}
+                  {result.comments.length} {result.comments.length === 1 ? 'finding' : 'findings'}
+                </p>
+                <p className="text-2xs text-fg-subtle">
+                  Generated{' '}
+                  <time dateTime={run.finishedAt ?? run.createdAt}>
+                    {dateTime(run.finishedAt ?? run.createdAt)}
+                  </time>
+                  {' · '}
+                  {run.stale ? 'Out of date' : 'Up to date'}
+                </p>
+                <MarkdownView>{result.overall}</MarkdownView>
+                {result.comments.map((comment, index) => (
+                  <article
+                    key={index}
+                    className="space-y-2 rounded-sm border border-line bg-panel p-3"
+                  >
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(index)}
+                        aria-label={`Include finding ${index + 1}`}
+                        disabled={run.stale || preparing || locked}
+                        onChange={(event) =>
+                          setSelection({
+                            runId: run.id,
+                            indices: event.target.checked
+                              ? [...selected, index]
+                              : selected.filter((item) => item !== index),
+                          })
+                        }
+                        className="size-3.5 accent-accent"
+                      />
+                      <span
+                        className={
+                          comment.severity === 'blocking'
+                            ? 'font-medium text-fail'
+                            : 'text-fg-muted'
+                        }
+                      >
+                        {comment.severity}
+                      </span>
+                      <Link
+                        to="/pr/$owner/$repo/$number/files"
+                        params={target}
+                        search={{ file: comment.path, mode: 'all' }}
+                        className="min-w-0 truncate font-mono text-accent hover:underline"
+                      >
+                        {comment.path}
+                        {comment.line === null ? ' (whole file)' : `:${comment.line}`}
+                      </Link>
+                    </label>
+                    <MarkdownView className="text-xs">{comment.body}</MarkdownView>
+                  </article>
+                ))}
+                {result.coverage.length > 0 && (
+                  <details className="text-xs text-fg-muted">
+                    <summary className="cursor-pointer font-medium">Review coverage</summary>
+                    <ul className="mt-1 list-disc space-y-1 pl-4">
+                      {result.coverage.map((item, index) => (
+                        <li key={index}>{item}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                {run.stale && (
+                  <p className="text-xs text-pending">
+                    {run.staleReason} Regenerate this review before posting.
+                  </p>
+                )}
+                <div className="space-y-1.5 border-t border-line pt-3">
+                  <Button
+                    size="sm"
+                    disabled={!locked && (run.stale || preparing)}
+                    aria-busy={preparing}
+                    onClick={locked ? openActivity : () => prepare()}
+                  >
+                    {locked
+                      ? 'Review queued · View activity'
+                      : preparing
+                        ? 'Preparing draft…'
+                        : reusable
+                          ? 'Use prepared review'
+                          : 'Prepare GitHub review'}
+                  </Button>
+                  {preparing && (
+                    <p role="status" className="text-xs text-fg-muted">
+                      Preparing your GitHub review. You can navigate away; preparation will
+                      continue.
+                    </p>
+                  )}
+                  {reusable && prepared && !preparing && (
+                    <p className="text-2xs text-fg-subtle">
+                      Draft prepared{' '}
+                      <time dateTime={prepared.preparedAt}>{dateTime(prepared.preparedAt)}</time>.{' '}
+                      Your saved edits are kept when you reopen it.
+                    </p>
+                  )}
+                  {ai.isRunning('draft_summary') && (
+                    <p role="status" className="text-xs text-fg-muted">
+                      Your review summary is being generated in the background. Open the prepared
+                      review to follow its progress.
+                    </p>
+                  )}
+                  {ai.completed('draft_summary') && !ai.isRunning('draft_summary') && (
+                    <p className="text-2xs text-fg-subtle">
+                      {ai.completed('draft_summary')!.stale
+                        ? 'The saved review summary is out of date. Open the prepared review to generate a new one.'
+                        : 'A generated summary is saved. Open the prepared review to use it or generate a new one.'}
+                    </p>
+                  )}
+                  {prepareError && (
+                    <div role="alert" className="space-y-2 text-xs text-fail">
+                      <p>{prepareError.message}</p>
+                      {replacementRevision && (
+                        <div className="flex flex-wrap gap-2">
+                          <Button size="sm" onClick={() => setFinishOpen(true)}>
+                            View current draft
+                          </Button>
+                          <Button
+                            size="sm"
+                            disabled={locked || preparing || run.stale}
+                            onClick={() =>
+                              prepare({ replace: true, expectedDraftRevision: replacementRevision })
+                            }
+                          >
+                            Save a copy and replace
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <p className="text-2xs text-fg-subtle">
+                    {selected.length} selected. Edit the summary and choose a verdict before
+                    posting. Previously prepared findings follow your selection. Independent
+                    comments are kept.
+                  </p>
+                </div>
+              </div>
+            )}
+          </AiCard>
+        </>
       )}
       {(starting || latest?.status === 'running' || latest?.status === 'queued') && (
         <p className="text-2xs text-fg-subtle">

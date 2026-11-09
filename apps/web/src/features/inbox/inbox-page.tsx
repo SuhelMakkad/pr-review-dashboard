@@ -16,6 +16,7 @@ import { FilterBar } from '@/features/inbox/filter-bar';
 import { activeFilterCount, matchesFilters, type InboxSearch } from '@/features/inbox/filters';
 import { InboxContext } from '@/features/inbox/inbox-context';
 import { QueueRow } from '@/features/inbox/queue-row';
+import { useAiReviewStatuses } from '@/features/ai/use-ai';
 import { useOperations } from '@/features/activity/use-operations';
 import { operationUnsettled } from '@review-desk/shared/operations';
 
@@ -46,6 +47,7 @@ export function InboxPage() {
   const navigate = useNavigate();
   const pulls = usePulls();
   const operations = useOperations(pulls.data?.account ?? '');
+  const aiReviews = useAiReviewStatuses(pulls.data?.account);
   const queuedReviews = new Set(
     operations.data?.pages
       .flatMap((page) => page.items)
@@ -289,6 +291,7 @@ export function InboxPage() {
                         else rowRefs.current.delete(item.id);
                       }}
                       item={item}
+                      aiReview={aiReviews.data?.get(item.id)}
                       selected={item.id === current?.id}
                       onSelect={() => select(item, false)}
                       onOpen={() => open(item)}

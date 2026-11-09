@@ -8,8 +8,10 @@ import {
   type AiProvider,
   type AiProviderStatus,
   type AiResult,
+  type AiReviewStatus,
   type AiRun,
   type AiRunContext,
+  type AiRunTrigger,
   type AiSettings,
   type AiTask,
   type CodexAccountStatus,
@@ -78,6 +80,9 @@ export class AiRunner {
   private probes: { at: number; statuses: AiProviderStatus[] } | null = null;
   private codexAccount: { at: number; status: Promise<CodexAccountStatus | null> } | null = null;
 
+  /** Called once a run settles (done, failed, cancelled or paused), after its row is written. */
+  onFinished?: (row: AiRunRow) => void;
+
   constructor(
     private readonly sync: SyncService,
     private readonly diffs: DiffService,
@@ -133,16 +138,29 @@ export class AiRunner {
           { ...value, ...saved?.tasks?.[task as AiTask] },
         ]),
       ) as AiSettings['tasks'],
+      autoReview: { ...defaults.autoReview, ...saved?.autoReview },
     };
   }
 
-  saveSettings(settings: AiSettings): AiSettings {
+  /** Saves settings. `autoReview.since` is the server's: set when turned on, cleared when off. */
+  saveSettings(
+    settings: Omit<AiSettings, 'autoReview'> & { autoReview?: { enabled: boolean } },
+  ): AiSettings {
+    const previous = this.settings().autoReview;
+    const enabled = settings.autoReview?.enabled ?? previous.enabled;
+    const since = !enabled
+      ? null
+      : previous.enabled && previous.since
+        ? previous.since
+        : new Date().toISOString();
+
     this.sync.store.setSetting(SETTINGS_KEY, {
       ...settings,
       tasks: {
         ...settings.tasks,
         full_review: { ...settings.tasks.full_review, provider: 'codex' },
       },
+      autoReview: { enabled, since },
     });
 
     return this.settings();
@@ -266,6 +284,7 @@ export class AiRunner {
       ),
       pauseReason: row.pauseReason,
       creditsUsed: creditsUsed(row.usage),
+      trigger: row.trigger,
     };
   }
 
@@ -357,7 +376,16 @@ export class AiRunner {
     account: string,
     prId: string,
     task: AiTask,
-    options: { provider?: AiProvider; force?: boolean } = {},
+    options: {
+      provider?: AiProvider;
+      force?: boolean;
+      trigger?: AiRunTrigger;
+      /**
+       * Asked with the refreshed PR after every await, right before a new run is queued; false
+       * refuses the run with NOT_ADMITTED. Cached results are returned without asking.
+       */
+      admit?: (detail: PullRequestDetail) => boolean;
+    } = {},
   ): Promise<AiRun> {
     this.detail(account, prId);
 
@@ -457,6 +485,8 @@ export class AiRunner {
 
     if (this.closing)
       throw new ReviewError('SHUTTING_DOWN', 503, 'The server is restarting. Try again shortly.');
+    if (options.admit && !options.admit(this.detail(account, prId)))
+      throw new ReviewError('NOT_ADMITTED', 409, 'This run is no longer wanted.');
 
     this.db
       .insert(aiRuns)
@@ -480,6 +510,7 @@ export class AiRunner {
         },
         status: 'queued',
         progress: 'Waiting to start…',
+        trigger: options.trigger ?? 'manual',
         createdAt: new Date().toISOString(),
       })
       .run();
@@ -660,6 +691,14 @@ export class AiRunner {
       if (!keepWorkspace) rmSync(workDir, { recursive: true, force: true });
       this.emit(row);
       this.pump();
+
+      if (current) {
+        try {
+          this.onFinished?.(current);
+        } catch {
+          // A listener must never break the queue.
+        }
+      }
     }
   }
 
@@ -845,6 +884,49 @@ export class AiRunner {
         this.emit(row);
       }
     }
+  }
+
+  /** A run of the task on this PR that is queued, running or paused, if there is one. */
+  activeRun(account: string, prId: string, task: AiTask): AiRunRow | null {
+    return (
+      this.db
+        .select()
+        .from(aiRuns)
+        .where(
+          and(
+            eq(aiRuns.account, account),
+            eq(aiRuns.prId, prId),
+            eq(aiRuns.task, task),
+            inArray(aiRuns.status, ['queued', 'running', 'paused']),
+          ),
+        )
+        .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
+        .limit(1)
+        .get() ?? null
+    );
+  }
+
+  /** The latest full review of each tracked PR, for list badges. */
+  reviewStatuses(account: string): AiReviewStatus[] {
+    const rows = this.db
+      .select()
+      .from(aiRuns)
+      .where(and(eq(aiRuns.account, account), eq(aiRuns.task, 'full_review')))
+      .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
+      .all();
+    const latest = new Map<string, AiRunRow>();
+
+    for (const row of rows) if (!latest.has(row.prId)) latest.set(row.prId, row);
+
+    return [...latest.values()]
+      .filter((row) => this.sync.detail(row.prId))
+      .map((row) => ({
+        prId: row.prId,
+        runId: row.id,
+        status: row.status,
+        stale: Boolean(this.staleReason(row)),
+        trigger: row.trigger,
+      }));
   }
 
   /** Keep the latest attempt and latest completed result so a failed retry never loses a review. */

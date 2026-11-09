@@ -424,7 +424,25 @@ export function defaultScenario(anchor = Date.now()): Scenario {
     },
   );
 
+  // Arrives through the second scripted step, so automatic review has a new request to pick up.
+  const incoming: ScenarioPull = {
+    feeds: ['requested'],
+    snapshot: base(1846, 'acme/web', 'Reminder banner for upcoming events', 'mara', {
+      body: 'Shows a banner on the scheduling screen when an event starts within the hour.',
+      headRefName: 'feat/event-reminders',
+      additions: 58,
+      deletions: 4,
+      changedFiles: 2,
+      reviewRequests: [direct],
+      checks: [{ name: 'build', state: 'success', url: null }],
+    }),
+  };
+
   const generatedFiles: Record<number, { path: string; added?: boolean; lines?: number }[]> = {
+    1846: [
+      { path: 'src/scheduling/ReminderBanner.tsx', added: true, lines: 26 },
+      { path: 'src/scheduling/useReminders.ts', lines: 18 },
+    ],
     1839: [
       { path: 'src/scheduling/CalendarTabs.tsx' },
       { path: 'src/scheduling/CalendarSettings.tsx', lines: 40 },
@@ -466,7 +484,7 @@ export function defaultScenario(anchor = Date.now()): Scenario {
   };
   const repos = buildDemoRepos(
     sha,
-    pulls.map((pull) => {
+    [...pulls, incoming].map((pull) => {
       const reviewedOid =
         [...pull.snapshot.reviews].sort(
           (a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt),
@@ -513,6 +531,22 @@ export function defaultScenario(anchor = Date.now()): Scenario {
           replyToId: conversation.comments[0].id,
         });
         pull.snapshot.updatedAt = now;
+      },
+    },
+    {
+      label: 'A new review request arrives',
+      apply(current) {
+        if (current.pulls.some((pull) => pull.snapshot.id === incoming.snapshot.id)) return;
+
+        const now = new Date(current.now()).toISOString();
+        const pull = structuredClone(incoming);
+
+        pull.snapshot.createdAt = now;
+        pull.snapshot.updatedAt = now;
+        pull.snapshot.requestEvents = [
+          { id: 'req-1846', createdAt: now, removed: false, reviewer: direct },
+        ];
+        current.pulls.push(pull);
       },
     },
   ];

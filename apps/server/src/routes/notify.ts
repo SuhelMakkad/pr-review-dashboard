@@ -14,6 +14,7 @@ const kinds = z.strictObject({
   changes_requested: z.boolean(),
   approved: z.boolean(),
   ci_failing: z.boolean(),
+  ai_review_ready: z.boolean(),
 });
 const settingsSchema = z.strictObject({
   account: z.string().min(1),

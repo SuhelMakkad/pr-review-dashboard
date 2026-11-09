@@ -3,6 +3,7 @@ import { useMutation, useMutationState, useQuery, useQueryClient } from '@tansta
 import type {
   AiProvider,
   AiProviderStatus,
+  AiReviewStatus,
   AiRun,
   AiSettings,
   AiTask,
@@ -17,6 +18,7 @@ import type {
 import { api } from '@/lib/api';
 
 export const aiKey = (prId: string) => ['ai', prId] as const;
+export const aiReviewsKey = ['ai-reviews'] as const;
 
 export function useAiOverview() {
   return useQuery({
@@ -38,6 +40,20 @@ export function useAiSettings(account: string) {
     mutationFn: (settings: AiSettings) =>
       api<AiSettings>('/api/ai/settings', { method: 'PUT', body: { account, settings } }),
     onSuccess: () => client.invalidateQueries({ queryKey: ['ai-overview'] }),
+  });
+}
+
+/** The latest full review of every tracked PR, keyed by PR id, for list badges. */
+export function useAiReviewStatuses(account: string | null | undefined) {
+  return useQuery({
+    queryKey: [...aiReviewsKey, account],
+    queryFn: () =>
+      api<{ reviews: AiReviewStatus[] }>(
+        `/api/ai/reviews?account=${encodeURIComponent(account ?? '')}`,
+      ),
+    enabled: Boolean(account),
+    select: (data) => new Map(data.reviews.map((review) => [review.prId, review])),
+    staleTime: 30_000,
   });
 }
 

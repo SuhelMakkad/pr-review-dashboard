@@ -213,8 +213,11 @@ function CodexModelSelect({
 }
 
 function AiSection({ account }: { account: string }) {
+  const client = useQueryClient();
   const overview = useAiOverview();
   const save = useAiSettings(account);
+  // The choice being saved, shown until the server confirms it, so the checkbox never flickers.
+  const [autoPending, setAutoPending] = useState<boolean | null>(null);
   const settings = overview.data?.settings;
   const providers = overview.data?.providers ?? [];
   const codex = overview.data?.codex ?? null;
@@ -222,6 +225,26 @@ function AiSection({ account }: { account: string }) {
   if (!settings) return null;
 
   const update = (next: typeof settings) => save.mutate(next);
+  const autoReview = autoPending ?? settings.autoReview.enabled;
+
+  const setAutoReview = (enabled: boolean) => {
+    setAutoPending(enabled);
+    save.mutate(
+      { ...settings, autoReview: { ...settings.autoReview, enabled } },
+      {
+        onSuccess: (saved) => {
+          client.setQueryData<typeof overview.data>(['ai-overview'], (current) =>
+            current ? { ...current, settings: saved } : current,
+          );
+          setAutoPending(null);
+        },
+        onError: (error) => {
+          setAutoPending(null);
+          toast.error(error.message);
+        },
+      },
+    );
+  };
 
   return (
     <>
@@ -262,6 +285,20 @@ function AiSection({ account }: { account: string }) {
           <CodexPlan status={codex} />
         </Row>
       )}
+      <Row
+        label="Review requested PRs automatically"
+        hint={`Runs a full review as soon as you or one of your teams is asked to review, including re-requests. Uses your ChatGPT plan. Findings are never posted for you.${
+          autoReview ? ' Requests already waiting when you turned this on are not reviewed.' : ''
+        }`}
+      >
+        <input
+          type="checkbox"
+          aria-label="Review requested PRs automatically"
+          checked={autoReview}
+          onChange={(event) => setAutoReview(event.target.checked)}
+          className="size-4 shrink-0 accent-accent"
+        />
+      </Row>
       {(Object.keys(settings.tasks) as AiTask[]).map((task) => (
         <Row
           key={task}

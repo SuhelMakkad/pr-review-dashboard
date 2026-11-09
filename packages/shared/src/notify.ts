@@ -9,7 +9,8 @@ export type NotificationKind =
   | 'dismissed'
   | 'changes_requested'
   | 'approved'
-  | 'ci_failing';
+  | 'ci_failing'
+  | 'ai_review_ready';
 
 export interface ReviewNotification {
   key: string;
@@ -41,6 +42,7 @@ export const notificationKindLabels: Record<NotificationKind, string> = {
   changes_requested: 'Changes requested on your PRs',
   approved: 'Your PRs approved and ready',
   ci_failing: 'Checks failing on your PRs',
+  ai_review_ready: 'Automatic AI reviews ready',
 };
 
 export const defaultNotificationSettings = (): NotificationSettings => ({
@@ -54,6 +56,7 @@ export const defaultNotificationSettings = (): NotificationSettings => ({
     changes_requested: true,
     approved: true,
     ci_failing: true,
+    ai_review_ready: true,
   },
   quietHours: null,
   macosWhenClosed: false,

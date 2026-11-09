@@ -16,6 +16,7 @@ import { migrateDatabase } from '@/db/migrate.js';
 import {
   activityEvents,
   aiRuns,
+  autoReviewLog,
   githubOperations,
   draftComments,
   feedMembership,
@@ -287,6 +288,7 @@ export class Store {
       reviewDrafts,
       aiRuns,
       notificationLog,
+      autoReviewLog,
       githubOperations,
     ];
 

@@ -76,6 +76,8 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
     }
     case 'pulls.changed':
       void client.invalidateQueries({ queryKey: queryKeys.pulls });
+      // New commits can make a saved review out of date.
+      void client.invalidateQueries({ queryKey: ['ai-reviews'] });
 
       for (const id of event.ids) {
         void client.invalidateQueries({ queryKey: queryKeys.detail(id) });
@@ -100,6 +102,7 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
       return;
     case 'ai.updated':
       void client.invalidateQueries({ queryKey: ['ai', event.prId] });
+      void client.invalidateQueries({ queryKey: ['ai-reviews'] });
       return;
     case 'draft.updated':
       void client.invalidateQueries({ queryKey: ['draft', event.id] });

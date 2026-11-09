@@ -4,6 +4,7 @@ import type {
   AiProvider,
   AiRunContext,
   AiRunStatus,
+  AiRunTrigger,
   AiTask,
 } from '@review-desk/shared/ai';
 import type { ActivityKind } from '@review-desk/shared/insights';
@@ -171,6 +172,7 @@ export const aiRuns = sqliteTable(
     result: text('result'),
     error: text('error'),
     usage: text('usage'),
+    trigger: text('trigger').$type<AiRunTrigger>().notNull().default('manual'),
     createdAt: text('created_at').notNull(),
     finishedAt: text('finished_at'),
   },
@@ -189,6 +191,25 @@ export const notificationLog = sqliteTable(
     prId: text('pr_id').notNull(),
     channel: text('channel').notNull(),
     sentAt: text('sent_at').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.account, table.key] })],
+);
+
+/**
+ * Review requests automatic review has handled, keyed like attention reasons, so each request is
+ * reviewed at most once. `primed` marks requests that were already waiting when it was turned on.
+ */
+export const autoReviewLog = sqliteTable(
+  'auto_review_log',
+  {
+    account: text('account').notNull(),
+    key: text('key').notNull(),
+    prId: text('pr_id').notNull(),
+    status: text('status').$type<'primed' | 'started' | 'skipped' | 'failed'>().notNull(),
+    runId: text('run_id'),
+    attempts: integer('attempts').notNull().default(0),
+    error: text('error'),
+    updatedAt: text('updated_at').notNull(),
   },
   (table) => [primaryKey({ columns: [table.account, table.key] })],
 );

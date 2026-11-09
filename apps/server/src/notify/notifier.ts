@@ -156,10 +156,39 @@ export class Notifier {
       return [];
     }
 
+    // Held back during quiet hours: the facts persist, so the next sync announces them.
+    if (inQuietHours(this.settings().quietHours, now)) return [];
+
+    return this.deliver(account, fresh);
+  }
+
+  /**
+   * Announces one-off events, such as an automatic review finishing, that later syncs cannot
+   * rediscover. Each key is announced once; quiet hours drop it, since it cannot be replayed.
+   */
+  async announce(
+    account: string,
+    notifications: ReviewNotification[],
+    now = new Date(),
+  ): Promise<ReviewNotification[]> {
+    const fresh = notifications.filter((notification) => !this.seen(account, notification.key));
+
+    if (fresh.length === 0) return [];
+
+    if (inQuietHours(this.settings().quietHours, now)) {
+      this.remember(account, fresh, 'quiet');
+
+      return [];
+    }
+
+    return this.deliver(account, fresh);
+  }
+
+  private async deliver(
+    account: string,
+    fresh: ReviewNotification[],
+  ): Promise<ReviewNotification[]> {
     const settings = this.settings();
-
-    if (inQuietHours(settings.quietHours, now)) return [];
-
     const wanted = fresh.filter((notification) => settings.kinds[notification.kind]);
 
     // Unwanted kinds are still remembered, so turning a kind on later does not replay history.

@@ -6,6 +6,8 @@ export type AiTask =
 export type AiEffort = 'low' | 'medium' | 'high' | 'xhigh';
 export type AiRunStatus =
   'queued' | 'running' | 'paused' | 'done' | 'failed' | 'cancelled' | 'interrupted';
+/** Who started a run: you, or automatic review when your review was requested. */
+export type AiRunTrigger = 'manual' | 'auto';
 
 export interface BriefResult {
   summary: string;
@@ -83,6 +85,16 @@ export interface AiRun {
   pauseReason: 'user' | 'restart' | null;
   /** How far the Codex credit balance fell during the run; null when it did not or is unknown. */
   creditsUsed: number | null;
+  trigger: AiRunTrigger;
+}
+
+/** The latest full review of one PR, for status badges in lists. */
+export interface AiReviewStatus {
+  prId: string;
+  runId: string;
+  status: AiRunStatus;
+  stale: boolean;
+  trigger: AiRunTrigger;
 }
 
 /** Fingerprints of the evidence used to generate a review, persisted with the run. */
@@ -98,9 +110,19 @@ export interface AiTaskSettings {
   model: string | null;
 }
 
+/**
+ * Starts a full review when your review is requested. It never prepares or posts anything; `since`
+ * is set by the server when it is turned on, and requests already waiting then are not reviewed.
+ */
+export interface AutoReviewSettings {
+  enabled: boolean;
+  since: string | null;
+}
+
 export interface AiSettings {
   defaultProvider: AiProvider;
   tasks: Record<AiTask, AiTaskSettings>;
+  autoReview: AutoReviewSettings;
 }
 
 export interface AiProviderStatus {
@@ -159,6 +181,7 @@ export const defaultAiSettings = (): AiSettings => ({
     author_feedback: { provider: null, effort: 'low', model: null },
     draft_summary: { provider: null, effort: 'low', model: null },
   },
+  autoReview: { enabled: false, since: null },
 });
 
 /** Codex runs are refused: the plan's limit is used up, or the sign-in would not bill the plan. */
