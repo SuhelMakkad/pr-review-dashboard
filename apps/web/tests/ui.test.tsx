@@ -10,7 +10,7 @@ import { resetInboxAutoSelect } from '@/features/inbox/inbox-page';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { defaultAiSettings } from '@review-desk/shared/ai';
 import { defaultNotificationSettings } from '@review-desk/shared/notify';
-import type { LocalTriageState } from '@review-desk/shared/types';
+import type { LocalTriageState, PullRequestSnapshot } from '@review-desk/shared/types';
 import { review, snapshot, status } from '@test/fixtures';
 
 const followUp = snapshot({
@@ -33,6 +33,9 @@ const caughtUp = snapshot({ id: 'quiet', number: 3, title: 'Already approved and
 const snapshots = [followUp, firstReview, caughtUp];
 let triage: Record<string, LocalTriageState> = {};
 let writes: { id: string; body: Record<string, unknown> }[] = [];
+/** PRs added by hand through `POST /api/pulls/track`, and every queue change sent. */
+let added: PullRequestSnapshot[] = [];
+let queueChanges: { method: string; path: string; body: Record<string, unknown> }[] = [];
 const clients: QueryClient[] = [];
 
 beforeEach(() => {
@@ -41,6 +44,8 @@ beforeEach(() => {
   resetInboxAutoSelect();
   triage = {};
   writes = [];
+  added = [];
+  queueChanges = [];
   firstReview.body = 'A useful **description**.';
   Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
@@ -95,11 +100,36 @@ beforeEach(() => {
       } else if (path === '/api/pulls') {
         data = {
           account: 'me',
-          items: snapshots.map((pr) => deriveItem(pr, state(pr.id), 'me', [])),
+          items: [...snapshots, ...added].map((pr) => deriveItem(pr, state(pr.id), 'me', [])),
         };
+      } else if (path === '/api/pulls/track') {
+        const body = JSON.parse(String(options?.body));
+        const pr = snapshot({
+          id: 'added',
+          number: body.number,
+          repository: body.repository,
+          url: `https://github.com/${body.repository}/pull/${body.number}`,
+          title: 'Added by hand',
+          author: { login: 'carol' },
+          sources: ['manual'],
+          reviews: [],
+        });
+
+        queueChanges.push({ method: 'POST', path, body });
+        added = [pr];
+        data = {
+          account: 'me',
+          snapshot: pr,
+          item: deriveItem(pr, state(pr.id), 'me', []),
+          triage: state(pr.id),
+        };
+      } else if (path.endsWith('/track') && options?.method === 'DELETE') {
+        queueChanges.push({ method: 'DELETE', path, body: JSON.parse(String(options.body)) });
+        added = [];
+        data = { tracked: false };
       } else {
         const id = decodeURIComponent(path.split('/')[3]);
-        const pr = snapshots.find((value) => value.id === id)!;
+        const pr = [...snapshots, ...added].find((value) => value.id === id)!;
 
         if (options?.method === 'PATCH') {
           const body = JSON.parse(String(options.body));
@@ -240,6 +270,58 @@ describe('inbox', () => {
     expect(screen.getByText(/\[Image: tracker\]/)).toBeInTheDocument();
     expect(screen.getByText('bad').closest('a')).toBeNull();
     expect(screen.getByRole('link', { name: 'ok' })).toHaveAttribute('href', 'https://example.com');
+  });
+});
+
+describe('adding PRs by hand', () => {
+  it('adds an untracked PR from the Not tracked screen, then removes it again', async () => {
+    const { user } = mount('/inbox/attention/acme/web/77');
+
+    expect(await screen.findByText('Not tracked')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Add to review queue' }));
+
+    expect(await screen.findByRole('heading', { name: /Added by hand/ })).toBeInTheDocument();
+    expect(queueChanges).toEqual([
+      {
+        method: 'POST',
+        path: '/api/pulls/track',
+        body: { account: 'me', repository: 'acme/web', number: 77 },
+      },
+    ]);
+    expect(screen.getByText(/Tracked because you added it/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Remove from queue' }));
+
+    await waitFor(() =>
+      expect(within(screen.getByRole('listbox')).queryByText('Added by hand')).toBeNull(),
+    );
+    expect(queueChanges[1]).toEqual({
+      method: 'DELETE',
+      path: '/api/pulls/added/track',
+      body: { account: 'me' },
+    });
+  });
+
+  it('adds a PR from the inbox header and opens it', async () => {
+    const { user, router } = mount();
+
+    await queue();
+    await user.click(screen.getByRole('button', { name: 'Add PR' }));
+
+    const input = await screen.findByRole('textbox', { name: 'Pull request' });
+
+    await user.type(input, 'not a pr{Enter}');
+    expect(screen.getByText('Enter a GitHub PR link, or owner/repo#123.')).toBeInTheDocument();
+    expect(queueChanges).toEqual([]);
+
+    await user.clear(input);
+    await user.type(input, 'https://github.com/acme/web/pull/77{Enter}');
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe('/inbox/attention/acme/web/77'),
+    );
+    expect(await screen.findByRole('heading', { name: /Added by hand/ })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
 

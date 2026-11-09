@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { matchesFilters } from '@/features/inbox/filters';
-import { parsePrUrl } from '@/lib/pr-ref';
+import { formatRef, parsePrRef } from '@/lib/pr-ref';
 import { applyOptimistic } from '@/lib/queries';
 import { keyCaps } from '@/lib/shortcuts';
 import { parseSnooze, shortAge, snoozePresets } from '@/lib/time';
@@ -97,13 +97,27 @@ describe('client helpers', () => {
     expect(matchesFilters(item, { draft: 'only' })).toBe(false);
   });
 
-  it('parses pasted GitHub PR links', () => {
-    expect(parsePrUrl('https://github.com/acme/api/pull/12/files#diff')).toEqual({
-      owner: 'acme',
-      repo: 'api',
-      number: 12,
+  it('parses pasted GitHub PR links and owner/repo#number references', () => {
+    const ref = { owner: 'acme', repo: 'api', number: 12 };
+
+    expect(parsePrRef('https://github.com/acme/api/pull/12/files#diff')).toEqual(ref);
+    expect(parsePrRef(' acme/api#12 ')).toEqual(ref);
+    expect(parsePrRef('acme/api/pull/12')).toEqual(ref);
+    expect(parsePrRef('example-org/example-repo#111')).toEqual({
+      owner: 'example-org',
+      repo: 'example-repo',
+      number: 111,
     });
-    expect(parsePrUrl('https://github.com/acme/api/issues/12')).toBeNull();
+    expect(formatRef(ref)).toBe('acme/api#12');
+
+    for (const text of [
+      'https://github.com/acme/api/issues/12',
+      'api#12',
+      'acme/api#0',
+      'fix acme/api#12 soon',
+      'acme/api',
+    ])
+      expect(parsePrRef(text)).toBeNull();
   });
 
   it('renders key caps for shortcuts and sequences', () => {

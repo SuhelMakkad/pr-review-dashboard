@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { GitHub, type GitHubTransport, safeError } from '@/github/index.js';
+import { GhCli, GitHub, GitHubError, type GitHubTransport, safeError } from '@/github/index.js';
 
 const page = (hasNextPage = false, endCursor: string | null = null) => ({ hasNextPage, endCursor });
 const connection = <T>(nodes: T[], hasNextPage = false, endCursor: string | null = null) => ({
@@ -107,6 +107,48 @@ describe('GitHub data retrieval', () => {
     expect(await github.discover('me', 'reviewed')).toEqual(['one', 'two', 'three']);
     expect(graphql.mock.calls[1][1].cursor).toBe('next');
     expect(graphql.mock.calls[0][1].query).toContain('reviewed-by:me');
+  });
+
+  it('finds a PR by repository and number, and treats a missing one as null', async () => {
+    const graphql = vi
+      .fn()
+      .mockResolvedValueOnce({ repository: { pullRequest: { id: 'PR_kw', state: 'OPEN' } } })
+      .mockRejectedValueOnce(
+        new GitHubError(
+          "Could not resolve to a Repository with the name 'acme/missing'.",
+          null,
+          200,
+          'rejected',
+        ),
+      )
+      .mockRejectedValueOnce(new GitHubError('Bad credentials', null, 401, 'auth'));
+    const github = new GitHub({ graphql, rest: vi.fn() });
+
+    expect(await github.resolvePull('acme/api', 12)).toEqual({ id: 'PR_kw', state: 'OPEN' });
+    expect(graphql.mock.calls[0][1]).toEqual({ owner: 'acme', name: 'api', number: 12 });
+    expect(await github.resolvePull('acme/missing', 1)).toBeNull();
+    await expect(github.resolvePull('acme/api', 12)).rejects.toThrow('Bad credentials');
+  });
+
+  it('treats a missing PR number in an existing repository as null', async () => {
+    const transport = new GhCli();
+
+    // GitHub answers with partial data: the repository, but no PR, and a NOT_FOUND error.
+    vi.spyOn(transport, 'request').mockResolvedValue({
+      status: 200,
+      headers: {},
+      data: {
+        data: { repository: { pullRequest: null } },
+        errors: [
+          {
+            type: 'NOT_FOUND',
+            message: 'Could not resolve to a PullRequest with the number of 9999.',
+          },
+        ],
+      },
+    });
+
+    expect(await new GitHub(transport).resolvePull('acme/api', 9999)).toBeNull();
   });
 
   it('partitions searches above GitHub’s 1,000-result limit', async () => {

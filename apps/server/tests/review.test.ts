@@ -256,6 +256,27 @@ describe('thread and file actions', () => {
     expect(ops(github)).toEqual(['ReplyToThread', 'ResolveThread', 'MarkFileViewed']);
   });
 
+  it('does not bring back a PR removed while a viewed-file write was in flight', async () => {
+    const { github, sync, reviews } = await setup();
+    const { snapshot } = await sync.track('you', 'acme/api', 2066);
+
+    let release!: () => void;
+    const written = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    vi.spyOn(github, 'setFileViewed').mockImplementationOnce(() => written);
+
+    const viewing = reviews.setViewed('you', snapshot.id, 'src/summaries/cache.ts', true);
+
+    await vi.waitFor(() => expect(github.setFileViewed).toHaveBeenCalled());
+    sync.untrack('you', snapshot.id);
+    release();
+    await viewing;
+
+    expect(sync.detail(snapshot.id)).toBeNull();
+  });
+
   it('posts a single comment immediately, or to the conversation', async () => {
     const { reviews, pr, github } = await setup();
     const detail = pr(1839);

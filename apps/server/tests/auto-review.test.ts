@@ -225,6 +225,22 @@ describe('automatic review', () => {
     expect(draft.preparedReview ?? null).toBeNull();
   });
 
+  it('reviews a PR you added by hand, without announcing it as a review request', async () => {
+    const { sync, enable, runs, settled, notified, idOf } = await setup();
+
+    enable();
+    await sync.sync();
+    await sync.track('you', 'acme/api', 2066);
+    await sync.sync();
+    await settled();
+    await sync.sync();
+
+    expect(runs(2066)).toEqual([expect.objectContaining({ trigger: 'auto', status: 'done' })]);
+    expect(notified.filter((item) => item.prId === idOf(2066)).map((item) => item.kind)).toEqual([
+      'ai_review_ready',
+    ]);
+  });
+
   it('reviews team requests, assignments and re-requests once each', async () => {
     const { sync, pull, addPull, requestEvent, enable, runs, settled } = await setup();
 

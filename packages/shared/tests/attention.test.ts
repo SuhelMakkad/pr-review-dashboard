@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveItem, emptyTriage, sortItems } from '@/attention.js';
+import { addedByHand, deriveItem, emptyTriage, sortItems } from '@/attention.js';
 import { review, snapshot, t, thread } from '@test/fixtures.js';
 
 describe('review attention', () => {
@@ -15,6 +15,36 @@ describe('review attention', () => {
       expect(item.queue).toBe('attention');
       expect(item.reasons[0].kind).toBe('first_review');
     }
+  });
+
+  it('treats a PR you added yourself as a first review until you review it', () => {
+    const pr = snapshot({ sources: ['manual'], reviews: [] });
+    const item = deriveItem(pr, emptyTriage(), 'me', []);
+
+    expect(item.queue).toBe('attention');
+    expect(item.reasons.map((reason) => reason.kind)).toEqual(['first_review']);
+    expect(addedByHand(item)).toBe(true);
+
+    expect(deriveItem({ ...pr, reviews: [review()] }, emptyTriage(), 'me', []).reasons).toEqual([]);
+  });
+
+  it('only counts a PR as added by hand when nobody asked for your review', () => {
+    const direct = { kind: 'user' as const, login: 'me', name: 'me' };
+    const requested = deriveItem(
+      snapshot({ sources: ['requested', 'manual'], reviews: [] }),
+      emptyTriage(),
+      'me',
+      [],
+    );
+    const viaRequest = deriveItem(
+      snapshot({ sources: ['manual'], reviews: [], reviewRequests: [direct] }),
+      emptyTriage(),
+      'me',
+      [],
+    );
+
+    expect(addedByHand(requested)).toBe(false);
+    expect(addedByHand(viaRequest)).toBe(false);
   });
 
   it('tracks team requests, without repeatedly flagging a team request already reviewed', () => {
