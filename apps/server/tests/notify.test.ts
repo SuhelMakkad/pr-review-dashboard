@@ -135,4 +135,39 @@ describe('notifications', () => {
       }),
     ]);
   });
+
+  it('announces one-off events once, honouring kind toggles and quiet hours', async () => {
+    const { notifier, notified, native } = await setup();
+    const ready = (key: string) => ({
+      key,
+      kind: 'ai_review_ready' as const,
+      prId: 'PR_1',
+      title: 'web#1 · Change',
+      body: 'AI review ready · no findings',
+      path: '/inbox/attention/acme/web/1',
+    });
+    const noon = new Date(2026, 10, 5, 12, 0);
+
+    expect(await notifier.announce('you', [ready('ai:1')], noon)).toHaveLength(1);
+    expect(await notifier.announce('you', [ready('ai:1')], noon)).toEqual([]);
+
+    notifier.saveSettings({
+      ...defaultNotificationSettings(),
+      quietHours: { start: '22:00', end: '08:00' },
+    });
+    expect(await notifier.announce('you', [ready('ai:2')], new Date(2026, 10, 5, 23, 0))).toEqual(
+      [],
+    );
+    // Held back events cannot be rediscovered, so they are not replayed after quiet hours.
+    expect(await notifier.announce('you', [ready('ai:2')], noon)).toEqual([]);
+
+    notifier.saveSettings({
+      ...defaultNotificationSettings(),
+      kinds: { ...defaultNotificationSettings().kinds, ai_review_ready: false },
+    });
+    expect(await notifier.announce('you', [ready('ai:3')], noon)).toEqual([]);
+
+    expect(notified()).toEqual([ready('ai:1')]);
+    expect(native).not.toHaveBeenCalled();
+  });
 });
