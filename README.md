@@ -21,6 +21,8 @@ Open **http://127.0.0.1:4317**. Keep the process running; it syncs in the backgr
 
 **Inbox.** Pull requests that need you, grouped into follow-ups (new commits since your review, review re-requested, replies in your threads, @mentions, dismissed reviews) and first reviews. _Waiting on author_, _Caught up_ and _Snoozed_ hold the rest. `E` marks a PR done until something new happens; `S` snoozes it (presets, or type "fri 2pm"); new activity always brings a PR back. The URL holds the queue, filters and selected PR, so views are linkable and Back works.
 
+**Adding PRs by hand.** The inbox tracks PRs that request your review, are assigned to you, that you reviewed, or that mention you. To review any other open PR, click _Add PR_ in the inbox header and paste its link or `owner/repo#123`, paste it into the command palette (`⌘K`), or open its link and click _Add to review queue_ on the _Not tracked_ screen. It joins your first reviews like a review request, including automatic review when that is on, but without an "asked for your review" notification. It stays until it is merged or closed; _Remove from queue_ in the PR view drops it again, unless GitHub also lists you on it.
+
 **Review workspace.** `Enter` opens the diff: a file tree with viewed state (synced with GitHub), one file at a time with syntax highlighting, unified or split, and review threads inline under their lines. When the branch moved after your review, it opens _Since your review_ automatically: an exact diff for new commits, or a file-by-file comparison of what you reviewed against what is there now after a rebase or force push. Select lines and press `C` to comment; comments stay as local drafts until you finish the review. `R` replies to a thread and `Shift+R` resolves it; both post immediately and say so. `⌘⇧↵` opens the Finish sheet: pick Comment, Approve or Request changes, add a summary, and submit. It warns when new commits arrived while you were reviewing, re-anchors your draft comments to the new code, and flags any that sit on changed lines.
 
 **My PRs.** Your own open PRs grouped by whose move it is (needs you, waiting on reviewers, ready to merge, drafts), each with a checklist of what blocks it and the next step, including re-requesting a review in place. Waits longer than a day are flagged.
@@ -79,7 +81,7 @@ The app binds to `127.0.0.1` only, rejects unexpected hosts and origins, and req
 
 Everything lives in `.data/` (SQLite: cached PRs, notes, drafts, queued GitHub actions and receipts, triage, AI results, history). Schema upgrades back up the previous database first (`.data/backup-before-<migration>.sqlite`, or `.data/backup-v<N>.sqlite` for databases from before Drizzle). To back up, stop the app and copy `.data/`. To start fresh, stop the app and rename `.data/`. Notes and drafts are stored locally but not encrypted, so protect the folder like other work data.
 
-Syncing is incremental: a cheap fingerprint per PR decides when a full refresh is needed, with a full check every 30 minutes and on opening a PR. Search failures never drop a PR, and a PR leaves the list only once GitHub confirms it was closed or merged.
+Syncing is incremental: a cheap fingerprint per PR decides when a full refresh is needed, with a full check every 30 minutes and on opening a PR. Search failures never drop a PR, and a PR leaves the list only once GitHub confirms it was closed or merged, or you remove a PR you added by hand.
 
 ## Development
 
