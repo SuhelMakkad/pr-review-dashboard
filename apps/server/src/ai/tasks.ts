@@ -67,7 +67,7 @@ export function jsonSchemaFor(task: AiTask): Record<string, unknown> {
 
 /** Bump a task's version whenever its prompt or schema changes, to invalidate cached results. */
 export const promptVersions: Record<AiTask, number> = {
-  full_review: 3,
+  full_review: 4,
   brief: 1,
   since_review: 1,
   draft_comments: 3,
@@ -107,13 +107,11 @@ ${reviewTextStyle}
 Task: perform a full code review of the changes introduced by this PR.
 - Find actionable correctness, security, data integrity, compatibility, performance, and testing problems
   introduced by the change. Trace relevant code paths and verify each finding against the actual code.
-- Ignore pre-existing problems and formatter or lint concerns. Avoid speculative findings. An empty list is valid.
-- overall: a concise review summary suitable for posting on GitHub (2-5 sentences or a few short bullets). Summarize the findings and include 1-3 specific checks with file or symbol references and their outcomes. Even when comments is empty, explain what was checked, what is correct and why, and that no changes are needed within the reviewed scope. State material verification gaps briefly when they qualify the conclusion; keep the detailed coverage inventory in coverage.
+- Ignore pre-existing problems and formatter or lint concerns. Avoid speculative findings. Report no findings when none are confirmed.
+- overall: a review summary suitable for posting on GitHub. Include all actionable findings, each with its severity, repository-relative file or symbol location, a helpful explanation, the triggering scenario, and a suggested fix. Use as much space as needed to explain every finding clearly while staying concise. Include 1-3 specific checks with file or symbol references and their outcomes. When no actionable findings exist, explain what was checked, what is correct and why, and that no changes are needed within the reviewed scope. State material verification gaps briefly when they qualify the conclusion; keep the detailed coverage inventory in coverage.
 - assessment: changes_requested if a confirmed blocking problem exists, otherwise no_blocking_findings.
   This is advice for the user, never an instruction to approve or submit a review.
-- comments: concrete findings with a helpful explanation, the triggering scenario, and a suggested fix.
-  Use paths relative to the repository. Anchor to the smallest relevant line in review.json's diff,
-  with RIGHT for after/ and LEFT for before/. Use severity blocking, suggestion, nit, or question.
+- comments: Do not generate or leave inline review comments. Return comments: [] and include all actionable findings in overall.
 - coverage: describe the code paths and tests you inspected, and any files or behavior you could not verify.
   Never claim to have executed tests. Binary files, symlinks, and submodule contents may be unavailable.
 Return only JSON matching the requested schema.`,

@@ -59,14 +59,18 @@ function readyCopy(row: AiRunRow): string {
   try {
     const result = JSON.parse(row.result ?? '') as FullReviewResult;
     const count = result.comments.length;
+
+    if (count === 0)
+      return result.assessment === 'changes_requested'
+        ? 'AI review ready · Changes recommended'
+        : 'AI review ready · No blocking findings';
+
     const findings = `${count} finding${count === 1 ? '' : 's'}`;
 
     if (result.assessment === 'changes_requested')
       return `AI review ready · ${findings}, changes suggested`;
 
-    return count === 0
-      ? 'AI review ready · no findings'
-      : `AI review ready · ${findings}, none blocking`;
+    return `AI review ready · ${findings}, none blocking`;
   } catch {
     return 'AI review ready';
   }

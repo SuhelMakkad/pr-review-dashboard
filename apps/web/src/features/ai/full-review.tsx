@@ -171,8 +171,13 @@ export function FullReview({
                   {result.assessment === 'changes_requested'
                     ? 'Changes recommended'
                     : 'No blocking findings'}
-                  {' · '}
-                  {result.comments.length} {result.comments.length === 1 ? 'finding' : 'findings'}
+                  {result.comments.length > 0 && (
+                    <>
+                      {' · '}
+                      {result.comments.length}{' '}
+                      {result.comments.length === 1 ? 'finding' : 'findings'}
+                    </>
+                  )}
                 </p>
                 <p className="text-2xs text-fg-subtle">
                   Generated{' '}
