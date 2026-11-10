@@ -45,6 +45,8 @@ test('queues a review, advances from the inbox, and keeps its result after navig
   await command(page, '/api/dev/operations', { delayMs: 1200 });
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/files\?inbox=attention/);
+  // The workspace loads after the URL changes; its shortcuts exist once it shows.
+  await expect(page.getByRole('button', { name: /Finish review/ })).toBeVisible();
   await page.keyboard.press('ControlOrMeta+Shift+Enter');
 
   const sheet = page.getByRole('dialog', { name: 'Finish your review' });
