@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { matchesFilters } from '@/features/inbox/filters';
 import { formatRef, parsePrRef } from '@/lib/pr-ref';
-import { adoptStatus } from '@/lib/live';
+import { adoptStatus, refresh } from '@/lib/live';
 import { applyOptimistic, runTriage } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 import { keyCaps } from '@/lib/shortcuts';
@@ -247,5 +247,32 @@ describe('account switches', () => {
         items: [],
       });
     });
+  });
+});
+
+describe('event refreshes', () => {
+  it('loads again when an event arrives while the first load is on its way', async () => {
+    const client = new QueryClient();
+    const answers: ((value: string) => void)[] = [];
+    const observer = new QueryObserver(client, {
+      queryKey: ['operations', 'me'],
+      queryFn: () => new Promise<string>((resolve) => answers.push(resolve)),
+    });
+    const unsubscribe = observer.subscribe(() => {});
+
+    try {
+      await vi.waitFor(() => expect(answers).toHaveLength(1));
+
+      // The server answered before the change the event announces.
+      refresh(client, ['operations', 'me']);
+      answers[0]('Checking');
+
+      await vi.waitFor(() => expect(answers).toHaveLength(2));
+      answers[1]('Unconfirmed');
+      await vi.waitFor(() => expect(observer.getCurrentResult().data).toBe('Unconfirmed'));
+    } finally {
+      unsubscribe();
+      client.clear();
+    }
   });
 });

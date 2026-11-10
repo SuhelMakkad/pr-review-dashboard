@@ -84,6 +84,30 @@ export function cacheBelongsTo(client: QueryClient, account: string, queryKey: Q
   return owner === undefined || owner === account;
 }
 
+/**
+ * Refetches what an event changed. TanStack Query folds an invalidation into a first load that is
+ * already on its way, and that load can carry the state from just before the event (a reload
+ * racing an outbox update, say), so such a load is invalidated again once it lands.
+ */
+export function refresh(client: QueryClient, queryKey: QueryKey): void {
+  const cache = client.getQueryCache();
+
+  for (const query of cache.findAll({ queryKey })) {
+    if (query.state.data !== undefined || query.state.fetchStatus !== 'fetching') continue;
+
+    const unsubscribe = cache.subscribe((event) => {
+      if (event.query !== query) return;
+      if (event.type !== 'removed' && query.state.fetchStatus === 'fetching') return;
+
+      unsubscribe();
+      if (event.type !== 'removed')
+        void client.invalidateQueries({ queryKey: query.queryKey, exact: true });
+    });
+  }
+
+  void client.invalidateQueries({ queryKey });
+}
+
 function handle(client: QueryClient, event: ServerEvent, firstHello: { value: boolean }) {
   switch (event.type) {
     case 'hello': {
@@ -109,42 +133,42 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
       adoptStatus(client, event.status);
       return;
     case 'pulls.changed':
-      void client.invalidateQueries({ queryKey: queryKeys.pulls });
+      refresh(client, queryKeys.pulls);
       // New commits can make a saved review out of date.
-      void client.invalidateQueries({ queryKey: ['ai-reviews'] });
+      refresh(client, ['ai-reviews']);
 
       for (const id of event.ids) {
-        void client.invalidateQueries({ queryKey: queryKeys.detail(id) });
-        void client.invalidateQueries({ queryKey: ['diff', id] });
-        void client.invalidateQueries({ queryKey: ['ai', id] });
+        refresh(client, queryKeys.detail(id));
+        refresh(client, ['diff', id]);
+        refresh(client, ['ai', id]);
       }
 
-      void client.invalidateQueries({ queryKey: queryKeys.mine });
+      refresh(client, queryKeys.mine);
 
       return;
     case 'notify':
       void present(event.notifications);
       return;
     case 'insights.updated':
-      void client.invalidateQueries({ queryKey: ['insights'] });
+      refresh(client, ['insights']);
       return;
     case 'operation.updated':
-      void client.invalidateQueries({ queryKey: ['operations', event.account] });
-      void client.invalidateQueries({ queryKey: ['draft', event.prId] });
+      refresh(client, ['operations', event.account]);
+      refresh(client, ['draft', event.prId]);
       if (['needs_attention', 'cancelled'].includes(event.status))
-        void client.invalidateQueries({ queryKey: ['diff', event.prId] });
+        refresh(client, ['diff', event.prId]);
       return;
     case 'ai.updated':
-      void client.invalidateQueries({ queryKey: ['ai', event.prId] });
-      void client.invalidateQueries({ queryKey: ['ai-reviews'] });
+      refresh(client, ['ai', event.prId]);
+      refresh(client, ['ai-reviews']);
       return;
     case 'draft.updated':
-      void client.invalidateQueries({ queryKey: ['draft', event.id] });
-      void client.invalidateQueries({ queryKey: ['ai', event.id] });
+      refresh(client, ['draft', event.id]);
+      refresh(client, ['ai', event.id]);
       return;
     case 'triage.updated':
-      void client.invalidateQueries({ queryKey: queryKeys.pulls });
-      void client.invalidateQueries({ queryKey: queryKeys.detail(event.id) });
+      refresh(client, queryKeys.pulls);
+      refresh(client, queryKeys.detail(event.id));
       return;
   }
 }
