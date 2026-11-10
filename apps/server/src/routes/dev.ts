@@ -2,10 +2,10 @@ import type { FastifyInstance } from 'fastify';
 import type { AiRunner } from '@/ai/runner.js';
 import type { Notifier } from '@/notify/notifier.js';
 import type { FixtureProvider } from '@/ai/fixture.js';
-import type { FixtureGitHub } from '@/demo/fixture-github.js';
+import { DEMO_SECOND_ACCOUNT, type FixtureGitHub } from '@/demo/fixture-github.js';
 import { seedDemoQueue } from '@/demo/history.js';
 import type { LinearService } from '@/linear/service.js';
-import type { SyncService } from '@/sync/service.js';
+import { SELECTED_ACCOUNT_KEY, type SyncService } from '@/sync/service.js';
 import type { OperationQueue } from '@/operations/queue.js';
 
 /** Demo-only controls for stepping the scripted scenario. Never registered against real GitHub. */
@@ -60,17 +60,24 @@ export function registerDevRoutes(
     // Let an in-flight sync finish first, so it cannot write old state after the reset.
     await service.sync();
 
+    // Back to the scenario's own account; the next sync notices the change.
     fixture.reset();
-    service.store.clearAccount(fixture.scenario.world.viewer.login);
-    notifier.reset(fixture.scenario.world.viewer.login);
     linear.reset();
+
+    const logins = [fixture.scenario.world.viewer.login, DEMO_SECOND_ACCOUNT];
+
+    for (const login of logins) {
+      service.store.clearAccount(login);
+      notifier.reset(login);
+    }
 
     for (const key of [
       'notification-settings',
       'ai-settings',
       'review-sla-hours',
-      `backfill:${fixture.scenario.world.viewer.login}`,
-      `auto-review-primed:${fixture.scenario.world.viewer.login}`,
+      SELECTED_ACCOUNT_KEY,
+      `status:${DEMO_SECOND_ACCOUNT}`,
+      ...logins.flatMap((login) => [`backfill:${login}`, `auto-review-primed:${login}`]),
     ]) {
       service.store.deleteSetting(key);
     }

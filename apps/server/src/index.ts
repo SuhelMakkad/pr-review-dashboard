@@ -32,7 +32,7 @@ const service = new SyncService(
   store,
   fixture ?? new GitHub(),
   new EventBus(),
-  fixture ? null : ghCredentials,
+  fixture ?? ghCredentials,
 );
 const sessionToken = createSessionToken();
 const bootId = randomUUID();

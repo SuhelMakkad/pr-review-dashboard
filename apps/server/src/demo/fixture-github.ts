@@ -7,6 +7,7 @@ import type {
   ReviewState,
   Source,
 } from '@review-desk/shared/types';
+import type { CliAccount, GitHubAccounts } from '@/github/credentials.js';
 import type { ThreadInput } from '@/github/write.js';
 import { createHash } from 'node:crypto';
 import type {
@@ -29,6 +30,13 @@ export interface FixtureWrite {
   details: Record<string, unknown>;
 }
 
+/**
+ * A second fictional sign-in, so demo mode can switch accounts. No feed returns a scenario PR for
+ * it, but it can add them by hand (as if the repositories were public), so both accounts can track
+ * the same PR.
+ */
+export const DEMO_SECOND_ACCOUNT = 'you-personal';
+
 const reviewStates: Record<ReviewEvent, ReviewState> = {
   APPROVE: 'APPROVED',
   REQUEST_CHANGES: 'CHANGES_REQUESTED',
@@ -36,8 +44,10 @@ const reviewStates: Record<ReviewEvent, ReviewState> = {
 };
 
 /** A GitHub stand-in backed by an in-memory scenario. Used by demo mode and end-to-end tests. */
-export class FixtureGitHub implements GitHubApi {
+export class FixtureGitHub implements GitHubApi, GitHubAccounts {
   private stepIndex = 0;
+  /** The account selected in the app; null acts as the scenario's viewer. */
+  private selected: string | null = null;
   private sequence = 0;
   /** Every write GitHub would have received, for assertions in tests. */
   readonly writes: FixtureWrite[] = [];
@@ -76,17 +86,36 @@ export class FixtureGitHub implements GitHubApi {
     this.failNext = null;
     this.loseResponseNext = null;
     this.writeDelayMs = 0;
+    this.selected = null;
+  }
+
+  async list(): Promise<CliAccount[]> {
+    return [
+      { login: this.scenario.world.viewer.login, cliActive: true, ok: true },
+      { login: DEMO_SECOND_ACCOUNT, cliActive: false, ok: true },
+    ];
+  }
+
+  select(login: string | null): void {
+    this.selected = login;
+  }
+
+  /** True while the second account is selected: no feed or search returns anything for it. */
+  private get outsider(): boolean {
+    return this.selected === DEMO_SECOND_ACCOUNT;
   }
 
   async identity(): Promise<Actor> {
-    return { ...this.scenario.world.viewer };
+    return this.outsider ? { login: DEMO_SECOND_ACCOUNT } : { ...this.scenario.world.viewer };
   }
 
   async teams(): Promise<string[]> {
-    return [...this.scenario.world.teams];
+    return this.outsider ? [] : [...this.scenario.world.teams];
   }
 
   async discover(_login: string, source: FeedSource): Promise<string[]> {
+    if (this.outsider) return [];
+
     return this.scenario.world.pulls
       .filter((pull) => pull.snapshot.state === 'OPEN' && pull.feeds.includes(source))
       .map((pull) => pull.snapshot.id);
@@ -512,6 +541,8 @@ export class FixtureGitHub implements GitHubApi {
 
   /** Answers the backfill's searches from the scenario plus fictional history. */
   async searchPullIds(query: string): Promise<string[]> {
+    if (this.outsider) return [];
+
     const login = this.scenario.world.viewer.login;
     const range = /(updated|created):(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})/.exec(query);
     const from = range ? Date.parse(range[2]) : 0;
