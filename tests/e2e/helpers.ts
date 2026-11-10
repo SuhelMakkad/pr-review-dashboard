@@ -27,6 +27,9 @@ export async function openFresh(page: Page, path: string) {
   await page.clock.setFixedTime(NOW);
   await resetDemo(page);
   await page.goto(path);
+  // `load` fires before React has rendered and bound its keyboard shortcuts; a key pressed in that
+  // gap is lost. The sidebar renders with the shell that binds them.
+  await page.getByRole('navigation', { name: 'Queues' }).waitFor();
 }
 
 export async function expectAccessible(page: Page, exclude: string[] = []) {
