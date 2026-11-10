@@ -1,0 +1,93 @@
+import { expect, test } from '@playwright/test';
+import { expectAccessible, openFresh } from '@/e2e/helpers';
+
+// Demo mode has a second sign-in, you-personal. No feed returns a scenario PR for it, but it can
+// add one by hand, so both accounts can track the same PR.
+test.describe.configure({ mode: 'serial' });
+
+test('switches to another GitHub CLI account and back, keeping each queue', async ({ page }) => {
+  await openFresh(page, '/inbox/attention');
+
+  const rows = page.getByRole('listbox', { name: /pull requests/i }).getByRole('option');
+
+  await expect(rows.first()).toBeVisible();
+
+  const count = await rows.count();
+
+  await page.getByRole('button', { name: /^Switch GitHub account, now you\b(?!-)/ }).click();
+
+  const menu = page.getByRole('menu');
+
+  await expect(menu.getByRole('menuitemradio', { name: 'you', exact: true })).toBeChecked();
+  await expect(menu.getByRole('menuitemradio', { name: 'you-personal' })).not.toBeChecked();
+  await expectAccessible(page);
+
+  await menu.getByRole('menuitemradio', { name: 'you-personal' }).click();
+
+  await expect(page.getByText('Switched to you-personal')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: /^Switch GitHub account, now you-personal/ }),
+  ).toBeVisible();
+  await expect(rows).toHaveCount(0);
+
+  await page.keyboard.press('ControlOrMeta+k');
+  await page.getByPlaceholder(/Jump to a PR/).fill('switch github');
+  await expect(
+    page.getByRole('option', { name: 'Switch GitHub account to you-personal' }),
+  ).toHaveCount(0);
+  await page.getByRole('option', { name: 'Switch GitHub account to you', exact: true }).click();
+
+  await expect(
+    page.getByRole('button', { name: /^Switch GitHub account, now you\b(?!-)/ }),
+  ).toBeVisible();
+  await expect(rows).toHaveCount(count);
+});
+
+test('switches from Settings', async ({ page }) => {
+  await openFresh(page, '/settings');
+
+  const main = page.getByRole('main');
+
+  await main.getByRole('button', { name: /^Switch GitHub account, now you\b(?!-)/ }).click();
+  await page.getByRole('menuitemradio', { name: 'you-personal' }).click();
+
+  await expect(
+    main.getByRole('button', { name: /^Switch GitHub account, now you-personal/ }),
+  ).toBeVisible();
+});
+
+test("keeps each account's private note on a PR both accounts track", async ({ page }) => {
+  const id = 'PR_acme_api_2050';
+  const note = page.getByRole('textbox', { name: 'Private note' });
+  const savedNote = async () =>
+    ((await (await page.request.get(`/api/pulls/${id}`)).json()) as { triage?: { note: string } })
+      .triage?.note;
+  const switchTo = async (login: string) => {
+    await page.getByRole('button', { name: /^Switch GitHub account, now / }).click();
+    await page.getByRole('menuitemradio', { name: login, exact: true }).click();
+    await expect(page.getByText(`Switched to ${login}`)).toBeVisible();
+  };
+  /** Longer than the note's 800 ms autosave, so a wrong save would have reached the server. */
+  const pastAutosave = () => page.waitForTimeout(1500);
+
+  await openFresh(page, '/inbox/attention/acme/api/2050');
+  await note.fill('Note for you');
+  await expect.poll(savedNote).toBe('Note for you');
+
+  await switchTo('you-personal');
+  await page.getByRole('button', { name: 'Add to review queue' }).click();
+  await expect(note).toHaveValue('');
+  await note.fill('Note for personal');
+  await expect.poll(savedNote).toBe('Note for personal');
+
+  // Both accounts track this PR now, so its page stays open across each switch.
+  await switchTo('you');
+  await expect(note).toHaveValue('Note for you');
+  await pastAutosave();
+  expect(await savedNote()).toBe('Note for you');
+
+  await switchTo('you-personal');
+  await expect(note).toHaveValue('Note for personal');
+  await pastAutosave();
+  expect(await savedNote()).toBe('Note for personal');
+});
