@@ -19,6 +19,7 @@ import { refOf } from '@/lib/pr-ref';
 import { inQueue } from '@/features/pulls/meta';
 import { openActivity } from '@/features/activity/use-operations';
 import { useDiff, usePullDetail, usePulls } from '@/lib/queries';
+import { useRemountKey } from '@/lib/remount-key';
 import { useShortcuts } from '@/lib/shortcuts';
 import { storage } from '@/lib/storage';
 import { useAppearance } from '@/lib/theme';
@@ -62,12 +63,20 @@ const resolvedTheme = (theme: string) =>
 
 /** The review workspace: file tree, one file's diff with threads and drafts, threads rail, finish. */
 export function FilesWorkspace() {
+  const { item } = useCurrentPull();
+  const pulls = usePulls();
+  const detail = usePullDetail(item?.id ?? null);
+  // The same account the workspace writes as. Comments, replies and the review summary belong to
+  // one account and PR, so the workspace remounts when either changes.
+  const account = detail.data?.account ?? pulls.data?.account;
+  const scope = useRemountKey(account && item ? `${account}:${item.id}` : null);
+
   return (
     <WorkerPoolContextProvider
       poolOptions={{ workerFactory: () => new DiffsWorker(), poolSize: 2 }}
       highlighterOptions={{}}
     >
-      <Workspace />
+      <Workspace key={scope} />
     </WorkerPoolContextProvider>
   );
 }
@@ -863,6 +872,8 @@ function Workspace() {
 
       {draft && detail.data && (
         <FinishSheet
+          // Its summary autosaves and flushes on unmount, always to the account it was opened for.
+          key={`${account}:${item.id}`}
           open={finishOpen}
           onOpenChange={setFinishOpen}
           draft={draft}

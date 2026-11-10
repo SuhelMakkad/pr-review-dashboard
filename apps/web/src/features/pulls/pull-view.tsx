@@ -196,7 +196,18 @@ export function PullView({
     );
   }
 
-  return <PullDetailView key={item.id} item={item} detail={detail} variant={variant} lead={lead} />;
+  // The note and every other editor here belong to one account's view of one PR. Two accounts can
+  // track the same PR, so the account is part of the key: a switch never hands one account's text
+  // to the other account's save.
+  return (
+    <PullDetailView
+      key={`${detail.account}:${item.id}`}
+      item={item}
+      detail={detail}
+      variant={variant}
+      lead={lead}
+    />
+  );
 }
 
 function PullDetailView({

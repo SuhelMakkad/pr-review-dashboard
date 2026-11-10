@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Toaster } from 'sonner';
 import { useShortcuts, type Shortcut } from '@/lib/shortcuts';
 import { setBadge } from '@/lib/notifications';
-import { useMine, useNotificationSettings, usePulls } from '@/lib/queries';
+import { useMine, useNotificationSettings, usePulls, useStatus } from '@/lib/queries';
+import { useRemountKey } from '@/lib/remount-key';
 import { useEffect } from 'react';
 import { useAppearance } from '@/lib/theme';
 import { TooltipProvider } from '@/ui/tooltip';
@@ -54,6 +55,7 @@ export function Shell() {
   const { theme } = useAppearance();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const accountScope = useRemountKey(useStatus().data?.account?.login);
   const pulls = usePulls();
   const mine = useMine();
   const notifySettings = useNotificationSettings();
@@ -115,7 +117,10 @@ export function Shell() {
       <div className="grid h-full grid-cols-[auto_minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto]">
         <Sidebar />
         <main id="main" className={cn('min-w-0 bg-panel', activityOpen && 'xl:pr-[420px]')}>
-          <Outlet />
+          {/* Every page belongs to one account: a switch remounts it, dropping unsaved edits. */}
+          <Fragment key={accountScope}>
+            <Outlet />
+          </Fragment>
         </main>
         <StatusBar hints={hintsFor(pathname)} />
       </div>
