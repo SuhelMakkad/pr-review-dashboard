@@ -7,7 +7,10 @@ import { refOf } from '@/lib/pr-ref';
 import { useMine } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { EmptyState } from '@/ui/empty-state';
+import { ErrorState } from '@/ui/error-state';
+import { ListSkeleton } from '@/ui/skeleton';
 import { Kbd } from '@/ui/kbd';
+import { FadeSwap, IndicatorGroup, LayoutScroll, ListItem, ListPresence } from '@/ui/motion';
 import { useRouteRef } from '@/features/pulls/use-current-pull';
 import { sameRef } from '@/lib/pr-ref';
 import { groupMeta, groupOrder } from '@/features/mine/meta';
@@ -37,6 +40,7 @@ export function MinePage() {
     [items],
   );
   const flat = sections.flatMap((section) => section.items);
+  const listState = mine.isPending ? 'loading' : mine.error && !mine.data ? 'error' : 'ready';
   const current = ref ? flat.find((item) => sameRef(item, ref)) : undefined;
   const index = current ? flat.indexOf(current) : -1;
 
@@ -104,43 +108,69 @@ export function MinePage() {
         onLayoutChanged={layout.onLayoutChanged}
       >
         <Panel id="list" defaultSize="44" minSize="28" className="flex flex-col">
-          <div
-            role="listbox"
-            aria-label="My pull requests"
-            tabIndex={0}
-            className="scroll-thin min-h-0 flex-1 overflow-y-auto outline-none"
-          >
-            {mine.data && flat.length === 0 && (
-              <div className="grid place-items-center pt-10">
-                <EmptyState
-                  icon={<GitPullRequestDraft size={28} />}
-                  title="No open PRs of yours"
-                  hint="PRs you open appear here with what blocks them."
-                />
-              </div>
-            )}
-            {sections.map((section) => (
-              <div key={section.group} role="group" aria-label={groupMeta[section.group].label}>
-                <div className="sticky top-0 z-10 flex h-7 items-center gap-2 border-b border-line bg-sunken/95 px-4 text-2xs font-medium tracking-wide text-fg-subtle uppercase backdrop-blur">
-                  {groupMeta[section.group].label}
-                  <span className="tabular-nums">{section.items.length}</span>
-                </div>
-                {section.items.map((item) => (
-                  <MineRow
-                    key={item.id}
-                    ref={(element) => {
-                      if (element) rowRefs.current.set(item.id, element);
-                      else rowRefs.current.delete(item.id);
-                    }}
-                    item={item}
-                    selected={item.id === current?.id}
-                    onSelect={() => select(item, false)}
-                    onOpen={() => open(item)}
+          <IndicatorGroup>
+            <LayoutScroll
+              role="listbox"
+              aria-label="My pull requests"
+              aria-busy={mine.isPending}
+              tabIndex={0}
+              className="scroll-thin min-h-0 flex-1 overflow-y-auto outline-none"
+            >
+              {/* Loading, failed and loaded each fade into the next; an error centres itself. */}
+              <FadeSwap
+                swapKey={listState}
+                className={listState === 'error' ? 'grid min-h-full place-items-center' : undefined}
+              >
+                {listState === 'loading' && <ListSkeleton rows={4} />}
+
+                {listState === 'error' && (
+                  <ErrorState
+                    title="Could not load your pull requests"
+                    error={mine.error}
+                    onRetry={() => void mine.refetch()}
                   />
-                ))}
-              </div>
-            ))}
-          </div>
+                )}
+
+                {mine.data && flat.length === 0 && (
+                  <div className="grid place-items-center pt-10">
+                    <EmptyState
+                      icon={<GitPullRequestDraft size={28} />}
+                      title="No open PRs of yours"
+                      hint="PRs you open appear here with what blocks them."
+                    />
+                  </div>
+                )}
+                <ListPresence>
+                  {sections.map((section) => (
+                    <ListItem key={section.group}>
+                      <div role="group" aria-label={groupMeta[section.group].label}>
+                        <div className="sticky top-0 z-10 flex h-7 items-center gap-2 border-b border-line bg-sunken/95 px-4 text-2xs font-medium tracking-wide text-fg-subtle uppercase backdrop-blur">
+                          {groupMeta[section.group].label}
+                          <span className="tabular-nums">{section.items.length}</span>
+                        </div>
+                        <ListPresence>
+                          {section.items.map((item) => (
+                            <ListItem key={item.id}>
+                              <MineRow
+                                ref={(element) => {
+                                  if (element) rowRefs.current.set(item.id, element);
+                                  else rowRefs.current.delete(item.id);
+                                }}
+                                item={item}
+                                selected={item.id === current?.id}
+                                onSelect={() => select(item, false)}
+                                onOpen={() => open(item)}
+                              />
+                            </ListItem>
+                          ))}
+                        </ListPresence>
+                      </div>
+                    </ListItem>
+                  ))}
+                </ListPresence>
+              </FadeSwap>
+            </LayoutScroll>
+          </IndicatorGroup>
         </Panel>
         <Separator className="w-px bg-line outline-none hover:bg-accent data-[separator=active]:bg-accent" />
         <Panel id="reader" minSize="34" className="flex flex-col">

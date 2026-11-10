@@ -1,5 +1,7 @@
+import type { ReactNode } from 'react';
 import { Link, useRouterState } from '@tanstack/react-router';
 import {
+  type LucideIcon,
   ChartColumn,
   ChevronsUpDown,
   GitPullRequest,
@@ -14,11 +16,42 @@ import { useMine, usePulls, useStatus } from '@/lib/queries';
 import { Avatar } from '@/ui/avatar';
 import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
+import { ActiveIndicator, IndicatorGroup } from '@/ui/motion';
 import { Tooltip } from '@/ui/tooltip';
 import { inQueue, queueMeta, queueSlugs } from '@/features/pulls/meta';
 import { AccountMenu, useSwitchingAccount } from '@/features/shell/account-menu';
 
 const themeIcons = { light: Sun, dark: Moon, system: Monitor };
+
+const navClass = (active: boolean) =>
+  cn(
+    'relative flex h-8 items-center rounded-sm px-2 text-sm transition-colors',
+    active ? 'font-medium text-fg' : 'text-fg-muted hover:bg-hover hover:text-fg',
+  );
+
+/** One navigation entry's content. The active entry carries the indicator that glides between them. */
+function NavContent({
+  active,
+  icon: Icon,
+  label,
+  trailing,
+}: {
+  active: boolean;
+  icon: LucideIcon;
+  label: string;
+  trailing?: ReactNode;
+}) {
+  return (
+    <>
+      {active && <ActiveIndicator variant="fill" />}
+      <span className="relative z-10 flex min-w-0 flex-1 items-center gap-2.5">
+        <Icon size={15} aria-hidden="true" className={active ? 'text-accent' : ''} />
+        <span className="flex-1 truncate">{label}</span>
+        {trailing}
+      </span>
+    </>
+  );
+}
 
 export function Sidebar() {
   const pulls = usePulls();
@@ -31,6 +64,9 @@ export function Sidebar() {
   const ThemeIcon = themeIcons[theme];
   const login = status.data?.account?.login;
   const switching = useSwitchingAccount();
+  const onMine = pathname.startsWith('/mine');
+  const onInsights = pathname.startsWith('/insights');
+  const onSettings = pathname.startsWith('/settings');
 
   return (
     <aside
@@ -44,147 +80,137 @@ export function Sidebar() {
         <span className="text-sm font-semibold tracking-tight">Review Desk</span>
       </div>
 
-      <nav aria-label="Queues" className="flex flex-col gap-px px-2 pt-2">
-        <div className="px-2 pb-1 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
-          Reviews
-        </div>
-        {queueSlugs.map((slug) => {
-          const meta = queueMeta[slug];
-          const Icon = meta.icon;
-          const count = items.filter((item) => inQueue(item, slug)).length;
-          const active = pathname.startsWith(`/inbox/${slug}`);
+      <IndicatorGroup>
+        <nav aria-label="Queues" className="flex flex-col gap-px px-2 pt-2">
+          <div className="px-2 pb-1 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
+            Reviews
+          </div>
+          {queueSlugs.map((slug) => {
+            const meta = queueMeta[slug];
+            const count = items.filter((item) => inQueue(item, slug)).length;
+            const active = pathname.startsWith(`/inbox/${slug}`);
 
-          return (
-            <Tooltip key={slug} label={meta.label} shortcut={meta.keys} side="right">
-              <Link
-                to="/inbox/$queue"
-                params={{ queue: slug }}
-                aria-current={active ? 'page' : undefined}
-                className={cn(
-                  'group flex h-8 items-center gap-2.5 rounded-sm px-2 text-sm transition-colors',
-                  active
-                    ? 'bg-selected font-medium text-fg'
-                    : 'text-fg-muted hover:bg-hover hover:text-fg',
-                )}
-              >
-                <Icon size={15} aria-hidden="true" className={active ? 'text-accent' : ''} />
-                <span className="flex-1 truncate">{meta.label}</span>
-                <span
-                  className={cn(
-                    'text-xs tabular-nums',
-                    slug === 'attention' && count > 0
-                      ? 'font-semibold text-accent'
-                      : 'text-fg-subtle',
-                  )}
+            return (
+              <Tooltip key={slug} label={meta.label} shortcut={meta.keys} side="right">
+                <Link
+                  to="/inbox/$queue"
+                  params={{ queue: slug }}
+                  aria-current={active ? 'page' : undefined}
+                  className={navClass(active)}
                 >
-                  {count}
-                </span>
-              </Link>
-            </Tooltip>
-          );
-        })}
-      </nav>
+                  <NavContent
+                    active={active}
+                    icon={meta.icon}
+                    label={meta.label}
+                    trailing={
+                      <span
+                        className={cn(
+                          'text-xs tabular-nums',
+                          slug === 'attention' && count > 0
+                            ? 'font-semibold text-accent'
+                            : 'text-fg-subtle',
+                        )}
+                      >
+                        {count}
+                      </span>
+                    }
+                  />
+                </Link>
+              </Tooltip>
+            );
+          })}
+        </nav>
 
-      <nav aria-label="Authoring" className="mt-4 flex flex-col gap-px px-2">
-        <div className="px-2 pb-1 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
-          Authoring
-        </div>
-        <Tooltip label="Your PRs and what blocks them" shortcut="g m" side="right">
-          <Link
-            to="/mine"
-            aria-current={pathname.startsWith('/mine') ? 'page' : undefined}
-            className={cn(
-              'flex h-8 items-center gap-2.5 rounded-sm px-2 text-sm transition-colors',
-              pathname.startsWith('/mine')
-                ? 'bg-selected font-medium text-fg'
-                : 'text-fg-muted hover:bg-hover hover:text-fg',
-            )}
-          >
-            <GitPullRequestArrow
-              size={15}
-              aria-hidden="true"
-              className={pathname.startsWith('/mine') ? 'text-accent' : ''}
-            />
-            <span className="flex-1 truncate">My PRs</span>
-            <span
-              className={cn(
-                'text-xs tabular-nums',
-                needsYou > 0 ? 'font-semibold text-accent' : 'text-fg-subtle',
-              )}
-              title={`${needsYou} need you`}
+        <nav aria-label="Authoring" className="mt-4 flex flex-col gap-px px-2">
+          <div className="px-2 pb-1 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
+            Authoring
+          </div>
+          <Tooltip label="Your PRs and what blocks them" shortcut="g m" side="right">
+            <Link
+              to="/mine"
+              aria-current={onMine ? 'page' : undefined}
+              className={navClass(onMine)}
             >
-              {needsYou > 0 ? needsYou : (mine.data?.items.length ?? 0)}
+              <NavContent
+                active={onMine}
+                icon={GitPullRequestArrow}
+                label="My PRs"
+                trailing={
+                  <span
+                    className={cn(
+                      'text-xs tabular-nums',
+                      needsYou > 0 ? 'font-semibold text-accent' : 'text-fg-subtle',
+                    )}
+                    title={`${needsYou} need you`}
+                  >
+                    {needsYou > 0 ? needsYou : (mine.data?.items.length ?? 0)}
+                  </span>
+                }
+              />
+            </Link>
+          </Tooltip>
+        </nav>
+
+        <nav aria-label="Insights" className="mt-4 flex flex-col gap-px px-2">
+          <Tooltip
+            label="Your review speed, volume and queue over time"
+            shortcut="g t"
+            side="right"
+          >
+            <Link
+              to="/insights"
+              aria-current={onInsights ? 'page' : undefined}
+              className={navClass(onInsights)}
+            >
+              <NavContent active={onInsights} icon={ChartColumn} label="Insights" />
+            </Link>
+          </Tooltip>
+        </nav>
+
+        <div className="mt-auto flex flex-col gap-px px-2 pb-2">
+          <Link
+            to="/settings"
+            aria-current={onSettings ? 'page' : undefined}
+            className={navClass(onSettings)}
+          >
+            <NavContent active={onSettings} icon={Settings} label="Settings" />
+          </Link>
+          <button
+            type="button"
+            onClick={appearance.cycleTheme}
+            className="flex h-8 items-center gap-2.5 rounded-sm px-2 text-sm text-fg-muted hover:bg-hover hover:text-fg"
+            title="Switch between light, dark and system themes"
+          >
+            <ThemeIcon size={15} aria-hidden="true" />
+            <span className="flex-1 text-left">
+              {theme === 'system'
+                ? 'System theme'
+                : theme === 'dark'
+                  ? 'Dark theme'
+                  : 'Light theme'}
             </span>
-          </Link>
-        </Tooltip>
-      </nav>
-
-      <nav aria-label="Insights" className="mt-4 flex flex-col gap-px px-2">
-        <Tooltip label="Your review speed, volume and queue over time" shortcut="g t" side="right">
-          <Link
-            to="/insights"
-            aria-current={pathname.startsWith('/insights') ? 'page' : undefined}
-            className={cn(
-              'flex h-8 items-center gap-2.5 rounded-sm px-2 text-sm transition-colors',
-              pathname.startsWith('/insights')
-                ? 'bg-selected font-medium text-fg'
-                : 'text-fg-muted hover:bg-hover hover:text-fg',
-            )}
-          >
-            <ChartColumn
-              size={15}
-              aria-hidden="true"
-              className={pathname.startsWith('/insights') ? 'text-accent' : ''}
-            />
-            <span className="flex-1 truncate">Insights</span>
-          </Link>
-        </Tooltip>
-      </nav>
-
-      <div className="mt-auto flex flex-col gap-px px-2 pb-2">
-        <Link
-          to="/settings"
-          className={cn(
-            'flex h-8 items-center gap-2.5 rounded-sm px-2 text-sm',
-            pathname.startsWith('/settings')
-              ? 'bg-selected font-medium text-fg'
-              : 'text-fg-muted hover:bg-hover hover:text-fg',
-          )}
-        >
-          <Settings size={15} aria-hidden="true" />
-          <span className="flex-1">Settings</span>
-        </Link>
-        <button
-          type="button"
-          onClick={appearance.cycleTheme}
-          className="flex h-8 items-center gap-2.5 rounded-sm px-2 text-sm text-fg-muted hover:bg-hover hover:text-fg"
-          title="Switch between light, dark and system themes"
-        >
-          <ThemeIcon size={15} aria-hidden="true" />
-          <span className="flex-1 text-left">
-            {theme === 'system' ? 'System theme' : theme === 'dark' ? 'Dark theme' : 'Light theme'}
-          </span>
-        </button>
-        <div className="mt-2 flex items-center gap-1 border-t border-line pt-2">
-          <AccountMenu>
-            <button
-              type="button"
-              className="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-left hover:bg-hover data-[state=open]:bg-hover"
-            >
-              <Avatar login={login ?? '?'} size={22} />
-              <span className="sr-only">Switch GitHub account, now</span>
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-xs font-medium">{login ?? 'Connecting…'}</div>
-                <div className="text-2xs text-fg-subtle">
-                  {switching ? 'Switching…' : 'via GitHub CLI'}
+          </button>
+          <div className="mt-2 flex items-center gap-1 border-t border-line pt-2">
+            <AccountMenu>
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-left hover:bg-hover data-[state=open]:bg-hover"
+              >
+                <Avatar login={login ?? '?'} size={22} />
+                <span className="sr-only">Switch GitHub account, now</span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium">{login ?? 'Connecting…'}</div>
+                  <div className="text-2xs text-fg-subtle">
+                    {switching ? 'Switching…' : 'via GitHub CLI'}
+                  </div>
                 </div>
-              </div>
-              <ChevronsUpDown size={13} className="shrink-0 text-fg-subtle" aria-hidden="true" />
-            </button>
-          </AccountMenu>
-          <Kbd keys="[Shift]+?" />
+                <ChevronsUpDown size={13} className="shrink-0 text-fg-subtle" aria-hidden="true" />
+              </button>
+            </AccountMenu>
+            <Kbd keys="[Shift]+?" />
+          </div>
         </div>
-      </div>
+      </IndicatorGroup>
     </aside>
   );
 }

@@ -6,6 +6,7 @@ import { shortAge, shortDateTime } from '@/lib/time';
 import { Avatar } from '@/ui/avatar';
 import { LinearMark } from '@/ui/brand-icons';
 import { cn } from '@/ui/cn';
+import { ActiveIndicator } from '@/ui/motion';
 import { AiReviewBadge } from '@/features/ai/ai-review-badge';
 import { CiIndicator, ReasonChips, reviewSummary } from '@/features/pulls/meta';
 
@@ -37,12 +38,11 @@ export const QueueRow = forwardRef<
       onDoubleClick={onOpen}
       className={cn(
         'group relative flex min-h-[var(--row-h)] cursor-default items-center gap-3 border-b border-line py-1.5 pr-4 pl-3 select-none',
+        'transition-colors',
         selected ? 'bg-selected' : 'hover:bg-hover',
       )}
     >
-      {selected && (
-        <span className="absolute inset-y-0 left-0 w-0.5 bg-selected-line" aria-hidden="true" />
-      )}
+      {selected && <ActiveIndicator variant="bar" />}
 
       <span
         className={cn('size-1.5 shrink-0 rounded-full', unread ? 'bg-accent' : 'bg-transparent')}

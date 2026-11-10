@@ -3,6 +3,7 @@ import type { AuthorItem } from '@review-desk/shared/author';
 import { shortAge } from '@/lib/time';
 import { LinearMark } from '@/ui/brand-icons';
 import { cn } from '@/ui/cn';
+import { ActiveIndicator } from '@/ui/motion';
 import { CiIndicator, tone } from '@/features/pulls/meta';
 import { blockerTone, waitState } from '@/features/mine/meta';
 
@@ -25,12 +26,11 @@ export const MineRow = forwardRef<
       onDoubleClick={onOpen}
       className={cn(
         'relative flex min-h-[var(--row-h)] cursor-default items-center gap-3 border-b border-line py-1.5 pr-4 pl-4 select-none',
+        'transition-colors',
         selected ? 'bg-selected' : 'hover:bg-hover',
       )}
     >
-      {selected && (
-        <span className="absolute inset-y-0 left-0 w-0.5 bg-selected-line" aria-hidden="true" />
-      )}
+      {selected && <ActiveIndicator variant="bar" />}
       <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
         <div className="flex min-w-0 items-center gap-2">
           <span

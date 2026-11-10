@@ -27,6 +27,9 @@ import { Button, IconButton } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { EmptyState } from '@/ui/empty-state';
 import { Kbd } from '@/ui/kbd';
+import { ActiveIndicator, Enter, IndicatorGroup } from '@/ui/motion';
+import { ErrorState } from '@/ui/error-state';
+import { DiffSkeleton, FileTreeSkeleton } from '@/features/review/files-skeleton';
 import type { Anchor, LineTarget } from '@/features/diff/diff-pane';
 import { FileTree } from '@/features/diff/file-tree';
 import { ThreadCard } from '@/features/diff/thread-card';
@@ -573,38 +576,39 @@ function Workspace() {
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-11 shrink-0 items-center gap-3 border-b border-line px-3">
-        <div
-          role="radiogroup"
-          aria-label="Diff range"
-          className="inline-flex rounded-sm border border-line bg-sunken p-0.5"
-        >
-          {(
-            [
-              ['all', 'All changes'],
-              ['since', 'Since your review'],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              role="radio"
-              aria-checked={mode === value}
-              disabled={value === 'since' && !reviewOid}
-              title={
-                value === 'since' && !reviewOid ? 'You have not reviewed this PR yet' : undefined
-              }
-              onClick={() => setSearch({ mode: value, file: undefined }, false)}
-              className={cn(
-                'h-6 rounded-xs px-2.5 text-xs disabled:opacity-40',
-                mode === value
-                  ? 'bg-panel font-medium text-fg shadow-sm'
-                  : 'text-fg-muted hover:text-fg',
-              )}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <IndicatorGroup>
+          <div
+            role="radiogroup"
+            aria-label="Diff range"
+            className="inline-flex rounded-sm border border-line bg-sunken p-0.5"
+          >
+            {(
+              [
+                ['all', 'All changes'],
+                ['since', 'Since your review'],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={mode === value}
+                disabled={value === 'since' && !reviewOid}
+                title={
+                  value === 'since' && !reviewOid ? 'You have not reviewed this PR yet' : undefined
+                }
+                onClick={() => setSearch({ mode: value, file: undefined }, false)}
+                className={cn(
+                  'relative h-6 rounded-xs px-2.5 text-xs transition-colors disabled:opacity-40',
+                  mode === value ? 'font-medium text-fg' : 'text-fg-muted hover:text-fg',
+                )}
+              >
+                {mode === value && <ActiveIndicator variant="pill" />}
+                <span className="relative z-10">{label}</span>
+              </button>
+            ))}
+          </div>
+        </IndicatorGroup>
         <Kbd keys="d" />
         {current && (
           <span
@@ -673,36 +677,40 @@ function Workspace() {
         onLayoutChanged={layout.onLayoutChanged}
       >
         <Panel id="tree" defaultSize="20" minSize="12" maxSize="40">
+          {/* The tree fades in once the diff arrives, replacing its outline. */}
           {diff.data ? (
-            <FileTree
-              ref={fileFilterRef}
-              files={files}
-              selected={current?.path}
-              threadCounts={threadCounts}
-              onSelect={(path) => selectFile(path)}
-              onToggleViewed={(path) => toggleViewed(path, false)}
-            />
-          ) : (
+            <Enter key="tree" preset="fade" className="h-full">
+              <FileTree
+                ref={fileFilterRef}
+                files={files}
+                selected={current?.path}
+                threadCounts={threadCounts}
+                onSelect={(path) => selectFile(path)}
+                onToggleViewed={(path) => toggleViewed(path, false)}
+              />
+            </Enter>
+          ) : diff.error ? (
             <div className="h-full border-r border-line bg-sunken" />
+          ) : (
+            <FileTreeSkeleton />
           )}
         </Panel>
         <Separator className="w-px bg-line outline-none hover:bg-accent data-[separator=active]:bg-accent" />
         <Panel id="diff" minSize="40">
           <div ref={diffRef} className="h-full min-w-0 bg-panel">
+            {/* Each state eases in; moving between files stays instant. */}
             {diff.isPending ? (
-              <p className="p-6 text-sm text-fg-muted" aria-busy="true">
-                Loading diff…
-              </p>
+              <DiffSkeleton />
             ) : diff.error ? (
-              <div className="grid h-full place-items-center">
-                <EmptyState
-                  icon={<CircleAlert size={28} />}
+              <Enter key="error" preset="fade" className="grid h-full place-items-center">
+                <ErrorState
                   title="Could not load the diff"
-                  hint={diff.error.message}
+                  error={diff.error}
+                  onRetry={() => void diff.refetch()}
                 />
-              </div>
+              </Enter>
             ) : !current ? (
-              <div className="grid h-full place-items-center">
+              <Enter key="empty" preset="fade" className="grid h-full place-items-center">
                 <EmptyState
                   icon={<History size={28} />}
                   title={
@@ -710,58 +718,60 @@ function Workspace() {
                   }
                   hint={kind === 'identical' ? 'Press D to see the full diff.' : undefined}
                 />
-              </div>
+              </Enter>
             ) : (
-              <FileView
-                key={`${mode}:${current.path}`}
-                file={current}
-                expanded={expanded.has(current.path)}
-                onExpand={() => setExpanded(new Set([...expanded, current.path]))}
-                threads={threadsByFile.get(current.path) ?? []}
-                drafts={drafts.filter((comment) => comment.path === current.path)}
-                composer={
-                  composer && composer.path === current.path && composer.line !== null
-                    ? composer
-                    : null
-                }
-                fileComposer={
-                  composer && composer.path === current.path && composer.line === null
-                    ? composerFor(composer)
-                    : null
-                }
-                view={view}
-                theme={resolvedTheme(theme)}
-                leftSideComments={mode === 'all'}
-                prUrl={item.url}
-                queuedComments={review.operations.filter(
-                  (operation) =>
-                    operation.action.type === 'comment' &&
-                    operation.action.comment.path === current.path &&
-                    operationUnsettled(operation.status),
-                )}
-                renderAnchor={renderAnchor}
-                renderThread={renderThread}
-                renderDraft={renderDraft}
-                onCommentLine={(target) => {
-                  if (locked) {
-                    openActivity();
-                    return;
+              <Enter key="ready" preset="fade" className="h-full">
+                <FileView
+                  key={`${mode}:${current.path}`}
+                  file={current}
+                  expanded={expanded.has(current.path)}
+                  onExpand={() => setExpanded(new Set([...expanded, current.path]))}
+                  threads={threadsByFile.get(current.path) ?? []}
+                  drafts={drafts.filter((comment) => comment.path === current.path)}
+                  composer={
+                    composer && composer.path === current.path && composer.line !== null
+                      ? composer
+                      : null
                   }
+                  fileComposer={
+                    composer && composer.path === current.path && composer.line === null
+                      ? composerFor(composer)
+                      : null
+                  }
+                  view={view}
+                  theme={resolvedTheme(theme)}
+                  leftSideComments={mode === 'all'}
+                  prUrl={item.url}
+                  queuedComments={review.operations.filter(
+                    (operation) =>
+                      operation.action.type === 'comment' &&
+                      operation.action.comment.path === current.path &&
+                      operationUnsettled(operation.status),
+                  )}
+                  renderAnchor={renderAnchor}
+                  renderThread={renderThread}
+                  renderDraft={renderDraft}
+                  onCommentLine={(target) => {
+                    if (locked) {
+                      openActivity();
+                      return;
+                    }
 
-                  setRecoveredBody('');
-                  setComposerError(null);
-                  setComposer({ ...target, path: current.path });
-                }}
-                onCommentFile={() => {
-                  if (locked) {
-                    openActivity();
-                    return;
-                  }
-                  setRecoveredBody('');
-                  setComposer({ path: current.path, line: null });
-                }}
-                onSelectLines={setSelection}
-              />
+                    setRecoveredBody('');
+                    setComposerError(null);
+                    setComposer({ ...target, path: current.path });
+                  }}
+                  onCommentFile={() => {
+                    if (locked) {
+                      openActivity();
+                      return;
+                    }
+                    setRecoveredBody('');
+                    setComposer({ path: current.path, line: null });
+                  }}
+                  onSelectLines={setSelection}
+                />
+              </Enter>
             )}
           </div>
         </Panel>
@@ -770,34 +780,35 @@ function Workspace() {
             <Separator className="w-px bg-line outline-none hover:bg-accent data-[separator=active]:bg-accent" />
             <Panel id="rail" defaultSize="24" minSize="16" maxSize="40">
               <div className="flex h-full flex-col border-l border-line bg-sunken">
-                <div
-                  role="tablist"
-                  aria-label="Side panel"
-                  className="flex shrink-0 gap-1 border-b border-line px-2 pt-2"
-                >
-                  {(
-                    [
-                      ['threads', `Threads${unresolved.length ? ` · ${unresolved.length}` : ''}`],
-                      ['assist', '✦ Assist'],
-                    ] as const
-                  ).map(([value, label]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      role="tab"
-                      aria-selected={railTab === value}
-                      onClick={() => setRailTab(value)}
-                      className={cn(
-                        '-mb-px border-b-2 px-2 pb-1.5 text-xs',
-                        railTab === value
-                          ? 'border-accent font-medium text-fg'
-                          : 'border-transparent text-fg-muted hover:text-fg',
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
+                <IndicatorGroup>
+                  <div
+                    role="tablist"
+                    aria-label="Side panel"
+                    className="flex shrink-0 gap-1 border-b border-line px-2 pt-2"
+                  >
+                    {(
+                      [
+                        ['threads', `Threads${unresolved.length ? ` · ${unresolved.length}` : ''}`],
+                        ['assist', '✦ Assist'],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        role="tab"
+                        aria-selected={railTab === value}
+                        onClick={() => setRailTab(value)}
+                        className={cn(
+                          'relative -mb-px px-2 pb-2 text-xs transition-colors',
+                          railTab === value ? 'font-medium text-fg' : 'text-fg-muted hover:text-fg',
+                        )}
+                      >
+                        {railTab === value && <ActiveIndicator variant="underline" />}
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </IndicatorGroup>
                 <div className="min-h-0 flex-1">
                   {railTab === 'threads' ? (
                     <ThreadsRail

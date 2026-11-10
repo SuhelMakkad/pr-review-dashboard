@@ -1,12 +1,22 @@
 import { useState, useSyncExternalStore, type ReactNode } from 'react';
-import { DropdownMenu } from 'radix-ui';
 import { Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAccounts, useStatus, useSwitchAccount } from '@/lib/queries';
 import { Avatar } from '@/ui/avatar';
-
-const menuItemClass =
-  'flex h-8 cursor-default items-center gap-2 rounded-sm px-2 outline-none data-[disabled]:opacity-50 data-[highlighted]:bg-selected';
+import { FadeSwap } from '@/ui/motion';
+import { Skeleton, SkeletonRegion } from '@/ui/skeleton';
+import {
+  Menu,
+  MenuContent,
+  MenuItemIndicator,
+  MenuLabel,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuTrigger,
+  menuItemClass,
+  menuLabelClass,
+} from '@/ui/menu';
 
 /**
  * Whether a switch is in progress, shared by the sidebar, Settings and the command palette. A
@@ -74,21 +84,34 @@ export function AccountMenu({
 
   return (
     // Not modal, so the rest of the page stays reachable for assistive technology while it is open.
-    <DropdownMenu.Root open={open} onOpenChange={setOpen} modal={false}>
-      <DropdownMenu.Trigger asChild>{children}</DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          side={side}
-          align={align}
-          sideOffset={6}
-          className="z-50 w-64 rounded-md border border-line bg-elevated p-1 text-sm text-fg shadow-popover"
-        >
-          <DropdownMenu.Label className="px-2 pt-1.5 pb-1 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
-            GitHub accounts
-          </DropdownMenu.Label>
+    <Menu open={open} onOpenChange={setOpen} modal={false}>
+      <MenuTrigger asChild>{children}</MenuTrigger>
+      <MenuContent side={side} align={align} sideOffset={6} className="w-64">
+        <MenuLabel className={menuLabelClass}>GitHub accounts</MenuLabel>
 
+        {/* The menu eases to the size of whatever the GitHub CLI check returns. */}
+        <FadeSwap
+          swapKey={
+            accounts.isPending
+              ? 'loading'
+              : accounts.isError
+                ? 'error'
+                : accounts.data.switchable
+                  ? 'accounts'
+                  : 'fixed'
+          }
+          smoothHeight
+        >
           {accounts.isPending ? (
-            <p className="px-2 py-1.5 text-xs text-fg-muted">Checking GitHub CLI sign-ins…</p>
+            <SkeletonRegion label="Checking GitHub CLI sign-ins…">
+              {[0, 1].map((index) => (
+                <div key={index} className="flex h-8 items-center gap-2 px-2">
+                  <span className="w-4" />
+                  <Skeleton className="size-[18px] rounded-full" />
+                  <Skeleton className={index ? 'h-3 w-20' : 'h-3 w-28'} />
+                </div>
+              ))}
+            </SkeletonRegion>
           ) : accounts.isError ? (
             <p role="alert" className="px-2 py-1.5 text-xs text-fail">
               {accounts.error.message}
@@ -96,18 +119,18 @@ export function AccountMenu({
           ) : !accounts.data.switchable ? (
             <p className="px-2 py-1.5 text-xs text-fg-muted">This server cannot switch accounts.</p>
           ) : (
-            <DropdownMenu.RadioGroup value={current ?? ''} onValueChange={switchTo}>
+            <MenuRadioGroup value={current ?? ''} onValueChange={switchTo}>
               {accounts.data.accounts.map((account) => (
-                <DropdownMenu.RadioItem
+                <MenuRadioItem
                   key={account.login}
                   value={account.login}
                   disabled={!account.ok || switching}
                   className={menuItemClass}
                 >
                   <span className="w-4">
-                    <DropdownMenu.ItemIndicator>
+                    <MenuItemIndicator>
                       <Check size={14} />
-                    </DropdownMenu.ItemIndicator>
+                    </MenuItemIndicator>
                   </span>
                   <Avatar login={account.login} size={18} />
                   <span className="flex-1 truncate">{account.login}</span>
@@ -121,18 +144,18 @@ export function AccountMenu({
                       {account.inProgress} waiting
                     </span>
                   ) : null}
-                </DropdownMenu.RadioItem>
+                </MenuRadioItem>
               ))}
-            </DropdownMenu.RadioGroup>
+            </MenuRadioGroup>
           )}
+        </FadeSwap>
 
-          <DropdownMenu.Separator className="my-1 h-px bg-line" />
-          <p className="px-2 pt-0.5 pb-1.5 text-2xs leading-relaxed text-fg-subtle">
-            Each account keeps its own queue, drafts and history. Add one with{' '}
-            <code>gh auth login</code>.
-          </p>
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+        <MenuSeparator />
+        <p className="px-2 pt-0.5 pb-1.5 text-2xs leading-relaxed text-fg-subtle">
+          Each account keeps its own queue, drafts and history. Add one with{' '}
+          <code>gh auth login</code>.
+        </p>
+      </MenuContent>
+    </Menu>
   );
 }

@@ -6,14 +6,19 @@ import { IconButton } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { EmptyState } from '@/ui/empty-state';
 import { Kbd } from '@/ui/kbd';
+import { ActiveIndicator, Enter, IndicatorGroup } from '@/ui/motion';
+import { PullSkeleton } from '@/features/pulls/pull-skeleton';
 import { useCurrentPull } from '@/features/pulls/use-current-pull';
 import { NotTrackedActions } from '@/features/pulls/use-track';
 
 const tabClass = (active: boolean) =>
   cn(
-    'inline-flex h-12 items-center gap-1.5 border-b-2 px-3 text-sm',
-    active ? 'border-accent font-medium text-fg' : 'border-transparent text-fg-muted hover:text-fg',
+    'relative inline-flex h-12 items-center gap-1.5 px-3 text-sm transition-colors',
+    active ? 'font-medium text-fg' : 'text-fg-muted hover:text-fg',
   );
+
+/** The active tab's underline; it glides to whichever tab becomes active. */
+const TabUnderline = () => <ActiveIndicator variant="underline" />;
 
 /** Frame for a single PR: header, Overview / Files tabs, and the not-tracked state. */
 export function PullLayout() {
@@ -59,21 +64,25 @@ export function PullLayout() {
           <span className="truncate text-sm font-medium">{item?.title}</span>
         </div>
         {params && item && (
-          <nav aria-label="Pull request sections" className="flex shrink-0 items-center">
-            <Link to="/pr/$owner/$repo/$number" params={params} className={tabClass(!onFiles)}>
-              Overview <Kbd keys="1" />
-            </Link>
-            <Link
-              to="/pr/$owner/$repo/$number/files"
-              params={params}
-              search={{}}
-              className={tabClass(onFiles)}
-            >
-              Files
-              <span className="text-xs text-fg-subtle tabular-nums">{item.changedFiles}</span>
-              <Kbd keys="2" />
-            </Link>
-          </nav>
+          <IndicatorGroup>
+            <nav aria-label="Pull request sections" className="flex shrink-0 items-center">
+              <Link to="/pr/$owner/$repo/$number" params={params} className={tabClass(!onFiles)}>
+                {!onFiles && <TabUnderline />}
+                Overview <Kbd keys="1" />
+              </Link>
+              <Link
+                to="/pr/$owner/$repo/$number/files"
+                params={params}
+                search={{}}
+                className={tabClass(onFiles)}
+              >
+                {onFiles && <TabUnderline />}
+                Files
+                <span className="text-xs text-fg-subtle tabular-nums">{item.changedFiles}</span>
+                <Kbd keys="2" />
+              </Link>
+            </nav>
+          </IndicatorGroup>
         )}
         {item && (
           <a
@@ -88,7 +97,9 @@ export function PullLayout() {
       </header>
       <div className="min-h-0 flex-1">
         {item ? (
-          <Outlet />
+          <Enter key={onFiles ? 'files' : 'overview'} preset="fade" className="h-full">
+            <Outlet />
+          </Enter>
         ) : loaded ? (
           <div className="grid h-full place-items-center">
             <EmptyState
@@ -97,7 +108,9 @@ export function PullLayout() {
               action={ref && <NotTrackedActions pullRef={ref} />}
             />
           </div>
-        ) : null}
+        ) : (
+          <PullSkeleton variant="page" />
+        )}
       </div>
     </div>
   );

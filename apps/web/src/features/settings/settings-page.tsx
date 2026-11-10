@@ -5,6 +5,8 @@ import { useLive } from '@/lib/live';
 import { useStatus } from '@/lib/queries';
 import { dateTime, shortDateTime } from '@/lib/time';
 import { cn } from '@/ui/cn';
+import { ActiveIndicator, Enter, IndicatorGroup } from '@/ui/motion';
+import { Skeleton, SkeletonRegion } from '@/ui/skeleton';
 import {
   aiTaskLabels,
   type AiEffort,
@@ -44,6 +46,27 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
   );
 }
 
+/** A settings section in outline while its data loads: its heading, then its rows. */
+function SectionSkeleton({ label, rows }: { label: string; rows: number }) {
+  return (
+    <SkeletonRegion label={label}>
+      <Skeleton className="mt-8 h-3 w-24" />
+      {Array.from({ length: rows }, (_, index) => (
+        <div
+          key={index}
+          className="flex items-center justify-between gap-6 border-b border-line py-4"
+        >
+          <div className="space-y-1.5">
+            <Skeleton className="h-3.5 w-32" />
+            <Skeleton className="h-3 w-56" />
+          </div>
+          <Skeleton className="h-7 w-28 rounded-sm" />
+        </div>
+      ))}
+    </SkeletonRegion>
+  );
+}
+
 function Segmented<T extends string>({
   value,
   options,
@@ -56,26 +79,26 @@ function Segmented<T extends string>({
   label: string;
 }) {
   return (
-    <ToggleGroup.Root
-      type="single"
-      value={value}
-      onValueChange={(next) => next && onChange(next as T)}
-      aria-label={label}
-      className="inline-flex rounded-sm border border-line bg-sunken p-0.5"
-    >
-      {options.map((option) => (
-        <ToggleGroup.Item
-          key={option.value}
-          value={option.value}
-          className={cn(
-            'h-7 rounded-xs px-3 text-xs text-fg-muted',
-            'data-[state=on]:bg-panel data-[state=on]:font-medium data-[state=on]:text-fg data-[state=on]:shadow-sm',
-          )}
-        >
-          {option.label}
-        </ToggleGroup.Item>
-      ))}
-    </ToggleGroup.Root>
+    <IndicatorGroup>
+      <ToggleGroup.Root
+        type="single"
+        value={value}
+        onValueChange={(next) => next && onChange(next as T)}
+        aria-label={label}
+        className="inline-flex rounded-sm border border-line bg-sunken p-0.5"
+      >
+        {options.map((option) => (
+          <ToggleGroup.Item
+            key={option.value}
+            value={option.value}
+            className="relative h-7 rounded-xs px-3 text-xs text-fg-muted transition-colors hover:text-fg data-[state=on]:font-medium data-[state=on]:text-fg"
+          >
+            {option.value === value && <ActiveIndicator variant="pill" />}
+            <span className="relative z-10">{option.label}</span>
+          </ToggleGroup.Item>
+        ))}
+      </ToggleGroup.Root>
+    </IndicatorGroup>
   );
 }
 
@@ -235,7 +258,7 @@ function AiSection({ account }: { account: string }) {
   const providers = overview.data?.providers ?? [];
   const codex = overview.data?.codex ?? null;
 
-  if (!settings) return null;
+  if (!settings) return <SectionSkeleton label="Loading AI settings…" rows={4} />;
 
   const update = (next: typeof settings) => save.mutate(next);
   const autoReview = autoPending ?? settings.autoReview.enabled;
@@ -260,7 +283,7 @@ function AiSection({ account }: { account: string }) {
   };
 
   return (
-    <>
+    <Enter preset="fade">
       <h2 className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
         AI assist
       </h2>
@@ -382,7 +405,7 @@ function AiSection({ account }: { account: string }) {
           </span>
         </Row>
       ))}
-    </>
+    </Enter>
   );
 }
 
@@ -420,93 +443,100 @@ function LinearSection() {
     void navigate({ to: '/settings', search: {}, replace: true });
   }, [search.linear, navigate, queryClient]);
 
-  if (!data) return null;
+  if (!data) return <SectionSkeleton label="Loading the Linear connection…" rows={1} />;
 
   const via = data.method === 'oauth' ? 'your Linear sign-in' : 'a personal API key';
 
   return (
-    <section aria-labelledby="settings-linear">
-      <h2
-        id="settings-linear"
-        className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase"
-      >
-        Linear
-      </h2>
-      <Row
-        label="Connection"
-        hint={
-          data.connected
-            ? `Connected to ${data.workspace} with ${via}. Teams: ${data.teamKeys.join(', ')}.`
-            : 'Shows the status, owner and priority of tickets your PRs reference.'
-        }
-      >
-        {data.connected ? (
-          <span className="flex items-center gap-3">
-            <span className="text-sm text-ok">Connected</span>
-            {data.method === 'oauth' && data.canSignIn && (
-              <Button size="sm" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>
-                Disconnect
-              </Button>
-            )}
-          </span>
-        ) : data.canSignIn ? (
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={connect.isPending}
-            onClick={() => connect.mutate()}
-          >
-            {connect.isPending ? 'Opening Linear…' : 'Connect Linear'}
-          </Button>
-        ) : (
-          <span className={cn('text-sm', data.error ? 'text-fail' : 'text-fg-muted')}>
-            {data.error ? 'Key rejected' : 'Not connected'}
-          </span>
-        )}
-      </Row>
-      {!data.connected && (
-        <div className="space-y-3 border-b border-line py-4 text-sm text-fg-muted">
-          {data.error && <p className="text-xs text-fail">{data.error}</p>}
-          {data.canSignIn && (
-            <p className="text-xs">
-              Connect opens Linear, where you approve read-only access for Review Desk. It goes
-              through Linear’s MCP server, so it works even where personal API keys are turned off.
-              The sign-in is kept in your macOS Keychain, never in this app’s pages or data folder.
-            </p>
-          )}
-          <details className="group text-xs" open={!data.canSignIn}>
-            <summary className="cursor-default select-none hover:text-fg">
-              {data.canSignIn ? 'Use a personal API key instead' : 'Use a personal API key'}
-            </summary>
-            <div className="mt-2 space-y-2">
-              <p>
-                If your workspace allows personal API keys (Linear Settings → Security & access →
-                Personal API keys), create one and store it in your macOS Keychain by running this
-                in a terminal and pasting the key when asked:
-              </p>
-              <div className="flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded-sm border border-line bg-sunken px-2 py-1.5 text-xs text-fg">
-                  {data.setupCommand}
-                </code>
+    <Enter preset="fade">
+      <section aria-labelledby="settings-linear">
+        <h2
+          id="settings-linear"
+          className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase"
+        >
+          Linear
+        </h2>
+        <Row
+          label="Connection"
+          hint={
+            data.connected
+              ? `Connected to ${data.workspace} with ${via}. Teams: ${data.teamKeys.join(', ')}.`
+              : 'Shows the status, owner and priority of tickets your PRs reference.'
+          }
+        >
+          {data.connected ? (
+            <span className="flex items-center gap-3">
+              <span className="text-sm text-ok">Connected</span>
+              {data.method === 'oauth' && data.canSignIn && (
                 <Button
                   size="sm"
-                  onClick={() =>
-                    void navigator.clipboard
-                      .writeText(data.setupCommand)
-                      .then(() => toast('Command copied'))
-                  }
+                  disabled={disconnect.isPending}
+                  onClick={() => disconnect.mutate()}
                 >
-                  Copy
+                  Disconnect
                 </Button>
-                <Button size="sm" onClick={() => void status.refetch()}>
-                  Check again
-                </Button>
+              )}
+            </span>
+          ) : data.canSignIn ? (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={connect.isPending}
+              onClick={() => connect.mutate()}
+            >
+              {connect.isPending ? 'Opening Linear…' : 'Connect Linear'}
+            </Button>
+          ) : (
+            <span className={cn('text-sm', data.error ? 'text-fail' : 'text-fg-muted')}>
+              {data.error ? 'Key rejected' : 'Not connected'}
+            </span>
+          )}
+        </Row>
+        {!data.connected && (
+          <div className="space-y-3 border-b border-line py-4 text-sm text-fg-muted">
+            {data.error && <p className="text-xs text-fail">{data.error}</p>}
+            {data.canSignIn && (
+              <p className="text-xs">
+                Connect opens Linear, where you approve read-only access for Review Desk. It goes
+                through Linear’s MCP server, so it works even where personal API keys are turned
+                off. The sign-in is kept in your macOS Keychain, never in this app’s pages or data
+                folder.
+              </p>
+            )}
+            <details className="group text-xs" open={!data.canSignIn}>
+              <summary className="cursor-default select-none hover:text-fg">
+                {data.canSignIn ? 'Use a personal API key instead' : 'Use a personal API key'}
+              </summary>
+              <div className="mt-2 space-y-2">
+                <p>
+                  If your workspace allows personal API keys (Linear Settings → Security & access →
+                  Personal API keys), create one and store it in your macOS Keychain by running this
+                  in a terminal and pasting the key when asked:
+                </p>
+                <div className="flex items-center gap-2">
+                  <code className="min-w-0 flex-1 truncate rounded-sm border border-line bg-sunken px-2 py-1.5 text-xs text-fg">
+                    {data.setupCommand}
+                  </code>
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      void navigator.clipboard
+                        .writeText(data.setupCommand)
+                        .then(() => toast('Command copied'))
+                    }
+                  >
+                    Copy
+                  </Button>
+                  <Button size="sm" onClick={() => void status.refetch()}>
+                    Check again
+                  </Button>
+                </div>
               </div>
-            </div>
-          </details>
-        </div>
-      )}
-    </section>
+            </details>
+          </div>
+        )}
+      </section>
+    </Enter>
   );
 }
 
@@ -557,7 +587,7 @@ function NotificationsSection({ account }: { account: string }) {
     if (notificationsSupported()) setPermission(Notification.permission);
   }, []);
 
-  if (!settings) return null;
+  if (!settings) return <SectionSkeleton label="Loading notification settings…" rows={3} />;
 
   const update = (next: Partial<NotificationSettings>) => {
     const merged = { ...settings, ...next };
@@ -573,7 +603,7 @@ function NotificationsSection({ account }: { account: string }) {
   };
 
   return (
-    <>
+    <Enter preset="fade">
       <h2 className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
         Notifications
       </h2>
@@ -667,6 +697,6 @@ function NotificationsSection({ account }: { account: string }) {
           onChange={(badgeIncludesMine) => update({ badgeIncludesMine })}
         />
       </div>
-    </>
+    </Enter>
   );
 }

@@ -1,6 +1,5 @@
 import type React from 'react';
 import type { ReactNode } from 'react';
-import { DropdownMenu } from 'radix-ui';
 import {
   AlertTriangle,
   ChevronDown,
@@ -28,6 +27,8 @@ import { relativePhrase } from '@/lib/time';
 import { Button } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
+import { Menu, MenuContent, MenuItem, MenuTrigger, menuItemClass } from '@/ui/menu';
+import { FadeSwap } from '@/ui/motion';
 import { useAi, useAiOverview } from '@/features/ai/use-ai';
 
 const providerLabel: Record<AiProvider, string> = { codex: 'Codex', claude: 'Claude' };
@@ -71,8 +72,8 @@ export function RunButton({
       >
         {running ? 'Working…' : label}
       </Button>
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
+      <Menu>
+        <MenuTrigger asChild>
           <button
             type="button"
             aria-label="Choose the AI agent"
@@ -81,41 +82,35 @@ export function RunButton({
           >
             <ChevronDown size={12} />
           </button>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content
-            align="end"
-            sideOffset={4}
-            className="z-50 min-w-[200px] rounded-md border border-line bg-elevated p-1 text-sm shadow-popover"
-          >
-            {providers.map((provider) => (
-              <DropdownMenu.Item
-                key={provider.id}
-                disabled={!provider.available || (provider.id === 'codex' && codexPaused)}
-                title={
-                  provider.id === 'codex' && codexPaused
-                    ? (overview.data?.codex?.problem ?? undefined)
-                    : undefined
-                }
-                onSelect={() => onRun(provider.id)}
-                className="flex h-8 cursor-default items-center gap-2 rounded-sm px-2 outline-none data-[disabled]:opacity-50 data-[highlighted]:bg-selected"
-              >
-                <span className="flex-1">
-                  Run with {provider.label}
-                  {provider.id === fallback && <span className="text-fg-subtle"> · default</span>}
-                </span>
-                <span className="text-2xs text-fg-subtle">
-                  {!provider.available
-                    ? 'not installed'
-                    : provider.id === 'codex' && codexPaused
-                      ? 'paused'
-                      : (provider.version ?? '')}
-                </span>
-              </DropdownMenu.Item>
-            ))}
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
+        </MenuTrigger>
+        <MenuContent align="end" sideOffset={4} className="min-w-[200px]">
+          {providers.map((provider) => (
+            <MenuItem
+              key={provider.id}
+              disabled={!provider.available || (provider.id === 'codex' && codexPaused)}
+              title={
+                provider.id === 'codex' && codexPaused
+                  ? (overview.data?.codex?.problem ?? undefined)
+                  : undefined
+              }
+              onSelect={() => onRun(provider.id)}
+              className={menuItemClass}
+            >
+              <span className="flex-1">
+                Run with {provider.label}
+                {provider.id === fallback && <span className="text-fg-subtle"> · default</span>}
+              </span>
+              <span className="text-2xs text-fg-subtle">
+                {!provider.available
+                  ? 'not installed'
+                  : provider.id === 'codex' && codexPaused
+                    ? 'paused'
+                    : (provider.version ?? '')}
+              </span>
+            </MenuItem>
+          ))}
+        </MenuContent>
+      </Menu>
     </span>
   );
 }
@@ -144,6 +139,15 @@ export function AiCard({
 }) {
   const busy = run.status === 'queued' || run.status === 'running';
   const preparing = starting && !busy;
+  // The body crossfades between these states; progress updates within a state do not.
+  const state =
+    preparing || busy
+      ? 'working'
+      : run.status === 'cancelled' || run.status === 'interrupted'
+        ? 'stopped'
+        : run.status === 'failed' || run.status === 'paused'
+          ? run.status
+          : 'done';
 
   return (
     <div className="rounded-md border border-dashed border-ai/50 bg-ai/[0.03] px-3 py-2.5">
@@ -201,48 +205,50 @@ export function AiCard({
           )}
         </span>
       </div>
-      {preparing || busy ? (
-        <p className="flex items-center gap-2 text-sm text-fg-muted" role="status">
-          <LoaderCircle size={13} className="animate-spin text-ai" aria-hidden="true" />
-          {preparing
-            ? run.task === 'full_review'
-              ? 'Preparing review…'
-              : 'Starting…'
-            : (run.progress ?? 'Working…')}
-        </p>
-      ) : run.status === 'failed' ? (
-        <p className="text-sm text-fail" role="alert">
-          {run.error ?? 'The agent failed.'}
-        </p>
-      ) : run.status === 'paused' ? (
-        <div className="space-y-1 text-sm text-fg-muted">
-          <p role="status">
-            {run.pauseReason === 'restart'
-              ? 'Paused by a server restart. Your progress is saved.'
-              : 'Paused. Your progress is saved.'}
+      <FadeSwap swapKey={state} smoothHeight>
+        {preparing || busy ? (
+          <p className="flex items-center gap-2 text-sm text-fg-muted" role="status">
+            <LoaderCircle size={13} className="animate-spin text-ai" aria-hidden="true" />
+            {preparing
+              ? run.task === 'full_review'
+                ? 'Preparing review…'
+                : 'Starting…'
+              : (run.progress ?? 'Working…')}
           </p>
-          {run.pauseReason === 'restart' && !run.error && run.resumable && (
-            <p className="text-xs">This run will resume after the server reconnects.</p>
-          )}
-          {run.error && (
-            <p role="alert" className="text-xs text-fail">
-              {run.error}
+        ) : run.status === 'failed' ? (
+          <p className="text-sm text-fail" role="alert">
+            {run.error ?? 'The agent failed.'}
+          </p>
+        ) : run.status === 'paused' ? (
+          <div className="space-y-1 text-sm text-fg-muted">
+            <p role="status">
+              {run.pauseReason === 'restart'
+                ? 'Paused by a server restart. Your progress is saved.'
+                : 'Paused. Your progress is saved.'}
             </p>
-          )}
-          {run.stale && (
-            <p className="text-xs text-pending">
-              {run.staleReason} Generate a new review to cover the changes.
-            </p>
-          )}
-        </div>
-      ) : run.status === 'cancelled' || run.status === 'interrupted' ? (
-        <p className="flex items-center gap-2 text-sm text-fg-muted">
-          <CircleDashed size={13} aria-hidden="true" />
-          {run.status === 'cancelled' ? 'Stopped.' : 'Interrupted by a restart.'}
-        </p>
-      ) : (
-        children
-      )}
+            {run.pauseReason === 'restart' && !run.error && run.resumable && (
+              <p className="text-xs">This run will resume after the server reconnects.</p>
+            )}
+            {run.error && (
+              <p role="alert" className="text-xs text-fail">
+                {run.error}
+              </p>
+            )}
+            {run.stale && (
+              <p className="text-xs text-pending">
+                {run.staleReason} Generate a new review to cover the changes.
+              </p>
+            )}
+          </div>
+        ) : run.status === 'cancelled' || run.status === 'interrupted' ? (
+          <p className="flex items-center gap-2 text-sm text-fg-muted">
+            <CircleDashed size={13} aria-hidden="true" />
+            {run.status === 'cancelled' ? 'Stopped.' : 'Interrupted by a restart.'}
+          </p>
+        ) : (
+          children
+        )}
+      </FadeSwap>
       {run.creditsUsed !== null && (
         <p className="mt-2 text-2xs text-pending">
           Your Codex credit balance fell by {run.creditsUsed} during this run.
@@ -457,48 +463,52 @@ export function AssistPanel({
         const launch = (provider?: AiProvider, force?: boolean) =>
           ai.start.mutate({ task, provider, force });
 
+        // Running a task for the first time grows its placeholder row into the result card.
         if (!run) {
           return (
-            <div
-              key={task}
-              className="flex items-center justify-between gap-3 rounded-md border border-dashed border-line px-3 py-2"
-            >
-              <span className="text-xs text-fg-muted">{aiTaskLabels[task]}</span>
-              <RunButton
-                label="Run"
-                shortcut={task === 'brief' ? 'b' : undefined}
-                running={ai.isStarting(task)}
-                onRun={(provider) => launch(provider)}
-              />
-            </div>
+            <FadeSwap key={task} swapKey="idle" smoothHeight>
+              <div className="flex items-center justify-between gap-3 rounded-md border border-dashed border-line px-3 py-2">
+                <span className="text-xs text-fg-muted">{aiTaskLabels[task]}</span>
+                <RunButton
+                  label="Run"
+                  shortcut={task === 'brief' ? 'b' : undefined}
+                  running={ai.isStarting(task)}
+                  onRun={(provider) => launch(provider)}
+                />
+              </div>
+            </FadeSwap>
           );
         }
 
         return (
-          <AiCard
-            key={task}
-            run={run}
-            title={aiTaskLabels[task]}
-            starting={ai.isStarting(task)}
-            onCancel={() => ai.cancel.mutate(run.id)}
-            onRerun={() => launch(run.provider, true)}
-            onPause={() => ai.pause(run.id)}
-            onResume={() => ai.resume(run.id)}
-          >
-            {task === 'brief' && run.result && (
-              <BriefView result={run.result as BriefResult} onOpenFile={onOpenFile} />
-            )}
-            {task === 'since_review' && run.result && (
-              <SinceReviewView
-                result={run.result as SinceReviewResult}
-                threadLabel={threadLabel}
-                onOpenThread={onOpenThread}
-              />
-            )}
-            {task === 'author_feedback' && run.result && (
-              <FeedbackView result={run.result as AuthorFeedbackResult} threadLabel={threadLabel} />
-            )}
-          </AiCard>
+          <FadeSwap key={task} swapKey="run" smoothHeight>
+            <AiCard
+              run={run}
+              title={aiTaskLabels[task]}
+              starting={ai.isStarting(task)}
+              onCancel={() => ai.cancel.mutate(run.id)}
+              onRerun={() => launch(run.provider, true)}
+              onPause={() => ai.pause(run.id)}
+              onResume={() => ai.resume(run.id)}
+            >
+              {task === 'brief' && run.result && (
+                <BriefView result={run.result as BriefResult} onOpenFile={onOpenFile} />
+              )}
+              {task === 'since_review' && run.result && (
+                <SinceReviewView
+                  result={run.result as SinceReviewResult}
+                  threadLabel={threadLabel}
+                  onOpenThread={onOpenThread}
+                />
+              )}
+              {task === 'author_feedback' && run.result && (
+                <FeedbackView
+                  result={run.result as AuthorFeedbackResult}
+                  threadLabel={threadLabel}
+                />
+              )}
+            </AiCard>
+          </FadeSwap>
         );
       })}
       {ai.start.error && (

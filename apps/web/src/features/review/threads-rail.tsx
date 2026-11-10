@@ -2,6 +2,7 @@ import type { DiffFile } from '@review-desk/shared/diff';
 import type { ReviewThread } from '@review-desk/shared/types';
 import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
+import { LayoutItem, LayoutScroll } from '@/ui/motion';
 
 export function ThreadsRail({
   threads,
@@ -34,7 +35,11 @@ export function ThreadsRail({
           {open} open · <Kbd keys="u" />
         </span>
       </div>
-      <ol className="scroll-thin min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3">
+      {/* Resolving a thread re-sorts it to the end; the items glide to their new places. */}
+      <LayoutScroll
+        as="ol"
+        className="scroll-thin min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
+      >
         {sorted.length === 0 && (
           <li className="px-1 py-6 text-center text-xs text-fg-subtle">No review threads yet.</li>
         )}
@@ -45,7 +50,7 @@ export function ThreadsRail({
           ).length;
 
           return (
-            <li key={thread.id}>
+            <LayoutItem as="li" key={thread.id}>
               <button
                 type="button"
                 onClick={() => onOpen(thread)}
@@ -81,10 +86,10 @@ export function ThreadsRail({
                   {first?.body}
                 </p>
               </button>
-            </li>
+            </LayoutItem>
           );
         })}
-      </ol>
+      </LayoutScroll>
     </aside>
   );
 }

@@ -30,6 +30,9 @@ import { Button } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
 import { MarkdownView } from '@/ui/markdown';
+import { ErrorState } from '@/ui/error-state';
+import { Enter, Reveal, SmoothHeight } from '@/ui/motion';
+import { PullSkeleton } from '@/features/pulls/pull-skeleton';
 import { AssistPanel } from '@/features/ai/assist-panel';
 import { FullReview } from '@/features/ai/full-review';
 import { LinearCard } from '@/features/linear/linear-card';
@@ -188,25 +191,33 @@ export function PullView({
   const query = usePullDetail(item.id);
   const detail = query.data;
 
+  // Each state eases in as it arrives and never waits for the previous one to leave, so moving
+  // through the queue stays instant.
   if (!detail) {
-    return (
-      <div className="p-6 text-sm text-fg-muted" aria-busy={!query.error}>
-        {query.error ? query.error.message : 'Loading pull request…'}
-      </div>
+    return query.error ? (
+      <Enter key="error" preset="fade" className="grid h-full place-items-center">
+        <ErrorState
+          title="Could not load this pull request"
+          error={query.error}
+          onRetry={() => void query.refetch()}
+        />
+      </Enter>
+    ) : (
+      <Enter key="loading" preset="fade" className="h-full">
+        <PullSkeleton variant={variant} />
+      </Enter>
     );
   }
 
   // The note and every other editor here belong to one account's view of one PR. Two accounts can
   // track the same PR, so the account is part of the key: a switch never hands one account's text
-  // to the other account's save.
+  // to the other account's save. Each PR fades in as it opens; the previous one leaves at once.
+  const key = `${detail.account}:${item.id}`;
+
   return (
-    <PullDetailView
-      key={`${detail.account}:${item.id}`}
-      item={item}
-      detail={detail}
-      variant={variant}
-      lead={lead}
-    />
+    <Enter key={key} preset="fade" className="h-full">
+      <PullDetailView key={key} item={item} detail={detail} variant={variant} lead={lead} />
+    </Enter>
   );
 }
 
@@ -351,8 +362,8 @@ function PullDetailView({
 
         <LinearCard prId={item.id} />
 
-        {why.length > 0 && (
-          <div className="mx-6 mb-4 space-y-1.5 rounded-md border border-line bg-sunken px-3 py-2.5">
+        <Reveal show={why.length > 0} className="px-6 pb-4">
+          <div className="space-y-1.5 rounded-md border border-line bg-sunken px-3 py-2.5">
             {why.map((line) => {
               const Icon = reasonMeta[line.kind].icon;
 
@@ -371,7 +382,7 @@ function PullDetailView({
               );
             })}
           </div>
-        )}
+        </Reveal>
 
         <div className="flex flex-wrap items-center gap-2 px-6 pb-4">
           <Link
@@ -420,7 +431,7 @@ function PullDetailView({
               >
                 {item.doneAt ? 'Undo done' : 'Done'}
               </Button>
-              {item.unreadReplyKeys.length > 0 && (
+              <Reveal show={item.unreadReplyKeys.length > 0} preset="pop" as="span">
                 <Button
                   size="sm"
                   icon={<MessageSquare size={13} />}
@@ -429,7 +440,7 @@ function PullDetailView({
                 >
                   Mark seen
                 </Button>
-              )}
+              </Reveal>
             </>
           )}
           {!authored && onlyAddedByHand(item) && (
@@ -452,8 +463,9 @@ function PullDetailView({
           />
         </div>
 
-        {(item.snoozedUntil || item.doneAt) && (
-          <p className="mx-6 mb-4 flex items-center gap-2 rounded-sm bg-sunken px-3 py-2 text-xs text-fg-muted">
+        {/* Snoozing or marking done folds this note in; waking or undoing folds it away. */}
+        <Reveal show={Boolean(item.snoozedUntil || item.doneAt)} className="px-6 pb-4">
+          <p className="flex items-center gap-2 rounded-sm bg-sunken px-3 py-2 text-xs text-fg-muted">
             {item.snoozedUntil ? (
               <AlarmClock size={13} aria-hidden="true" />
             ) : (
@@ -461,9 +473,10 @@ function PullDetailView({
             )}
             {item.snoozedUntil
               ? `Snoozed until ${shortDateTime(item.snoozedUntil)}. New activity wakes it early.`
-              : `Marked done ${relativePhrase(item.doneAt!)}. It returns when there is new activity.`}
+              : item.doneAt &&
+                `Marked done ${relativePhrase(item.doneAt)}. It returns when there is new activity.`}
           </p>
-        )}
+        </Reveal>
 
         <Section title="Full review">
           <FullReview
@@ -661,20 +674,22 @@ function PullDetailView({
             </a>
           }
         >
-          <ul className="space-y-0.5">
-            {files.map((file) => (
-              <li key={file.path} className="flex items-center gap-2 text-xs">
-                <FileCode2 size={12} className="shrink-0 text-fg-subtle" aria-hidden="true" />
-                <code className="min-w-0 flex-1 truncate text-fg-muted" title={file.path}>
-                  {file.path}
-                </code>
-                <span className="shrink-0 tabular-nums">
-                  <span className="text-add">+{file.additions}</span>{' '}
-                  <span className="text-del">−{file.deletions}</span>
-                </span>
-              </li>
-            ))}
-          </ul>
+          <SmoothHeight trigger={showAllFiles}>
+            <ul className="space-y-0.5">
+              {files.map((file) => (
+                <li key={file.path} className="flex items-center gap-2 text-xs">
+                  <FileCode2 size={12} className="shrink-0 text-fg-subtle" aria-hidden="true" />
+                  <code className="min-w-0 flex-1 truncate text-fg-muted" title={file.path}>
+                    {file.path}
+                  </code>
+                  <span className="shrink-0 tabular-nums">
+                    <span className="text-add">+{file.additions}</span>{' '}
+                    <span className="text-del">−{file.deletions}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </SmoothHeight>
           {pr.files.length > 12 && (
             <button
               type="button"

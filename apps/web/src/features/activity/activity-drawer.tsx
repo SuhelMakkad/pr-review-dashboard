@@ -1,16 +1,7 @@
 import { useEffect, useRef } from 'react';
-import { Dialog } from 'radix-ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import {
-  Activity,
-  AlertTriangle,
-  CheckCircle2,
-  Clock3,
-  ExternalLink,
-  LoaderCircle,
-  X,
-} from 'lucide-react';
+import { Activity, AlertTriangle, CheckCircle2, Clock3, ExternalLink, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   operationInProgress,
@@ -24,7 +15,11 @@ import { storage } from '@/lib/storage';
 import { dateTime, relativePhrase } from '@/lib/time';
 import { useStatus } from '@/lib/queries';
 import { Button, IconButton } from '@/ui/button';
+import { DialogClose, DialogDescription, DialogTitle, Drawer } from '@/ui/dialog';
 import { MarkdownView } from '@/ui/markdown';
+import { ErrorState } from '@/ui/error-state';
+import { Enter, ListItem, ListPresence } from '@/ui/motion';
+import { Skeleton, SkeletonRegion, SkeletonText } from '@/ui/skeleton';
 import { cn } from '@/ui/cn';
 import { openActivity, setActivityOpen, useActivityOpen, useOperations } from './use-operations';
 
@@ -408,74 +403,90 @@ export function ActivityDrawer() {
   ];
 
   return (
-    <Dialog.Root open={open} onOpenChange={setActivityOpen} modal={false}>
-      <Dialog.Portal>
-        <Dialog.Content
-          aria-describedby="activity-description"
-          onInteractOutside={(event) => event.preventDefault()}
-          className="fixed top-0 right-0 bottom-7 z-40 flex w-[420px] max-w-full flex-col border-l border-line bg-elevated shadow-popover"
-        >
-          <header className="flex items-start justify-between border-b border-line px-4 py-4">
-            <div>
-              <Dialog.Title className="text-base font-semibold">Activity</Dialog.Title>
-              <Dialog.Description id="activity-description" className="mt-1 text-xs text-fg-muted">
-                GitHub actions · saved on this device
-              </Dialog.Description>
-            </div>
-            <Dialog.Close asChild>
-              <IconButton size="sm" label="Close activity" icon={<X size={15} />} />
-            </Dialog.Close>
-          </header>
-          <div
-            className="scroll-thin min-h-0 flex-1 overflow-y-auto"
-            aria-busy={operations.isPending}
-          >
-            {operations.isPending && (
-              <p role="status" className="flex items-center gap-2 p-4 text-sm text-fg-muted">
-                <LoaderCircle size={14} className="animate-spin" />
-                Loading activity…
-              </p>
-            )}
-            {operations.error && (
-              <div role="alert" className="space-y-2 p-4 text-sm">
-                <p>Could not load activity. {operations.error.message}</p>
-                <Button size="sm" onClick={() => void operations.refetch()}>
-                  Try again
-                </Button>
+    <Drawer
+      open={open}
+      onOpenChange={setActivityOpen}
+      aria-describedby="activity-description"
+      onInteractOutside={(event) => event.preventDefault()}
+      className="top-0 bottom-7 z-40 flex w-(--drawer-w) max-w-full flex-col"
+    >
+      <header className="flex items-start justify-between border-b border-line px-4 py-4">
+        <div>
+          <DialogTitle className="text-base font-semibold">Activity</DialogTitle>
+          <DialogDescription id="activity-description" className="mt-1 text-xs text-fg-muted">
+            GitHub actions · saved on this device
+          </DialogDescription>
+        </div>
+        <DialogClose asChild>
+          <IconButton size="sm" label="Close activity" icon={<X size={15} />} />
+        </DialogClose>
+      </header>
+      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto" aria-busy={operations.isPending}>
+        {/* Loading and failure ease in; the loaded groups then animate their own changes. */}
+        {operations.isPending && (
+          <Enter key="loading" preset="fade">
+            <SkeletonRegion label="Loading activity…">
+              <div className="px-4 pt-4 pb-2">
+                <Skeleton className="h-2.5 w-24" />
               </div>
-            )}
-            {groups.map(
-              (group) =>
-                group.items.length > 0 && (
-                  <section key={group.title} aria-label={group.title}>
-                    <h2 className="px-4 pt-4 pb-1 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
-                      {group.title} · {group.items.length}
-                    </h2>
+              {[0, 1, 2].map((index) => (
+                <div key={index} className="space-y-2 border-b border-line px-4 py-3">
+                  <Skeleton className="h-3.5 w-1/2" />
+                  <SkeletonText lines={2} />
+                </div>
+              ))}
+            </SkeletonRegion>
+          </Enter>
+        )}
+        {operations.error && (
+          <Enter key="error" preset="fade" className="grid place-items-center pt-6">
+            <ErrorState
+              title="Could not load activity"
+              error={operations.error}
+              onRetry={() => void operations.refetch()}
+            />
+          </Enter>
+        )}
+        {/* An action moving from In progress to Recent leaves one group and arrives in the next. */}
+        <ListPresence>
+          {groups
+            .filter((group) => group.items.length > 0)
+            .map((group) => (
+              <ListItem key={group.title}>
+                <section aria-label={group.title}>
+                  <h2 className="px-4 pt-4 pb-1 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
+                    {group.title} · {group.items.length}
+                  </h2>
+                  <ListPresence>
                     {group.items.map((operation) => (
-                      <OperationCard key={operation.id} operation={operation} />
+                      <ListItem key={operation.id}>
+                        <OperationCard operation={operation} />
+                      </ListItem>
                     ))}
-                  </section>
-                ),
-            )}
-            {!operations.isPending && !operations.error && items.length === 0 && (
-              <p className="p-4 text-sm text-fg-muted">
-                Your GitHub actions and their results will appear here.
-              </p>
-            )}
-            {operations.hasNextPage && (
-              <div className="p-4">
-                <Button
-                  size="sm"
-                  disabled={operations.isFetchingNextPage}
-                  onClick={() => void operations.fetchNextPage()}
-                >
-                  {operations.isFetchingNextPage ? 'Loading…' : 'Load older actions'}
-                </Button>
-              </div>
-            )}
+                  </ListPresence>
+                </section>
+              </ListItem>
+            ))}
+        </ListPresence>
+        {!operations.isPending && !operations.error && items.length === 0 && (
+          <Enter key="empty" preset="fade">
+            <p className="p-4 text-sm text-fg-muted">
+              Your GitHub actions and their results will appear here.
+            </p>
+          </Enter>
+        )}
+        {operations.hasNextPage && (
+          <div className="p-4">
+            <Button
+              size="sm"
+              disabled={operations.isFetchingNextPage}
+              onClick={() => void operations.fetchNextPage()}
+            >
+              {operations.isFetchingNextPage ? 'Loading…' : 'Load older actions'}
+            </Button>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+        )}
+      </div>
+    </Drawer>
   );
 }

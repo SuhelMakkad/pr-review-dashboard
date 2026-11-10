@@ -7,6 +7,9 @@ import { usePulls } from '@/lib/queries';
 import { relativePhrase } from '@/lib/time';
 import { Button } from '@/ui/button';
 import { cn } from '@/ui/cn';
+import { ErrorState } from '@/ui/error-state';
+import { ActiveIndicator, Enter, IndicatorGroup } from '@/ui/motion';
+import { Skeleton, SkeletonRegion } from '@/ui/skeleton';
 import { ColumnChart } from '@/features/insights/charts/column-chart';
 import { formatHours, Legend } from '@/features/insights/charts/common';
 import { LineChart } from '@/features/insights/charts/line-chart';
@@ -198,29 +201,30 @@ export function InsightsPage() {
         </header>
 
         <div role="toolbar" aria-label="Filters" className="flex flex-wrap items-center gap-3">
-          <div
-            role="radiogroup"
-            aria-label="Date range"
-            className="inline-flex rounded-sm border border-line bg-sunken p-0.5"
-          >
-            {ranges.map((value) => (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={days === value}
-                onClick={() => setDays(value)}
-                className={cn(
-                  'h-7 rounded-xs px-3 text-xs',
-                  days === value
-                    ? 'bg-panel font-medium text-fg shadow-sm'
-                    : 'text-fg-muted hover:text-fg',
-                )}
-              >
-                Last {value} days
-              </button>
-            ))}
-          </div>
+          <IndicatorGroup>
+            <div
+              role="radiogroup"
+              aria-label="Date range"
+              className="inline-flex rounded-sm border border-line bg-sunken p-0.5"
+            >
+              {ranges.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={days === value}
+                  onClick={() => setDays(value)}
+                  className={cn(
+                    'relative h-7 rounded-xs px-3 text-xs transition-colors',
+                    days === value ? 'font-medium text-fg' : 'text-fg-muted hover:text-fg',
+                  )}
+                >
+                  {days === value && <ActiveIndicator variant="pill" />}
+                  <span className="relative z-10">Last {value} days</span>
+                </button>
+              ))}
+            </div>
+          </IndicatorGroup>
           <select
             aria-label="Repository"
             value={repo}
@@ -251,250 +255,301 @@ export function InsightsPage() {
           </label>
         </div>
 
+        {/* Outline while loading; then the charts, a failure or the first-sync note eases in. */}
         {!insights ? (
-          <p className="py-16 text-center text-sm text-fg-muted">
-            {query.isPending ? 'Loading…' : 'Insights appear after the first sync.'}
-          </p>
+          query.isPending ? (
+            <InsightsSkeleton />
+          ) : query.error ? (
+            <Enter key="error" preset="fade" className="grid place-items-center py-10">
+              <ErrorState
+                title="Could not load insights"
+                error={query.error}
+                onRetry={() => void query.refetch()}
+              />
+            </Enter>
+          ) : (
+            <Enter key="empty" preset="fade">
+              <p className="py-16 text-center text-sm text-fg-muted">
+                Insights appear after the first sync.
+              </p>
+            </Enter>
+          )
         ) : (
-          <div
-            className={cn(
-              'space-y-4 transition-opacity',
-              query.isFetching && query.isPlaceholderData && 'opacity-60',
-            )}
-          >
-            <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-              <div className="col-span-2 rounded-lg border border-line bg-panel px-4 py-3 lg:col-span-1">
-                <div className="text-xs text-fg-muted">Median time to review</div>
-                <div className="mt-1 text-5xl font-semibold tracking-tight text-fg">
-                  {formatHours(turnaround!.medianHours)}
+          <Enter key="ready" preset="fade">
+            <div
+              className={cn(
+                'space-y-4 transition-opacity',
+                query.isFetching && query.isPlaceholderData && 'opacity-60',
+              )}
+            >
+              <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+                <div className="col-span-2 rounded-lg border border-line bg-panel px-4 py-3 lg:col-span-1">
+                  <div className="text-xs text-fg-muted">Median time to review</div>
+                  <div className="mt-1 text-5xl font-semibold tracking-tight text-fg">
+                    {formatHours(turnaround!.medianHours)}
+                  </div>
+                  <div className="mt-1 text-xs text-fg-subtle">
+                    across {turnaround!.count} review requests
+                  </div>
                 </div>
-                <div className="mt-1 text-xs text-fg-subtle">
-                  across {turnaround!.count} review requests
-                </div>
+                <Tile
+                  label="Slowest 10% take"
+                  value={formatHours(turnaround!.p90Hours)}
+                  note="90th percentile"
+                />
+                <Tile
+                  label="Reviews submitted"
+                  value={insights.reviews.total.toLocaleString()}
+                  note={`in the last ${insights.range.days} days`}
+                />
+                <Tile
+                  label="Over your target"
+                  value={`${overTargetShare}%`}
+                  note={`${turnaround!.breaches} took longer than ${formatHours(insights.slaHours)}`}
+                  tone={overTargetShare > 25 ? 'warning' : undefined}
+                />
+                <Tile
+                  label="Waiting on you now"
+                  value={String(insights.open.count)}
+                  note={
+                    insights.open.oldestAt
+                      ? `oldest asked ${relativePhrase(insights.open.oldestAt)}`
+                      : 'nothing outstanding'
+                  }
+                />
               </div>
-              <Tile
-                label="Slowest 10% take"
-                value={formatHours(turnaround!.p90Hours)}
-                note="90th percentile"
-              />
-              <Tile
-                label="Reviews submitted"
-                value={insights.reviews.total.toLocaleString()}
-                note={`in the last ${insights.range.days} days`}
-              />
-              <Tile
-                label="Over your target"
-                value={`${overTargetShare}%`}
-                note={`${turnaround!.breaches} took longer than ${formatHours(insights.slaHours)}`}
-                tone={overTargetShare > 25 ? 'warning' : undefined}
-              />
-              <Tile
-                label="Waiting on you now"
-                value={String(insights.open.count)}
-                note={
-                  insights.open.oldestAt
-                    ? `oldest asked ${relativePhrase(insights.open.oldestAt)}`
-                    : 'nothing outstanding'
-                }
-              />
-            </div>
 
-            <div className="grid gap-4 lg:grid-cols-2">
-              <Card
-                title="Reviews submitted"
-                subtitle={insights.reviews.granularity === 'week' ? 'Per week' : 'Per day'}
-                table={
-                  <DataTable
-                    head={[insights.reviews.granularity === 'week' ? 'Week of' : 'Day', 'Reviews']}
-                    rows={insights.reviews.series.map((point) => [
-                      shortDate(point.start),
-                      point.count,
-                    ])}
-                  />
-                }
-              >
-                <ColumnChart
-                  label="Reviews submitted over time"
-                  columns={insights.reviews.series.map((point) => ({
-                    key: point.start,
-                    label: shortDate(point.start),
-                    value: point.count,
-                    color: 'var(--series-1)',
-                    detail: `${point.count} ${point.count === 1 ? 'review' : 'reviews'}`,
-                  }))}
-                />
-              </Card>
-
-              <Card
-                title="Time to review"
-                subtitle={`How long requests waited for your review; target ${formatHours(insights.slaHours)}`}
-                table={
-                  <DataTable
-                    head={['Waited', 'Requests', 'Over target']}
-                    rows={turnaround!.buckets.map((bucket) => [
-                      bucket.label,
-                      bucket.count,
-                      bucket.overTarget ? 'yes' : 'no',
-                    ])}
-                  />
-                }
-              >
-                <ColumnChart
-                  label="Distribution of time to review"
-                  columns={turnaround!.buckets.map((bucket) => ({
-                    key: bucket.label,
-                    label: bucket.label,
-                    value: bucket.count,
-                    color: bucket.overTarget ? 'var(--status-warning)' : 'var(--series-1)',
-                    detail: `${bucket.count} ${bucket.count === 1 ? 'request' : 'requests'}${bucket.overTarget ? ' · over target' : ''}`,
-                  }))}
-                />
-                <div className="mt-2">
-                  <Legend
-                    items={[
-                      { label: 'Within target', color: 'var(--series-1)', shape: 'rect' },
-                      {
-                        label: 'Over target',
-                        color: 'var(--status-warning)',
-                        shape: 'rect',
-                        icon: (
-                          <AlertTriangle size={11} className="text-pending" aria-hidden="true" />
-                        ),
-                      },
-                    ]}
-                  />
-                </div>
-              </Card>
-
-              <Card
-                title="Your queue"
-                subtitle="Pull requests needing you vs. waiting on authors, end of each day"
-                table={
-                  <DataTable
-                    head={['Day', 'Needs attention', 'Waiting on author']}
-                    rows={insights.queue.map((point) => [
-                      shortDate(point.day),
-                      point.attention,
-                      point.waiting,
-                    ])}
-                  />
-                }
-              >
-                <LineChart
-                  label="Queue size over time"
-                  series={[
-                    {
-                      name: 'Needs you',
+              <div className="grid gap-4 lg:grid-cols-2">
+                <Card
+                  title="Reviews submitted"
+                  subtitle={insights.reviews.granularity === 'week' ? 'Per week' : 'Per day'}
+                  table={
+                    <DataTable
+                      head={[
+                        insights.reviews.granularity === 'week' ? 'Week of' : 'Day',
+                        'Reviews',
+                      ]}
+                      rows={insights.reviews.series.map((point) => [
+                        shortDate(point.start),
+                        point.count,
+                      ])}
+                    />
+                  }
+                >
+                  <ColumnChart
+                    label="Reviews submitted over time"
+                    columns={insights.reviews.series.map((point) => ({
+                      key: point.start,
+                      label: shortDate(point.start),
+                      value: point.count,
                       color: 'var(--series-1)',
-                      points: insights.queue.map((point) => ({
-                        x: Date.parse(point.day),
-                        y: point.attention,
-                      })),
-                    },
-                    {
-                      name: 'Waiting',
-                      color: 'var(--series-2)',
-                      points: insights.queue.map((point) => ({
-                        x: Date.parse(point.day),
-                        y: point.waiting,
-                      })),
-                    },
-                  ]}
-                />
-                {insights.queue.length >= 2 && (
+                      detail: `${point.count} ${point.count === 1 ? 'review' : 'reviews'}`,
+                    }))}
+                  />
+                </Card>
+
+                <Card
+                  title="Time to review"
+                  subtitle={`How long requests waited for your review; target ${formatHours(insights.slaHours)}`}
+                  table={
+                    <DataTable
+                      head={['Waited', 'Requests', 'Over target']}
+                      rows={turnaround!.buckets.map((bucket) => [
+                        bucket.label,
+                        bucket.count,
+                        bucket.overTarget ? 'yes' : 'no',
+                      ])}
+                    />
+                  }
+                >
+                  <ColumnChart
+                    label="Distribution of time to review"
+                    columns={turnaround!.buckets.map((bucket) => ({
+                      key: bucket.label,
+                      label: bucket.label,
+                      value: bucket.count,
+                      color: bucket.overTarget ? 'var(--status-warning)' : 'var(--series-1)',
+                      detail: `${bucket.count} ${bucket.count === 1 ? 'request' : 'requests'}${bucket.overTarget ? ' · over target' : ''}`,
+                    }))}
+                  />
                   <div className="mt-2">
                     <Legend
                       items={[
-                        { label: 'Needs you', color: 'var(--series-1)', shape: 'line' },
-                        { label: 'Waiting on author', color: 'var(--series-2)', shape: 'line' },
+                        { label: 'Within target', color: 'var(--series-1)', shape: 'rect' },
+                        {
+                          label: 'Over target',
+                          color: 'var(--status-warning)',
+                          shape: 'rect',
+                          icon: (
+                            <AlertTriangle size={11} className="text-pending" aria-hidden="true" />
+                          ),
+                        },
                       ]}
                     />
                   </div>
-                )}
-              </Card>
+                </Card>
 
-              <Card
-                title="Your verdicts"
-                subtitle="What your submitted reviews said"
-                table={
-                  <DataTable
-                    head={['Verdict', 'Reviews']}
-                    rows={[
-                      ['Approved', insights.verdicts.approved],
-                      ['Changes requested', insights.verdicts.changesRequested],
-                      ['Commented', insights.verdicts.commented],
+                <Card
+                  title="Your queue"
+                  subtitle="Pull requests needing you vs. waiting on authors, end of each day"
+                  table={
+                    <DataTable
+                      head={['Day', 'Needs attention', 'Waiting on author']}
+                      rows={insights.queue.map((point) => [
+                        shortDate(point.day),
+                        point.attention,
+                        point.waiting,
+                      ])}
+                    />
+                  }
+                >
+                  <LineChart
+                    label="Queue size over time"
+                    series={[
+                      {
+                        name: 'Needs you',
+                        color: 'var(--series-1)',
+                        points: insights.queue.map((point) => ({
+                          x: Date.parse(point.day),
+                          y: point.attention,
+                        })),
+                      },
+                      {
+                        name: 'Waiting',
+                        color: 'var(--series-2)',
+                        points: insights.queue.map((point) => ({
+                          x: Date.parse(point.day),
+                          y: point.waiting,
+                        })),
+                      },
                     ]}
                   />
-                }
-              >
-                <SegmentedBar
-                  label="Review verdicts"
-                  segments={[
-                    {
-                      label: 'Approved',
-                      value: insights.verdicts.approved,
-                      color: 'var(--series-1)',
-                      ink: '#ffffff',
-                    },
-                    {
-                      label: 'Changes requested',
-                      value: insights.verdicts.changesRequested,
-                      color: 'var(--series-2)',
-                      ink: '#ffffff',
-                    },
-                    {
-                      label: 'Commented',
-                      value: insights.verdicts.commented,
-                      color: 'var(--series-3)',
-                      ink: '#ffffff',
-                    },
-                  ]}
-                />
-              </Card>
-            </div>
+                  {insights.queue.length >= 2 && (
+                    <div className="mt-2">
+                      <Legend
+                        items={[
+                          { label: 'Needs you', color: 'var(--series-1)', shape: 'line' },
+                          { label: 'Waiting on author', color: 'var(--series-2)', shape: 'line' },
+                        ]}
+                      />
+                    </div>
+                  )}
+                </Card>
 
-            <div className="grid gap-4 lg:grid-cols-3">
-              <Card
-                title="By repository"
-                subtitle="Reviews and time to review"
-                className="lg:col-span-2"
-              >
-                {insights.repositories.length ? (
-                  <DataTable
-                    head={['Repository', 'Reviews', 'Median wait', 'Over target']}
-                    rows={insights.repositories.map((row) => [
-                      row.repository,
-                      row.reviews,
-                      formatHours(row.medianHours),
-                      row.breaches,
-                    ])}
+                <Card
+                  title="Your verdicts"
+                  subtitle="What your submitted reviews said"
+                  table={
+                    <DataTable
+                      head={['Verdict', 'Reviews']}
+                      rows={[
+                        ['Approved', insights.verdicts.approved],
+                        ['Changes requested', insights.verdicts.changesRequested],
+                        ['Commented', insights.verdicts.commented],
+                      ]}
+                    />
+                  }
+                >
+                  <SegmentedBar
+                    label="Review verdicts"
+                    segments={[
+                      {
+                        label: 'Approved',
+                        value: insights.verdicts.approved,
+                        color: 'var(--series-1)',
+                        ink: '#ffffff',
+                      },
+                      {
+                        label: 'Changes requested',
+                        value: insights.verdicts.changesRequested,
+                        color: 'var(--series-2)',
+                        ink: '#ffffff',
+                      },
+                      {
+                        label: 'Commented',
+                        value: insights.verdicts.commented,
+                        color: 'var(--series-3)',
+                        ink: '#ffffff',
+                      },
+                    ]}
                   />
-                ) : (
-                  <p className="text-sm text-fg-muted">No reviews in this range.</p>
-                )}
-              </Card>
-              <Card title="Your PRs" subtitle="As an author">
-                <dl className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <dt className="text-fg-muted">Opened</dt>
-                    <dd className="font-semibold">{insights.authored.opened}</dd>
-                  </div>
-                  <div className="flex justify-between">
-                    <dt className="text-fg-muted">Median wait for a first review</dt>
-                    <dd className="font-semibold">
-                      {formatHours(insights.authored.medianFirstReviewHours)}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between">
-                    <dt className="text-fg-muted">Merged</dt>
-                    <dd className="font-semibold">{insights.authored.merged}</dd>
-                  </div>
-                </dl>
-              </Card>
+                </Card>
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-3">
+                <Card
+                  title="By repository"
+                  subtitle="Reviews and time to review"
+                  className="lg:col-span-2"
+                >
+                  {insights.repositories.length ? (
+                    <DataTable
+                      head={['Repository', 'Reviews', 'Median wait', 'Over target']}
+                      rows={insights.repositories.map((row) => [
+                        row.repository,
+                        row.reviews,
+                        formatHours(row.medianHours),
+                        row.breaches,
+                      ])}
+                    />
+                  ) : (
+                    <p className="text-sm text-fg-muted">No reviews in this range.</p>
+                  )}
+                </Card>
+                <Card title="Your PRs" subtitle="As an author">
+                  <dl className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <dt className="text-fg-muted">Opened</dt>
+                      <dd className="font-semibold">{insights.authored.opened}</dd>
+                    </div>
+                    <div className="flex justify-between">
+                      <dt className="text-fg-muted">Median wait for a first review</dt>
+                      <dd className="font-semibold">
+                        {formatHours(insights.authored.medianFirstReviewHours)}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between">
+                      <dt className="text-fg-muted">Merged</dt>
+                      <dd className="font-semibold">{insights.authored.merged}</dd>
+                    </div>
+                  </dl>
+                </Card>
+              </div>
             </div>
-          </div>
+          </Enter>
         )}
       </div>
     </div>
+  );
+}
+
+/** The insights layout in outline: the headline tiles, then two charts. */
+function InsightsSkeleton() {
+  return (
+    <SkeletonRegion label="Loading insights…" className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        {[0, 1, 2, 3, 4].map((index) => (
+          <div
+            key={index}
+            className={cn(
+              'space-y-2.5 rounded-lg border border-line bg-panel px-4 py-3',
+              index === 0 && 'col-span-2 lg:col-span-1',
+            )}
+          >
+            <Skeleton className="h-3 w-24" />
+            <Skeleton className={index === 0 ? 'h-11 w-28' : 'h-7 w-16'} />
+            <Skeleton className="h-2.5 w-20" />
+          </div>
+        ))}
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        {[0, 1].map((index) => (
+          <div key={index} className="space-y-3 rounded-lg border border-line bg-panel p-4">
+            <Skeleton className="h-3.5 w-40" />
+            <Skeleton className="h-48 rounded-md" />
+          </div>
+        ))}
+      </div>
+    </SkeletonRegion>
   );
 }

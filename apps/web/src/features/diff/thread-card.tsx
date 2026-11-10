@@ -1,13 +1,6 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
-import {
-  CheckCheck,
-  ChevronDown,
-  ChevronRight,
-  MessageSquare,
-  Reply,
-  RotateCcw,
-} from 'lucide-react';
+import { CheckCheck, ChevronRight, MessageSquare, Reply, RotateCcw } from 'lucide-react';
 import type { ReviewThread } from '@review-desk/shared/types';
 import type { GitHubOperation, OperationReceipt } from '@review-desk/shared/operations';
 import { operationUnsettled } from '@review-desk/shared/operations';
@@ -16,6 +9,7 @@ import { dateTime, relativePhrase } from '@/lib/time';
 import { Avatar } from '@/ui/avatar';
 import { cn } from '@/ui/cn';
 import { MarkdownView } from '@/ui/markdown';
+import { FadeSwap, Reveal } from '@/ui/motion';
 import { tone } from '@/features/pulls/meta';
 import { Button } from '@/ui/button';
 import { Composer } from '@/features/review/composer';
@@ -48,7 +42,7 @@ export function ThreadCard({
   queuedReplies?: GitHubOperation[];
   recoveredBody?: string;
 }) {
-  const [open, setOpen] = useState(!thread.isResolved || focused);
+  const [open, setOpen] = useState(!thread.isResolved || Boolean(focused));
   const [error, setError] = useState<string | null>(null);
   const newCount = thread.comments.filter((comment) =>
     unread.has(`${comment.id}:${comment.updatedAt}`),
@@ -69,11 +63,11 @@ export function ThreadCard({
         className="flex w-full items-center gap-2 bg-sunken px-3 py-1.5 text-left text-xs"
         aria-expanded={open}
       >
-        {open ? (
-          <ChevronDown size={12} aria-hidden="true" />
-        ) : (
-          <ChevronRight size={12} aria-hidden="true" />
-        )}
+        <ChevronRight
+          size={12}
+          aria-hidden="true"
+          className={cn('transition-transform', open && 'rotate-90')}
+        />
         <MessageSquare size={12} className="text-fg-subtle" aria-hidden="true" />
         <span className="font-medium">{first?.author.login}</span>
         <span className="min-w-0 flex-1 truncate text-fg-muted">{open ? '' : first?.body}</span>
@@ -91,8 +85,9 @@ export function ThreadCard({
             : `${thread.comments.length} ${thread.comments.length === 1 ? 'comment' : 'comments'}`}
         </span>
       </button>
-      {open && (
-        <div className="divide-y divide-line">
+      {/* Lives in the diff virtualizer, so it fades rather than changing height mid-animation. */}
+      <Reveal show={open} preset="fade">
+        <div className="relative divide-y divide-line">
           {thread.comments.map((comment) => {
             const isUnread = unread.has(`${comment.id}:${comment.updatedAt}`);
 
@@ -148,84 +143,88 @@ export function ThreadCard({
                 )}
               </div>
             ))}
-          {actions &&
-            (actions.replying ? (
-              <div className="p-2">
-                <Composer
-                  label="Reply to thread"
-                  placeholder="Reply…"
-                  initial={recoveredBody}
-                  busy={actions.busy}
-                  error={error}
-                  onCancel={() => {
-                    setError(null);
-                    actions.setReplying(false);
-                  }}
-                  primary={{
-                    label: `Reply as @${account}`,
-                    keys: '$mod+Enter',
-                    variant: 'primary',
-                    run: async (body) => {
-                      try {
-                        await actions.reply(body);
+          {actions && (
+            // The reply box mounts at once (it takes focus) while the buttons fade out above it.
+            <FadeSwap swapKey={actions.replying ? 'reply' : 'actions'} mode="popLayout">
+              {actions.replying ? (
+                <div className="p-2">
+                  <Composer
+                    label="Reply to thread"
+                    placeholder="Reply…"
+                    initial={recoveredBody}
+                    busy={actions.busy}
+                    error={error}
+                    onCancel={() => {
+                      setError(null);
+                      actions.setReplying(false);
+                    }}
+                    primary={{
+                      label: `Reply as @${account}`,
+                      keys: '$mod+Enter',
+                      variant: 'primary',
+                      run: async (body) => {
+                        try {
+                          await actions.reply(body);
 
-                        setError(null);
-                        actions.setReplying(false);
-                        toast('Reply queued', {
-                          action: { label: 'View activity', onClick: openActivity },
-                        });
-                      } catch (failure) {
-                        setError((failure as Error).message);
+                          setError(null);
+                          actions.setReplying(false);
+                          toast('Reply queued', {
+                            action: { label: 'View activity', onClick: openActivity },
+                          });
+                        } catch (failure) {
+                          setError((failure as Error).message);
+                        }
+                      },
+                    }}
+                  />
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 bg-sunken/60 px-2 py-1">
+                  {thread.viewerCanReply !== false && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon={<Reply size={12} />}
+                      onClick={() => actions.setReplying(true)}
+                      disabled={actions.locked}
+                      shortcut={focused ? 'r' : undefined}
+                    >
+                      Reply
+                    </Button>
+                  )}
+                  {thread.viewerCanResolve !== false && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon={thread.isResolved ? <RotateCcw size={12} /> : <CheckCheck size={12} />}
+                      disabled={actions.busy || Boolean(actions.resolution)}
+                      onClick={() =>
+                        void actions
+                          .resolve(!thread.isResolved)
+                          .catch((failure: Error) => toast.error(failure.message))
                       }
-                    },
-                  }}
-                />
-              </div>
-            ) : (
-              <div className="flex items-center gap-1 bg-sunken/60 px-2 py-1">
-                {thread.viewerCanReply !== false && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    icon={<Reply size={12} />}
-                    onClick={() => actions.setReplying(true)}
-                    disabled={actions.locked}
-                    shortcut={focused ? 'r' : undefined}
-                  >
-                    Reply
-                  </Button>
-                )}
-                {thread.viewerCanResolve !== false && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    icon={thread.isResolved ? <RotateCcw size={12} /> : <CheckCheck size={12} />}
-                    disabled={actions.busy || Boolean(actions.resolution)}
-                    onClick={() =>
-                      void actions
-                        .resolve(!thread.isResolved)
-                        .catch((failure: Error) => toast.error(failure.message))
-                    }
-                    shortcut={focused ? 'Shift+r' : undefined}
-                  >
-                    {actions.resolution
-                      ? actions.resolution.status === 'needs_attention'
-                        ? 'Resolution needs attention'
-                        : 'Resolution queued'
-                      : thread.isResolved
-                        ? 'Unresolve'
-                        : 'Resolve'}
-                  </Button>
-                )}
-                {actions.resolution && (
-                  <Button size="sm" variant="ghost" onClick={openActivity}>
-                    View activity
-                  </Button>
-                )}
-              </div>
-            ))}
+                      shortcut={focused ? 'Shift+r' : undefined}
+                    >
+                      {actions.resolution
+                        ? actions.resolution.status === 'needs_attention'
+                          ? 'Resolution needs attention'
+                          : 'Resolution queued'
+                        : thread.isResolved
+                          ? 'Unresolve'
+                          : 'Resolve'}
+                    </Button>
+                  )}
+                  {actions.resolution && (
+                    <Button size="sm" variant="ghost" onClick={openActivity}>
+                      View activity
+                    </Button>
+                  )}
+                </div>
+              )}
+            </FadeSwap>
+          )}
         </div>
-      )}
+      </Reveal>
     </div>
   );
 }

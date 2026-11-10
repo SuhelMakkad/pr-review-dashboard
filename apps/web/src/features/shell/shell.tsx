@@ -7,6 +7,7 @@ import { useMine, useNotificationSettings, usePulls, useStatus } from '@/lib/que
 import { useRemountKey } from '@/lib/remount-key';
 import { useEffect } from 'react';
 import { useAppearance } from '@/lib/theme';
+import { Enter, MotionProvider } from '@/ui/motion';
 import { TooltipProvider } from '@/ui/tooltip';
 import { undoLast } from '@/features/pulls/actions';
 import { queueMeta, queueSlugs } from '@/features/pulls/meta';
@@ -16,7 +17,6 @@ import { Sidebar } from '@/features/shell/sidebar';
 import { StatusBar, type Hint } from '@/features/shell/status-bar';
 import { ActivityDrawer } from '@/features/activity/activity-drawer';
 import { useActivityOpen } from '@/features/activity/use-operations';
-import { cn } from '@/ui/cn';
 
 function hintsFor(pathname: string): Hint[] {
   if (pathname.startsWith('/inbox/')) {
@@ -56,6 +56,8 @@ export function Shell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const accountScope = useRemountKey(useStatus().data?.account?.login);
+  // Moving between sections (inbox, mine, a PR, insights, settings) eases the new page in.
+  const section = pathname.split('/')[1] ?? '';
   const pulls = usePulls();
   const mine = useMine();
   const notifySettings = useNotificationSettings();
@@ -107,37 +109,46 @@ export function Shell() {
   ]);
 
   return (
-    <TooltipProvider>
-      <a
-        href="#main"
-        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-sm focus:bg-elevated focus:px-3 focus:py-2"
-      >
-        Skip to content
-      </a>
-      <div className="grid h-full grid-cols-[auto_minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto]">
-        <Sidebar />
-        <main id="main" className={cn('min-w-0 bg-panel', activityOpen && 'xl:pr-[420px]')}>
-          {/* Every page belongs to one account: a switch remounts it, dropping unsaved edits. */}
-          <Fragment key={accountScope}>
-            <Outlet />
-          </Fragment>
-        </main>
-        <StatusBar hints={hintsFor(pathname)} />
-      </div>
-      <CommandPalette
-        open={paletteOpen}
-        onOpenChange={setPaletteOpen}
-        onShowShortcuts={() => setShortcutsOpen(true)}
-      />
-      <ActivityDrawer />
-      <CheatSheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
-      <Toaster
-        theme={theme}
-        position="bottom-right"
-        offset={40}
-        toastOptions={{ className: 'text-sm' }}
-        visibleToasts={3}
-      />
-    </TooltipProvider>
+    <MotionProvider>
+      <TooltipProvider>
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-sm focus:bg-elevated focus:px-3 focus:py-2"
+        >
+          Skip to content
+        </a>
+        <div className="grid h-full grid-cols-[auto_minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto]">
+          <Sidebar />
+          {/* Eases aside for the activity drawer instead of jumping to its new width. */}
+          <main
+            id="main"
+            className="drawer-push min-w-0 bg-panel"
+            data-drawer-open={activityOpen || undefined}
+          >
+            {/* Every page belongs to one account: a switch remounts it, dropping unsaved edits. */}
+            <Fragment key={accountScope}>
+              <Enter key={section} className="h-full">
+                <Outlet />
+              </Enter>
+            </Fragment>
+          </main>
+          <StatusBar hints={hintsFor(pathname)} />
+        </div>
+        <CommandPalette
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          onShowShortcuts={() => setShortcutsOpen(true)}
+        />
+        <ActivityDrawer />
+        <CheatSheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+        <Toaster
+          theme={theme}
+          position="bottom-right"
+          offset={40}
+          toastOptions={{ className: 'text-sm' }}
+          visibleToasts={3}
+        />
+      </TooltipProvider>
+    </MotionProvider>
   );
 }

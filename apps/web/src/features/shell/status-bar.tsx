@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Popover } from 'radix-ui';
 import { CircleAlert, RefreshCw } from 'lucide-react';
 import { useLive } from '@/lib/live';
 import { useStatus, useSyncNow } from '@/lib/queries';
 import { dateTime, relativePhrase } from '@/lib/time';
 import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
+import { Popover, PopoverContent, PopoverTrigger } from '@/ui/popover';
+import { Reveal } from '@/ui/motion';
 import { ActivityButton } from '@/features/activity/activity-drawer';
 
 function useTick(ms: number) {
@@ -96,43 +97,36 @@ export function StatusBar({ hints }: { hints: Hint[] }) {
         Sync
       </button>
 
-      {problems.length > 0 && (
-        <Popover.Root>
-          <Popover.Trigger className="inline-flex items-center gap-1 rounded-xs px-1 font-medium text-pending hover:bg-hover">
+      <Reveal show={problems.length > 0} preset="pop" as="span">
+        <Popover>
+          <PopoverTrigger className="inline-flex items-center gap-1 rounded-xs px-1 font-medium text-pending hover:bg-hover">
             <CircleAlert size={11} aria-hidden="true" />
             {state?.error
               ? 'Showing saved data'
               : `${problems.length} sync ${problems.length === 1 ? 'warning' : 'warnings'}`}
-          </Popover.Trigger>
-          <Popover.Portal>
-            <Popover.Content
-              side="top"
-              align="start"
-              sideOffset={8}
-              className="z-50 w-[420px] rounded-md border border-line bg-elevated p-3 text-xs text-fg shadow-popover"
-            >
-              <p className="mb-2 font-semibold">
-                {state?.error ? 'GitHub could not be reached' : 'Some data could not be refreshed'}
+          </PopoverTrigger>
+          <PopoverContent side="top" align="start" sideOffset={8} className="w-[420px] p-3 text-xs">
+            <p className="mb-2 font-semibold">
+              {state?.error ? 'GitHub could not be reached' : 'Some data could not be refreshed'}
+            </p>
+            <ul className="max-h-60 space-y-1.5 overflow-auto text-fg-muted">
+              {problems.map((problem, index) => (
+                <li key={index} className="break-words">
+                  {problem}
+                </li>
+              ))}
+            </ul>
+            {state?.retryAt && (
+              <p className="mt-2 text-fg-subtle">Retrying after {dateTime(state.retryAt)}.</p>
+            )}
+            {state?.error && (
+              <p className="mt-2 text-fg-subtle">
+                Check <code>gh auth status</code>; cached PRs stay visible meanwhile.
               </p>
-              <ul className="max-h-60 space-y-1.5 overflow-auto text-fg-muted">
-                {problems.map((problem, index) => (
-                  <li key={index} className="break-words">
-                    {problem}
-                  </li>
-                ))}
-              </ul>
-              {state?.retryAt && (
-                <p className="mt-2 text-fg-subtle">Retrying after {dateTime(state.retryAt)}.</p>
-              )}
-              {state?.error && (
-                <p className="mt-2 text-fg-subtle">
-                  Check <code>gh auth status</code>; cached PRs stay visible meanwhile.
-                </p>
-              )}
-            </Popover.Content>
-          </Popover.Portal>
-        </Popover.Root>
-      )}
+            )}
+          </PopoverContent>
+        </Popover>
+      </Reveal>
 
       <ActivityButton />
       <span className="ml-auto truncate">{state?.account?.login}</span>

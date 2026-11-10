@@ -66,14 +66,6 @@ beforeEach(() => {
       disconnect() {}
     },
   );
-  Object.defineProperty(window, 'matchMedia', {
-    writable: true,
-    value: vi.fn(() => ({
-      matches: false,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    })),
-  });
   vi.stubGlobal(
     'fetch',
     vi.fn(async (path: string, options?: RequestInit) => {
@@ -146,6 +138,15 @@ beforeEach(() => {
           snapshot: pr,
           item: deriveItem(pr, state(pr.id), account, []),
           triage: state(pr.id),
+        };
+      } else if (/^\/api\/pulls\/[^/]+\/draft(\?|$)/.test(path)) {
+        data = {
+          prId: decodeURIComponent(path.split('/')[3]),
+          body: '',
+          event: 'COMMENT',
+          comments: [],
+          updatedAt: null,
+          githubPendingReview: null,
         };
       } else if (path.endsWith('/track') && options?.method === 'DELETE') {
         queueChanges.push({ method: 'DELETE', path, body: JSON.parse(String(options.body)) });

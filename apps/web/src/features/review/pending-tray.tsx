@@ -2,6 +2,7 @@ import { AlertTriangle, Send, Trash2 } from 'lucide-react';
 import { reviewEventLabels, type ReviewDraft } from '@review-desk/shared/review';
 import { Button } from '@/ui/button';
 import { Kbd } from '@/ui/kbd';
+import { Reveal } from '@/ui/motion';
 import { openActivity } from '@/features/activity/use-operations';
 
 /** Always-visible summary of the review in progress, with the way to finish it. */
@@ -30,14 +31,14 @@ export function PendingTray({
           ? 'No pending comments'
           : `${comments.length} pending ${comments.length === 1 ? 'comment' : 'comments'}`}
       </span>
-      {draft && draft.event !== 'COMMENT' && (
-        <span className="text-fg-muted">· {reviewEventLabels[draft.event]}</span>
-      )}
-      {stale > 0 && (
+      <Reveal show={Boolean(draft && draft.event !== 'COMMENT')} preset="pop" as="span">
+        <span className="text-fg-muted">· {draft && reviewEventLabels[draft.event]}</span>
+      </Reveal>
+      <Reveal show={stale > 0} preset="pop" as="span">
         <span className="inline-flex items-center gap-1 text-pending">
           <AlertTriangle size={12} aria-hidden="true" /> {stale} need attention
         </span>
-      )}
+      </Reveal>
       <span className="text-fg-subtle tabular-nums">
         {viewed}/{total} files viewed · <Kbd keys="v" />
       </span>
@@ -45,11 +46,11 @@ export function PendingTray({
         Select lines and press <Kbd keys="c" /> to comment
       </span>
       <div className="ml-auto flex items-center gap-2">
-        {hasDraft && !locked && (
+        <Reveal show={hasDraft && !locked} preset="pop" as="span">
           <Button size="sm" variant="ghost" icon={<Trash2 size={12} />} onClick={onDiscard}>
             Discard
           </Button>
-        )}
+        </Reveal>
         <Button
           size="sm"
           variant="primary"

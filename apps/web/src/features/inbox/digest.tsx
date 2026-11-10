@@ -1,4 +1,5 @@
 import type { AttentionKind, PullRequestItem } from '@review-desk/shared/types';
+import { Reveal } from '@/ui/motion';
 import { reasonMeta } from '@/features/pulls/meta';
 import type { InboxSearch } from '@/features/inbox/filters';
 
@@ -37,24 +38,24 @@ export function Digest({
     .map((kind) => ({ kind, count: recent.filter((reason) => reason.kind === kind).length }))
     .filter((entry) => entry.count > 0);
 
-  if (counts.length === 0) return null;
-
   return (
-    <p className="flex items-center gap-1.5 border-b border-line px-4 py-1.5 text-xs text-fg-muted">
-      <span className="text-fg-subtle">Last 24 hours:</span>
-      {counts.map((entry, index) => (
-        <span key={entry.kind} className="inline-flex items-center gap-1.5">
-          {index > 0 && <span className="text-fg-subtle">·</span>}
-          <button
-            type="button"
-            className="rounded-xs hover:text-fg hover:underline"
-            style={{ color: `var(--${reasonMeta[entry.kind].tone})` }}
-            onClick={() => onFilter({ reason: entry.kind })}
-          >
-            {phrases[entry.kind](entry.count)}
-          </button>
-        </span>
-      ))}
-    </p>
+    <Reveal show={counts.length > 0}>
+      <p className="flex items-center gap-1.5 border-b border-line px-4 py-1.5 text-xs text-fg-muted">
+        <span className="text-fg-subtle">Last 24 hours:</span>
+        {counts.map((entry, index) => (
+          <span key={entry.kind} className="inline-flex items-center gap-1.5">
+            {index > 0 && <span className="text-fg-subtle">·</span>}
+            <button
+              type="button"
+              className="rounded-xs hover:text-fg hover:underline"
+              style={{ color: `var(--${reasonMeta[entry.kind].tone})` }}
+              onClick={() => onFilter({ reason: entry.kind })}
+            >
+              {phrases[entry.kind](entry.count)}
+            </button>
+          </span>
+        ))}
+      </p>
+    </Reveal>
   );
 }

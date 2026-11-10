@@ -11,6 +11,7 @@ import { refOf } from '@/lib/pr-ref';
 import { queryKeys } from '@/lib/query-keys';
 import { relativePhrase } from '@/lib/time';
 import { Button } from '@/ui/button';
+import { FadeSwap, ListItem, ListPresence } from '@/ui/motion';
 import { blockerTone, groupMeta, waitState } from '@/features/mine/meta';
 
 /** What stands between your PR and merging, each item with the next step to clear it. */
@@ -121,42 +122,51 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
         <span className="font-semibold text-fg">{groupMeta[item.group].label}</span>
         <span className="text-fg-muted">{groupMeta[item.group].hint}</span>
       </div>
-      {item.blockers.length === 0 ? (
-        <p className="flex items-center gap-2 text-sm">
-          <CircleCheck size={14} className="text-ok" aria-hidden="true" />
-          {item.group === 'ready'
-            ? `Approved by ${item.approvals.join(', ')} and ready to merge.`
-            : 'Nothing is blocking this PR.'}
-        </p>
-      ) : (
-        <ul className="space-y-1.5">
-          {item.blockers.map((blocker) => (
-            <li key={blocker.kind} className="flex items-center gap-2 text-sm">
-              <CircleDot
-                size={13}
-                style={{ color: `var(--${blockerTone[blocker.kind]})` }}
-                aria-hidden="true"
-              />
-              <span className="min-w-0 flex-1">
-                {blocker.label}
-                {blocker.since && (
-                  <span className="text-xs text-fg-subtle">
-                    {' '}
-                    · since {relativePhrase(blocker.since)}
+      <FadeSwap swapKey={item.blockers.length === 0 ? 'clear' : 'blocked'} smoothHeight>
+        {item.blockers.length === 0 ? (
+          <p className="flex items-center gap-2 text-sm">
+            <CircleCheck size={14} className="text-ok" aria-hidden="true" />
+            {item.group === 'ready'
+              ? `Approved by ${item.approvals.join(', ')} and ready to merge.`
+              : 'Nothing is blocking this PR.'}
+          </p>
+        ) : (
+          <ul>
+            {/* Blockers fold away as they clear and fold in as they appear after a sync. */}
+            <ListPresence>
+              {item.blockers.map((blocker) => (
+                <ListItem
+                  key={blocker.kind}
+                  as="li"
+                  className="flex items-center gap-2 pt-1.5 text-sm first:pt-0"
+                >
+                  <CircleDot
+                    size={13}
+                    style={{ color: `var(--${blockerTone[blocker.kind]})` }}
+                    aria-hidden="true"
+                  />
+                  <span className="min-w-0 flex-1">
+                    {blocker.label}
+                    {blocker.since && (
+                      <span className="text-xs text-fg-subtle">
+                        {' '}
+                        · since {relativePhrase(blocker.since)}
+                      </span>
+                    )}
+                    {blocker.actor !== 'you' && (
+                      <span className="text-xs text-fg-subtle">
+                        {' '}
+                        · {blocker.actor === 'ci' ? 'waiting on CI' : 'their move'}
+                      </span>
+                    )}
                   </span>
-                )}
-                {blocker.actor !== 'you' && (
-                  <span className="text-xs text-fg-subtle">
-                    {' '}
-                    · {blocker.actor === 'ci' ? 'waiting on CI' : 'their move'}
-                  </span>
-                )}
-              </span>
-              {action(blocker)}
-            </li>
-          ))}
-        </ul>
-      )}
+                  {action(blocker)}
+                </ListItem>
+              ))}
+            </ListPresence>
+          </ul>
+        )}
+      </FadeSwap>
       {wait && wait.tone !== 'ok' && item.group === 'waiting' && (
         <p className="mt-2 text-xs" style={{ color: `var(--${wait.tone})` }}>
           Waiting {wait.hours} hours for review — past the{' '}

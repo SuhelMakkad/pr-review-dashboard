@@ -1,16 +1,25 @@
 import { forwardRef, useEffect, useState } from 'react';
-import { DropdownMenu } from 'radix-ui';
 import { Check, ChevronRight, ListFilter, Search, X } from 'lucide-react';
 import type { PullRequestItem } from '@review-desk/shared/types';
 import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
+import {
+  Menu,
+  MenuContent,
+  MenuItem,
+  MenuItemIndicator,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuSub,
+  MenuSubContent,
+  MenuSubTrigger,
+  MenuTrigger,
+  menuItemClass,
+} from '@/ui/menu';
+import { ListItem, ListPresence } from '@/ui/motion';
 import { ciMeta, reasonMeta } from '@/features/pulls/meta';
 import { activeFilterCount, type InboxSearch } from '@/features/inbox/filters';
-
-const menuClass =
-  'z-50 min-w-[200px] rounded-md border border-line bg-elevated p-1 text-sm text-fg shadow-popover';
-const menuItemClass =
-  'flex h-8 cursor-default items-center gap-2 rounded-sm px-2 outline-none data-[highlighted]:bg-selected';
 
 type FilterKey = 'repo' | 'author' | 'reason' | 'ci' | 'draft';
 
@@ -26,47 +35,35 @@ function Submenu({
   onChange: (value: string | undefined) => void;
 }) {
   return (
-    <DropdownMenu.Sub>
-      <DropdownMenu.SubTrigger className={menuItemClass}>
+    <MenuSub>
+      <MenuSubTrigger className={menuItemClass}>
         <span className="flex-1">{label}</span>
         {value && <span className="size-1.5 rounded-full bg-accent" aria-hidden="true" />}
         <ChevronRight size={14} className="text-fg-subtle" aria-hidden="true" />
-      </DropdownMenu.SubTrigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.SubContent
-          className={cn(menuClass, 'max-h-80 overflow-y-auto')}
-          sideOffset={4}
-        >
-          <DropdownMenu.RadioGroup
-            value={value ?? ''}
-            onValueChange={(next) => onChange(next || undefined)}
-          >
-            <DropdownMenu.RadioItem value="" className={menuItemClass}>
+      </MenuSubTrigger>
+      <MenuSubContent className="max-h-80 min-w-[200px] overflow-y-auto" sideOffset={4}>
+        <MenuRadioGroup value={value ?? ''} onValueChange={(next) => onChange(next || undefined)}>
+          <MenuRadioItem value="" className={menuItemClass}>
+            <span className="w-4">
+              <MenuItemIndicator>
+                <Check size={14} />
+              </MenuItemIndicator>
+            </span>
+            Any
+          </MenuRadioItem>
+          {options.map((option) => (
+            <MenuRadioItem key={option.value} value={option.value} className={menuItemClass}>
               <span className="w-4">
-                <DropdownMenu.ItemIndicator>
+                <MenuItemIndicator>
                   <Check size={14} />
-                </DropdownMenu.ItemIndicator>
+                </MenuItemIndicator>
               </span>
-              Any
-            </DropdownMenu.RadioItem>
-            {options.map((option) => (
-              <DropdownMenu.RadioItem
-                key={option.value}
-                value={option.value}
-                className={menuItemClass}
-              >
-                <span className="w-4">
-                  <DropdownMenu.ItemIndicator>
-                    <Check size={14} />
-                  </DropdownMenu.ItemIndicator>
-                </span>
-                <span className="truncate">{option.label}</span>
-              </DropdownMenu.RadioItem>
-            ))}
-          </DropdownMenu.RadioGroup>
-        </DropdownMenu.SubContent>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Sub>
+              <span className="truncate">{option.label}</span>
+            </MenuRadioItem>
+          ))}
+        </MenuRadioGroup>
+      </MenuSubContent>
+    </MenuSub>
   );
 }
 
@@ -146,8 +143,8 @@ export const FilterBar = forwardRef<
         )}
       </label>
 
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger
+      <Menu>
+        <MenuTrigger
           className={cn(
             'inline-flex h-8 items-center gap-1.5 rounded-sm border px-2.5 text-sm',
             count
@@ -160,87 +157,86 @@ export const FilterBar = forwardRef<
           {count > 0 && (
             <span className="rounded-xs bg-accent px-1 text-2xs text-accent-fg">{count}</span>
           )}
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content className={menuClass} sideOffset={6} align="start">
-            <Submenu
-              label="Repository"
-              value={search.repo}
-              options={repositories.map((value) => ({ value, label: value }))}
-              onChange={(repo) => onChange({ repo })}
-            />
-            <Submenu
-              label="Author"
-              value={search.author}
-              options={authors.map((value) => ({ value, label: value }))}
-              onChange={(author) => onChange({ author })}
-            />
-            <Submenu
-              label="Attention reason"
-              value={search.reason}
-              options={(
-                ['first_review', 'changed', 'requested_again', 'reply', 'dismissed'] as const
-              ).map((value) => ({ value, label: reasonMeta[value].label }))}
-              onChange={(reason) => onChange({ reason: reason as InboxSearch['reason'] })}
-            />
-            <Submenu
-              label="Checks"
-              value={search.ci}
-              options={(['success', 'failure', 'pending', 'none'] as const).map((value) => ({
-                value,
-                label: ciMeta[value].label,
-              }))}
-              onChange={(ci) => onChange({ ci: ci as InboxSearch['ci'] })}
-            />
-            <Submenu
-              label="Drafts"
-              value={search.draft}
-              options={[
-                { value: 'hide', label: 'Hide drafts' },
-                { value: 'only', label: 'Drafts only' },
-              ]}
-              onChange={(draft) => onChange({ draft: draft as InboxSearch['draft'] })}
-            />
-            {count > 0 && (
-              <>
-                <DropdownMenu.Separator className="my-1 h-px bg-line" />
-                <DropdownMenu.Item
-                  className={menuItemClass}
-                  onSelect={() =>
-                    onChange({
-                      repo: undefined,
-                      author: undefined,
-                      reason: undefined,
-                      ci: undefined,
-                      draft: undefined,
-                    })
-                  }
-                >
-                  Clear all filters
-                </DropdownMenu.Item>
-              </>
-            )}
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
+        </MenuTrigger>
+        <MenuContent className="min-w-[200px]" sideOffset={6} align="start">
+          <Submenu
+            label="Repository"
+            value={search.repo}
+            options={repositories.map((value) => ({ value, label: value }))}
+            onChange={(repo) => onChange({ repo })}
+          />
+          <Submenu
+            label="Author"
+            value={search.author}
+            options={authors.map((value) => ({ value, label: value }))}
+            onChange={(author) => onChange({ author })}
+          />
+          <Submenu
+            label="Attention reason"
+            value={search.reason}
+            options={(
+              ['first_review', 'changed', 'requested_again', 'reply', 'dismissed'] as const
+            ).map((value) => ({ value, label: reasonMeta[value].label }))}
+            onChange={(reason) => onChange({ reason: reason as InboxSearch['reason'] })}
+          />
+          <Submenu
+            label="Checks"
+            value={search.ci}
+            options={(['success', 'failure', 'pending', 'none'] as const).map((value) => ({
+              value,
+              label: ciMeta[value].label,
+            }))}
+            onChange={(ci) => onChange({ ci: ci as InboxSearch['ci'] })}
+          />
+          <Submenu
+            label="Drafts"
+            value={search.draft}
+            options={[
+              { value: 'hide', label: 'Hide drafts' },
+              { value: 'only', label: 'Drafts only' },
+            ]}
+            onChange={(draft) => onChange({ draft: draft as InboxSearch['draft'] })}
+          />
+          {count > 0 && (
+            <>
+              <MenuSeparator />
+              <MenuItem
+                className={menuItemClass}
+                onSelect={() =>
+                  onChange({
+                    repo: undefined,
+                    author: undefined,
+                    reason: undefined,
+                    ci: undefined,
+                    draft: undefined,
+                  })
+                }
+              >
+                Clear all filters
+              </MenuItem>
+            </>
+          )}
+        </MenuContent>
+      </Menu>
 
-      <div className="flex min-w-0 items-center gap-1 overflow-hidden">
-        {active.map((key) => (
-          <span
-            key={key}
-            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-xs bg-selected pr-1 pl-2 text-xs text-fg"
-          >
-            {chipLabel(key, search[key]!)}
-            <button
-              type="button"
-              aria-label={`Remove ${key} filter`}
-              className="rounded-xs p-0.5 text-fg-subtle hover:bg-hover hover:text-fg"
-              onClick={() => onChange({ [key]: undefined })}
-            >
-              <X size={11} />
-            </button>
-          </span>
-        ))}
+      <div className="relative flex min-w-0 items-center gap-1 overflow-hidden">
+        <ListPresence mode="popLayout">
+          {active.map((key) => (
+            <ListItem key={key} as="span" preset="pop" layout className="shrink-0">
+              <span className="inline-flex h-6 items-center gap-1 rounded-xs bg-selected pr-1 pl-2 text-xs text-fg">
+                {chipLabel(key, search[key]!)}
+                <button
+                  type="button"
+                  aria-label={`Remove ${key} filter`}
+                  className="rounded-xs p-0.5 text-fg-subtle hover:bg-hover hover:text-fg"
+                  onClick={() => onChange({ [key]: undefined })}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            </ListItem>
+          ))}
+        </ListPresence>
       </div>
     </div>
   );

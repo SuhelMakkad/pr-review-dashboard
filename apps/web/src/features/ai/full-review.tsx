@@ -11,6 +11,8 @@ import { Button } from '@/ui/button';
 import { MarkdownView } from '@/ui/markdown';
 import { FinishSheet } from '@/features/review/finish-sheet';
 import { useReview } from '@/features/review/use-review';
+import { FadeSwap, Reveal, StaggerItem } from '@/ui/motion';
+import { Skeleton, SkeletonRegion, SkeletonText } from '@/ui/skeleton';
 import { AiCard } from '@/features/ai/assist-panel';
 import { useAi, useAiOverview } from '@/features/ai/use-ai';
 import { useInboxNavigation } from '@/features/inbox/inbox-context';
@@ -94,236 +96,253 @@ export function FullReview({
 
   return (
     <section aria-label="Full review" className="space-y-3">
-      {!run && ai.runs.isPending ? (
-        <p role="status" className="text-xs text-fg-muted">
-          Loading saved review…
-        </p>
-      ) : !run && ai.runs.error ? (
-        <div role="alert" className="space-y-2 text-xs text-fail">
-          <p>Could not load the saved review. {ai.runs.error.message}</p>
-          <Button size="sm" onClick={() => void ai.runs.refetch()}>
-            Try again
-          </Button>
-        </div>
-      ) : !run ? (
-        <div className="space-y-3 rounded-md border border-ai/40 bg-ai/[0.03] p-3">
-          <div>
-            <h3 className="flex items-center gap-1.5 text-sm font-medium text-ai">
-              <Sparkles size={14} aria-hidden="true" /> Full review
-            </h3>
-            <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-              Find issues across the complete PR. Review the findings before posting.
-            </p>
+      <FadeSwap
+        swapKey={run ? 'run' : ai.runs.isPending ? 'loading' : ai.runs.error ? 'error' : 'idle'}
+        className="space-y-3"
+        smoothHeight
+      >
+        {!run && ai.runs.isPending ? (
+          <SkeletonRegion
+            label="Loading saved review…"
+            className="space-y-2.5 rounded-md border border-line p-3"
+          >
+            <Skeleton className="h-3.5 w-28" />
+            <SkeletonText lines={2} />
+            <Skeleton className="h-7 w-28 rounded-sm" />
+          </SkeletonRegion>
+        ) : !run && ai.runs.error ? (
+          <div role="alert" className="space-y-2 text-xs text-fail">
+            <p>Could not load the saved review. {ai.runs.error.message}</p>
+            <Button size="sm" onClick={() => void ai.runs.refetch()}>
+              Try again
+            </Button>
           </div>
-          <Button
-            size="sm"
-            icon={
-              starting ? (
-                <LoaderCircle size={13} className="animate-spin" />
-              ) : (
-                <Sparkles size={13} />
-              )
-            }
-            disabled={starting || codex?.available === false || blocked}
-            aria-busy={starting}
-            onClick={launch}
-          >
-            {starting ? 'Preparing review…' : 'Run review'}
-          </Button>
-          {codex?.available !== false && blocked && (
-            <p className="text-xs text-fail" role="alert">
-              {plan?.problem}
-            </p>
-          )}
-          {codex?.available === false && (
-            <p className="text-xs text-fail">
-              Review agent unavailable. Check installed agents in{' '}
-              <Link to="/settings" className="underline">
-                Settings
-              </Link>
-              .
-            </p>
-          )}
-        </div>
-      ) : (
-        <>
-          {run.trigger === 'auto' && (
-            <p className="flex items-center gap-1.5 text-2xs text-fg-subtle">
-              <Sparkles size={11} aria-hidden="true" /> Started automatically when your review was
-              requested. Nothing is posted until you prepare and submit a review.
-            </p>
-          )}
-          <AiCard
-            run={run}
-            title="Full review"
-            showProvider={false}
-            starting={starting}
-            onCancel={() => ai.cancel.mutate(run.id)}
-            onRerun={launch}
-            onPause={() => ai.pause(run.id)}
-            onResume={() => ai.resume(run.id)}
-          >
-            {result && (
-              <div className="space-y-3">
-                <p
-                  className={`text-xs font-medium ${result.assessment === 'changes_requested' ? 'text-pending' : 'text-ok'}`}
-                >
-                  {result.assessment === 'changes_requested'
-                    ? 'Changes recommended'
-                    : 'No blocking findings'}
-                  {result.comments.length > 0 && (
-                    <>
-                      {' · '}
-                      {result.comments.length}{' '}
-                      {result.comments.length === 1 ? 'finding' : 'findings'}
-                    </>
-                  )}
-                </p>
-                <p className="text-2xs text-fg-subtle">
-                  Generated{' '}
-                  <time dateTime={run.finishedAt ?? run.createdAt}>
-                    {dateTime(run.finishedAt ?? run.createdAt)}
-                  </time>
-                  {' · '}
-                  {run.stale ? 'Out of date' : 'Up to date'}
-                </p>
-                <MarkdownView>{result.overall}</MarkdownView>
-                {result.comments.map((comment, index) => (
-                  <article
-                    key={index}
-                    className="space-y-2 rounded-sm border border-line bg-panel p-3"
-                  >
-                    <label className="flex items-center gap-2 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={selected.includes(index)}
-                        aria-label={`Include finding ${index + 1}`}
-                        disabled={run.stale || preparing || locked}
-                        onChange={(event) =>
-                          setSelection({
-                            runId: run.id,
-                            indices: event.target.checked
-                              ? [...selected, index]
-                              : selected.filter((item) => item !== index),
-                          })
-                        }
-                        className="size-3.5 accent-accent"
-                      />
-                      <span
-                        className={
-                          comment.severity === 'blocking'
-                            ? 'font-medium text-fail'
-                            : 'text-fg-muted'
-                        }
-                      >
-                        {comment.severity}
-                      </span>
-                      <Link
-                        to="/pr/$owner/$repo/$number/files"
-                        params={target}
-                        search={{ file: comment.path, mode: 'all' }}
-                        className="min-w-0 truncate font-mono text-accent hover:underline"
-                      >
-                        {comment.path}
-                        {comment.line === null ? ' (whole file)' : `:${comment.line}`}
-                      </Link>
-                    </label>
-                    <MarkdownView className="text-xs">{comment.body}</MarkdownView>
-                  </article>
-                ))}
-                {result.coverage.length > 0 && (
-                  <details className="text-xs text-fg-muted">
-                    <summary className="cursor-pointer font-medium">Review coverage</summary>
-                    <ul className="mt-1 list-disc space-y-1 pl-4">
-                      {result.coverage.map((item, index) => (
-                        <li key={index}>{item}</li>
-                      ))}
-                    </ul>
-                  </details>
-                )}
-                {run.stale && (
-                  <p className="text-xs text-pending">
-                    {run.staleReason} Regenerate this review before posting.
-                  </p>
-                )}
-                <div className="space-y-1.5 border-t border-line pt-3">
-                  <Button
-                    size="sm"
-                    disabled={!locked && (run.stale || preparing)}
-                    aria-busy={preparing}
-                    onClick={locked ? openActivity : () => prepare()}
-                  >
-                    {locked
-                      ? 'Review queued · View activity'
-                      : preparing
-                        ? 'Preparing draft…'
-                        : reusable
-                          ? 'Use prepared review'
-                          : 'Prepare GitHub review'}
-                  </Button>
-                  {preparing && (
-                    <p role="status" className="text-xs text-fg-muted">
-                      Preparing your GitHub review. You can navigate away; preparation will
-                      continue.
-                    </p>
-                  )}
-                  {reusable && prepared && !preparing && (
-                    <p className="text-2xs text-fg-subtle">
-                      Draft prepared{' '}
-                      <time dateTime={prepared.preparedAt}>{dateTime(prepared.preparedAt)}</time>.{' '}
-                      Your saved edits are kept when you reopen it.
-                    </p>
-                  )}
-                  {ai.isRunning('draft_summary') && (
-                    <p role="status" className="text-xs text-fg-muted">
-                      Your review summary is being generated in the background. Open the prepared
-                      review to follow its progress.
-                    </p>
-                  )}
-                  {ai.completed('draft_summary') && !ai.isRunning('draft_summary') && (
-                    <p className="text-2xs text-fg-subtle">
-                      {ai.completed('draft_summary')!.stale
-                        ? 'The saved review summary is out of date. Open the prepared review to generate a new one.'
-                        : 'A generated summary is saved. Open the prepared review to use it or generate a new one.'}
-                    </p>
-                  )}
-                  {prepareError && (
-                    <div role="alert" className="space-y-2 text-xs text-fail">
-                      <p>{prepareError.message}</p>
-                      {replacementRevision && (
-                        <div className="flex flex-wrap gap-2">
-                          <Button size="sm" onClick={() => setFinishOpen(true)}>
-                            View current draft
-                          </Button>
-                          <Button
-                            size="sm"
-                            disabled={locked || preparing || run.stale}
-                            onClick={() =>
-                              prepare({ replace: true, expectedDraftRevision: replacementRevision })
-                            }
-                          >
-                            Save a copy and replace
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <p className="text-2xs text-fg-subtle">
-                    {selected.length} selected. Edit the summary and choose a verdict before
-                    posting. Previously prepared findings follow your selection. Independent
-                    comments are kept.
-                  </p>
-                </div>
-              </div>
+        ) : !run ? (
+          <div className="space-y-3 rounded-md border border-ai/40 bg-ai/[0.03] p-3">
+            <div>
+              <h3 className="flex items-center gap-1.5 text-sm font-medium text-ai">
+                <Sparkles size={14} aria-hidden="true" /> Full review
+              </h3>
+              <p className="mt-1 text-xs leading-relaxed text-fg-muted">
+                Find issues across the complete PR. Review the findings before posting.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              icon={
+                starting ? (
+                  <LoaderCircle size={13} className="animate-spin" />
+                ) : (
+                  <Sparkles size={13} />
+                )
+              }
+              disabled={starting || codex?.available === false || blocked}
+              aria-busy={starting}
+              onClick={launch}
+            >
+              {starting ? 'Preparing review…' : 'Run review'}
+            </Button>
+            {codex?.available !== false && blocked && (
+              <p className="text-xs text-fail" role="alert">
+                {plan?.problem}
+              </p>
             )}
-          </AiCard>
-        </>
-      )}
-      {(starting || latest?.status === 'running' || latest?.status === 'queued') && (
+            {codex?.available === false && (
+              <p className="text-xs text-fail">
+                Review agent unavailable. Check installed agents in{' '}
+                <Link to="/settings" className="underline">
+                  Settings
+                </Link>
+                .
+              </p>
+            )}
+          </div>
+        ) : (
+          <>
+            {run.trigger === 'auto' && (
+              <p className="flex items-center gap-1.5 text-2xs text-fg-subtle">
+                <Sparkles size={11} aria-hidden="true" /> Started automatically when your review was
+                requested. Nothing is posted until you prepare and submit a review.
+              </p>
+            )}
+            <AiCard
+              run={run}
+              title="Full review"
+              showProvider={false}
+              starting={starting}
+              onCancel={() => ai.cancel.mutate(run.id)}
+              onRerun={launch}
+              onPause={() => ai.pause(run.id)}
+              onResume={() => ai.resume(run.id)}
+            >
+              {result && (
+                <div className="space-y-3">
+                  <p
+                    className={`text-xs font-medium ${result.assessment === 'changes_requested' ? 'text-pending' : 'text-ok'}`}
+                  >
+                    {result.assessment === 'changes_requested'
+                      ? 'Changes recommended'
+                      : 'No blocking findings'}
+                    {result.comments.length > 0 && (
+                      <>
+                        {' · '}
+                        {result.comments.length}{' '}
+                        {result.comments.length === 1 ? 'finding' : 'findings'}
+                      </>
+                    )}
+                  </p>
+                  <p className="text-2xs text-fg-subtle">
+                    Generated{' '}
+                    <time dateTime={run.finishedAt ?? run.createdAt}>
+                      {dateTime(run.finishedAt ?? run.createdAt)}
+                    </time>
+                    {' · '}
+                    {run.stale ? 'Out of date' : 'Up to date'}
+                  </p>
+                  <MarkdownView>{result.overall}</MarkdownView>
+                  {/* Findings arrive one after another when a review finishes. */}
+                  {result.comments.map((comment, index) => (
+                    <StaggerItem
+                      as="article"
+                      key={index}
+                      index={index}
+                      className="space-y-2 rounded-sm border border-line bg-panel p-3"
+                    >
+                      <label className="flex items-center gap-2 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={selected.includes(index)}
+                          aria-label={`Include finding ${index + 1}`}
+                          disabled={run.stale || preparing || locked}
+                          onChange={(event) =>
+                            setSelection({
+                              runId: run.id,
+                              indices: event.target.checked
+                                ? [...selected, index]
+                                : selected.filter((item) => item !== index),
+                            })
+                          }
+                          className="size-3.5 accent-accent"
+                        />
+                        <span
+                          className={
+                            comment.severity === 'blocking'
+                              ? 'font-medium text-fail'
+                              : 'text-fg-muted'
+                          }
+                        >
+                          {comment.severity}
+                        </span>
+                        <Link
+                          to="/pr/$owner/$repo/$number/files"
+                          params={target}
+                          search={{ file: comment.path, mode: 'all' }}
+                          className="min-w-0 truncate font-mono text-accent hover:underline"
+                        >
+                          {comment.path}
+                          {comment.line === null ? ' (whole file)' : `:${comment.line}`}
+                        </Link>
+                      </label>
+                      <MarkdownView className="text-xs">{comment.body}</MarkdownView>
+                    </StaggerItem>
+                  ))}
+                  {result.coverage.length > 0 && (
+                    <details className="text-xs text-fg-muted">
+                      <summary className="cursor-pointer font-medium">Review coverage</summary>
+                      <ul className="mt-1 list-disc space-y-1 pl-4">
+                        {result.coverage.map((item, index) => (
+                          <li key={index}>{item}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {run.stale && (
+                    <p className="text-xs text-pending">
+                      {run.staleReason} Regenerate this review before posting.
+                    </p>
+                  )}
+                  <div className="space-y-1.5 border-t border-line pt-3">
+                    <Button
+                      size="sm"
+                      disabled={!locked && (run.stale || preparing)}
+                      aria-busy={preparing}
+                      onClick={locked ? openActivity : () => prepare()}
+                    >
+                      {locked
+                        ? 'Review queued · View activity'
+                        : preparing
+                          ? 'Preparing draft…'
+                          : reusable
+                            ? 'Use prepared review'
+                            : 'Prepare GitHub review'}
+                    </Button>
+                    <Reveal show={preparing}>
+                      <p role="status" className="text-xs text-fg-muted">
+                        Preparing your GitHub review. You can navigate away; preparation will
+                        continue.
+                      </p>
+                    </Reveal>
+                    {reusable && prepared && !preparing && (
+                      <p className="text-2xs text-fg-subtle">
+                        Draft prepared{' '}
+                        <time dateTime={prepared.preparedAt}>{dateTime(prepared.preparedAt)}</time>.{' '}
+                        Your saved edits are kept when you reopen it.
+                      </p>
+                    )}
+                    {ai.isRunning('draft_summary') && (
+                      <p role="status" className="text-xs text-fg-muted">
+                        Your review summary is being generated in the background. Open the prepared
+                        review to follow its progress.
+                      </p>
+                    )}
+                    {ai.completed('draft_summary') && !ai.isRunning('draft_summary') && (
+                      <p className="text-2xs text-fg-subtle">
+                        {ai.completed('draft_summary')!.stale
+                          ? 'The saved review summary is out of date. Open the prepared review to generate a new one.'
+                          : 'A generated summary is saved. Open the prepared review to use it or generate a new one.'}
+                      </p>
+                    )}
+                    {prepareError && (
+                      <div role="alert" className="space-y-2 text-xs text-fail">
+                        <p>{prepareError.message}</p>
+                        {replacementRevision && (
+                          <div className="flex flex-wrap gap-2">
+                            <Button size="sm" onClick={() => setFinishOpen(true)}>
+                              View current draft
+                            </Button>
+                            <Button
+                              size="sm"
+                              disabled={locked || preparing || run.stale}
+                              onClick={() =>
+                                prepare({
+                                  replace: true,
+                                  expectedDraftRevision: replacementRevision,
+                                })
+                              }
+                            >
+                              Save a copy and replace
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <p className="text-2xs text-fg-subtle">
+                      {selected.length} selected. Edit the summary and choose a verdict before
+                      posting. Previously prepared findings follow your selection. Independent
+                      comments are kept.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </AiCard>
+          </>
+        )}
+      </FadeSwap>
+      <Reveal show={starting || latest?.status === 'running' || latest?.status === 'queued'}>
         <p className="text-2xs text-fg-subtle">
           You can navigate away. This review will continue in the background.
         </p>
-      )}
+      </Reveal>
       {latest && run?.id !== latest.id && (
         <p role={latest.status === 'failed' ? 'alert' : 'status'} className="text-xs text-fg-muted">
           {latest.status === 'failed'
@@ -349,7 +368,8 @@ export function FullReview({
           {ai.controlError.message}
         </p>
       )}
-      {finishOpen && review.draft.data && (
+      {/* Mounted while closed, like the Files tab's sheet, so closing can animate out. */}
+      {review.draft.data && (
         <FinishSheet
           open={finishOpen}
           onOpenChange={setFinishOpen}

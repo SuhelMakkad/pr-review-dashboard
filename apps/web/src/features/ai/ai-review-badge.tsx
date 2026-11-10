@@ -1,7 +1,7 @@
 import { CircleAlert, LoaderCircle, Sparkles, type LucideIcon } from 'lucide-react';
 import type { AiReviewStatus } from '@review-desk/shared/ai';
 import { tone } from '@/features/pulls/meta';
-import { cn } from '@/ui/cn';
+import { Reveal } from '@/ui/motion';
 
 interface BadgeMeta {
   label: string;
@@ -60,27 +60,25 @@ export function AiReviewBadge({
   className?: string;
 }) {
   const meta = review ? badgeFor(review) : null;
-
-  if (!meta) return null;
-
-  const Icon = meta.icon;
+  const Icon = meta?.icon;
 
   return (
-    <span
-      title={meta.hint}
-      style={tone(meta.tone)}
-      className={cn(
-        'tone inline-flex h-5 items-center gap-1 rounded-xs px-1.5 text-2xs font-medium whitespace-nowrap',
-        className,
+    <Reveal show={Boolean(meta)} preset="pop" as="span" className={className}>
+      {meta && Icon && (
+        <span
+          title={meta.hint}
+          style={tone(meta.tone)}
+          className="tone inline-flex h-5 items-center gap-1 rounded-xs px-1.5 text-2xs font-medium whitespace-nowrap"
+        >
+          <Icon
+            size={11}
+            strokeWidth={2.25}
+            aria-hidden="true"
+            className={meta.spin ? 'motion-safe:animate-spin' : undefined}
+          />
+          {meta.label}
+        </span>
       )}
-    >
-      <Icon
-        size={11}
-        strokeWidth={2.25}
-        aria-hidden="true"
-        className={meta.spin ? 'motion-safe:animate-spin' : undefined}
-      />
-      {meta.label}
-    </span>
+    </Reveal>
   );
 }

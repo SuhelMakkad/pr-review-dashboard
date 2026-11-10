@@ -16,6 +16,12 @@ export const inboxSearchSchema = z.object({
 
 export type InboxSearch = z.infer<typeof inboxSearchSchema>;
 
+/** Identifies one filtered view: the list swaps at once when it changes and animates within it. */
+export const filterKey = (search: InboxSearch) =>
+  [search.q, search.repo, search.author, search.reason, search.ci, search.draft]
+    .map((value) => value ?? '')
+    .join('|');
+
 export const activeFilterCount = (search: InboxSearch) =>
   [search.repo, search.author, search.reason, search.ci, search.draft].filter(Boolean).length;
 

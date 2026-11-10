@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
-import { CircleAlert, Inbox, Plus } from 'lucide-react';
+import { Inbox, Plus } from 'lucide-react';
 import type { PullRequestItem } from '@review-desk/shared/types';
 import { refOf } from '@/lib/pr-ref';
 import { usePulls } from '@/lib/queries';
@@ -9,13 +9,21 @@ import { useShortcuts } from '@/lib/shortcuts';
 import { shortDateTime } from '@/lib/time';
 import { Button } from '@/ui/button';
 import { EmptyState } from '@/ui/empty-state';
+import { ErrorState } from '@/ui/error-state';
 import { Kbd } from '@/ui/kbd';
+import { ListSkeleton } from '@/ui/skeleton';
+import { FadeSwap, IndicatorGroup, LayoutScroll, ListItem, ListPresence } from '@/ui/motion';
 import { inQueue, isFollowUp, queueMeta, type QueueSlug } from '@/features/pulls/meta';
 import { useCurrentPull } from '@/features/pulls/use-current-pull';
 import { AddPullDialog } from '@/features/inbox/add-pull-dialog';
 import { Digest } from '@/features/inbox/digest';
 import { FilterBar } from '@/features/inbox/filter-bar';
-import { activeFilterCount, matchesFilters, type InboxSearch } from '@/features/inbox/filters';
+import {
+  activeFilterCount,
+  filterKey,
+  matchesFilters,
+  type InboxSearch,
+} from '@/features/inbox/filters';
 import { InboxContext } from '@/features/inbox/inbox-context';
 import { QueueRow } from '@/features/inbox/queue-row';
 import { useAiReviewStatuses } from '@/features/ai/use-ai';
@@ -188,6 +196,7 @@ export function InboxPage() {
     .sort()[0];
 
   const filtered = activeFilterCount(search) > 0 || Boolean(search.q);
+  const listState = pulls.isPending ? 'loading' : pulls.error && !pulls.data ? 'error' : 'ready';
 
   return (
     <InboxContext.Provider value={navigation}>
@@ -215,98 +224,112 @@ export function InboxPage() {
           onLayoutChanged={layout.onLayoutChanged}
         >
           <Panel id="list" defaultSize="44" minSize="28" className="flex flex-col">
-            <div
-              role="listbox"
-              aria-label={`${meta.label} pull requests`}
-              aria-activedescendant={current ? `row-${current.id}` : undefined}
-              tabIndex={0}
-              className="scroll-thin min-h-0 flex-1 overflow-y-auto outline-none"
-            >
-              {pulls.isPending && <ListSkeleton />}
+            <IndicatorGroup>
+              {/* Scroll-aware, so the selection bar glides to the right row in a scrolled list. */}
+              <LayoutScroll
+                role="listbox"
+                aria-label={`${meta.label} pull requests`}
+                aria-activedescendant={current ? `row-${current.id}` : undefined}
+                aria-busy={pulls.isPending}
+                tabIndex={0}
+                className="scroll-thin min-h-0 flex-1 overflow-y-auto outline-none"
+              >
+                {/* Loading, failed and loaded each fade into the next; an error centres itself. */}
+                <FadeSwap
+                  swapKey={listState}
+                  className={
+                    listState === 'error' ? 'grid min-h-full place-items-center' : undefined
+                  }
+                >
+                  {listState === 'loading' && <ListSkeleton />}
 
-              {pulls.error && !pulls.data && (
-                <div className="grid min-h-full place-items-center">
-                  <EmptyState
-                    icon={<CircleAlert size={28} />}
-                    title="Can't reach Review Desk"
-                    hint={pulls.error.message}
-                  />
-                </div>
-              )}
-
-              {pulls.data && flat.length === 0 && (
-                <div className="grid place-items-center pt-10">
-                  {filtered ? (
-                    <EmptyState
-                      title="No matching pull requests"
-                      hint="Try a different filter."
-                      action={
-                        <button
-                          type="button"
-                          className="text-sm text-accent underline"
-                          onClick={() =>
-                            setSearch({
-                              q: undefined,
-                              repo: undefined,
-                              author: undefined,
-                              reason: undefined,
-                              ci: undefined,
-                              draft: undefined,
-                            })
-                          }
-                        >
-                          Clear filters
-                        </button>
-                      }
-                    />
-                  ) : (
-                    <EmptyState
-                      icon={<Inbox size={28} />}
-                      title={meta.empty}
-                      hint={
-                        <>
-                          {meta.emptyHint}
-                          {queue === 'attention' && nextWake && (
-                            <span className="mt-2 block text-fg-subtle">
-                              Next snoozed PR wakes {shortDateTime(nextWake)}.
-                            </span>
-                          )}
-                        </>
-                      }
+                  {listState === 'error' && (
+                    <ErrorState
+                      title="Can't reach Review Desk"
+                      error={pulls.error}
+                      onRetry={() => void pulls.refetch()}
                     />
                   )}
-                </div>
-              )}
 
-              {sections.map((section) => (
-                <div
-                  key={section.label ?? 'all'}
-                  role="group"
-                  aria-label={section.label ?? meta.label}
-                >
-                  {section.label && (
-                    <div className="sticky top-0 z-10 flex h-7 items-center gap-2 border-b border-line bg-sunken/95 px-4 text-2xs font-medium tracking-wide text-fg-subtle uppercase backdrop-blur">
-                      {section.label}
-                      <span className="tabular-nums">{section.items.length}</span>
+                  {pulls.data && flat.length === 0 && (
+                    <div className="grid place-items-center pt-10">
+                      {filtered ? (
+                        <EmptyState
+                          title="No matching pull requests"
+                          hint="Try a different filter."
+                          action={
+                            <button
+                              type="button"
+                              className="text-sm text-accent underline"
+                              onClick={() =>
+                                setSearch({
+                                  q: undefined,
+                                  repo: undefined,
+                                  author: undefined,
+                                  reason: undefined,
+                                  ci: undefined,
+                                  draft: undefined,
+                                })
+                              }
+                            >
+                              Clear filters
+                            </button>
+                          }
+                        />
+                      ) : (
+                        <EmptyState
+                          icon={<Inbox size={28} />}
+                          title={meta.empty}
+                          hint={
+                            <>
+                              {meta.emptyHint}
+                              {queue === 'attention' && nextWake && (
+                                <span className="mt-2 block text-fg-subtle">
+                                  Next snoozed PR wakes {shortDateTime(nextWake)}.
+                                </span>
+                              )}
+                            </>
+                          }
+                        />
+                      )}
                     </div>
                   )}
-                  {section.items.map((item) => (
-                    <QueueRow
-                      key={item.id}
-                      ref={(element) => {
-                        if (element) rowRefs.current.set(item.id, element);
-                        else rowRefs.current.delete(item.id);
-                      }}
-                      item={item}
-                      aiReview={aiReviews.data?.get(item.id)}
-                      selected={item.id === current?.id}
-                      onSelect={() => select(item, false)}
-                      onOpen={() => open(item)}
-                    />
-                  ))}
-                </div>
-              ))}
-            </div>
+
+                  {/* Triage, undo and sync changes animate; a new queue or filter swaps at once. */}
+                  <ListPresence resetKey={`${queue}:${filterKey(search)}`}>
+                    {sections.map((section) => (
+                      <ListItem key={section.label ?? 'all'}>
+                        <div role="group" aria-label={section.label ?? meta.label}>
+                          {section.label && (
+                            <div className="sticky top-0 z-10 flex h-7 items-center gap-2 border-b border-line bg-sunken/95 px-4 text-2xs font-medium tracking-wide text-fg-subtle uppercase backdrop-blur">
+                              {section.label}
+                              <span className="tabular-nums">{section.items.length}</span>
+                            </div>
+                          )}
+                          <ListPresence>
+                            {section.items.map((item) => (
+                              <ListItem key={item.id}>
+                                <QueueRow
+                                  ref={(element) => {
+                                    if (element) rowRefs.current.set(item.id, element);
+                                    else rowRefs.current.delete(item.id);
+                                  }}
+                                  item={item}
+                                  aiReview={aiReviews.data?.get(item.id)}
+                                  selected={item.id === current?.id}
+                                  onSelect={() => select(item, false)}
+                                  onOpen={() => open(item)}
+                                />
+                              </ListItem>
+                            ))}
+                          </ListPresence>
+                        </div>
+                      </ListItem>
+                    ))}
+                  </ListPresence>
+                </FadeSwap>
+              </LayoutScroll>
+            </IndicatorGroup>
           </Panel>
 
           <Separator className="w-px bg-line transition-colors outline-none hover:bg-accent focus-visible:bg-accent data-[separator=active]:bg-accent" />
@@ -330,21 +353,5 @@ export function InboxPage() {
         </Group>
       </div>
     </InboxContext.Provider>
-  );
-}
-
-function ListSkeleton() {
-  return (
-    <div aria-busy="true" aria-label="Loading pull requests">
-      {Array.from({ length: 6 }, (_, index) => (
-        <div
-          key={index}
-          className="flex h-[var(--row-h)] items-center gap-3 border-b border-line px-4"
-        >
-          <div className="h-3 flex-1 animate-pulse rounded-xs bg-sunken" />
-          <div className="h-3 w-16 animate-pulse rounded-xs bg-sunken" />
-        </div>
-      ))}
-    </div>
   );
 }
