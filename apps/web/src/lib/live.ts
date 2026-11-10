@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type { QueryClient } from '@tanstack/react-query';
+import type { Query, QueryClient, QueryKey } from '@tanstack/react-query';
 import type { ServerEvent } from '@review-desk/shared/events';
 import type { PullRequestList, SyncStatus } from '@review-desk/shared/types';
 import { queryKeys } from '@/lib/query-keys';
@@ -38,6 +38,52 @@ export function fallbackInterval(live: LiveState, ms = 15_000): number | false {
   return live.connected ? false : ms;
 }
 
+/** Answers that hold nothing of any one account, so they survive an account switch. */
+const SHARED_QUERIES = new Set<unknown>([queryKeys.status[0], queryKeys.accounts[0]]);
+
+/**
+ * Shows a new sync status. When it names another account than the cached answers belong to, they
+ * are dropped rather than refetched, so no screen shows, or starts editing, the previous account's
+ * PRs, notes or drafts while the new account's load. The routed pages remount at the same time
+ * (`useRemountKey` in the shell), so nothing they hold carries over either.
+ */
+export function adoptStatus(client: QueryClient, status: SyncStatus): void {
+  const login = status.account?.login ?? null;
+  const previous = client.getQueryData<SyncStatus>(queryKeys.status);
+  const shown = previous?.account?.login ?? null;
+  const listed = client.getQueryData<PullRequestList>(queryKeys.pulls)?.account ?? null;
+  const switched = (shown !== null && shown !== login) || (listed !== null && listed !== login);
+
+  if (switched)
+    client.removeQueries({ predicate: (query: Query) => !SHARED_QUERIES.has(query.queryKey[0]) });
+
+  client.setQueryData(queryKeys.status, status);
+
+  // The first status names the account the cached answers were loaded for; refresh them.
+  if (!switched && previous?.account?.login !== status.account?.login)
+    void client.invalidateQueries();
+}
+
+/**
+ * True when the cached answer at `queryKey` belongs to `account`, so a write made for that account
+ * may update it or roll it back. A write can finish after a switch (removing queries does not stop
+ * it), and the switch can reach the cache in either order: through the answer itself (another
+ * window switched, and new PR data arrived before the status) or through the status (the answer was
+ * dropped). So the answer's own account decides, and the status only when there is none. Every
+ * mutation checks this before writing into a key both accounts share (a PR's detail, the queue, a
+ * diff), so the previous account's data never reappears on the new account's screens.
+ */
+export function cacheBelongsTo(client: QueryClient, account: string, queryKey: QueryKey): boolean {
+  const answer = client.getQueryData<{ account?: unknown }>(queryKey);
+  const owner =
+    typeof answer?.account === 'string'
+      ? answer.account
+      : client.getQueryData<SyncStatus>(queryKeys.status)?.account?.login;
+
+  // Before the first status nothing can have switched yet.
+  return owner === undefined || owner === account;
+}
+
 function handle(client: QueryClient, event: ServerEvent, firstHello: { value: boolean }) {
   switch (event.type) {
     case 'hello': {
@@ -59,21 +105,9 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
     case 'resync':
       void client.invalidateQueries();
       return;
-    case 'status': {
-      const previous = client.getQueryData<SyncStatus>(queryKeys.status);
-      const list = client.getQueryData<PullRequestList>(queryKeys.pulls);
-
-      client.setQueryData(queryKeys.status, event.status);
-
-      if (
-        previous?.account?.login !== event.status.account?.login ||
-        (list && list.account !== (event.status.account?.login ?? null))
-      ) {
-        void client.invalidateQueries();
-      }
-
+    case 'status':
+      adoptStatus(client, event.status);
       return;
-    }
     case 'pulls.changed':
       void client.invalidateQueries({ queryKey: queryKeys.pulls });
       // New commits can make a saved review out of date.

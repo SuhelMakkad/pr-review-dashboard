@@ -3,13 +3,12 @@ import type { DiffManifest } from '@review-desk/shared/diff';
 import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
 import type { OperationReceipt } from '@review-desk/shared/operations';
 import { api, ApiError } from '@/lib/api';
+import { cacheBelongsTo } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
 import { githubCommand } from '@/lib/operation-command';
 import { useOperations } from '@/features/activity/use-operations';
 
 const viewedVersions = new Map<string, number>();
-
-export const draftKey = (prId: string) => ['draft', prId] as const;
 
 export interface CommentTarget {
   path: string;
@@ -26,13 +25,14 @@ export function useReview(prId: string | null, account: string) {
   const refreshOperations = () => client.invalidateQueries({ queryKey: ['operations', account] });
 
   const draft = useQuery({
-    queryKey: draftKey(prId ?? 'none'),
+    queryKey: queryKeys.draft(prId ?? 'none', account),
     queryFn: () =>
       api<ReviewDraft>(`/api/pulls/${enc}/draft?account=${encodeURIComponent(account)}`),
     enabled: Boolean(prId && account),
   });
 
-  const refreshDraft = () => client.invalidateQueries({ queryKey: draftKey(prId ?? 'none') });
+  const refreshDraft = () =>
+    client.invalidateQueries({ queryKey: queryKeys.draft(prId ?? 'none', account) });
 
   const addComment = useMutation({
     mutationFn: (input: CommentTarget & { body: string; origin?: 'user' | 'ai' }) =>
@@ -122,7 +122,10 @@ export function useReview(prId: string | null, account: string) {
     onSuccess: refreshOperations,
   });
 
-  /** Optimistic: the tree and progress update before GitHub confirms. */
+  /**
+   * Optimistic: the tree and progress update before GitHub confirms. Diffs carry the viewer's own
+   * viewed state under keys both accounts share, so nothing is written once another account shows.
+   */
   const setViewed = useMutation({
     mutationFn: ({ path, viewed }: { path: string; viewed: boolean }) =>
       githubCommand(`/api/pulls/${enc}/viewed`, { account, path, viewed }),
@@ -131,7 +134,9 @@ export function useReview(prId: string | null, account: string) {
       const version = (viewedVersions.get(versionKey) ?? 0) + 1;
       viewedVersions.set(versionKey, version);
 
-      const snapshots = client.getQueriesData<DiffManifest>({ queryKey: ['diff', prId] });
+      const snapshots = client
+        .getQueriesData<DiffManifest>({ queryKey: ['diff', prId] })
+        .filter(([key]) => cacheBelongsTo(client, account, key));
 
       for (const [key, manifest] of snapshots) {
         if (!manifest) continue;
@@ -148,10 +153,9 @@ export function useReview(prId: string | null, account: string) {
     },
     onError: (_error, variables, context) => {
       if (!context || viewedVersions.get(context.versionKey) !== context.version) return;
-
       for (const [key, manifest] of context.snapshots) {
         const original = manifest?.files.find((file) => file.path === variables.path);
-        if (!original) continue;
+        if (!original || !cacheBelongsTo(client, account, key)) continue;
 
         client.setQueryData<DiffManifest>(key, (current) =>
           current

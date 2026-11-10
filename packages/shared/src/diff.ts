@@ -34,6 +34,8 @@ export interface DiffFile {
 
 export interface DiffManifest {
   prId: string;
+  /** The account whose view this is (viewed state, "since your review"); set by the diff route. */
+  account?: string;
   mode: DiffMode;
   kind: DiffKind;
   /** Left side of the comparison (base or your reviewed commit) and right side (head). */

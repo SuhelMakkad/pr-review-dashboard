@@ -19,11 +19,14 @@ export function registerDiffRoutes(
       const mode: DiffMode = request.query.mode === 'since-review' ? 'since-review' : 'full';
 
       try {
-        return await diffs.manifest(
+        const manifest = await diffs.manifest(
           detail.snapshot,
           mode,
           detail.item.latestReview?.commitOid ?? null,
         );
+
+        // Viewed state and "since your review" are this account's, so the reply says whose it is.
+        return { ...manifest, account: detail.account };
       } catch (error) {
         return reply.code(502).send({ error: safeError(error) });
       }

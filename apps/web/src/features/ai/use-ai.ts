@@ -16,8 +16,8 @@ import type {
   ReviewEvent,
 } from '@review-desk/shared/review';
 import { api } from '@/lib/api';
+import { queryKeys } from '@/lib/query-keys';
 
-export const aiKey = (prId: string) => ['ai', prId] as const;
 export const aiReviewsKey = ['ai-reviews'] as const;
 
 export function useAiOverview() {
@@ -60,7 +60,8 @@ export function useAiReviewStatuses(account: string | null | undefined) {
 /** AI runs for one PR. Live progress arrives over the event stream; a light poll covers gaps. */
 export function useAi(prId: string | null, account: string) {
   const client = useQueryClient();
-  const key = aiKey(prId ?? 'none');
+  const key = queryKeys.ai(prId ?? 'none', account);
+  const draftKey = queryKeys.draft(prId ?? 'none', account);
   const startKey = ['ai-start', account, prId] as const;
   const starts = useMutationState({
     filters: { mutationKey: startKey, exact: true },
@@ -139,7 +140,7 @@ export function useAi(prId: string | null, account: string) {
           body: { account, event: draftEvent, body: draftBody },
         });
 
-        client.setQueryData(['draft', prId], draft);
+        client.setQueryData(draftKey, draft);
       }
 
       return api<AiRun>(`/api/pulls/${encodeURIComponent(prId!)}/ai`, {
@@ -172,7 +173,7 @@ export function useAi(prId: string | null, account: string) {
         method: 'POST',
         body: { account, index, body },
       }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['draft', prId] }),
+    onSuccess: () => client.invalidateQueries({ queryKey: draftKey }),
   });
 
   const prepare = useMutation({
@@ -186,12 +187,12 @@ export function useAi(prId: string | null, account: string) {
         body: { account, ...options },
       }),
     onSuccess: (draft) => {
-      client.setQueryData(['draft', prId], draft);
+      client.setQueryData(draftKey, draft);
     },
     onSettled: () =>
       Promise.all([
         client.invalidateQueries({ queryKey: key }),
-        client.invalidateQueries({ queryKey: ['draft', prId] }),
+        client.invalidateQueries({ queryKey: draftKey }),
       ]),
   });
 
@@ -202,7 +203,7 @@ export function useAi(prId: string | null, account: string) {
         method: 'POST',
         body: { account },
       }),
-    onSuccess: (draft) => client.setQueryData(['draft', prId], draft),
+    onSuccess: (draft) => client.setQueryData(draftKey, draft),
     onSettled: () => client.invalidateQueries({ queryKey: key }),
   });
 

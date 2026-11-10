@@ -1,4 +1,10 @@
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type QueryKey,
+} from '@tanstack/react-query';
 import type {
   PullRequestDetail,
   PullRequestItem,
@@ -15,7 +21,7 @@ export interface MineList {
   items: AuthorItem[];
 }
 import { api } from '@/lib/api';
-import { fallbackInterval, useLive } from '@/lib/live';
+import { cacheBelongsTo, fallbackInterval, useLive } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
 
 export function useStatus() {
@@ -85,7 +91,12 @@ export function useSyncNow() {
 
   return useMutation({
     mutationFn: () => api<SyncStatus>('/api/sync', { method: 'POST' }),
-    onSuccess: (status) => client.setQueryData(queryKeys.status, status),
+    // A reply sent before a switch must not switch the screens back; switches arrive through
+    // adoptStatus.
+    onSuccess: (status) => {
+      if (status.account && cacheBelongsTo(client, status.account.login, queryKeys.status))
+        client.setQueryData(queryKeys.status, status);
+    },
   });
 }
 
@@ -134,15 +145,21 @@ export interface TriageVariables {
 
 /**
  * Applies a triage update optimistically, writes it, and rolls back on failure. Independent of any
- * component, so callers can navigate away (e.g. auto-advance) without losing the result.
+ * component, so callers can navigate away (e.g. auto-advance) without losing the result. The
+ * cached queue and PR belong to the account it was sent for, so they are left alone once another
+ * account is on screen.
  */
 export async function runTriage(
   client: QueryClient,
   { id, account, update }: TriageVariables,
 ): Promise<PullRequestDetail> {
+  const owned = (key: QueryKey) => cacheBelongsTo(client, account, key);
+
   await client.cancelQueries({ queryKey: queryKeys.pulls });
 
-  const previous = client.getQueryData<PullRequestList>(queryKeys.pulls);
+  const previous = owned(queryKeys.pulls)
+    ? client.getQueryData<PullRequestList>(queryKeys.pulls)
+    : undefined;
 
   if (previous) {
     client.setQueryData<PullRequestList>(queryKeys.pulls, {
@@ -157,11 +174,11 @@ export async function runTriage(
       body: { account, ...update },
     });
 
-    client.setQueryData(queryKeys.detail(id), detail);
+    if (owned(queryKeys.detail(id))) client.setQueryData(queryKeys.detail(id), detail);
 
     return detail;
   } catch (error) {
-    if (previous) client.setQueryData(queryKeys.pulls, previous);
+    if (previous && owned(queryKeys.pulls)) client.setQueryData(queryKeys.pulls, previous);
 
     throw error;
   } finally {
