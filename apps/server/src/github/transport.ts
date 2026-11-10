@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { ghCredentials, type GhCredentials } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
@@ -53,25 +54,20 @@ interface RunResult {
   timedOut: boolean;
 }
 
-/** Child environment for gh: never forward debug output that could print credentials. */
-function ghEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-
-  delete env.GH_DEBUG;
-  delete env.DEBUG;
-
-  return env;
-}
-
 export class GhCli implements GitHubTransport {
-  constructor(private readonly timeoutMs = 35_000) {}
+  constructor(
+    private readonly timeoutMs = 35_000,
+    private readonly credentials: GhCredentials = ghCredentials,
+  ) {}
 
-  private spawn(args: string[], input?: string): Promise<RunResult> {
+  private async spawn(args: string[], input?: string): Promise<RunResult> {
+    const env = await this.credentials.environment();
+
     return new Promise((resolve, reject) => {
       const child = spawn('gh', args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: false,
-        env: ghEnvironment(),
+        env,
       });
       let stdout = '';
       let stderr = '';
@@ -124,20 +120,24 @@ export class GhCli implements GitHubTransport {
     const message = result.timedOut
       ? 'GitHub request timed out; cached data is still available.'
       : safeError(result.stderr.trim() || 'GitHub request failed. Check gh auth status.');
+    const outcome = result.timedOut
+      ? 'unknown'
+      : rateLimited(message)
+        ? 'rate_limit'
+        : /HTTP 401|authentication|not logged/i.test(message)
+          ? 'auth'
+          : /HTTP 4\d\d/.test(message)
+            ? 'rejected'
+            : 'unknown';
+
+    // A rejected token may have been replaced by a new sign-in; read it again next time.
+    if (outcome === 'auth') this.credentials.forget();
 
     throw new GitHubError(
       message,
       rateLimited(message) ? new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS).toISOString() : null,
       null,
-      result.timedOut
-        ? 'unknown'
-        : rateLimited(message)
-          ? 'rate_limit'
-          : /HTTP 401|authentication|not logged/i.test(message)
-            ? 'auth'
-            : /HTTP 4\d\d/.test(message)
-              ? 'rejected'
-              : 'unknown',
+      outcome,
     );
   }
 
@@ -229,6 +229,8 @@ export class GhCli implements GitHubTransport {
 
     const isJson = parsed.headers['content-type']?.includes('json') ?? false;
     const data = (isJson && parsed.body ? JSON.parse(parsed.body) : parsed.body) as T;
+
+    if (parsed.status === 401) this.credentials.forget();
 
     if (parsed.status === 403 || parsed.status === 429) {
       const retryAt = retryAtFromHeaders(parsed.headers);

@@ -8,6 +8,7 @@ import { x } from 'tar';
 import type { DiffManifest } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi } from '@/github/api.js';
+import { ghCredentials } from '@/github/credentials.js';
 import { safeError } from '@/github/errors.js';
 import { AgentError } from '@/ai/provider.js';
 
@@ -58,7 +59,10 @@ export async function extractRepository(
   return omitted;
 }
 
-/** The server downloads immutable snapshots using gh; no GitHub credentials reach Codex. */
+/**
+ * The server downloads immutable snapshots using gh, as the account the review belongs to; no
+ * GitHub credentials reach Codex.
+ */
 export const downloadRepository: RepositoryExporter = async (
   repository,
   oid,
@@ -72,10 +76,8 @@ export const downloadRepository: RepositoryExporter = async (
   const archive = `${directory}.tar.gz`;
   const controller = new AbortController();
   const combined = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(120_000)]);
-  const env: NodeJS.ProcessEnv = { ...process.env, GH_PROMPT_DISABLED: '1' };
+  const env = await ghCredentials.environment();
 
-  delete env.GH_DEBUG;
-  delete env.DEBUG;
   await mkdir(directory, { recursive: true, mode: 0o700 });
 
   const child = spawn(
