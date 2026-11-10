@@ -19,9 +19,10 @@ import {
   Search,
   Settings,
   Activity,
+  UsersRound,
 } from 'lucide-react';
 import { formatRef, parsePrRef, refOf, sameRef } from '@/lib/pr-ref';
-import { useMine, usePulls, useSyncNow } from '@/lib/queries';
+import { useAccounts, useMine, usePulls, useSyncNow } from '@/lib/queries';
 import { appearance } from '@/lib/theme';
 import { snoozePresets } from '@/lib/time';
 import { Kbd } from '@/ui/kbd';
@@ -30,6 +31,7 @@ import { queueMeta, queueSlugs } from '@/features/pulls/meta';
 import { useCurrentPull } from '@/features/pulls/use-current-pull';
 import { onlyAddedByHand, useAddAndOpen, useUntrackPull } from '@/features/pulls/use-track';
 import { openActivity } from '@/features/activity/use-operations';
+import { useAccountSwitcher } from '@/features/shell/account-menu';
 
 const itemClass =
   'flex h-9 cursor-default items-center gap-2.5 rounded-sm px-2.5 text-sm text-fg data-[selected=true]:bg-selected aria-disabled:opacity-50';
@@ -54,6 +56,12 @@ export function CommandPalette({
   const untrack = useUntrackPull();
   const actions = usePullActions();
   const { item: current } = useCurrentPull();
+  const accounts = useAccounts(open);
+  const switcher = useAccountSwitcher();
+  // Compared with the live status: a cached list can predate the last switch.
+  const otherAccounts = (accounts.data?.accounts ?? []).filter(
+    (account) => account.ok && account.login !== switcher.current,
+  );
   const items = pulls.data?.items ?? [];
   const pastedRef = parsePrRef(query);
   const pastedTracked =
@@ -271,6 +279,18 @@ export function CommandPalette({
                   <RefreshCw size={15} className="text-fg-subtle" aria-hidden="true" />
                   Sync with GitHub now
                 </Command.Item>
+                {otherAccounts.map((account) => (
+                  <Command.Item
+                    key={account.login}
+                    value={`switch github account ${account.login}`}
+                    className={itemClass}
+                    disabled={switcher.switching}
+                    onSelect={run(() => switcher.switchTo(account.login))}
+                  >
+                    <UsersRound size={15} className="text-fg-subtle" aria-hidden="true" />
+                    Switch GitHub account to {account.login}
+                  </Command.Item>
+                ))}
                 <Command.Item className={itemClass} onSelect={run(appearance.cycleTheme)}>
                   <Monitor size={15} className="text-fg-subtle" aria-hidden="true" />
                   Switch theme (light · dark · system)

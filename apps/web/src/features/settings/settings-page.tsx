@@ -28,6 +28,9 @@ import {
   type NotificationSettings,
 } from '@review-desk/shared/notify';
 import { toast } from 'sonner';
+import { ChevronDown } from 'lucide-react';
+import { AccountMenu } from '@/features/shell/account-menu';
+import { Avatar } from '@/ui/avatar';
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
@@ -115,8 +118,17 @@ export function SettingsPage() {
         <h2 className="mt-8 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
           GitHub
         </h2>
-        <Row label="Account" hint="Switch with `gh auth switch`; each account keeps separate data.">
-          <span className="text-sm">{state?.account?.login ?? '—'}</span>
+        <Row
+          label="Account"
+          hint="Switching here leaves the GitHub CLI's own account, used in your terminal, as it is. Each account keeps separate data."
+        >
+          <AccountMenu side="bottom" align="end">
+            <Button size="sm" icon={<Avatar login={state?.account?.login ?? '?'} size={16} />}>
+              <span className="sr-only">Switch GitHub account, now</span>
+              {state?.account?.login ?? '—'}
+              <ChevronDown size={13} className="text-fg-subtle" aria-hidden="true" />
+            </Button>
+          </AccountMenu>
         </Row>
         <Row label="Teams" hint="Team review requests are matched against these.">
           <span className="max-w-xs truncate text-right text-sm text-fg-muted">
@@ -141,8 +153,9 @@ export function SettingsPage() {
         <p className="py-4 text-sm leading-relaxed text-fg-muted">
           Cached GitHub data, notes, snoozes and acknowledgements live in{' '}
           <code>.data/review-desk.sqlite</code> on this machine. The server only listens on
-          127.0.0.1, every write needs this window's session token, and GitHub credentials stay
-          inside the GitHub CLI.
+          127.0.0.1, every write needs this window's session token, and GitHub credentials come from
+          the GitHub CLI. When you pick an account here, its token goes only to the <code>gh</code>{' '}
+          commands the server runs; it is never saved or sent to this window.
           {live.demo && ' This window is running in demo mode with a fictional scenario.'}
         </p>
       </div>

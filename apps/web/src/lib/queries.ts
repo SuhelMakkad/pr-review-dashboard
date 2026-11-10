@@ -6,6 +6,7 @@ import {
   type QueryKey,
 } from '@tanstack/react-query';
 import type {
+  GitHubAccountList,
   PullRequestDetail,
   PullRequestItem,
   PullRequestList,
@@ -21,7 +22,7 @@ export interface MineList {
   items: AuthorItem[];
 }
 import { api } from '@/lib/api';
-import { cacheBelongsTo, fallbackInterval, useLive } from '@/lib/live';
+import { adoptStatus, cacheBelongsTo, fallbackInterval, useLive } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
 
 export function useStatus() {
@@ -83,6 +84,27 @@ export function useNotificationSettings() {
     queryKey: ['notify-settings'],
     queryFn: () => api<NotificationSettings>('/api/notifications/settings'),
     staleTime: 60_000,
+  });
+}
+
+/** GitHub CLI sign-ins. Listing checks each one with GitHub, so it loads only when shown. */
+export function useAccounts(enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.accounts,
+    queryFn: () => api<GitHubAccountList>('/api/accounts'),
+    enabled,
+    staleTime: 60_000,
+  });
+}
+
+/** Switches Review Desk to another GitHub CLI account; the GitHub CLI itself stays as it is. */
+export function useSwitchAccount() {
+  const client = useQueryClient();
+
+  return useMutation({
+    mutationFn: (variables: { from: string | null; to: string }) =>
+      api<SyncStatus>('/api/accounts/switch', { body: variables }),
+    onSuccess: (status) => adoptStatus(client, status),
   });
 }
 

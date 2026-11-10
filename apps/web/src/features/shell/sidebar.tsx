@@ -1,6 +1,7 @@
 import { Link, useRouterState } from '@tanstack/react-router';
 import {
   ChartColumn,
+  ChevronsUpDown,
   GitPullRequest,
   GitPullRequestArrow,
   Monitor,
@@ -15,6 +16,7 @@ import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
 import { Tooltip } from '@/ui/tooltip';
 import { inQueue, queueMeta, queueSlugs } from '@/features/pulls/meta';
+import { AccountMenu, useSwitchingAccount } from '@/features/shell/account-menu';
 
 const themeIcons = { light: Sun, dark: Moon, system: Monitor };
 
@@ -28,6 +30,7 @@ export function Sidebar() {
   const items = pulls.data?.items ?? [];
   const ThemeIcon = themeIcons[theme];
   const login = status.data?.account?.login;
+  const switching = useSwitchingAccount();
 
   return (
     <aside
@@ -162,12 +165,23 @@ export function Sidebar() {
             {theme === 'system' ? 'System theme' : theme === 'dark' ? 'Dark theme' : 'Light theme'}
           </span>
         </button>
-        <div className="mt-2 flex items-center gap-2 border-t border-line px-2 pt-3">
-          <Avatar login={login ?? '?'} size={22} />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-xs font-medium">{login ?? 'Connecting…'}</div>
-            <div className="text-2xs text-fg-subtle">via GitHub CLI</div>
-          </div>
+        <div className="mt-2 flex items-center gap-1 border-t border-line pt-2">
+          <AccountMenu>
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-left hover:bg-hover data-[state=open]:bg-hover"
+            >
+              <Avatar login={login ?? '?'} size={22} />
+              <span className="sr-only">Switch GitHub account, now</span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-medium">{login ?? 'Connecting…'}</div>
+                <div className="text-2xs text-fg-subtle">
+                  {switching ? 'Switching…' : 'via GitHub CLI'}
+                </div>
+              </div>
+              <ChevronsUpDown size={13} className="shrink-0 text-fg-subtle" aria-hidden="true" />
+            </button>
+          </AccountMenu>
           <Kbd keys="[Shift]+?" />
         </div>
       </div>
