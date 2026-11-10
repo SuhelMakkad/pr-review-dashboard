@@ -16,10 +16,17 @@ import { filesSearchSchema } from '@/features/review/search';
 import { SettingsPage } from '@/features/settings/settings-page';
 import { MinePage } from '@/features/mine/mine-page';
 import { MineReader } from '@/features/mine/mine-reader';
+import { AppError, RouteError } from '@/features/shell/error-page';
 import { NotFound } from '@/features/shell/not-found';
 import { Shell } from '@/features/shell/shell';
 
-const rootRoute = createRootRoute({ component: Shell, notFoundComponent: NotFound });
+// A crash in a page shows `RouteError` in place of that page (every route gets the default);
+// a crash in the frame itself falls back to the full-window `AppError`.
+const rootRoute = createRootRoute({
+  component: Shell,
+  notFoundComponent: NotFound,
+  errorComponent: AppError,
+});
 
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -132,6 +139,7 @@ export function createAppRouter(options: { history?: RouterHistory } = {}) {
     routeTree,
     history: options.history,
     defaultPreload: false,
+    defaultErrorComponent: RouteError,
     scrollRestoration: false,
   });
 }

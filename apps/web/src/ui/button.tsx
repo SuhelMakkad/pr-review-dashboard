@@ -24,6 +24,21 @@ const iconSizes: Record<Size, string> = {
   md: 'size-8 text-sm rounded-sm',
 };
 
+/** A button's classes, for elements that act like one but are not, such as a router `Link`. */
+export function buttonClass({
+  variant = 'secondary',
+  size = 'md',
+  iconOnly = false,
+}: { variant?: Variant; size?: Size; iconOnly?: boolean } = {}) {
+  return cn(
+    // A slight press-in confirms the click; CSS, so the reduced-motion rule in app.css covers it.
+    // `not-disabled` rather than `enabled`, so links styled as buttons press in too.
+    'inline-flex shrink-0 items-center justify-center font-medium whitespace-nowrap transition-[color,background-color,border-color,opacity,scale] select-none not-disabled:active:scale-[0.97] disabled:cursor-default disabled:opacity-50',
+    variants[variant],
+    iconOnly ? iconSizes[size] : sizes[size],
+  );
+}
+
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
   size?: Size;
@@ -51,13 +66,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     <button
       ref={ref}
       type={type}
-      className={cn(
-        // A slight press-in confirms the click; CSS, so the reduced-motion rule in app.css covers it.
-        'inline-flex shrink-0 items-center justify-center font-medium whitespace-nowrap transition-[color,background-color,border-color,opacity,scale] select-none enabled:active:scale-[0.97] disabled:cursor-default disabled:opacity-50',
-        variants[variant],
-        iconOnly ? iconSizes[size] : sizes[size],
-        className,
-      )}
+      className={cn(buttonClass({ variant, size, iconOnly }), className)}
       {...props}
     >
       {icon}

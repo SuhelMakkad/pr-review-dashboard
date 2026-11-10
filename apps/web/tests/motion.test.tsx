@@ -6,9 +6,11 @@ import userEvent from '@testing-library/user-event';
 import { useState, type ReactNode } from 'react';
 import { MotionGlobalConfig } from 'motion/react';
 import { DialogClose, DialogTitle, Modal } from '@/ui/dialog';
+import { EmptyState } from '@/ui/empty-state';
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '@/ui/menu';
 import {
   ActiveIndicator,
+  Enter,
   FadeSwap,
   IndicatorGroup,
   initReducedMotion,
@@ -230,6 +232,29 @@ describe('SmoothHeight', () => {
       MotionGlobalConfig.skipAnimations = true;
       vi.restoreAllMocks();
     }
+  });
+});
+
+describe('EmptyState', () => {
+  it('staggers its parts in behind an Enter and leaves every one visible', async () => {
+    render(
+      withMotion(
+        <Enter>
+          <EmptyState
+            stagger
+            icon={<span>Icon</span>}
+            title="Nothing here"
+            hint="A hint"
+            action={<button type="button">Act</button>}
+          />
+        </Enter>,
+      ),
+    );
+
+    for (const text of ['Icon', 'A hint', 'Act']) {
+      await waitFor(() => expect(screen.getByText(text)).toBeVisible());
+    }
+    expect(screen.getByRole('heading', { name: 'Nothing here' })).toBeVisible();
   });
 });
 

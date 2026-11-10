@@ -13,6 +13,29 @@ import { defaultNotificationSettings } from '@review-desk/shared/notify';
 import type { LocalTriageState, PullRequestSnapshot } from '@review-desk/shared/types';
 import { review, snapshot, status } from '@test/fixtures';
 
+// The Insights page always crashes here, standing in for any page that throws while rendering.
+vi.mock('@/features/insights/insights-page', () => ({
+  InsightsPage: () => {
+    throw new Error('Insights exploded');
+  },
+}));
+
+/** While `frame` is set, the status bar throws, so the app frame itself crashes. */
+const crash = vi.hoisted(() => ({ frame: false }));
+
+vi.mock('@/features/shell/status-bar', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/shell/status-bar')>();
+
+  return {
+    ...actual,
+    StatusBar: (props: Parameters<typeof actual.StatusBar>[0]) => {
+      if (crash.frame) throw new Error('Status bar exploded');
+
+      return <actual.StatusBar {...props} />;
+    },
+  };
+});
+
 const followUp = snapshot({
   id: 'follow',
   number: 2,
@@ -519,5 +542,92 @@ describe('shell', () => {
     const { router } = mount('/acme/repo/pull/3/files');
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/pr/acme/repo/3/files'));
+  });
+});
+
+describe('error page', () => {
+  const quiet: { mockRestore: () => void }[] = [];
+
+  beforeEach(() => {
+    // React and the router report every caught render error; these crashes are on purpose.
+    quiet.push(
+      vi.spyOn(console, 'error').mockImplementation(() => undefined),
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+    );
+  });
+
+  afterEach(() => {
+    crash.frame = false;
+    for (const spy of quiet.splice(0)) spy.mockRestore();
+  });
+
+  /** Waits for an element to finish animating in. */
+  const shown = (element: HTMLElement) => waitFor(() => expect(element).toBeVisible());
+
+  const details = () => screen.findByRole('button', { name: 'Technical details' });
+
+  it('shows a crashed page inside the app frame and leaves it for the inbox', async () => {
+    const { user, router } = mount('/insights');
+
+    await shown(await screen.findByRole('heading', { name: 'Something went wrong on this page' }));
+    expect(screen.getByRole('navigation', { name: 'Queues' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('link', { name: 'Go to your inbox' }));
+
+    // The inbox opens on its first PR, so the path continues past the queue.
+    await queue();
+    expect(router.state.location.pathname).toMatch(/^\/inbox\/attention/);
+    expect(screen.queryByRole('heading', { name: 'Something went wrong on this page' })).toBeNull();
+  });
+
+  it('folds the technical details away until asked for', async () => {
+    const { user } = mount('/insights');
+    const toggle = await details();
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText(/Insights exploded/)).toBeNull();
+
+    await user.click(toggle);
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await shown(await screen.findByText(/Error: Insights exploded/));
+
+    await user.click(toggle);
+    await waitFor(() => expect(screen.queryByText(/Insights exploded/)).toBeNull());
+  });
+
+  it('copies the details for a bug report and confirms it', async () => {
+    const { user } = mount('/insights');
+
+    await user.click(await screen.findByRole('button', { name: 'Copy details' }));
+
+    await shown(await screen.findByText('Copied'));
+
+    const report = await navigator.clipboard.readText();
+
+    expect(report).toContain('Error: Insights exploded');
+    expect(report).toContain('Page: /insights');
+  });
+
+  it('enters anew when trying again crashes again', async () => {
+    const { user } = mount('/insights');
+
+    await user.click(await details());
+    expect(await details()).toHaveAttribute('aria-expanded', 'true');
+
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+
+    await waitFor(async () => expect(await details()).toHaveAttribute('aria-expanded', 'false'));
+    await shown(screen.getByRole('heading', { name: 'Something went wrong on this page' }));
+  });
+
+  it('falls back to a full-window page when the app frame itself crashes', async () => {
+    crash.frame = true;
+    mount();
+
+    // Visible, not just present: the page brings its own motion features, or it would stay hidden.
+    await shown(await screen.findByRole('heading', { name: 'Review Desk ran into a problem' }));
+    await shown(screen.getByRole('button', { name: 'Reload Review Desk' }));
+    expect(screen.queryByRole('navigation', { name: 'Queues' })).toBeNull();
   });
 });
