@@ -24,6 +24,7 @@ import type { PullRequestDetail } from '@review-desk/shared/types';
 import { aiRuns, type AiRunRow } from '@/db/schema.js';
 import type { DiffService } from '@/diff/service.js';
 import type { EventBus } from '@/events.js';
+import { asAccount } from '@/github/credentials.js';
 import { redact, safeError } from '@/github/errors.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
 import type { SyncService } from '@/sync/service.js';
@@ -541,7 +542,9 @@ export class AiRunner {
 
       if (!id) return;
 
-      const execution = this.execute(id);
+      // A run keeps its own account's GitHub access if you switch accounts while it runs.
+      const account = this.row(id)?.account;
+      const execution = account ? asAccount(account, () => this.execute(id)) : this.execute(id);
 
       this.executions.set(id, execution);
       void execution.finally(() => this.executions.delete(id));
@@ -704,11 +707,12 @@ export class AiRunner {
 
   /** Keeps only anchors GitHub would accept; the rest stay as unanchored suggestions. */
   private async anchor(row: AiRunRow, result: DraftCommentsResult): Promise<DraftCommentsResult> {
-    const detail = this.sync.detail(row.prId);
+    // The run's own snapshot, since the active account may have changed while it ran.
+    const snapshot = row.request?.snapshot ?? this.sync.detail(row.prId)?.snapshot;
 
-    if (!detail) return result;
+    if (!snapshot) return result;
 
-    const full = await this.diffs.manifest(row.request?.snapshot ?? detail.snapshot, 'full', null);
+    const full = await this.diffs.manifest(snapshot, 'full', null);
 
     return {
       ...result,

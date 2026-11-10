@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { activityEvents } from '@/db/schema.js';
 import type { EventBus } from '@/events.js';
+import { asAccount } from '@/github/credentials.js';
 import { safeError } from '@/github/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import { extractActivity } from '@/insights/extract.js';
@@ -49,7 +50,8 @@ export class Backfill {
   start(login: string, options: { force?: boolean } = {}): Promise<void> {
     if (this.running) return this.running;
 
-    this.running = this.run(login, Boolean(options.force)).finally(() => {
+    // History is read as this account even if you switch accounts while it runs.
+    this.running = asAccount(login, () => this.run(login, Boolean(options.force))).finally(() => {
       this.running = null;
       this.events.emit({ type: 'insights.updated' });
     });
@@ -59,6 +61,7 @@ export class Backfill {
 
   private async run(login: string, force: boolean): Promise<void> {
     const state = this.state(login);
+    const teams = this.sync.status.teams;
     const done = new Set(force ? [] : state.doneWindows);
     const now = Date.now();
     const known = new Set(
@@ -95,10 +98,7 @@ export class Backfill {
         ].filter((id) => force || !known.has(id));
 
         for (const snapshot of await this.sync.github.history(ids, login)) {
-          this.sync.store.recordActivity(
-            login,
-            extractActivity(snapshot, login, this.sync.status.teams),
-          );
+          this.sync.store.recordActivity(login, extractActivity(snapshot, login, teams));
           known.add(snapshot.id);
         }
 
