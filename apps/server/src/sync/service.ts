@@ -15,6 +15,7 @@ import {
 import type { Store } from '@/db/store.js';
 import { EventBus } from '@/events.js';
 import type { DetectResult, GitHubApi } from '@/github/api.js';
+import { asAccount, type GitHubAccounts } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { GitHub } from '@/github/read.js';
 import { extractActivity } from '@/insights/extract.js';
@@ -57,6 +58,9 @@ export interface MineList {
   items: AuthorItem[];
 }
 
+/** The account picked in the app; when absent, the GitHub CLI's active account is used. */
+export const SELECTED_ACCOUNT_KEY = 'selectedAccount';
+
 const sameLogin = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
 const ordered = (sources: Iterable<Source>) =>
   SOURCE_ORDER.filter((source) => [...sources].includes(source));
@@ -76,12 +80,17 @@ export class SyncService {
     readonly store: Store,
     readonly github: GitHubApi = new GitHub(),
     readonly events = new EventBus(),
+    /** Lets the app switch GitHub CLI accounts; null where the account is fixed. */
+    readonly accounts: GitHubAccounts | null = null,
   ) {
     const lastAccount = store.getSetting<string>('lastAccount');
+    const selected = store.getSetting<string>(SELECTED_ACCOUNT_KEY);
 
     this.status =
       (lastAccount && store.getSetting<SyncStatus>(`status:${lastAccount}`)) || initialStatus();
     this.status.syncing = false;
+
+    if (selected) accounts?.select(selected);
   }
 
   start(): void {
@@ -130,11 +139,85 @@ export class SyncService {
     if (this.running) return this.running;
     if (this.cooldown()) return Promise.resolve();
 
-    this.running = this.perform(Boolean(options.scheduled)).finally(() => {
-      this.running = null;
+    const run = this.perform(Boolean(options.scheduled)).finally(() => {
+      if (this.running === run) this.running = null;
     });
 
-    return this.running;
+    this.running = run;
+
+    return run;
+  }
+
+  /**
+   * Switches to another account signed in to the GitHub CLI, without changing the CLI's own
+   * active account. A sync in progress finishes as the previous account first, then the new
+   * account's saved queue shows at once while a sync fetches its current state.
+   */
+  async switchAccount(from: string | null, to: string): Promise<SyncStatus> {
+    const accounts = this.accounts;
+
+    if (!accounts)
+      throw new ReviewError('UNSUPPORTED', 409, 'Switching accounts is not available here.');
+
+    const target = (await accounts.list()).find((account) => sameLogin(account.login, to));
+
+    if (!target)
+      throw new ReviewError(
+        'NOT_SIGNED_IN',
+        404,
+        `${to} is not signed in to the GitHub CLI. Run gh auth login to add it.`,
+      );
+
+    if (!target.ok)
+      throw new ReviewError(
+        'SIGN_IN_FAILED',
+        409,
+        `The GitHub CLI could not verify ${target.login}. Run gh auth login to sign in again.`,
+      );
+
+    const previous = this.running;
+    const switching = (async () => {
+      await previous?.catch(() => undefined);
+
+      // Checked after the previous sync, which can itself notice a different account.
+      if ((this.status.account?.login ?? null) !== from)
+        throw new ReviewError(
+          'ACCOUNT_CHANGED',
+          409,
+          'GitHub account changed. Refresh before switching.',
+        );
+
+      accounts.select(target.login);
+      this.store.setSetting(SELECTED_ACCOUNT_KEY, target.login);
+
+      if (target.login !== from) {
+        const saved = this.store.getSetting<SyncStatus>(`status:${target.login}`);
+
+        this.status = {
+          ...(saved ?? initialStatus()),
+          account: saved?.account ?? { login: target.login },
+          syncing: false,
+          error: null,
+          warnings: [],
+        };
+        this.store.saveStatus(this.status);
+        this.emitStatus();
+      }
+    })();
+    const run = switching
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.running === run) this.running = null;
+      });
+
+    this.running = run;
+
+    // Wait until the switch no longer counts as running, or this sync would only rejoin it.
+    await run;
+    await switching;
+    void this.sync();
+
+    return this.status;
   }
 
   private assertNotCoolingDown(): void {
@@ -172,7 +255,9 @@ export class SyncService {
 
     if (!account || !cached) return null;
 
-    const snapshot = await this.github.snapshot(id, account, cached.sources, cached);
+    const snapshot = await asAccount(account, () =>
+      this.github.snapshot(id, account, cached.sources, cached),
+    );
     const current = this.store.snapshot(account, id);
 
     // Removed from the queue while it was being fetched: do not bring it back.
@@ -195,7 +280,7 @@ export class SyncService {
     this.assertNotCoolingDown();
 
     const label = `${repository}#${number}`;
-    const resolved = await this.github.resolvePull(repository, number);
+    const resolved = await asAccount(login, () => this.github.resolvePull(repository, number));
 
     if (!resolved)
       throw new ReviewError(
@@ -215,11 +300,8 @@ export class SyncService {
     const feeds = this.store.membership(login).get(resolved.id) ?? [];
 
     // Fetch before writing anything, so a failure leaves the queue as it was.
-    const snapshot = await this.github.snapshot(
-      resolved.id,
-      login,
-      ordered([...feeds, 'manual']),
-      cached,
+    const snapshot = await asAccount(login, () =>
+      this.github.snapshot(resolved.id, login, ordered([...feeds, 'manual']), cached),
     );
 
     this.store.transaction(() => {

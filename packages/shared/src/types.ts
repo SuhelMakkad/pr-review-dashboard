@@ -231,6 +231,25 @@ export interface SyncStatus {
   warnings: string[];
 }
 
+/** An account signed in to the GitHub CLI that Review Desk can switch to. */
+export interface GitHubAccount {
+  login: string;
+  /** The account Review Desk works as now. */
+  current: boolean;
+  /** The GitHub CLI's own active account, which `gh` uses in a terminal. */
+  cliActive: boolean;
+  /** False when the GitHub CLI could not verify this sign-in. */
+  ok: boolean;
+  /** GitHub actions queued as this account that are still being sent. */
+  inProgress: number;
+}
+
+export interface GitHubAccountList {
+  /** False when this server cannot change accounts; `accounts` is then empty. */
+  switchable: boolean;
+  accounts: GitHubAccount[];
+}
+
 export interface PullRequestList {
   account: string | null;
   items: PullRequestItem[];

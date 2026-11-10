@@ -9,6 +9,7 @@ import { loadIndexHtml } from '@/http/html.js';
 import { createSessionToken, registerSecurity } from '@/http/security.js';
 import { registerEventStream } from '@/http/sse.js';
 import { DiffService } from '@/diff/service.js';
+import { registerAccountRoutes } from '@/routes/accounts.js';
 import { registerDevRoutes } from '@/routes/dev.js';
 import { registerDiffRoutes } from '@/routes/diff.js';
 import { registerReviewRoutes } from '@/routes/review.js';
@@ -127,6 +128,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   const operations = new OperationQueue(service, options.operationQueue);
 
   registerOperationRoutes(app, operations);
+  registerAccountRoutes(app, service, operations);
   registerReviewRoutes(app, reviews, operations);
   app.addHook('onClose', () => operations.close());
   app.addHook('onClose', () => runner.close());

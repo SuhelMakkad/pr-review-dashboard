@@ -8,6 +8,7 @@ import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { seedDemoQueue } from '@/demo/history.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { EventBus } from '@/events.js';
+import { ghCredentials } from '@/github/credentials.js';
 import { GitHub } from '@/github/read.js';
 import { createSessionToken } from '@/http/security.js';
 import { ClaudeProvider } from '@/ai/claude.js';
@@ -27,7 +28,12 @@ const demoAnchor = process.env.REVIEW_DESK_DEMO_NOW
 const fixture =
   config.mode === 'demo' ? new FixtureGitHub(() => defaultScenario(demoAnchor)) : undefined;
 const store = new Store(config.databasePath);
-const service = new SyncService(store, fixture ?? new GitHub(), new EventBus());
+const service = new SyncService(
+  store,
+  fixture ?? new GitHub(),
+  new EventBus(),
+  fixture ? null : ghCredentials,
+);
 const sessionToken = createSessionToken();
 const bootId = randomUUID();
 const linearOAuth = fixture ? null : new LinearOAuth(new KeychainCredentialStore());

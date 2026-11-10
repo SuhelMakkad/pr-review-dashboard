@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { and, asc, desc, eq, inArray, lt, or } from 'drizzle-orm';
 import {
+  operationInProgress,
   operationUnsettled,
   type GitHubAction,
   type GitHubOperation,
@@ -11,6 +12,7 @@ import {
 import { githubOperations } from '@/db/schema.js';
 import { DiffService } from '@/diff/service.js';
 import type { GitHubApi } from '@/github/api.js';
+import { asAccount } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { DraftStore } from '@/review/drafts.js';
 import { ReviewError, ReviewService } from '@/review/service.js';
@@ -48,6 +50,7 @@ export class OperationQueue {
   private active: Promise<void> | null = null;
   private suspended = false;
   private closed = false;
+  private holds = 0;
   private lastMutationAt = 0;
   private readonly refreshes = new Set<Promise<unknown>>();
   private readonly interval: number;
@@ -477,7 +480,7 @@ export class OperationQueue {
   }
 
   wake(): void {
-    if (this.closed || this.suspended || this.active || this.timer) return;
+    if (this.closed || this.suspended || this.holds > 0 || this.active || this.timer) return;
 
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -517,8 +520,9 @@ export class OperationQueue {
     );
     if (!row) return;
 
-    if (row.status === 'checking') await this.reconcile(row);
-    else await this.execute(row);
+    // Each action is sent as the account that queued it, whatever is selected meanwhile.
+    if (row.status === 'checking') await asAccount(row.account, () => this.reconcile(row));
+    else await asAccount(row.account, () => this.execute(row));
   }
 
   private async execute(original: OperationRecord): Promise<void> {
@@ -1050,6 +1054,33 @@ export class OperationQueue {
   resume(): void {
     this.suspended = false;
     this.wake();
+  }
+
+  /**
+   * Lets the action being sent finish, without starting another, until the returned release is
+   * called. Used while switching accounts, so no action is cut off halfway.
+   */
+  async hold(): Promise<() => void> {
+    this.holds++;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+
+    await this.active;
+
+    let released = false;
+
+    return () => {
+      if (released) return;
+
+      released = true;
+      this.holds--;
+      this.wake();
+    };
+  }
+
+  /** Actions queued as this account that are still being sent; they wait while it is not active. */
+  inProgress(account: string): number {
+    return this.rows(account).filter((row) => operationInProgress(row.status)).length;
   }
 
   async close(): Promise<void> {
