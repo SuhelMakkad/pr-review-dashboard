@@ -6,6 +6,7 @@ import { startLive } from '@/lib/live';
 import { startNotifications } from '@/lib/notifications';
 import { initTheme } from '@/lib/theme';
 import { createAppRouter } from '@/router';
+import { initReducedMotion } from '@/ui/motion';
 import '@/styles/app.css';
 
 const client = new QueryClient({
@@ -14,6 +15,7 @@ const client = new QueryClient({
 const router = createAppRouter();
 
 initTheme();
+initReducedMotion();
 startLive(client);
 startNotifications((path) => void router.history.push(path));
 

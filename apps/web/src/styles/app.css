@@ -44,6 +44,16 @@
 
   --shadow-popover: 0 8px 24px oklch(0.2 0.03 264 / 0.12), 0 1px 3px oklch(0.2 0.03 264 / 0.08);
   --row-h: 52px;
+  /* The activity drawer, and the room the page makes for it. */
+  --drawer-w: 420px;
+
+  /* Motion: mirrors src/ui/motion/tokens.ts (a test keeps them equal). */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-skeleton-delay: 150ms;
 
   /* Chart series: validated (dataviz validator) against this panel surface in each mode. */
   --series-1: #2a78d6;
@@ -155,6 +165,12 @@
   --color-del-bg: var(--del-bg);
 
   --shadow-popover: var(--shadow-popover);
+
+  /* Every `transition-*` utility uses the motion tokens unless it names its own timing. */
+  --ease-standard: var(--motion-ease);
+  --ease-exit: var(--motion-ease-exit);
+  --default-transition-duration: var(--motion-fast);
+  --default-transition-timing-function: var(--motion-ease);
 }
 
 @layer base {
@@ -229,6 +245,33 @@
   .scroll-thin {
     scrollbar-width: thin;
     scrollbar-color: var(--line-strong) transparent;
+  }
+
+  /*
+   * Makes room for a Drawer on wide screens. The padding moves on the drawer's own timing (slow in,
+   * quicker out), so the page edge and the drawer edge travel together.
+   */
+  .drawer-push {
+    transition: padding-right var(--motion-base) var(--motion-ease-exit);
+  }
+
+  @media (width >= 80rem) {
+    .drawer-push[data-drawer-open] {
+      padding-right: var(--drawer-w);
+      transition: padding-right var(--motion-slow) var(--motion-ease);
+    }
+  }
+
+  /* Skeletons stay invisible for a beat, then fade in; loads faster than that never show one. */
+  .skeleton-reveal {
+    animation: skeleton-reveal var(--motion-base) var(--motion-ease) var(--motion-skeleton-delay)
+      both;
+  }
+
+  @keyframes skeleton-reveal {
+    from {
+      opacity: 0;
+    }
   }
 }
 

@@ -52,7 +52,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       ref={ref}
       type={type}
       className={cn(
-        'inline-flex shrink-0 items-center justify-center font-medium whitespace-nowrap transition-colors select-none disabled:cursor-default disabled:opacity-50',
+        // A slight press-in confirms the click; CSS, so the reduced-motion rule in app.css covers it.
+        'inline-flex shrink-0 items-center justify-center font-medium whitespace-nowrap transition-[color,background-color,border-color,opacity,scale] select-none enabled:active:scale-[0.97] disabled:cursor-default disabled:opacity-50',
         variants[variant],
         iconOnly ? iconSizes[size] : sizes[size],
         className,
