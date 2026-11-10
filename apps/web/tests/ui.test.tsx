@@ -31,7 +31,14 @@ const firstReview = snapshot({
 });
 const caughtUp = snapshot({ id: 'quiet', number: 3, title: 'Already approved and quiet' });
 const snapshots = [followUp, firstReview, caughtUp];
+/** The account the mock server works as; both accounts track the same PRs. */
+let account = 'me';
+/** Local triage per account and PR, keyed `account:id`. */
 let triage: Record<string, LocalTriageState> = {};
+/** While set, triage writes are saved at once but answered only when it resolves. */
+let heldReply: Promise<void> | null = null;
+/** While set, the status still names this account: news of a switch has not reached it yet. */
+let laggingStatus: string | null = null;
 let writes: { id: string; body: Record<string, unknown> }[] = [];
 /** PRs added by hand through `POST /api/pulls/track`, and every queue change sent. */
 let added: PullRequestSnapshot[] = [];
@@ -42,6 +49,9 @@ beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
   resetInboxAutoSelect();
+  account = 'me';
+  heldReply = null;
+  laggingStatus = null;
   triage = {};
   writes = [];
   added = [];
@@ -67,11 +77,25 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (path: string, options?: RequestInit) => {
-      const state = (id: string) => triage[id] ?? emptyTriage();
+      const state = (id: string) => triage[`${account}:${id}`] ?? emptyTriage();
       let data: unknown;
 
       if (path === '/api/mine') {
-        data = { account: 'me', items: [] };
+        data = { account, items: [] };
+      } else if (path === '/api/accounts') {
+        data = {
+          switchable: true,
+          accounts: ['me', 'other'].map((login) => ({
+            login,
+            current: login === account,
+            cliActive: login === 'me',
+            ok: true,
+            inProgress: 0,
+          })),
+        };
+      } else if (path === '/api/accounts/switch') {
+        account = JSON.parse(String(options?.body)).to;
+        data = { ...status(), account: { login: account } };
       } else if (path.startsWith('/api/operations')) {
         data = { items: [], nextCursor: null };
       } else if (path === '/api/ai') {
@@ -94,13 +118,13 @@ beforeEach(() => {
       } else if (path === '/api/status') {
         data = {
           ...status(),
-          account: { login: 'me' },
+          account: { login: laggingStatus ?? account },
           lastSuccessfulSync: new Date().toISOString(),
         };
       } else if (path === '/api/pulls') {
         data = {
-          account: 'me',
-          items: [...snapshots, ...added].map((pr) => deriveItem(pr, state(pr.id), 'me', [])),
+          account,
+          items: [...snapshots, ...added].map((pr) => deriveItem(pr, state(pr.id), account, [])),
         };
       } else if (path === '/api/pulls/track') {
         const body = JSON.parse(String(options?.body));
@@ -118,9 +142,9 @@ beforeEach(() => {
         queueChanges.push({ method: 'POST', path, body });
         added = [pr];
         data = {
-          account: 'me',
+          account,
           snapshot: pr,
-          item: deriveItem(pr, state(pr.id), 'me', []),
+          item: deriveItem(pr, state(pr.id), account, []),
           triage: state(pr.id),
         };
       } else if (path.endsWith('/track') && options?.method === 'DELETE') {
@@ -135,25 +159,35 @@ beforeEach(() => {
           const body = JSON.parse(String(options.body));
           const current = { ...state(id) };
 
+          // Like the server: a write for an account that is no longer active is refused.
+          if (body.account !== account)
+            return {
+              ok: false,
+              status: 409,
+              json: async () => ({ error: 'GitHub account changed. Refresh before updating.' }),
+            };
+
           writes.push({ id, body });
 
           if (body.note !== undefined) current.note = body.note;
           if (body.done !== undefined) {
             current.doneAt = body.done ? new Date().toISOString() : null;
             current.doneActivityKeys = body.done
-              ? deriveItem(pr, state(id), 'me', []).activityKeys
+              ? deriveItem(pr, state(id), account, []).activityKeys
               : [];
           }
 
-          triage[id] = current;
+          triage[`${account}:${id}`] = current;
         }
 
         data = {
-          account: 'me',
+          account,
           snapshot: pr,
-          item: deriveItem(pr, state(id), 'me', []),
+          item: deriveItem(pr, state(id), account, []),
           triage: state(id),
         };
+
+        if (options?.method === 'PATCH' && heldReply) await heldReply;
       }
 
       return { ok: true, status: 200, json: async () => data };
@@ -322,6 +356,111 @@ describe('adding PRs by hand', () => {
     );
     expect(await screen.findByRole('heading', { name: /Added by hand/ })).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+describe('switching accounts', () => {
+  /** Waits past the note's 800 ms autosave, so a wrong save would have been sent. */
+  const pastAutosave = () => act(() => new Promise((resolve) => setTimeout(resolve, 1200)));
+
+  async function writeNote(user: ReturnType<typeof userEvent.setup>, text: string) {
+    await screen.findByRole('heading', { name: /Follow up after code changes/ });
+    await user.keyboard('n');
+    expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveFocus();
+    await user.keyboard(text);
+    await waitFor(() => expect(triage['me:follow']?.note).toBe(text), { timeout: 3000 });
+  }
+
+  it("keeps each account's private note on a PR both accounts track", async () => {
+    triage['other:follow'] = { ...emptyTriage(), note: 'Note for other' };
+
+    const { user } = mount('/inbox/attention/acme/another/2');
+
+    await writeNote(user, 'Note for me');
+    // Radix menus open from the keyboard in jsdom; pointer events need a real browser.
+    screen.getByRole('button', { name: /^Switch GitHub account, now me\b/ }).focus();
+    await user.keyboard('{Enter}');
+    await user.click(await screen.findByRole('menuitemradio', { name: 'other' }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other'),
+    );
+    await pastAutosave();
+
+    expect(triage['other:follow'].note).toBe('Note for other');
+    expect(triage['me:follow'].note).toBe('Note for me');
+    expect(writes.filter((write) => write.body.account === 'other')).toEqual([]);
+  });
+
+  it("ignores a reply to the previous account's autosave that arrives after the switch", async () => {
+    let release = () => {};
+
+    triage['other:follow'] = { ...emptyTriage(), note: 'Note for other' };
+    heldReply = new Promise((resolve) => (release = resolve));
+
+    const { user } = mount('/inbox/attention/acme/another/2');
+
+    // The server saves the note at once; its reply waits until after the switch.
+    await writeNote(user, 'Note for me');
+    screen.getByRole('button', { name: /^Switch GitHub account, now me\b/ }).focus();
+    await user.keyboard('{Enter}');
+    await user.click(await screen.findByRole('menuitemradio', { name: 'other' }));
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other'),
+    );
+
+    await act(async () => release());
+    await pastAutosave();
+
+    expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other');
+    expect(clients[0].getQueryData(['detail', 'follow'])).toMatchObject({ account: 'other' });
+    expect(triage['other:follow'].note).toBe('Note for other');
+  });
+
+  it("ignores a late autosave reply once another window's switch reaches the PR first", async () => {
+    let release = () => {};
+
+    triage['other:follow'] = { ...emptyTriage(), note: 'Note for other' };
+    heldReply = new Promise((resolve) => (release = resolve));
+
+    const { user } = mount('/inbox/attention/acme/another/2');
+
+    await writeNote(user, 'Note for me');
+
+    // Another window switches; this one sees the new account's PR before any status.
+    laggingStatus = 'me';
+    account = 'other';
+    await act(() => clients[0].invalidateQueries({ queryKey: ['detail', 'follow'] }));
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other'),
+    );
+
+    await act(async () => release());
+    await pastAutosave();
+
+    expect(clients[0].getQueryData(['status'])).toMatchObject({ account: { login: 'me' } });
+    expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other');
+    expect(clients[0].getQueryData(['detail', 'follow'])).toMatchObject({ account: 'other' });
+  });
+
+  it('remounts the note when PR data for another account arrives before the status', async () => {
+    triage['other:follow'] = { ...emptyTriage(), note: 'Note for other' };
+
+    const { user } = mount('/inbox/attention/acme/another/2');
+
+    await writeNote(user, 'Note for me');
+
+    // Another window switched accounts; this one learns of it from a PR refresh first.
+    account = 'other';
+    await act(() => clients[0].invalidateQueries({ queryKey: ['detail', 'follow'] }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other'),
+    );
+    await pastAutosave();
+
+    expect(triage['other:follow'].note).toBe('Note for other');
+    expect(writes.filter((write) => write.body.account === 'other')).toEqual([]);
   });
 });
 

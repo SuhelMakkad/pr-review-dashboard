@@ -5,8 +5,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { DiffManifest } from '@review-desk/shared/diff';
+import { adoptStatus } from '@/lib/live';
 import { githubCommand } from '@/lib/operation-command';
+import { useSyncNow } from '@/lib/queries';
+import { queryKeys } from '@/lib/query-keys';
 import { useReview } from '@/features/review/use-review';
+import { status } from '@test/fixtures';
 
 afterEach(() => {
   cleanup();
@@ -129,6 +133,79 @@ it('does not let an older viewed failure roll back a newer choice for the same f
     await waitFor(() =>
       expect(client.getQueryData<DiffManifest>(key)?.files[0].viewed).toBe('VIEWED'),
     );
+  } finally {
+    client.clear();
+  }
+});
+
+it.each([
+  ['a switch in this window', 'status'],
+  ['another window, whose diff arrives before any status', 'data'],
+] as const)(
+  "does not roll a rejected viewed update back into another account's diff after %s",
+  async (_, through) => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let reject: (error: Error) => void = () => {};
+    vi.stubGlobal('fetch', (path: string) => {
+      if (path.includes('/viewed')) return new Promise<Response>((_, fail) => (reject = fail));
+      if (path.startsWith('/api/operations'))
+        return Promise.resolve(response({ items: [], nextCursor: null }));
+
+      return Promise.resolve(
+        response({ body: '', event: 'COMMENT', comments: [], githubPendingReview: null }),
+      );
+    });
+    const key = ['diff', 'pr-one', 'full'];
+    client.setQueryData(queryKeys.status, status({ account: { login: 'you' } }));
+    client.setQueryData(key, { account: 'you', files: [{ path: 'a.ts', viewed: 'UNVIEWED' }] });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
+    const viewed = () => client.getQueryData<DiffManifest>(key)?.files[0].viewed;
+
+    try {
+      act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: true }));
+      await waitFor(() => expect(viewed()).toBe('VIEWED'));
+
+      // The switch happens while the write is pending; the other account viewed the same file.
+      if (through === 'status')
+        act(() => adoptStatus(client, status({ account: { login: 'other' } })));
+      client.setQueryData(key, { account: 'other', files: [{ path: 'a.ts', viewed: 'VIEWED' }] });
+      await act(async () => reject(new Error('Rejected after the switch')));
+
+      await waitFor(() => expect(hook.result.current.setViewed.isError).toBe(true));
+      expect(viewed()).toBe('VIEWED');
+    } finally {
+      client.clear();
+    }
+  },
+);
+
+it('keeps the new account when a sync reply from before a switch arrives', async () => {
+  const client = new QueryClient();
+  let answer: (() => void) | null = null;
+  vi.stubGlobal(
+    'fetch',
+    () =>
+      new Promise<Response>((resolve) => {
+        answer = () => resolve(response(status({ account: { login: 'you' } })));
+      }),
+  );
+  client.setQueryData(queryKeys.status, status({ account: { login: 'you' } }));
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const hook = renderHook(() => useSyncNow(), { wrapper });
+
+  try {
+    act(() => hook.result.current.mutate());
+    await waitFor(() => expect(answer).not.toBeNull());
+    act(() => adoptStatus(client, status({ account: { login: 'other' } })));
+    await act(async () => answer!());
+
+    await waitFor(() => expect(hook.result.current.isSuccess).toBe(true));
+    expect(client.getQueryData(queryKeys.status)).toMatchObject({ account: { login: 'other' } });
   } finally {
     client.clear();
   }

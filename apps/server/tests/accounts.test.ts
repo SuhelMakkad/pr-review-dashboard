@@ -309,6 +309,16 @@ describe('account routes', () => {
       ],
     });
 
+    // Diffs carry the account whose viewed state they show, so the browser can tell them apart.
+    const pull = service.list().items[0];
+    const diff = await app.inject({
+      method: 'GET',
+      url: `/api/pulls/${pull.id}/diff?mode=full`,
+      headers,
+    });
+
+    expect(diff.json()).toMatchObject({ prId: pull.id, account: 'you' });
+
     const post = (payload: object, extra: Record<string, string> = headers) =>
       app.inject({ method: 'POST', url: '/api/accounts/switch', headers: extra, payload });
 
