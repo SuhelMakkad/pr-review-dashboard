@@ -13,7 +13,9 @@ import { queueSlugs, type QueueSlug } from '@/features/pulls/meta';
 import { PullLayout } from '@/features/pulls/pull-layout';
 import { PullOverview } from '@/features/pulls/pull-overview';
 import { filesSearchSchema } from '@/features/review/search';
-import { SettingsPage } from '@/features/settings/settings-page';
+import { settingsSearchSchema } from '@/features/settings/search';
+import { firstSettingsSlug, isSettingsSlug } from '@/features/settings/sections';
+import { SettingsLayout } from '@/features/settings/settings-layout';
 import { MinePage } from '@/features/mine/mine-page';
 import { MineReader } from '@/features/mine/mine-reader';
 import { AppError, RouteError } from '@/features/shell/error-page';
@@ -117,10 +119,35 @@ const insightsRoute = createRoute({
   component: lazyRouteComponent(() => import('@/features/insights/insights-page'), 'InsightsPage'),
 });
 
-const settingsRoute = createRoute({
+/** Settings opens on its first page; Linear's sign-in (and old bookmarks) land on the Linear page. */
+const settingsIndexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'settings',
-  component: SettingsPage,
+  validateSearch: settingsSearchSchema,
+  beforeLoad: ({ search }) => {
+    throw redirect({
+      to: '/settings/$section',
+      params: { section: search.linear ? 'linear' : firstSettingsSlug },
+      search: search.linear ? { linear: search.linear } : {},
+      replace: true,
+    });
+  },
+});
+
+const settingsSectionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: 'settings/$section',
+  validateSearch: settingsSearchSchema,
+  beforeLoad: ({ params }) => {
+    if (!isSettingsSlug(params.section)) {
+      throw redirect({
+        to: '/settings/$section',
+        params: { section: firstSettingsSlug },
+        replace: true,
+      });
+    }
+  },
+  component: SettingsLayout,
 });
 
 const routeTree = rootRoute.addChildren([
@@ -131,7 +158,8 @@ const routeTree = rootRoute.addChildren([
   githubPullTabRoute,
   mineRoute.addChildren([minePullRoute]),
   insightsRoute,
-  settingsRoute,
+  settingsIndexRoute,
+  settingsSectionRoute,
 ]);
 
 export function createAppRouter(options: { history?: RouterHistory } = {}) {

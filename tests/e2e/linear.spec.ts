@@ -18,10 +18,21 @@ test('shows the linked Linear issue next to the PR and in the queue', async ({ p
 });
 
 test('settings show AI agents and the Linear connection', async ({ page }) => {
-  await openFresh(page, '/settings');
+  await openFresh(page, '/settings/ai');
 
   await expect(page.getByRole('radio', { name: 'Codex' })).toHaveAttribute('aria-checked', 'true');
-  await expect(page.getByText('Codex: demo')).toBeVisible();
+  await expect(
+    page
+      .getByRole('list', { name: 'Installed agents' })
+      .getByRole('listitem')
+      .filter({ hasText: 'Codex' }),
+  ).toContainText('demo');
+  await expectAccessible(page);
+
+  await page
+    .getByRole('navigation', { name: 'Settings sections' })
+    .getByRole('link', { name: /^Linear/ })
+    .click();
   await expect(
     page.getByText('Connected to Acme with your Linear sign-in. Teams: DEMO.'),
   ).toBeVisible();
@@ -29,7 +40,7 @@ test('settings show AI agents and the Linear connection', async ({ page }) => {
 });
 
 test('signs in to Linear from settings and signs out again', async ({ page }) => {
-  await openFresh(page, '/settings');
+  await openFresh(page, '/settings/linear');
 
   const linear = page.getByRole('region', { name: 'Linear' });
 
@@ -41,7 +52,7 @@ test('signs in to Linear from settings and signs out again', async ({ page }) =>
   // Demo mode's "Linear" page is the local callback, so the whole round trip stays in the app.
   await linear.getByRole('button', { name: 'Connect Linear' }).click();
   await expect(page.getByText('Linear connected')).toBeVisible();
-  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page).toHaveURL(/\/settings\/linear$/);
   await expect(
     linear.getByText('Connected to Acme with your Linear sign-in. Teams: DEMO.'),
   ).toBeVisible();

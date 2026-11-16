@@ -545,6 +545,121 @@ describe('shell', () => {
   });
 });
 
+describe('settings', () => {
+  /** Answers `path` with `data`, and every other request as usual. */
+  function respond(path: string, data: unknown) {
+    const usual = globalThis.fetch;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, options?: RequestInit) =>
+        url === path ? { ok: true, status: 200, json: async () => data } : usual(url, options),
+      ),
+    );
+  }
+
+  const sections = () => screen.getByRole('navigation', { name: 'Settings sections' });
+
+  it('opens on its first page with the list of pages beside it and the app sidebar kept', async () => {
+    const { router } = mount('/settings');
+
+    await waitFor(() => expect(router.state.location.pathname).toBe('/settings/appearance'));
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Appearance' }),
+    ).toBeInTheDocument();
+    expect(within(sections()).getByRole('link', { name: 'Appearance' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(screen.getByRole('navigation', { name: 'Queues' })).toBeInTheDocument();
+  });
+
+  it('moves between pages from the list', async () => {
+    const { user, router } = mount('/settings/appearance');
+
+    await screen.findByRole('heading', { level: 2, name: 'Appearance' });
+    await user.click(within(sections()).getByRole('link', { name: 'Data & privacy' }));
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Data & privacy' }),
+    ).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/settings/privacy');
+  });
+
+  it('sends an unknown page to the first one', async () => {
+    const { router } = mount('/settings/nope');
+
+    await waitFor(() => expect(router.state.location.pathname).toBe('/settings/appearance'));
+  });
+
+  it("lands Linear's sign-in on the Linear page, then drops the result from the URL", async () => {
+    const { router } = mount('/settings?linear=failed');
+
+    await waitFor(() => expect(router.state.location.pathname).toBe('/settings/linear'));
+    expect(await screen.findByRole('heading', { level: 2, name: 'Linear' })).toBeInTheDocument();
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+  });
+
+  it('flags a used-up Codex plan, a connected Linear and automatic reviews in the list', async () => {
+    respond('/api/ai', {
+      settings: { ...defaultAiSettings(), autoReview: { enabled: true, since: null } },
+      providers: [
+        { id: 'codex', label: 'Codex', available: true, version: '1.0', reason: null, demo: false },
+      ],
+      codex: {
+        type: 'chatgpt',
+        plan: 'ChatGPT Plus',
+        windows: [{ label: '5-hour', usedPercent: 100, resetsAt: null }],
+        limitReached: true,
+        resetsAt: null,
+        models: [],
+        problem: 'The plan limit is reached.',
+      },
+    });
+    respond('/api/linear/status', {
+      configured: true,
+      connected: true,
+      method: 'oauth',
+      workspace: 'Acme',
+      teamKeys: ['DEMO'],
+      error: null,
+      canSignIn: true,
+      setupCommand: '',
+    });
+    mount('/settings/ai');
+
+    const nav = await screen.findByRole('navigation', { name: 'Settings sections' });
+
+    expect(
+      await within(nav).findByRole('link', { name: 'AI agents, Needs attention' }),
+    ).toBeInTheDocument();
+    expect(await within(nav).findByRole('link', { name: 'Linear, Connected' })).toBeInTheDocument();
+    expect(within(nav).getByRole('link', { name: 'Automation, On' })).toBeInTheDocument();
+    expect(await screen.findByRole('meter', { name: '5-hour usage' })).toHaveAttribute(
+      'aria-valuenow',
+      '100',
+    );
+  });
+
+  it('saves a notification switch as soon as it is flipped', async () => {
+    const { user } = mount('/settings/notifications');
+    const mentions = await screen.findByRole('switch', { name: 'Mentions' });
+
+    expect(mentions).toBeChecked();
+    await user.click(mentions);
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/notifications/settings',
+        expect.objectContaining({
+          method: 'PUT',
+          body: expect.stringContaining('"mention":false'),
+        }),
+      ),
+    );
+  });
+});
+
 describe('error page', () => {
   const quiet: { mockRestore: () => void }[] = [];
 

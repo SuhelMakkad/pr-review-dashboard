@@ -16,6 +16,7 @@ import { CommandPalette } from '@/features/shell/command-palette';
 import { Sidebar } from '@/features/shell/sidebar';
 import { StatusBar, type Hint } from '@/features/shell/status-bar';
 import { ActivityDrawer } from '@/features/activity/activity-drawer';
+import { firstSettingsSlug } from '@/features/settings/sections';
 import { useActivityOpen } from '@/features/activity/use-operations';
 
 function hintsFor(pathname: string): Hint[] {
@@ -104,7 +105,7 @@ export function Shell() {
       keys: 'g s',
       label: 'Go to settings',
       group: 'Navigate',
-      run: () => navigate({ to: '/settings' }),
+      run: () => navigate({ to: '/settings/$section', params: { section: firstSettingsSlug } }),
     },
   ]);
 

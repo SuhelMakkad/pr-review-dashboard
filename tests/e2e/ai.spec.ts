@@ -591,7 +591,7 @@ test('marks a full review out of date after new review discussion arrives', asyn
 });
 
 test('settings show the Codex plan and let a task pick one of its models', async ({ page }) => {
-  await openFresh(page, '/settings');
+  await openFresh(page, '/settings/ai');
 
   await expect(page.getByText('ChatGPT Plus')).toBeVisible();
   await expect(page.getByText(/5-hour: 35% used/)).toBeVisible();

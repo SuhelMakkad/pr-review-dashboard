@@ -204,7 +204,7 @@ export function FullReview({
             {codex?.available === false && (
               <p className="text-xs text-fail">
                 Review agent unavailable. Check installed agents in{' '}
-                <Link to="/settings" className="underline">
+                <Link to="/settings/$section" params={{ section: 'ai' }} className="underline">
                   Settings
                 </Link>
                 .

@@ -33,6 +33,7 @@ import { useCurrentPull } from '@/features/pulls/use-current-pull';
 import { onlyAddedByHand, useAddAndOpen, useUntrackPull } from '@/features/pulls/use-track';
 import { openActivity } from '@/features/activity/use-operations';
 import { useAccountSwitcher } from '@/features/shell/account-menu';
+import { firstSettingsSlug, settingsSections } from '@/features/settings/sections';
 
 const itemClass =
   'flex h-9 cursor-default items-center gap-2.5 rounded-sm px-2.5 text-sm text-fg data-[selected=true]:bg-selected aria-disabled:opacity-50';
@@ -258,12 +259,42 @@ export function CommandPalette({
               My PRs
               <Kbd keys="g m" className="ml-auto" />
             </Command.Item>
-            <Command.Item className={itemClass} onSelect={run(() => navigate({ to: '/settings' }))}>
+            <Command.Item
+              value="go settings preferences"
+              className={itemClass}
+              onSelect={run(() =>
+                navigate({ to: '/settings/$section', params: { section: firstSettingsSlug } }),
+              )}
+            >
               <Settings size={15} className="text-fg-subtle" aria-hidden="true" />
               Settings
               <Kbd keys="g s" className="ml-auto" />
             </Command.Item>
           </Command.Group>
+
+          {/* Only while searching, so typing "quiet hours" or "codex model" finds the right page. */}
+          {query && (
+            <Command.Group heading="Settings" className={groupClass}>
+              {settingsSections.map((section) => {
+                const Icon = section.icon;
+
+                return (
+                  <Command.Item
+                    key={section.slug}
+                    value={`settings ${section.label} ${section.keywords.join(' ')}`}
+                    className={itemClass}
+                    onSelect={run(() =>
+                      navigate({ to: '/settings/$section', params: { section: section.slug } }),
+                    )}
+                  >
+                    <Icon size={15} className="text-fg-subtle" aria-hidden={true} />
+                    {section.label}
+                    <span className="ml-auto text-xs text-fg-subtle">Settings</span>
+                  </Command.Item>
+                );
+              })}
+            </Command.Group>
+          )}
 
           <Command.Group heading="App" className={groupClass}>
             <Command.Item className={itemClass} onSelect={run(openActivity)}>

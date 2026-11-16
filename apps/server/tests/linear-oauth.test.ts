@@ -471,7 +471,7 @@ describe('Linear sign-in routes', () => {
       const forged = await read('/api/linear/callback?state=forged&code=x');
 
       expect(forged.statusCode).toBe(303);
-      expect(forged.headers.location).toBe('/settings?linear=failed');
+      expect(forged.headers.location).toBe('/settings/linear?linear=failed');
       expect((await read('/api/linear/status')).json()).toMatchObject({
         connected: false,
         error: 'This Linear sign-in has expired or was already used. Start again from Settings.',
@@ -483,7 +483,7 @@ describe('Linear sign-in routes', () => {
 
       const callback = await read(url);
 
-      expect(callback.headers.location).toBe('/settings?linear=connected');
+      expect(callback.headers.location).toBe('/settings/linear?linear=connected');
       expect((await read('/api/linear/status')).json()).toMatchObject({
         connected: true,
         method: 'oauth',

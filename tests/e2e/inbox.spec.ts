@@ -84,8 +84,26 @@ test('has no serious accessibility violations', async ({ page }) => {
   await expectAccessible(page);
 
   await page.goto('/settings');
+  await expect(page).toHaveURL(/\/settings\/appearance$/);
   await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
-  await expectAccessible(page);
+
+  const sections = page.getByRole('navigation', { name: 'Settings sections' });
+
+  for (const label of [
+    'Appearance',
+    'Notifications',
+    'GitHub',
+    'Linear',
+    'AI agents',
+    'Automation',
+    'Data & privacy',
+  ]) {
+    await sections.getByRole('link', { name: new RegExp(`^${label}`) }).click();
+    await expect(page.getByRole('heading', { level: 2, name: label })).toBeVisible();
+    // Let each page's data load, so the check covers its cards rather than its skeletons.
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+    await expectAccessible(page);
+  }
 });
 
 test('matches the visual baseline', async ({ page }) => {

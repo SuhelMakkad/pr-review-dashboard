@@ -80,7 +80,11 @@ export function LinearCard({ prId }: { prId: string }) {
               ) : (
                 <span>
                   ·{' '}
-                  <Link to="/settings" className="text-accent hover:underline">
+                  <Link
+                    to="/settings/$section"
+                    params={{ section: 'linear' }}
+                    className="text-accent hover:underline"
+                  >
                     Connect Linear
                   </Link>{' '}
                   to see status and owner.

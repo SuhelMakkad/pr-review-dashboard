@@ -24,9 +24,9 @@ async function advance(page: Page): Promise<string | null> {
 }
 
 test('reviews a newly requested PR automatically and leaves posting to you', async ({ page }) => {
-  await openFresh(page, '/settings');
+  await openFresh(page, '/settings/automation');
 
-  const toggle = page.getByRole('checkbox', { name: 'Review requested PRs automatically' });
+  const toggle = page.getByRole('switch', { name: 'Review requested PRs automatically' });
 
   await expect(toggle).not.toBeChecked();
   await toggle.check();
@@ -65,15 +65,15 @@ test('reviews a newly requested PR automatically and leaves posting to you', asy
 });
 
 test('posts the findings of an automatic review to the PR when asked', async ({ page }) => {
-  await openFresh(page, '/settings');
+  await openFresh(page, '/settings/automation');
 
-  const post = page.getByRole('checkbox', { name: 'Post findings to the PR' });
+  const post = page.getByRole('switch', { name: 'Post findings to the PR' });
 
   await expect(post).not.toBeChecked();
 
   // Saved back to back: the second save must not undo the first.
   await post.check();
-  await page.getByRole('checkbox', { name: 'Review requested PRs automatically' }).check();
+  await page.getByRole('switch', { name: 'Review requested PRs automatically' }).check();
   await expect(
     page.getByText('Findings are posted to the PR when each review finishes.', { exact: false }),
   ).toBeVisible();

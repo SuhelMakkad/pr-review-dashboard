@@ -75,9 +75,9 @@ test('sends a desktop notification when the window is in the background', async 
 });
 
 test('notification settings are accessible', async ({ page }) => {
-  await openFresh(page, '/settings');
-  await expect(page.getByRole('checkbox', { name: 'Mentions' })).toBeChecked();
-  await page.getByRole('checkbox', { name: 'Use quiet hours' }).check();
+  await openFresh(page, '/settings/notifications');
+  await expect(page.getByRole('switch', { name: 'Mentions' })).toBeChecked();
+  await page.getByRole('switch', { name: 'Use quiet hours' }).check();
   await expect(
     page
       .getByRole('textbox', { name: 'Quiet hours start' })

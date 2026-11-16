@@ -1,7 +1,5 @@
-import type { ReactNode } from 'react';
 import { Link, useRouterState } from '@tanstack/react-router';
 import {
-  type LucideIcon,
   ChartColumn,
   ChevronsUpDown,
   GitPullRequest,
@@ -16,42 +14,14 @@ import { useMine, usePulls, useStatus } from '@/lib/queries';
 import { Avatar } from '@/ui/avatar';
 import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
-import { ActiveIndicator, IndicatorGroup } from '@/ui/motion';
+import { IndicatorGroup } from '@/ui/motion';
 import { Tooltip } from '@/ui/tooltip';
 import { inQueue, queueMeta, queueSlugs } from '@/features/pulls/meta';
 import { AccountMenu, useSwitchingAccount } from '@/features/shell/account-menu';
+import { NavContent, navClass } from '@/features/shell/nav-item';
+import { firstSettingsSlug } from '@/features/settings/sections';
 
 const themeIcons = { light: Sun, dark: Moon, system: Monitor };
-
-const navClass = (active: boolean) =>
-  cn(
-    'relative flex h-8 items-center rounded-sm px-2 text-sm transition-colors',
-    active ? 'font-medium text-fg' : 'text-fg-muted hover:bg-hover hover:text-fg',
-  );
-
-/** One navigation entry's content. The active entry carries the indicator that glides between them. */
-function NavContent({
-  active,
-  icon: Icon,
-  label,
-  trailing,
-}: {
-  active: boolean;
-  icon: LucideIcon;
-  label: string;
-  trailing?: ReactNode;
-}) {
-  return (
-    <>
-      {active && <ActiveIndicator variant="fill" />}
-      <span className="relative z-10 flex min-w-0 flex-1 items-center gap-2.5">
-        <Icon size={15} aria-hidden="true" className={active ? 'text-accent' : ''} />
-        <span className="flex-1 truncate">{label}</span>
-        {trailing}
-      </span>
-    </>
-  );
-}
 
 export function Sidebar() {
   const pulls = usePulls();
@@ -169,7 +139,8 @@ export function Sidebar() {
 
         <div className="mt-auto flex flex-col gap-px px-2 pb-2">
           <Link
-            to="/settings"
+            to="/settings/$section"
+            params={{ section: firstSettingsSlug }}
             aria-current={onSettings ? 'page' : undefined}
             className={navClass(onSettings)}
           >

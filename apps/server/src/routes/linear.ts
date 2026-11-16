@@ -41,7 +41,7 @@ export function registerLinearRoutes(
     const query = callbackQuery.safeParse(request.query);
     const connected = query.success ? await linear.callback(query.data) : false;
 
-    return reply.redirect(`/settings?linear=${connected ? 'connected' : 'failed'}`, 303);
+    return reply.redirect(`/settings/linear?linear=${connected ? 'connected' : 'failed'}`, 303);
   });
 
   app.post('/api/linear/disconnect', async () => {

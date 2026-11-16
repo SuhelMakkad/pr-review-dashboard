@@ -44,7 +44,7 @@ test('switches to another GitHub CLI account and back, keeping each queue', asyn
 });
 
 test('switches from Settings', async ({ page }) => {
-  await openFresh(page, '/settings');
+  await openFresh(page, '/settings/github');
 
   const main = page.getByRole('main');
 
