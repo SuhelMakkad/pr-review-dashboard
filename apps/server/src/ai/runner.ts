@@ -38,12 +38,7 @@ import {
 } from '@/ai/context.js';
 import type { AgentProvider } from '@/ai/provider.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
-import {
-  draftChanged,
-  planPreparation,
-  preparationRevision,
-  preparedCommentFingerprint,
-} from '@/ai/preparation.js';
+import { draftChanged, planPreparation, preparationRevision } from '@/ai/preparation.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
 import {
   downloadRepository,
@@ -985,7 +980,7 @@ export class AiRunner {
     });
   }
 
-  /** Stage selected findings locally. Posting still happens only through ReviewService.submit. */
+  /** Prepare a summary with selected findings, without creating inline review comments. */
   async prepareReview(
     account: string,
     id: string,
@@ -1011,8 +1006,6 @@ export class AiRunner {
 
     await this.sync.refresh(row.prId);
 
-    const detail = this.detail(account, row.prId);
-
     const staleReason = this.staleReason(row);
 
     if (staleReason) {
@@ -1030,21 +1023,24 @@ export class AiRunner {
       throw new ReviewError('NOT_FOUND', 404, 'One of the selected findings is unavailable.');
     }
 
-    const changedPaths = new Set(detail.snapshot.files.map((file) => file.path));
     const draft = this.reviews.draft(account, row.prId);
     const indicesKey = (values: number[]) => [...new Set(values)].sort((a, b) => a - b).join(',');
 
     if (
       draft.preparedReview?.runId === id &&
-      indicesKey(draft.preparedReview.indices) === indicesKey(indices)
+      indicesKey(draft.preparedReview.indices) === indicesKey(indices) &&
+      draft.preparedReview.content?.comments.length === 0
     )
       return draft;
 
-    const general = selected.filter((comment) => !changedPaths.has(comment.path));
     const summary = [
       result.overall,
-      ...general.map((comment) => `### ${comment.path}\n${comment.body}`),
+      ...selected.map(
+        (comment) =>
+          `### ${comment.severity}: ${comment.path}${comment.line === null ? '' : `:${comment.line}`}\n${comment.body}`,
+      ),
     ].join('\n\n');
+
     if (selected.some((comment) => comment.body.length > 65_536 || !comment.body.trim())) {
       throw new ReviewError(
         'INVALID_REVIEW',
@@ -1053,7 +1049,6 @@ export class AiRunner {
       );
     }
 
-    const full = await this.diffs.manifest(detail.snapshot, 'full', null);
     const latest = this.detail(account, row.prId).snapshot;
 
     if (latest.headOid !== row.headOid || this.staleReason(row)) {
@@ -1064,19 +1059,6 @@ export class AiRunner {
       );
     }
 
-    const comments = selected
-      .filter((comment) => changedPaths.has(comment.path))
-      .map((comment) => {
-        const file = full.files.find((candidate) => candidate.path === comment.path);
-        const lines = commentableLines(file?.patch);
-        const visible = comment.side === 'LEFT' ? lines.left : lines.right;
-
-        return {
-          ...comment,
-          line: comment.line !== null && visible.has(comment.line) ? comment.line : null,
-        };
-      });
-
     // One synchronous transaction avoids partial drafts or duplicate comments on retries.
     this.sync.store.transaction(() => {
       this.reviews.drafts.assertEditable(account, row.prId);
@@ -1085,7 +1067,8 @@ export class AiRunner {
 
       if (
         current.preparedReview?.runId === id &&
-        indicesKey(current.preparedReview.indices) === indicesKey(indices)
+        indicesKey(current.preparedReview.indices) === indicesKey(indices) &&
+        current.preparedReview.content?.comments.length === 0
       )
         return;
 
@@ -1106,42 +1089,18 @@ export class AiRunner {
 
       for (const commentId of removeIds) this.reviews.drafts.deleteComment(account, commentId);
 
-      const remaining = current.comments.filter((comment) => !removeIds.includes(comment.id));
-      const ownedComments: { id: string; fingerprint: string }[] = [];
-
-      for (const comment of comments) {
-        const exists = remaining.some(
-          (existing) =>
-            existing.origin === 'ai' &&
-            existing.anchorOid === row.headOid &&
-            existing.path === comment.path &&
-            existing.line === comment.line &&
-            existing.side === comment.side &&
-            existing.body === comment.body,
-        );
-
-        if (exists) continue;
-
-        const added = this.reviews.drafts.addComment(account, row.prId, {
-          ...comment,
-          startLine: null,
-          startSide: null,
-          subjectType: comment.line === null ? 'FILE' : 'LINE',
-          origin: 'ai',
-          anchorOid: row.headOid,
-        });
-
-        remaining.push(added);
-        ownedComments.push({ id: added.id, fingerprint: preparedCommentFingerprint(added) });
-      }
-
       this.reviews.drafts.saveMeta(account, row.prId, {
         body,
+        event:
+          result.assessment === 'no_blocking_findings' &&
+          !result.comments.some((comment) => comment.severity === 'blocking')
+            ? 'APPROVE'
+            : 'COMMENT',
         preparedReview: {
           runId: id,
           preparedAt: new Date().toISOString(),
           indices: [...new Set(indices)].sort((a, b) => a - b),
-          content: { summary, comments: ownedComments },
+          content: { summary, comments: [] },
           ...(previousDrafts.length ? { previousDrafts } : {}),
         },
       });

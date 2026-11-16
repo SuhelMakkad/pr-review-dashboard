@@ -390,9 +390,9 @@ export function FullReview({
                       </div>
                     )}
                     <p className="text-2xs text-fg-subtle">
-                      {selected.length} selected. Edit the summary and choose a verdict before
-                      posting. Previously prepared findings follow your selection. Independent
-                      comments are kept.
+                      {selected.length} selected for the summary. Findings are included in the
+                      review body. Edit the summary and verdict before posting. Independent comments
+                      are kept.
                     </p>
                   </div>
                 </div>

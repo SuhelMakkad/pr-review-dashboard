@@ -87,6 +87,58 @@ describe('drafting', () => {
 });
 
 describe('submitting a review', () => {
+  it('resolves every open thread before approving and leaves resolved threads alone', async () => {
+    const { reviews, pr, github, sync } = await setup();
+    const snapshot = pr(2041).snapshot;
+    const remote = github.scenario.world.pulls.find((pull) => pull.snapshot.id === snapshot.id)!;
+
+    remote.snapshot.threads.push({
+      ...snapshot.threads[0],
+      id: 'already-resolved',
+      isResolved: true,
+    });
+
+    await reviews.submit(snapshot.id, {
+      account: 'you',
+      event: 'APPROVE',
+      body: 'The suggestions have been addressed.',
+      expectedHeadOid: snapshot.headOid,
+    });
+
+    expect(ops(github)).toEqual([
+      'ResolveThread',
+      'ResolveThread',
+      'AddPendingReview',
+      'SubmitReview',
+    ]);
+    expect(github.writes.slice(0, 2).map((write) => write.details.threadId)).toEqual(
+      snapshot.threads.map((thread) => thread.id),
+    );
+    expect(sync.detail(snapshot.id)!.snapshot.threads.every((thread) => thread.isResolved)).toBe(
+      true,
+    );
+  });
+
+  it.each(['COMMENT', 'REQUEST_CHANGES'] as const)(
+    'leaves open threads unresolved for %s',
+    async (event) => {
+      const { reviews, pr, github, sync } = await setup();
+      const snapshot = pr(2041).snapshot;
+
+      await reviews.submit(snapshot.id, {
+        account: 'you',
+        event,
+        body: 'Follow-up feedback.',
+        expectedHeadOid: snapshot.headOid,
+      });
+
+      expect(ops(github)).toEqual(['AddPendingReview', 'SubmitReview']);
+      expect(sync.detail(snapshot.id)!.snapshot.threads.some((thread) => !thread.isResolved)).toBe(
+        true,
+      );
+    },
+  );
+
   it('sends one pending review with every comment, then a single submit', async () => {
     const { reviews, pr, github, sync } = await setup();
     const detail = pr(1839);

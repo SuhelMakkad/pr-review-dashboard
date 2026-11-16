@@ -18,6 +18,7 @@ import { annotatePatch } from '@/ai/context.js';
 import { FixtureProvider } from '@/ai/fixture.js';
 import { spawnAgentProcess } from '@/ai/provider.js';
 import { AiRunner } from '@/ai/runner.js';
+import { preparedCommentFingerprint } from '@/ai/preparation.js';
 import { jsonSchemaFor } from '@/ai/tasks.js';
 import {
   extractRepository,
@@ -476,6 +477,28 @@ async function setup() {
   };
 }
 
+/** Reproduce drafts made before full-review findings moved into the summary. */
+async function legacyPreparedReview(runner: AiRunner, reviews: ReviewService, run: AiRun) {
+  const prepared = await runner.prepareReview('you', run.id, [0]);
+  const finding = (run.result as FullReviewResult).comments[0];
+  const summary = (run.result as FullReviewResult).overall;
+  const comment = await reviews.addComment(run.prId, { ...finding, account: 'you', origin: 'ai' });
+
+  reviews.drafts.saveMeta('you', run.prId, {
+    body: summary,
+    event: 'COMMENT',
+    preparedReview: {
+      ...prepared.preparedReview!,
+      content: {
+        summary,
+        comments: [{ id: comment.id, fingerprint: preparedCommentFingerprint(comment) }],
+      },
+    },
+  });
+
+  return reviews.draft('you', run.prId);
+}
+
 function holdRuns(provider: FixtureProvider) {
   const run = provider.run.bind(provider);
   const controls = new Map<string, { complete: () => void; fail: (error: Error) => void }>();
@@ -711,7 +734,7 @@ describe('AI runner', () => {
     expect(cached.id).toBe(run.id);
   });
 
-  it('stages only selected findings, preserves existing drafts, and posts only on explicit submit', async () => {
+  it('puts selected findings in the summary, preserves existing drafts, and never posts them inline', async () => {
     const { runner, pr, finished, github, reviews, store } = await setup();
     const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
 
@@ -730,9 +753,10 @@ describe('AI runner', () => {
     const draft = await runner.prepareReview('you', run.id, [0, 0]);
     const retried = await runner.prepareReview('you', run.id, [0]);
 
-    expect(draft.comments).toHaveLength(1);
-    expect(draft.comments[0]).toMatchObject({ origin: 'ai', anchorOid: run.headOid });
-    expect(retried.comments).toHaveLength(1);
+    expect(draft.comments).toEqual([]);
+    expect(draft.body).toContain((run.result as FullReviewResult).comments[0].body);
+    expect(draft.event).toBe('APPROVE');
+    expect(retried.comments).toEqual([]);
     expect(retried.body).toBe(draft.body);
     expect(github.writes).toEqual([]);
 
@@ -743,12 +767,8 @@ describe('AI runner', () => {
       expectedHeadOid: run.headOid,
     });
 
-    expect(posted.submittedComments).toBe(1);
-    expect(github.writes.map((write) => write.op)).toEqual([
-      'AddPendingReview',
-      'AddReviewThread',
-      'SubmitReview',
-    ]);
+    expect(posted.submittedComments).toBe(0);
+    expect(github.writes.map((write) => write.op)).toEqual(['AddPendingReview', 'SubmitReview']);
     expect(
       (
         store.db.$client.prepare('SELECT status FROM ai_runs WHERE id = ?').get(run.id) as {
@@ -779,6 +799,7 @@ describe('AI runner', () => {
 
     expect(draft.body).toBe(overall);
     expect(draft.comments).toEqual([]);
+    expect(draft.event).toBe('APPROVE');
     expect(github.writes).toEqual([]);
 
     await reviews.submit(run.prId, {
@@ -864,7 +885,9 @@ describe('AI runner', () => {
 
     const deselected = await runner.prepareReview('you', run.id, []);
 
-    expect(deselected.body).toBe(`${prepared.body}\n\nMy conclusion.`);
+    expect(deselected.body).toBe(
+      `My introduction.\n\n${(run.result as FullReviewResult).overall}\n\nMy conclusion.`,
+    );
     expect(deselected.comments.map((comment) => comment.id)).toEqual([manual.id, suggestion.id]);
     expect(deselected.preparedReview).toMatchObject({ indices: [] });
   });
@@ -878,8 +901,9 @@ describe('AI runner', () => {
 
     const draft = await runner.prepareReview('you', run.id, [0]);
 
-    expect(draft.body).toBe(overall);
-    expect(draft.comments).toHaveLength(1);
+    expect(draft.body.split(overall)).toHaveLength(2);
+    expect(draft.body).toContain((run.result as FullReviewResult).comments[0].body);
+    expect(draft.comments).toEqual([]);
   });
 
   it.each(['summary', 'comment'] as const)(
@@ -887,7 +911,10 @@ describe('AI runner', () => {
     async (edited) => {
       const { runner, pr, finished, reviews, github } = await setup();
       const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
-      const prepared = await runner.prepareReview('you', run.id, [0]);
+      const prepared =
+        edited === 'comment'
+          ? await legacyPreparedReview(runner, reviews, run)
+          : await runner.prepareReview('you', run.id, [0]);
 
       if (edited === 'summary')
         await reviews.saveDraft('you', run.prId, { body: 'My revised assessment.' });
@@ -976,11 +1003,11 @@ describe('AI runner', () => {
   });
 
   it.each(['edit', 'prepare', 'queue'] as const)(
-    'does not overwrite a concurrent %s while checking the diff',
+    'does not overwrite a concurrent %s while refreshing the PR',
     async (change) => {
-      const { runner, pr, finished, reviews, diffs } = await setup();
+      const { runner, pr, finished, reviews, sync } = await setup();
       const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
-      const manifest = diffs.manifest.bind(diffs);
+      const refresh = sync.refresh.bind(sync);
       let reached!: () => void;
       let release!: () => void;
       const waiting = new Promise<void>((resolve) => {
@@ -990,11 +1017,11 @@ describe('AI runner', () => {
         release = resolve;
       });
 
-      vi.spyOn(diffs, 'manifest').mockImplementationOnce(async (...args) => {
+      vi.spyOn(sync, 'refresh').mockImplementationOnce(async (...args) => {
         reached();
         await released;
 
-        return manifest(...args);
+        return refresh(...args);
       });
 
       const preparing = runner.prepareReview('you', run.id, [0]);
@@ -1036,7 +1063,7 @@ describe('AI runner', () => {
   it('does not replace prepared findings that were already added to GitHub', async () => {
     const { runner, pr, finished, reviews, github } = await setup();
     const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
-    const prepared = await runner.prepareReview('you', run.id, [0]);
+    const prepared = await legacyPreparedReview(runner, reviews, run);
 
     reviews.drafts.updateComment('you', prepared.comments[0].id, {
       status: 'pushed',
@@ -1051,6 +1078,55 @@ describe('AI runner', () => {
     expect(reviews.draft('you', run.prId)).toEqual(saved);
     expect(github.writes).toEqual([]);
   });
+
+  it('moves legacy prepared inline findings into the summary when reopening the same selection', async () => {
+    const { runner, pr, finished, reviews } = await setup();
+    const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+
+    await legacyPreparedReview(runner, reviews, run);
+
+    const draft = await runner.prepareReview('you', run.id, [0]);
+
+    expect(draft.comments).toEqual([]);
+    expect(draft.body).toContain((run.result as FullReviewResult).comments[0].body);
+    expect(draft.event).toBe('APPROVE');
+    expect(draft.preparedReview?.content?.comments).toEqual([]);
+  });
+
+  it.each(['assessment', 'finding'] as const)(
+    'keeps approval unselected when a blocking %s exists, even if findings are deselected',
+    async (blocking) => {
+      const { runner, providers, pr, finished } = await setup();
+
+      vi.spyOn(providers.codex, 'run').mockResolvedValueOnce({
+        output: {
+          overall: 'The empty input path must be fixed before merging.',
+          assessment: blocking === 'assessment' ? 'changes_requested' : 'no_blocking_findings',
+          comments:
+            blocking === 'finding'
+              ? [
+                  {
+                    path: 'src/example.ts',
+                    line: 1,
+                    side: 'RIGHT',
+                    severity: 'blocking',
+                    body: 'Empty input crashes.',
+                  },
+                ]
+              : [],
+          coverage: [],
+        },
+        model: 'test',
+        usage: null,
+      });
+
+      const run = await finished(await runner.start('you', pr(1839).id, 'full_review'));
+      const draft = await runner.prepareReview('you', run.id, []);
+
+      expect(draft.event).toBe('COMMENT');
+      expect(draft.comments).toEqual([]);
+    },
+  );
 
   it('grounds summaries with no pending comments in the diff and the current completed review', async () => {
     const { runner, providers, pr, finished, sync, diffs } = await setup();
@@ -1118,9 +1194,9 @@ describe('AI runner', () => {
     ]);
 
     expect(prepared.preparedReview).toMatchObject({ runId: run.id, indices: [0] });
-    expect(reviews.draft('you', run.prId).comments).toHaveLength(1);
+    expect(reviews.draft('you', run.prId).comments).toEqual([]);
     expect(Date.parse(prepared.preparedReview!.preparedAt)).toBeGreaterThan(0);
-    await reviews.saveDraft('you', run.prId, { body: 'My edited summary.' });
+    await reviews.saveDraft('you', run.prId, { body: 'My edited summary.', event: 'COMMENT' });
     await runner.close();
 
     const restarted = new AiRunner(
@@ -1135,7 +1211,8 @@ describe('AI runner', () => {
     const reused = await restarted.prepareReview('you', run.id, [0, 0]);
 
     expect(reused.body).toBe('My edited summary.');
-    expect(reused.comments).toHaveLength(1);
+    expect(reused.event).toBe('COMMENT');
+    expect(reused.comments).toEqual([]);
     expect(reused.preparedReview).toEqual(prepared.preparedReview);
     expect(restarted.runs('you', run.prId)[0]).toMatchObject({ id: run.id, stale: false });
     await restarted.close();

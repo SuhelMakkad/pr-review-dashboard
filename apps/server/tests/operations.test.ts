@@ -41,8 +41,8 @@ async function setup(path = ':memory:', fixture?: FixtureGitHub) {
 
   const pr = (number = 1839) =>
     sync.detail(sync.list().items.find((item) => item.number === number)!.id)!.snapshot;
-  const submit = async (body = 'Looks good.', id = randomUUID()) => {
-    const pull = pr();
+  const submit = async (body = 'Looks good.', id = randomUUID(), number = 1839) => {
+    const pull = pr(number);
     const draft = reviews.drafts.draft('you', pull.id);
     const action: GitHubAction = {
       type: 'review',
@@ -73,6 +73,59 @@ const completed = async (queue: OperationQueue, id: string, status = 'succeeded'
 };
 
 describe('durable GitHub operations', () => {
+  it.each(['SubmitReview', 'ResolveThread'])(
+    'resumes approval after a rejected %s without repeating completed thread resolutions',
+    async (failure) => {
+      const { queue, github, sync, pr, submit } = await setup();
+      const pull = pr(2041);
+      const resolve = github.setThreadResolved.bind(github);
+      let resolutions = 0;
+
+      vi.spyOn(github, 'setThreadResolved').mockImplementation(async (...args) => {
+        if (++resolutions === 2 && failure === 'ResolveThread') github.failNext = failure;
+
+        return resolve(...args);
+      });
+
+      if (failure === 'SubmitReview') github.failNext = failure;
+
+      const { operation } = await submit('Suggestions addressed.', randomUUID(), 2041);
+
+      queue.resume();
+      await completed(queue, operation.id, 'needs_attention');
+      await queue.control('you', operation.id, 'retry');
+      await completed(queue, operation.id);
+
+      expect(github.writes.map((write) => write.op)).toEqual([
+        'ResolveThread',
+        'ResolveThread',
+        'AddPendingReview',
+        'SubmitReview',
+      ]);
+      expect(sync.detail(pull.id)!.snapshot.threads.every((thread) => thread.isResolved)).toBe(
+        true,
+      );
+    },
+  );
+
+  it('reconciles a lost resolution response and finishes approving without repeating the write', async () => {
+    const { queue, github, submit } = await setup();
+
+    github.loseResponseNext = 'ResolveThread';
+
+    const { operation } = await submit('Suggestions addressed.', randomUUID(), 2041);
+
+    queue.resume();
+    await completed(queue, operation.id);
+
+    expect(github.writes.map((write) => write.op)).toEqual([
+      'ResolveThread',
+      'ResolveThread',
+      'AddPendingReview',
+      'SubmitReview',
+    ]);
+  });
+
   it('keeps confirmed final receipts successful even when the PR changed before recovery', async () => {
     const { queue, store, github, pr, submit } = await setup();
     const { operation } = await submit();

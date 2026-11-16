@@ -655,6 +655,19 @@ export class OperationQueue {
         if (backup) row = this.save({ ...row, pendingReviewBackup: backup });
       }
 
+      if (
+        row.action.type === 'review' &&
+        row.action.review.event === 'APPROVE' &&
+        !row.approvalThreadIds
+      ) {
+        row = this.save({
+          ...row,
+          approvalThreadIds: pr.threads
+            .filter((thread) => !thread.isResolved)
+            .map((thread) => thread.id),
+        });
+      }
+
       let stepIndex = 0;
       const github = new Proxy(this.sync.github, {
         get: (target, property) => {
@@ -766,6 +779,7 @@ export class OperationQueue {
           operationId: row.id,
           draft: row.action.type === 'review' ? row.action.draft : undefined,
           pendingReviewId: pendingId ?? undefined,
+          approvalThreadIds: row.approvalThreadIds,
           assertActive: () => {
             if (this.row(row.account, row.id).status === 'cancelled') throw new Cancelled();
           },

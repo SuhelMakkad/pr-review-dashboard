@@ -39,7 +39,7 @@ const verdicts: {
     event: 'APPROVE',
     keys: 'a',
     icon: CheckCircle2,
-    hint: 'Ready to merge from your side.',
+    hint: 'Ready to merge. Resolves all open review threads.',
     tone: 'ok',
   },
   {

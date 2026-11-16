@@ -94,7 +94,9 @@ export function planPreparation(
   const body = !previous
     ? draft.body.includes(summary)
       ? draft.body
-      : [draft.body, summary].filter(Boolean).join('\n\n')
+      : summary.startsWith(draft.body)
+        ? summary
+        : [draft.body, summary].filter(Boolean).join('\n\n')
     : summaryIntact
       ? draft.body.slice(0, start) + summary + draft.body.slice(start + content!.summary.length)
       : summary;

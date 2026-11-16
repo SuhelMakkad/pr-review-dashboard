@@ -128,7 +128,7 @@ test('restores the previous review and allows retrying when a new review cannot 
   await expect(report.getByText('No blocking findings')).toBeVisible();
 });
 
-test('keeps a full review in the dashboard and posts selected findings only after submission', async ({
+test('keeps a full review in the dashboard and includes selected findings in the summary only after submission', async ({
   page,
 }) => {
   await openFresh(page, '/inbox/attention/acme/web/1839');
@@ -152,17 +152,17 @@ test('keeps a full review in the dashboard and posts selected findings only afte
   const sheet = page.getByRole('dialog', { name: 'Finish your review' });
 
   await expect(sheet.getByRole('textbox')).toHaveValue(
-    'The implementation is mostly sound, but the empty-input behavior needs a regression test.',
+    /The implementation is mostly sound[\s\S]*regression test for empty input/,
   );
-  await expect(sheet.getByText('1 inline comment')).toBeVisible();
-  await expect(sheet.getByRole('radio', { name: /Comment/ })).toBeChecked();
+  await expect(sheet.getByText('No inline comments')).toBeVisible();
+  await expect(sheet.getByRole('radio', { name: /Approve/ })).toBeChecked();
   expect(await demoWrites(page)).toEqual([]);
 
   await sheet.getByRole('button', { name: 'Close', exact: true }).click();
   await report.getByRole('button', { name: 'Use prepared review' }).click();
-  await expect(sheet.getByText('1 inline comment')).toBeVisible();
+  await expect(sheet.getByText('No inline comments')).toBeVisible();
   await sheet.getByRole('textbox').fill('Please cover the empty-input case.');
-  await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Submit Approve to GitHub' }).click();
 
   await expect(sheet).not.toBeVisible();
   await expect(page).not.toHaveURL(/1839/);
@@ -173,17 +173,13 @@ test('keeps a full review in the dashboard and posts selected findings only afte
 
   await expect
     .poll(async () => (await demoWrites(page)).map((write) => write.op))
-    .toEqual(['AddPendingReview', 'AddReviewThread', 'SubmitReview']);
+    .toEqual(['AddPendingReview', 'SubmitReview']);
   const writes = await demoWrites(page);
 
-  expect(writes.map((write) => write.op)).toEqual([
-    'AddPendingReview',
-    'AddReviewThread',
-    'SubmitReview',
-  ]);
-  expect(writes[2].details).toMatchObject({
-    event: 'COMMENT',
-    comments: 1,
+  expect(writes.map((write) => write.op)).toEqual(['AddPendingReview', 'SubmitReview']);
+  expect(writes[1].details).toMatchObject({
+    event: 'APPROVE',
+    comments: 0,
     body: 'Please cover the empty-input case.',
   });
 });
@@ -202,7 +198,7 @@ test('lets the user exclude findings and post only the review summary', async ({
   await expect(sheet.getByText('No inline comments')).toBeVisible();
   expect(await demoWrites(page)).toEqual([]);
 
-  await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Submit Approve to GitHub' }).click();
   await expect(sheet).not.toBeVisible();
 
   await expect
@@ -211,7 +207,7 @@ test('lets the user exclude findings and post only the review summary', async ({
   const writes = await demoWrites(page);
 
   expect(writes.map((write) => write.op)).toEqual(['AddPendingReview', 'SubmitReview']);
-  expect(writes[1].details).toMatchObject({ event: 'COMMENT', comments: 0 });
+  expect(writes[1].details).toMatchObject({ event: 'APPROVE', comments: 0 });
 });
 
 test('removes previously prepared findings when the selection changes, including after reload', async ({
@@ -224,7 +220,7 @@ test('removes previously prepared findings when the selection changes, including
 
   await report.getByRole('button', { name: 'Run review', exact: true }).click();
   await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
-  await expect(sheet.getByText('1 inline comment')).toBeVisible();
+  await expect(sheet.getByText('No inline comments')).toBeVisible();
   await sheet.getByRole('button', { name: 'Close', exact: true }).click();
   await page.reload();
   await report.getByRole('checkbox', { name: 'Include finding 1' }).uncheck();
@@ -234,7 +230,7 @@ test('removes previously prepared findings when the selection changes, including
   await expect(sheet.getByRole('textbox')).toHaveValue(
     'The implementation is mostly sound, but the empty-input behavior needs a regression test.',
   );
-  await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
+  await sheet.getByRole('button', { name: 'Submit Approve to GitHub' }).click();
 
   await expect
     .poll(async () => (await demoWrites(page)).map((write) => write.op))
@@ -277,12 +273,6 @@ test('confirms replacement of edited prepared content and keeps the old draft ac
 
   await expect(
     sheet.getByText('My edited review, saved before replacement.', { exact: true }),
-  ).toBeVisible();
-  await expect(
-    sheet
-      .locator('details')
-      .filter({ hasText: /^Draft saved / })
-      .getByText(/regression test for empty input/),
   ).toBeVisible();
   expect(await demoWrites(page)).toEqual([]);
 });
@@ -425,7 +415,7 @@ test('continues preparing after navigation and reopens the saved draft with edit
   await report.getByRole('button', { name: 'Use prepared review' }).click();
 
   await expect(sheet.getByRole('textbox')).toHaveValue('My saved review edits.');
-  await expect(sheet.getByText('1 inline comment')).toBeVisible();
+  await expect(sheet.getByText('No inline comments')).toBeVisible();
   expect(await demoWrites(page)).toEqual([]);
 });
 
@@ -553,7 +543,8 @@ test('retains a saved summary after a failed regeneration and marks it stale aft
   await sheet.getByRole('button', { name: 'Close', exact: true }).click();
   await report.getByRole('button', { name: 'Use prepared review' }).click();
   await expect(sheet.getByRole('alert')).toContainText('Summary generation unavailable.');
-  await sheet.getByRole('radio', { name: /Approve/ }).click();
+  await expect(sheet.getByRole('radio', { name: /Approve/ })).toBeChecked();
+  await sheet.getByRole('radio', { name: /Comment/ }).click();
   await expect(sheet.getByRole('button', { name: 'Use generated summary' })).toBeDisabled();
   await expect(sheet.getByText(/verdict or draft comments changed/)).toBeVisible();
   await sheet.getByRole('button', { name: 'Generate new summary' }).click();

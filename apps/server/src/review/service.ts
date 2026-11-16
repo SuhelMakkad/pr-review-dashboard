@@ -75,6 +75,7 @@ export class ReviewService {
       operationId: string;
       draft?: FrozenReview;
       pendingReviewId?: string;
+      approvalThreadIds?: string[];
       assertActive?: () => void;
     },
   ) {
@@ -408,6 +409,14 @@ export class ReviewService {
       : draft.comments;
 
     return this.write(async () => {
+      if (request.event === 'APPROVE') {
+        const threadIds =
+          this.execution?.approvalThreadIds ??
+          pr.threads.filter((thread) => !thread.isResolved).map((thread) => thread.id);
+
+        for (const threadId of threadIds) await this.github.setThreadResolved(threadId, true);
+      }
+
       let reviewId = frozen
         ? frozen.githubReviewId
         : (draft.githubReviewId ?? pr.pendingReview?.id ?? null);

@@ -15,4 +15,6 @@ export interface OperationRecord extends Omit<GitHubOperation, 'controls'> {
   attempts: number;
   steps: MutationStep[];
   pendingReviewBackup?: ReviewReceipt;
+  /** Keep approval resolutions in the same order when replaying completed mutation steps. */
+  approvalThreadIds?: string[];
 }

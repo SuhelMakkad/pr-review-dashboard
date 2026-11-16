@@ -92,6 +92,22 @@ test('replies to and resolves a thread from the keyboard', async ({ page }) => {
     .toEqual(['ReplyToThread', 'ResolveThread']);
 });
 
+test('approving resolves all open review threads', async ({ page }) => {
+  await openFresh(page, '/pr/acme/api/2041/files?mode=all');
+  await expect(page.getByText('Good catch, batched in chunks of 5k now.')).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+Shift+Enter');
+
+  const sheet = page.getByRole('dialog', { name: 'Finish your review' });
+
+  await sheet.getByRole('radio', { name: /Approve/ }).click();
+  await sheet.getByRole('textbox').fill('The suggestions have been addressed.');
+  await sheet.getByRole('button', { name: 'Submit Approve to GitHub' }).click();
+
+  await expect
+    .poll(async () => (await demoWrites(page)).map((write) => write.op))
+    .toEqual(['ResolveThread', 'ResolveThread', 'AddPendingReview', 'SubmitReview']);
+});
+
 test('keeps your text in Activity when GitHub rejects a queued reply', async ({ page }) => {
   await openFresh(page, '/pr/acme/api/2041/files?mode=all');
   await expect(page.getByText('Good catch, batched in chunks of 5k now.')).toBeVisible();
