@@ -49,6 +49,13 @@ export interface FullReviewResult extends DraftCommentsResult {
   coverage: string[];
 }
 
+export function hasBlockingFindings(result: FullReviewResult): boolean {
+  return (
+    result.assessment === 'changes_requested' ||
+    result.comments.some((comment) => comment.severity === 'blocking')
+  );
+}
+
 export interface AuthorFeedbackResult {
   summary: string;
   actionItems: { text: string; threadId: string | null }[];
@@ -127,8 +134,8 @@ export interface AiSettings {
   tasks: Record<AiTask, AiTaskSettings>;
   autoReview: AutoReviewSettings;
   /**
-   * Posts each full review that finishes, automatic or manual, to its PR as one conversation
-   * comment from your account. Never approves or requests changes.
+   * Posts each finished full review as you: approves and resolves open threads when there are
+   * no blocking findings, otherwise posts a conversation comment with the findings.
    */
   postFindings: boolean;
 }

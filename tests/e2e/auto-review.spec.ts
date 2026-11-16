@@ -64,7 +64,9 @@ test('reviews a newly requested PR automatically and leaves posting to you', asy
   expect(await demoWrites(page)).toEqual([]);
 });
 
-test('posts the findings of an automatic review to the PR when asked', async ({ page }) => {
+test('automatically approves a review with no blocking findings when posting is enabled', async ({
+  page,
+}) => {
   await openFresh(page, '/settings/automation');
 
   const post = page.getByRole('switch', { name: 'Post findings to the PR' });
@@ -87,29 +89,45 @@ test('posts the findings of an automatic review to the PR when asked', async ({ 
   await advance(page);
   await advance(page);
 
-  const row = page
-    .getByRole('option')
-    .filter({ hasText: 'Reminder banner for upcoming events' });
-
-  await expect(row.getByText('AI review ready')).toBeVisible();
-
-  await page.goto('/inbox/attention/acme/web/1846');
+  await expect
+    .poll(async () => (await demoWrites(page)).map((write) => write.op))
+    .toEqual(['ApproveReview']);
+  await page.goto('/pr/acme/web/1846');
 
   const report = page.getByRole('region', { name: 'Full review' });
 
-  await expect(report.getByText('Posted to the PR conversation.')).toBeVisible();
+  await expect(report.getByText('Approved the PR.')).toBeVisible();
   await expect(report.getByRole('link', { name: 'Open on GitHub' })).toHaveAttribute(
     'href',
-    /#issuecomment-/,
+    /#pullrequestreview-/,
   );
 
-  // Its own comment does not make the review out of date.
+  // Its own approval does not make the review out of date.
   await expect(report.getByText('Up to date', { exact: false })).toBeVisible();
 
   const writes = await demoWrites(page);
 
-  expect(writes.map((write) => write.op)).toEqual(['AddComment']);
+  expect(writes.map((write) => write.op)).toEqual(['ApproveReview']);
   expect(String(writes[0].details.body)).toContain('**AI review** · ');
+});
+
+test('resolves all open threads before automatically approving a completed review', async ({
+  page,
+}) => {
+  await openFresh(page, '/settings/automation');
+  await page.getByRole('switch', { name: 'Post findings to the PR' }).check();
+  await expect(
+    page.getByText(/approves the PR and resolves all open review threads/),
+  ).toBeVisible();
+  await page.goto('/pr/acme/api/2041');
+  await page.getByRole('button', { name: 'Run review', exact: true }).click();
+
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await expect(report.getByText('Approved the PR.')).toBeVisible();
+  await expect
+    .poll(async () => (await demoWrites(page)).map((write) => write.op))
+    .toEqual(['ResolveThread', 'ResolveThread', 'ApproveReview']);
 });
 
 test('does nothing when automatic review is off', async ({ page }) => {

@@ -18,8 +18,15 @@ export type GitHubAction =
   | { type: 'viewed'; path: string; viewed: boolean }
   | { type: 'reviewers'; logins: string[] }
   | { type: 'discard'; reviewId: string; restoreOperationId?: string }
-  /** A finished full review, posted as a conversation comment because Settings asked for it. */
-  | { type: 'ai_review'; runId: string; expectedHeadOid: string; body: string };
+  /** A finished full review, posted automatically because Settings asked for it. */
+  | {
+      type: 'ai_review';
+      runId: string;
+      expectedHeadOid: string;
+      body: string;
+      /** Older queued operations without an event post a conversation comment. */
+      event?: 'APPROVE' | 'COMMENT';
+    };
 
 export type OperationControl = 'cancel' | 'retry' | 'check' | 'reopen' | 'dismiss' | 'restore';
 

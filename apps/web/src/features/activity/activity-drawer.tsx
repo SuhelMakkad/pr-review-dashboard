@@ -41,6 +41,8 @@ function label(operation: GitHubOperation) {
         : 'Submit review';
   if (operation.action.type === 'resolve')
     return operation.action.resolved ? 'Resolve thread' : 'Unresolve thread';
+  if (operation.action.type === 'ai_review' && operation.action.event === 'APPROVE')
+    return 'Approve after AI review';
 
   return operationLabels[operation.action.type];
 }

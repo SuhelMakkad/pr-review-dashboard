@@ -1,4 +1,8 @@
-import type { FullReviewResult, SuggestedComment } from '@review-desk/shared/ai';
+import {
+  hasBlockingFindings,
+  type FullReviewResult,
+  type SuggestedComment,
+} from '@review-desk/shared/ai';
 import { postedReviewMarker } from '@/ai/freshness.js';
 import type { AiRunner } from '@/ai/runner.js';
 import type { AiRunRow } from '@/db/schema.js';
@@ -21,12 +25,10 @@ const severityLabels: Record<SuggestedComment['severity'], string> = {
 export const postedReviewOperationId = (runId: string) => `ai-review-${runId}`;
 
 /**
- * The comment for a finished full review: its verdict and summary, any findings it tied to code,
- * and which commit it reviewed, since a conversation comment does not go out of date on GitHub.
+ * The body for a finished full review: its verdict, summary, findings and reviewed commit.
  */
 export function postedReviewBody(runId: string, headOid: string, result: FullReviewResult): string {
-  const verdict =
-    result.assessment === 'changes_requested' ? 'Changes recommended' : 'No blocking findings';
+  const verdict = hasBlockingFindings(result) ? 'Changes recommended' : 'No blocking findings';
   const findings = result.comments.map((comment) => {
     const location = comment.line === null ? comment.path : `${comment.path}:${comment.line}`;
 
@@ -46,10 +48,9 @@ export function postedReviewBody(runId: string, headOid: string, result: FullRev
 }
 
 /**
- * Posts each full review that finishes to its PR as one conversation comment, when Settings asks
- * for it. A comment, unlike a GitHub review, leaves your review request open. It goes through the
- * GitHub outbox like any other write, so Activity shows it, and the outbox skips it when new
- * commits arrive before it is sent.
+ * Posts each completed full review through the GitHub outbox when Settings asks for it. Approves
+ * reviews without blockers and posts a conversation comment otherwise. The outbox resolves open
+ * threads before approving and skips outdated reviews when new commits arrive.
  */
 export class FindingsPoster {
   constructor(
@@ -73,6 +74,7 @@ export class FindingsPoster {
         type: 'ai_review',
         runId: row.id,
         expectedHeadOid: row.headOid,
+        event: hasBlockingFindings(result) ? 'COMMENT' : 'APPROVE',
         body: postedReviewBody(row.id, row.headOid, result),
       });
     } catch {

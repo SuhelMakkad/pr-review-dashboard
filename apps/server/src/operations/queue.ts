@@ -21,6 +21,7 @@ import type { SyncService } from '@/sync/service.js';
 import type { MutationStep, OperationRecord } from './types.js';
 
 const MUTATIONS = new Set([
+  'approveReview',
   'addPendingReview',
   'addReviewThread',
   'submitReview',
@@ -152,9 +153,10 @@ export class OperationQueue {
     )
       controls.push('retry');
 
-    // A posted AI review has no draft to return to: it can only be left unposted.
+    // Automatic posting has no local draft to restore; confirmed resolutions can be kept.
     if (
       !started ||
+      (row.action.type === 'ai_review' && !uncertain) ||
       (uncertain && !this.pendingId(row) && !row.steps.some((step) => step.completedAt))
     )
       controls.push(row.action.type === 'ai_review' ? 'cancel' : 'reopen');
@@ -299,7 +301,7 @@ export class OperationQueue {
     this.sync.store.transaction(() => {
       const drafts = new DraftStore(this.sync.store);
 
-      // A conversation comment never joins your pending review, so it can wait behind it.
+      // Automatic posts never consume the local draft or its pending GitHub review.
       if (CONTENT_ACTIONS.has(action.type) && action.type !== 'ai_review')
         drafts.assertEditable(account, prId);
 
@@ -561,7 +563,7 @@ export class OperationQueue {
         viewed: ['setFileViewed'],
         reviewers: ['requestReviews'],
         discard: ['deleteReview'],
-        ai_review: ['addConversationComment'],
+        ai_review: ['addConversationComment', 'approveReview'],
       };
 
       // A durable final receipt already proves success, even if the PR changed after a crash.
@@ -656,8 +658,8 @@ export class OperationQueue {
       }
 
       if (
-        row.action.type === 'review' &&
-        row.action.review.event === 'APPROVE' &&
+        ((row.action.type === 'review' && row.action.review.event === 'APPROVE') ||
+          (row.action.type === 'ai_review' && row.action.event === 'APPROVE')) &&
         !row.approvalThreadIds
       ) {
         row = this.save({
@@ -715,6 +717,21 @@ export class OperationQueue {
                 409,
                 'The GitHub account changed before sending. Sign in to the original account before retrying.',
               );
+            if (
+              row.action.type === 'ai_review' &&
+              row.action.event === 'APPROVE' &&
+              (method === 'approveReview' || method === 'setThreadResolved')
+            ) {
+              await this.sync.refresh(row.prId);
+
+              if (this.sync.detail(row.prId)?.snapshot.headOid !== row.action.expectedHeadOid)
+                throw new ReviewError(
+                  'HEAD_MOVED',
+                  409,
+                  'New commits arrived after this AI review. Run it again before approving.',
+                );
+            }
+
             if (
               method === 'submitReview' &&
               (row.action.type === 'review' || row.action.type === 'comment')
@@ -829,7 +846,18 @@ export class OperationQueue {
           break;
         }
         case 'ai_review': {
-          const posted = await github.addConversationComment(row.prId, row.action.body);
+          const action = row.action;
+
+          if (action.event === 'APPROVE') {
+            for (const threadId of row.approvalThreadIds ?? [])
+              await github.setThreadResolved(threadId, true);
+          }
+
+          const posted =
+            action.event === 'APPROVE'
+              ? await github.approveReview(row.prId, action.expectedHeadOid, action.body)
+              : await github.addConversationComment(row.prId, action.body);
+
           result = { url: posted.url };
           break;
         }
@@ -850,7 +878,12 @@ export class OperationQueue {
       return `Saving comment ${completed + 1} of ${row.action.draft.comments.filter((comment) => comment.status === 'draft').length} to your pending review.`;
     }
 
-    if (row.action.type === 'ai_review') return 'Posting the AI review to the PR conversation.';
+    if (row.action.type === 'ai_review')
+      return method === 'setThreadResolved'
+        ? 'Resolving open review threads before approving.'
+        : row.action.event === 'APPROVE'
+          ? 'Approving the PR with the AI review.'
+          : 'Posting the AI review to the PR conversation.';
 
     return method === 'submitReview'
       ? 'Submitting your pending review to GitHub.'
@@ -1044,6 +1077,23 @@ export class OperationQueue {
         }
       } else if (step.method === 'deleteReview') {
         confirmed = (await this.sync.github.reviewReceipt(String(step.args[0]))) === null;
+      } else if (step.method === 'approveReview' && row.action.type === 'ai_review') {
+        await this.sync.refresh(row.prId);
+
+        const action = row.action;
+        const approved = this.sync
+          .detail(row.prId)
+          ?.snapshot.reviews.find(
+            (review) =>
+              review.state === 'APPROVED' &&
+              review.commitOid === action.expectedHeadOid &&
+              review.body === action.body,
+          );
+
+        if (approved) {
+          confirmed = true;
+          result = { id: approved.id, url: approved.url };
+        }
       } else if (step.method === 'addConversationComment' && row.action.type === 'ai_review') {
         // The run's marker identifies the comment exactly. Absence is not proof: GitHub may not
         // list it yet, so an unfound comment stays unconfirmed rather than being sent again.

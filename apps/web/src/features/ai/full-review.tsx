@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { LoaderCircle, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
-import { codexBlocked, type FullReviewResult } from '@review-desk/shared/ai';
+import { codexBlocked, hasBlockingFindings, type FullReviewResult } from '@review-desk/shared/ai';
 import { operationInProgress, type GitHubOperation } from '@review-desk/shared/operations';
 import type { PrepareReviewOptions } from '@review-desk/shared/review';
 import type { CiState } from '@review-desk/shared/types';
@@ -19,12 +19,14 @@ import { useAi, useAiOverview } from '@/features/ai/use-ai';
 import { useInboxNavigation } from '@/features/inbox/inbox-context';
 import { openActivity, useOperations } from '@/features/activity/use-operations';
 
-/** Where this review's automatic post to the PR conversation stands. */
+/** Where this review's automatic approval or comment stands. */
 function PostingStatus({ operation }: { operation: GitHubOperation }) {
+  const approving = operation.action.type === 'ai_review' && operation.action.event === 'APPROVE';
+
   if (operation.status === 'succeeded')
     return (
       <p className="text-xs text-ok">
-        Posted to the PR conversation.{' '}
+        {approving ? 'Approved the PR.' : 'Posted to the PR conversation.'}{' '}
         {operation.result?.url && (
           <a
             href={operation.result.url}
@@ -51,7 +53,9 @@ function PostingStatus({ operation }: { operation: GitHubOperation }) {
   return (
     <p role="status" className="text-xs text-fg-muted">
       {operationInProgress(operation.status)
-        ? 'Posting to the PR conversation…'
+        ? approving
+          ? 'Resolving threads and approving the PR…'
+          : 'Posting to the PR conversation…'
         : operation.progress}
     </p>
   );
@@ -241,11 +245,9 @@ export function FullReview({
               {result && (
                 <div className="space-y-3">
                   <p
-                    className={`text-xs font-medium ${result.assessment === 'changes_requested' ? 'text-pending' : 'text-ok'}`}
+                    className={`text-xs font-medium ${hasBlockingFindings(result) ? 'text-pending' : 'text-ok'}`}
                   >
-                    {result.assessment === 'changes_requested'
-                      ? 'Changes recommended'
-                      : 'No blocking findings'}
+                    {hasBlockingFindings(result) ? 'Changes recommended' : 'No blocking findings'}
                     {result.comments.length > 0 && (
                       <>
                         {' · '}

@@ -5,7 +5,7 @@ import type { PullRequestSnapshot } from '@review-desk/shared/types';
 const fingerprint = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-/** Opens every AI review the dashboard posts, so it can recognise its own comments later. */
+/** Identifies each automatically posted approval or conversation comment. */
 export const postedReviewMarker = (runId: string) => `<!-- review-desk:ai-review run=${runId} -->`;
 
 const postedReviewPrefix = '<!-- review-desk:ai-review ';
@@ -25,7 +25,7 @@ export function reviewFingerprint(pr: PullRequestSnapshot, account: string): str
     headOid: pr.headOid,
     title: pr.title,
     body: pr.body,
-    reviews: pr.reviews,
+    reviews: pr.reviews.filter((review) => !review.body.startsWith(postedReviewPrefix)),
     threads: pr.threads,
     conversation: pr.conversation.filter((comment) => !posted(comment)),
     requests: pr.requestEvents,

@@ -15,6 +15,7 @@ import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { DiffService } from '@/diff/service.js';
 import { EventBus } from '@/events.js';
+import { GitHubError } from '@/github/errors.js';
 import { Notifier } from '@/notify/notifier.js';
 import { OperationQueue } from '@/operations/queue.js';
 import { ReviewService } from '@/review/service.js';
@@ -99,7 +100,18 @@ async function setup() {
 
     throw new Error('runs did not settle');
   };
-  const review = async (number = 1839) => {
+  const review = async (number = 1839, output?: FullReviewResult) => {
+    if (output) {
+      vi.spyOn(providers.codex, 'run').mockResolvedValueOnce({
+        output: {
+          ...output,
+          comments: output.comments.map((comment) => ({ ...comment, line: comment.line ?? 1 })),
+        },
+        model: 'test',
+        usage: null,
+      });
+    }
+
     const run = await runner.start('you', idOf(number), 'full_review');
 
     await settled();
@@ -128,6 +140,7 @@ async function setup() {
     store,
     github,
     sync,
+    reviews,
     runner,
     queue,
     poster,
@@ -164,24 +177,24 @@ describe('posting finished reviews', () => {
     expect(github.writes).toEqual([]);
   });
 
-  it('posts a finished review once, as a conversation comment that keeps the request open', async () => {
-    const { runner, sync, github, idOf, setPosting, review, posted, poster, comments } =
-      await setup();
+  it('approves a finished review without blockers once, with all findings in its body', async () => {
+    const { runner, sync, github, idOf, setPosting, review, posted, poster } = await setup();
 
     setPosting(true);
 
     const run = await review();
     const operation = await posted(run.id);
-    const [write] = comments();
+    const [write] = github.writes;
 
     expect(operation.action).toEqual({
       type: 'ai_review',
       runId: run.id,
       expectedHeadOid: run.headOid,
       body: expect.any(String),
+      event: 'APPROVE',
     });
-    expect(operation.result?.url).toMatch(/#issuecomment-/);
-    expect(comments()).toHaveLength(1);
+    expect(operation.result?.url).toMatch(/#pullrequestreview-/);
+    expect(github.writes).toHaveLength(1);
     expect(write.details.prId).toBe(idOf(1839));
     expect(String(write.details.body)).toMatch(
       new RegExp(`^${postedReviewMarker(run.id)}\\n\\*\\*AI review\\*\\* · No blocking findings`),
@@ -189,21 +202,203 @@ describe('posting finished reviews', () => {
     expect(String(write.details.body)).toContain('empty-input behavior needs a regression test');
     expect(String(write.details.body)).toContain('**Suggestion** · `');
 
-    // A comment is not a review: no review was submitted, so your request stays open.
-    const requested = sync.detail(idOf(1839))!.item.requestedVia;
-
-    expect(github.writes.map((item) => item.op)).toEqual(['AddComment']);
+    expect(github.writes.map((item) => item.op)).toEqual(['ApproveReview']);
     await sync.refresh(idOf(1839));
-    expect(sync.detail(idOf(1839))!.item.requestedVia).toEqual(requested);
+    expect(sync.detail(idOf(1839))!.item.latestReview?.state).toBe('APPROVED');
+    expect(sync.detail(idOf(1839))!.item.requestedVia).toEqual([]);
 
     // Finishing again never posts again.
     poster.finished(run);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(comments()).toHaveLength(1);
+    expect(github.writes).toHaveLength(1);
 
-    // Its own comment does not make the review it came from out of date.
+    // Its own approval does not make the review it came from out of date.
     await sync.refresh(idOf(1839));
     expect(runner.runs('you', idOf(1839))[0]).toMatchObject({ id: run.id, stale: false });
+  });
+
+  it('resolves all open threads before approving and preserves the local review draft', async () => {
+    const { reviews, github, sync, pull, idOf, setPosting, review, posted } = await setup();
+    const snapshot = pull(2041).snapshot;
+
+    snapshot.threads[0].isOutdated = true;
+    snapshot.threads.push({ ...snapshot.threads[0], id: 'already-resolved', isResolved: true });
+    await sync.refresh(snapshot.id);
+    await reviews.saveDraft('you', snapshot.id, {
+      body: 'My independent draft.',
+      event: 'COMMENT',
+    });
+    await reviews.addComment(snapshot.id, {
+      account: 'you',
+      path: snapshot.threads[0].path,
+      line: null,
+      body: 'My unsubmitted comment.',
+    });
+
+    const draft = reviews.draft('you', snapshot.id);
+
+    setPosting(true);
+
+    const run = await review(
+      2041,
+      result({ assessment: 'no_blocking_findings', overall: 'No changes are needed.' }),
+    );
+
+    await posted(run.id);
+    await sync.refresh(idOf(2041));
+
+    expect(github.writes.map((write) => write.op)).toEqual([
+      'ResolveThread',
+      'ResolveThread',
+      'ApproveReview',
+    ]);
+    expect(pull(2041).snapshot.threads.every((thread) => thread.isResolved)).toBe(true);
+    expect(reviews.draft('you', snapshot.id)).toEqual(draft);
+  });
+
+  it.each(['assessment', 'finding'] as const)(
+    'posts one conversation comment and keeps threads and the review request open for a blocking %s',
+    async (blocking) => {
+      const { github, sync, pull, setPosting, review, posted } = await setup();
+
+      setPosting(true);
+
+      const run = await review(
+        2041,
+        result({
+          assessment: blocking === 'assessment' ? 'changes_requested' : 'no_blocking_findings',
+          comments:
+            blocking === 'finding'
+              ? [
+                  {
+                    path: 'src/retry.ts',
+                    line: 12,
+                    side: 'RIGHT',
+                    severity: 'blocking',
+                    body: 'Add a delay.',
+                  },
+                ]
+              : [],
+        }),
+      );
+      const operation = await posted(run.id);
+
+      await sync.refresh(run.prId);
+
+      expect(operation.action).toMatchObject({ event: 'COMMENT' });
+      expect(operation.result?.url).toMatch(/#issuecomment-/);
+      expect(github.writes.map((write) => write.op)).toEqual(['AddComment']);
+      expect(String(github.writes[0].details.body)).toContain('Changes recommended');
+      expect(pull(2041).snapshot.threads.some((thread) => !thread.isResolved)).toBe(true);
+      expect(sync.detail(run.prId)!.item.requestedVia.length).toBeGreaterThan(0);
+    },
+  );
+
+  it.each(['ResolveThread', 'ApproveReview'])(
+    'resumes after a rejected %s without repeating completed resolutions',
+    async (failure) => {
+      const { github, queue, setPosting, review, posted } = await setup();
+      const resolve = github.setThreadResolved.bind(github);
+      let resolutions = 0;
+
+      vi.spyOn(github, 'setThreadResolved').mockImplementation(async (...args) => {
+        if (++resolutions === 2 && failure === 'ResolveThread') github.failNext = failure;
+
+        return resolve(...args);
+      });
+
+      if (failure === 'ApproveReview') github.failNext = failure;
+      setPosting(true);
+
+      const run = await review(2041);
+      const operation = await posted(run.id, 'needs_attention');
+
+      await queue.control('you', operation.id, 'retry');
+      await posted(run.id);
+
+      expect(github.writes.map((write) => write.op)).toEqual([
+        'ResolveThread',
+        'ResolveThread',
+        'ApproveReview',
+      ]);
+    },
+  );
+
+  it.each(['ResolveThread', 'ApproveReview'])(
+    'confirms a lost %s response without repeating the write',
+    async (mutation) => {
+      const { github, setPosting, review, posted } = await setup();
+
+      github.loseResponseNext = mutation;
+      setPosting(true);
+
+      const run = await review(2041);
+      const operation = await posted(run.id);
+
+      expect(operation.result?.url).toMatch(/#pullrequestreview-/);
+      expect(github.writes.map((write) => write.op)).toEqual([
+        'ResolveThread',
+        'ResolveThread',
+        'ApproveReview',
+      ]);
+    },
+  );
+
+  it('confirms an approval whose response was lost even after newer commits arrive', async () => {
+    const { github, pull, setPosting, review, posted } = await setup();
+    const approve = github.approveReview.bind(github);
+
+    vi.spyOn(github, 'approveReview').mockImplementationOnce(async (...args) => {
+      await approve(...args);
+      pull(1839).snapshot.headOid = 'new-commits-after-approval';
+
+      throw new GitHubError('Response lost after approving.');
+    });
+    setPosting(true);
+
+    const run = await review();
+    const operation = await posted(run.id);
+
+    expect(operation.result?.url).toMatch(/#pullrequestreview-/);
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
+  });
+
+  it('stops before further resolutions or approval if new commits arrive during posting', async () => {
+    const { github, queue, pull, setPosting, review, posted } = await setup();
+    const resolve = github.setThreadResolved.bind(github);
+
+    vi.spyOn(github, 'setThreadResolved').mockImplementationOnce(async (...args) => {
+      await resolve(...args);
+      pull(2041).snapshot.headOid = 'new-head-during-resolution';
+    });
+    setPosting(true);
+
+    const run = await review(2041);
+    const operation = await posted(run.id, 'needs_attention');
+
+    expect(operation.error?.code).toBe('HEAD_MOVED');
+    expect(github.writes.map((write) => write.op)).toEqual(['ResolveThread']);
+    expect(operation.controls).toContain('cancel');
+
+    await queue.control('you', operation.id, 'cancel');
+
+    expect(queue.get('you', operation.id).status).toBe('cancelled');
+  });
+
+  it('keeps older queued automatic posts as conversation comments', async () => {
+    const { queue, review, posted, github } = await setup();
+    const run = await review();
+
+    queue.enqueue('you', run.prId, postedReviewOperationId(run.id), {
+      type: 'ai_review',
+      runId: run.id,
+      expectedHeadOid: run.headOid,
+      body: postedReviewBody(run.id, run.headOid, JSON.parse(run.result!)),
+    });
+
+    await posted(run.id);
+
+    expect(github.writes.map((write) => write.op)).toEqual(['AddComment']);
   });
 
   it('still notices other people commenting, even when they copy the marker', async () => {
@@ -278,7 +473,7 @@ describe('posting finished reviews', () => {
     setPosting(true);
     github.loseResponseNext = 'AddComment';
 
-    const run = await review();
+    const run = await review(1839, result());
     const operation = await posted(run.id);
 
     expect(comments()).toHaveLength(1);
@@ -291,7 +486,7 @@ describe('posting finished reviews', () => {
     setPosting(true);
     github.failNext = 'AddComment';
 
-    const run = await review();
+    const run = await review(1839, result());
     const failed = await posted(run.id, 'needs_attention');
 
     expect(failed.controls).toEqual(['retry', 'cancel', 'dismiss']);
@@ -306,7 +501,7 @@ describe('posting finished reviews', () => {
   });
 
   it('posts automatic reviews too', async () => {
-    const { github, sync, runner, setPosting, settled, posted, comments } = await setup();
+    const { github, sync, runner, setPosting, settled, posted } = await setup();
 
     setPosting(true, true);
     await sync.sync();
@@ -321,7 +516,7 @@ describe('posting finished reviews', () => {
 
     expect(automatic).toMatchObject({ status: 'done' });
     await posted(automatic!.runId);
-    expect(comments()).toHaveLength(1);
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
   });
 
   it('keeps the setting when a save leaves it out, and loads older settings as off', async () => {
@@ -463,6 +658,6 @@ describe('posting through the app', () => {
         { timeout: 5_000, interval: 50 },
       )
       .toBe('succeeded');
-    expect(fixture.writes.map((write) => write.op)).toEqual(['AddComment']);
+    expect(fixture.writes.map((write) => write.op)).toEqual(['ApproveReview']);
   });
 });

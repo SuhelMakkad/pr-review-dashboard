@@ -125,8 +125,11 @@ export const searchQuery = `query Search($query: String!, $cursor: String) {
   search(query: $query, type: ISSUE, first: 100, after: $cursor) { issueCount nodes { ... on PullRequest { id } } ${pageInfo} }
 }`;
 
-/** Review writes. Every write is an explicit user action in the app. */
+/** Review writes, requested directly or enabled through automation settings. */
 export const mutations = {
+  ApproveReview: `mutation ApproveReview($pullRequestId: ID!, $commitOID: GitObjectID!, $body: String!) {
+  addPullRequestReview(input: { pullRequestId: $pullRequestId, commitOID: $commitOID, event: APPROVE, body: $body }) { pullRequestReview { id url } }
+}`,
   AddPendingReview: `mutation AddPendingReview($pullRequestId: ID!, $commitOID: GitObjectID) {
   addPullRequestReview(input: { pullRequestId: $pullRequestId, commitOID: $commitOID }) { pullRequestReview { id } }
 }`,

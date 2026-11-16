@@ -5,6 +5,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   codexBlocked,
   defaultAiSettings,
+  hasBlockingFindings,
   type AiProvider,
   type AiProviderStatus,
   type AiResult,
@@ -1091,11 +1092,7 @@ export class AiRunner {
 
       this.reviews.drafts.saveMeta(account, row.prId, {
         body,
-        event:
-          result.assessment === 'no_blocking_findings' &&
-          !result.comments.some((comment) => comment.severity === 'blocking')
-            ? 'APPROVE'
-            : 'COMMENT',
+        event: hasBlockingFindings(result) ? 'COMMENT' : 'APPROVE',
         preparedReview: {
           runId: id,
           preparedAt: new Date().toISOString(),

@@ -93,6 +93,25 @@ function rawSnapshot() {
 }
 
 describe('GitHub data retrieval', () => {
+  it('submits an approval with a review body against the exact reviewed commit', async () => {
+    const receipt = { id: 'review-1', url: 'https://github.com/a/b/pull/1#pullrequestreview-1' };
+    const graphql = vi
+      .fn()
+      .mockResolvedValue({ addPullRequestReview: { pullRequestReview: receipt } });
+    const github = new GitHub({ graphql, rest: vi.fn() });
+
+    expect(await github.approveReview('pr-1', 'reviewed-head', 'No changes are needed.')).toEqual(
+      receipt,
+    );
+    expect(graphql.mock.calls).toHaveLength(1);
+    expect(graphql.mock.calls[0][0]).toContain('event: APPROVE');
+    expect(graphql.mock.calls[0][1]).toEqual({
+      pullRequestId: 'pr-1',
+      commitOID: 'reviewed-head',
+      body: 'No changes are needed.',
+    });
+  });
+
   it('paginates discovery and deduplicates IDs', async () => {
     const graphql = vi
       .fn()

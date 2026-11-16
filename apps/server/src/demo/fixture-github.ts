@@ -283,6 +283,34 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     );
   }
 
+  async approveReview(prId: string, commitOid: string, body: string) {
+    await this.beforeWrite();
+    const pull = this.pullById(prId);
+    const id = this.nextId('review');
+    const now = this.now();
+
+    this.record('ApproveReview', { prId, commitOid, body });
+    pull.snapshot.reviews.push({
+      id,
+      state: 'APPROVED',
+      submittedAt: now,
+      updatedAt: now,
+      commitOid,
+      body,
+      url: `${pull.snapshot.url}#pullrequestreview-${id}`,
+    });
+
+    pull.snapshot.reviewRequests = pull.snapshot.reviewRequests.filter(
+      (reviewer) => reviewer.login !== this.scenario.world.viewer.login,
+    );
+    pull.snapshot.updatedAt = now;
+
+    return this.receipt('ApproveReview', {
+      id,
+      url: `${pull.snapshot.url}#pullrequestreview-${id}`,
+    });
+  }
+
   async addPendingReview(prId: string, commitOid: string): Promise<string> {
     await this.beforeWrite();
     this.pullById(prId);

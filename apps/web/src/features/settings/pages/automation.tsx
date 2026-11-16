@@ -75,7 +75,7 @@ export function AutomationSettings({ account }: { account: string }) {
       >
         <SettingRow
           label="Post findings to the PR"
-          hint="When a full review finishes, automatic or started by you, its summary and findings are posted to the PR as one comment from your account. Your review request stays open, and it never approves or requests changes. A review is not posted once new commits arrive. Activity shows each post."
+          hint="When a full review finishes, automatic or started by you, it approves the PR and resolves all open review threads if there are no blocking findings. Otherwise it posts the summary and findings as one comment. Posts go out from your account. Reviews with new commits are skipped. Activity shows each post."
         >
           <Switch
             aria-label="Post findings to the PR"

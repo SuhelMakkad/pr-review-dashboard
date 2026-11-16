@@ -1,5 +1,5 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { codexBlocked, type FullReviewResult } from '@review-desk/shared/ai';
+import { codexBlocked, hasBlockingFindings, type FullReviewResult } from '@review-desk/shared/ai';
 import { addedByHand } from '@review-desk/shared/attention';
 import type { ReviewNotification } from '@review-desk/shared/notify';
 import type { AttentionReason, PullRequestItem } from '@review-desk/shared/types';
@@ -62,16 +62,16 @@ function readyCopy(row: AiRunRow): string {
   try {
     const result = JSON.parse(row.result ?? '') as FullReviewResult;
     const count = result.comments.length;
+    const blocking = hasBlockingFindings(result);
 
     if (count === 0)
-      return result.assessment === 'changes_requested'
+      return blocking
         ? 'AI review ready · Changes recommended'
         : 'AI review ready · No blocking findings';
 
     const findings = `${count} finding${count === 1 ? '' : 's'}`;
 
-    if (result.assessment === 'changes_requested')
-      return `AI review ready · ${findings}, changes suggested`;
+    if (blocking) return `AI review ready · ${findings}, changes suggested`;
 
     return `AI review ready · ${findings}, none blocking`;
   } catch {
@@ -82,7 +82,7 @@ function readyCopy(row: AiRunRow): string {
 /**
  * Starts a full review when your review is requested. It stops at the finished report, so nothing
  * here can reach GitHub: posting the report is FindingsPoster's job, and only when Settings asks
- * for it. Preparing and submitting a GitHub review stay explicit.
+ * for it. FindingsPoster decides whether the result warrants an approval or a comment.
  */
 export class AutoReviewer {
   private running: Promise<void> | null = null;

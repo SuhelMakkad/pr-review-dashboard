@@ -13,8 +13,13 @@ export interface ThreadInput {
   subjectType?: 'LINE' | 'FILE';
 }
 
-/** GitHub writes used by the review workspace. Only ever called from explicit user actions. */
+/** GitHub writes used by the review workspace and enabled automations. */
 export interface GitHubWrites {
+  approveReview(
+    prId: string,
+    commitOid: string,
+    body: string,
+  ): Promise<{ id: string; url: string }>;
   addPendingReview(prId: string, commitOid: string): Promise<string>;
   addReviewThread(reviewId: string, thread: ThreadInput): Promise<string>;
   submitReview(
@@ -61,6 +66,14 @@ export function createWriter(transport: GitHubTransport): GitHubWrites {
     transport.graphql<T>(mutations[name], variables);
 
   return {
+    async approveReview(prId, commitOid, body) {
+      const data = await run<{
+        addPullRequestReview: { pullRequestReview: { id: string; url: string } };
+      }>('ApproveReview', { pullRequestId: prId, commitOID: commitOid, body });
+
+      return data.addPullRequestReview.pullRequestReview;
+    },
+
     async addPendingReview(prId, commitOid) {
       const data = await run<{ addPullRequestReview: { pullRequestReview: { id: string } } }>(
         'AddPendingReview',

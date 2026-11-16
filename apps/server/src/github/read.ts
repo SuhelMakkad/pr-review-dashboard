@@ -388,6 +388,10 @@ export class GitHub implements GitHubApi {
     return this.writes.addPendingReview(prId, commitOid);
   }
 
+  approveReview(prId: string, commitOid: string, body: string) {
+    return this.writes.approveReview(prId, commitOid, body);
+  }
+
   addReviewThread(reviewId: string, thread: ThreadInput) {
     return this.writes.addReviewThread(reviewId, thread);
   }
