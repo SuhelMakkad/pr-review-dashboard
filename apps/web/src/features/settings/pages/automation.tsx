@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Enter } from '@/ui/motion';
 import { Switch } from '@/ui/switch';
+import { quietMinutes } from '@/features/ai/restart';
 import { useAiOverview, useAiSettings } from '@/features/ai/use-ai';
 import { CardSkeleton, SettingRow, SettingsCard } from '@/features/settings/parts';
 
@@ -55,7 +56,7 @@ export function AutomationSettings({ account }: { account: string }) {
       <SettingsCard title="Automatic reviews">
         <SettingRow
           label="Review requested PRs automatically"
-          hint={`Runs a full review as soon as you or one of your teams is asked to review, including re-requests. Uses your ChatGPT plan. ${
+          hint={`Runs a full review as soon as you or one of your teams is asked to review, including re-requests. If new commits arrive while it runs, it stops and reviews the latest commits once the PR has had none for ${quietMinutes} minutes. Uses your ChatGPT plan. ${
             postFindings
               ? 'Findings are posted to the PR when each review finishes.'
               : 'Findings are never posted for you.'

@@ -149,6 +149,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   const autoReviewer = new AutoReviewer(service, runner, notifier);
   const poster = new FindingsPoster(service, runner, operations);
 
+  runner.onSettled = (row) => autoReviewer.settled(row);
   runner.onFinished = (row) => {
     poster.finished(row);
     autoReviewer.finished(row);

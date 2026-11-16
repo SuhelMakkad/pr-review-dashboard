@@ -586,9 +586,9 @@ export class OperationQueue {
           'The GitHub CLI account changed. Sign in to the original account before retrying.',
         );
 
-      await this.sync.refresh(row.prId);
+      // The refresh's own result: a slower refresh started earlier may save an older head after it.
+      const pr = (await this.sync.refresh(row.prId))?.snapshot;
       if (this.row(row.account, row.id).status === 'cancelled') return;
-      const pr = this.sync.detail(row.prId)?.snapshot;
 
       // Posting was automatic, so an outdated review is skipped rather than left needing attention,
       // which would also hold back your own actions on the PR.
@@ -717,19 +717,36 @@ export class OperationQueue {
                 409,
                 'The GitHub account changed before sending. Sign in to the original account before retrying.',
               );
-            if (
-              row.action.type === 'ai_review' &&
-              row.action.event === 'APPROVE' &&
-              (method === 'approveReview' || method === 'setThreadResolved')
-            ) {
-              await this.sync.refresh(row.prId);
+            // Commits can land after the check before sending, while writes are paced. Every
+            // automatic post checks again right before it goes out.
+            if (row.action.type === 'ai_review') {
+              const expected = row.action.expectedHeadOid;
 
-              if (this.sync.detail(row.prId)?.snapshot.headOid !== row.action.expectedHeadOid)
+              const pr = (await this.sync.refresh(row.prId))?.snapshot;
+
+              row = this.row(row.account, row.id);
+              if (row.status === 'cancelled') throw new Cancelled();
+
+              if (pr?.headOid !== expected) {
+                // Nothing sent yet: skip the outdated post, as the check before sending does.
+                if (!row.steps.some((step) => step.completedAt || step.uncertain)) {
+                  this.save({
+                    ...row,
+                    status: 'cancelled',
+                    finishedAt: now(),
+                    progress: pr
+                      ? 'Not posted: new commits arrived after this review. Run it again to review them.'
+                      : 'Not posted: this PR is no longer tracked.',
+                  });
+                  throw new Cancelled();
+                }
+
                 throw new ReviewError(
                   'HEAD_MOVED',
                   409,
                   'New commits arrived after this AI review. Run it again before approving.',
                 );
+              }
             }
 
             if (

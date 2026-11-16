@@ -17,7 +17,8 @@ export type ServerEvent =
       operationId: string;
       status: OperationStatus;
     }
-  | { type: 'ai.updated'; prId: string; runId: string }
+  /** `runId` is absent when no run changed, such as when an automatic restart is rescheduled. */
+  | { type: 'ai.updated'; prId: string; runId?: string }
   | { type: 'notify'; notifications: ReviewNotification[] }
   | { type: 'insights.updated' };
 

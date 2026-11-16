@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { LoaderCircle, Sparkles } from 'lucide-react';
+import { LoaderCircle, RefreshCw, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { codexBlocked, hasBlockingFindings, type FullReviewResult } from '@review-desk/shared/ai';
 import { operationInProgress, type GitHubOperation } from '@review-desk/shared/operations';
@@ -15,6 +15,7 @@ import { useReview } from '@/features/review/use-review';
 import { FadeSwap, Reveal, StaggerItem } from '@/ui/motion';
 import { Skeleton, SkeletonRegion, SkeletonText } from '@/ui/skeleton';
 import { AiCard } from '@/features/ai/assist-panel';
+import { restartCopy } from '@/features/ai/restart';
 import { useAi, useAiOverview } from '@/features/ai/use-ai';
 import { useInboxNavigation } from '@/features/inbox/inbox-context';
 import { openActivity, useOperations } from '@/features/activity/use-operations';
@@ -151,6 +152,14 @@ export function FullReview({
 
   return (
     <section aria-label="Full review" className="space-y-3">
+      <Reveal show={Boolean(ai.restartAt)}>
+        {ai.restartAt && (
+          <p role="status" className="flex gap-1.5 text-xs text-fg-muted">
+            <RefreshCw size={13} aria-hidden="true" className="mt-0.5 shrink-0 text-ai" />
+            {restartCopy(ai.restartAt)}
+          </p>
+        )}
+      </Reveal>
       <FadeSwap
         swapKey={run ? 'run' : ai.runs.isPending ? 'loading' : ai.runs.error ? 'error' : 'idle'}
         className="space-y-3"
@@ -408,7 +417,7 @@ export function FullReview({
           You can navigate away. This review will continue in the background.
         </p>
       </Reveal>
-      {latest && run?.id !== latest.id && (
+      {latest && run?.id !== latest.id && !ai.restartAt && (
         <p role={latest.status === 'failed' ? 'alert' : 'status'} className="text-xs text-fg-muted">
           {latest.status === 'failed'
             ? `The new review failed: ${latest.error}`

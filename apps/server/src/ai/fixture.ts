@@ -9,6 +9,11 @@ import { annotatePatch } from '@/ai/context.js';
 
 const wait = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new AgentError('Cancelled.'));
+      return;
+    }
+
     const timer = setTimeout(resolve, ms);
 
     signal.addEventListener('abort', () => {

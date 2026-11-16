@@ -69,6 +69,7 @@ async function setup() {
 
   cleanups.push(() => runner.close());
   cleanups.push(() => queue.close());
+  runner.onSettled = (row) => autoReviewer.settled(row);
   runner.onFinished = (row) => {
     poster.finished(row);
     autoReviewer.finished(row);
@@ -466,6 +467,43 @@ describe('posting finished reviews', () => {
       .poll(() => queue.get('you', viewed.id).status, { timeout: 2500, interval: 20 })
       .toBe('succeeded');
   });
+
+  it.each([
+    ['a comment', () => result()],
+    ['an approval', undefined],
+  ] as const)(
+    'skips %s when new commits land after the check before sending',
+    async (_kind, output) => {
+      const { sync, queue, pull, setPosting, review, posted, github } = await setup();
+      const refresh = sync.refresh.bind(sync);
+      let calls = 0;
+
+      setPosting(true);
+      await queue.pause();
+
+      const run = await review(1839, output?.());
+
+      // The first refresh is the check before sending; GitHub moves on right after it.
+      vi.spyOn(sync, 'refresh').mockImplementation(async (id) => {
+        calls += 1;
+
+        if (calls === 2) {
+          pull(1839).snapshot.headOid = 'pushed-while-posting';
+          pull(1839).snapshot.updatedAt = new Date().toISOString();
+        }
+
+        return refresh(id);
+      });
+      queue.resume();
+
+      const operation = await posted(run.id, 'cancelled');
+
+      expect(operation.progress).toBe(
+        'Not posted: new commits arrived after this review. Run it again to review them.',
+      );
+      expect(github.writes).toEqual([]);
+    },
+  );
 
   it('confirms a posted review whose response was lost, without posting it twice', async () => {
     const { github, setPosting, review, posted, comments } = await setup();

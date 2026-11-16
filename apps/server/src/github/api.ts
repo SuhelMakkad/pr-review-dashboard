@@ -34,7 +34,8 @@ export interface CompareResult {
   status: 'ahead' | 'behind' | 'diverged' | 'identical';
   mergeBaseOid: string | null;
   files: RemoteFile[];
-  commits: { oid: string; parents: string[] }[];
+  /** `committedAt` is the committer date, which a rebase or amend renews. */
+  commits: { oid: string; parents: string[]; committedAt: string | null }[];
 }
 
 export interface BlobText {

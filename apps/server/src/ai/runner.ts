@@ -12,6 +12,7 @@ import {
   type AiReviewStatus,
   type AiRun,
   type AiRunContext,
+  type AiRunStatus,
   type AiRunTrigger,
   type AiSettings,
   type AiTask,
@@ -79,6 +80,12 @@ export class AiRunner {
 
   /** Called once a run settles (done, failed, cancelled or paused), after its row is written. */
   onFinished?: (row: AiRunRow) => void;
+
+  /**
+   * Called inside the transaction that records a run as done or failed, so state that depends on
+   * the outcome is saved with it. Synchronous; a throw is ignored.
+   */
+  onSettled?: (row: AiRunRow) => void;
 
   constructor(
     private readonly sync: SyncService,
@@ -624,6 +631,9 @@ export class AiRunner {
         );
       }
 
+      // Stopped or paused while the workspace was prepared: never start the agent.
+      controller.signal.throwIfAborted();
+
       const result = await this.providers[row.provider].run(
         {
           instructions: saved.instructions,
@@ -662,7 +672,7 @@ export class AiRunner {
           : parsed.data;
       controller.signal.throwIfAborted();
 
-      this.update(id, {
+      this.settle(id, {
         status: 'done',
         progress: null,
         model: result.model,
@@ -673,7 +683,7 @@ export class AiRunner {
       });
     } catch (error) {
       if (this.row(id)?.status !== 'paused')
-        this.update(id, {
+        this.settle(id, {
           status: controller.signal.aborted ? 'cancelled' : 'failed',
           progress: null,
           error: controller.signal.aborted ? null : safeError(error),
@@ -708,6 +718,23 @@ export class AiRunner {
         }
       }
     }
+  }
+
+  /** Records how a run ended, together with what `onSettled` saves about a done or failed run. */
+  private settle(id: string, changes: Parameters<AiRunner['update']>[1]): void {
+    this.sync.store.transaction(() => {
+      this.update(id, changes);
+
+      const row = this.row(id);
+
+      if (row?.status !== 'done' && row?.status !== 'failed') return;
+
+      try {
+        this.onSettled?.(row);
+      } catch {
+        // A listener must never lose the run's outcome.
+      }
+    });
   }
 
   /** Keeps only anchors GitHub would accept; the rest stay as unanchored suggestions. */
@@ -915,8 +942,10 @@ export class AiRunner {
     );
   }
 
-  /** The latest full review of each tracked PR, for list badges. */
-  reviewStatuses(account: string): AiReviewStatus[] {
+  /** The latest full review of each tracked PR, for list badges. Restarts are AutoReviewer's. */
+  reviewStatuses(
+    account: string,
+  ): (Omit<AiReviewStatus, 'restartAt'> & { runId: string; status: AiRunStatus })[] {
     const rows = this.db
       .select()
       .from(aiRuns)

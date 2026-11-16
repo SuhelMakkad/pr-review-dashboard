@@ -5,6 +5,7 @@ interface Commit {
   oid: string;
   parents: string[];
   files: Record<string, string>;
+  committedAt?: string;
 }
 
 /** A tiny in-memory git model (commits, parents, file contents, refs) for demo diffs. */
@@ -12,10 +13,16 @@ export class FixtureRepos {
   private readonly commits = new Map<string, Map<string, Commit>>();
   private readonly refs = new Map<string, Map<string, string>>();
 
-  commit(repository: string, oid: string, parents: string[], files: Record<string, string>): void {
+  commit(
+    repository: string,
+    oid: string,
+    parents: string[],
+    files: Record<string, string>,
+    committedAt?: string,
+  ): void {
     if (!this.commits.has(repository)) this.commits.set(repository, new Map());
 
-    this.commits.get(repository)!.set(oid, { oid, parents, files });
+    this.commits.get(repository)!.set(oid, { oid, parents, files, committedAt });
   }
 
   /** Builds a child commit by applying changes (null deletes a file) to its parent. */
@@ -24,6 +31,7 @@ export class FixtureRepos {
     oid: string,
     parent: string,
     changes: Record<string, string | null>,
+    committedAt?: string,
   ): void {
     const files = { ...this.get(repository, parent)!.files };
 
@@ -32,7 +40,7 @@ export class FixtureRepos {
       else files[path] = content;
     }
 
-    this.commit(repository, oid, [parent], files);
+    this.commit(repository, oid, [parent], files, committedAt);
   }
 
   ref(repository: string, name: string, oid: string): void {
@@ -119,7 +127,11 @@ export class FixtureRepos {
     const commits = headAncestors
       .filter((oid) => !baseAncestors.has(oid))
       .reverse()
-      .map((oid) => ({ oid, parents: this.get(repository, oid)!.parents }));
+      .map((oid) => {
+        const commit = this.get(repository, oid)!;
+
+        return { oid, parents: commit.parents, committedAt: commit.committedAt ?? null };
+      });
 
     return {
       status,

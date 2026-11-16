@@ -215,7 +215,11 @@ interface RawCompare {
   status: CompareResult['status'];
   merge_base_commit?: { sha: string };
   files?: RawRestFile[];
-  commits?: { sha: string; parents: { sha: string }[] }[];
+  commits?: {
+    sha: string;
+    parents: { sha: string }[];
+    commit?: { committer?: { date?: string | null } | null };
+  }[];
 }
 
 const restFile = (file: RawRestFile): RemoteFile => ({
@@ -623,6 +627,7 @@ export class GitHub implements GitHubApi {
       commits: (response.data.commits ?? []).map((commit) => ({
         oid: commit.sha,
         parents: commit.parents.map((parent) => parent.sha),
+        committedAt: commit.commit?.committer?.date ?? null,
       })),
     };
   }

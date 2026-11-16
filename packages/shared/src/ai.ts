@@ -12,6 +12,12 @@ export type AiRunStatus =
 /** Who started a run: you, or automatic review when your review was requested. */
 export type AiRunTrigger = 'manual' | 'auto';
 
+/**
+ * How long a PR must go without new commits before an automatic review that new commits stopped
+ * starts again. Each push during the wait starts it over, so a burst of pushes is reviewed once.
+ */
+export const AUTO_REVIEW_QUIET_MS = 5 * 60_000;
+
 export interface BriefResult {
   summary: string;
   risk: 'low' | 'medium' | 'high';
@@ -98,13 +104,27 @@ export interface AiRun {
   trigger: AiRunTrigger;
 }
 
-/** The latest full review of one PR, for status badges in lists. */
+/**
+ * The latest full review of one PR, for status badges in lists. `runId` and `status` are null for
+ * a PR whose automatic review has not run yet but waits to restart.
+ */
 export interface AiReviewStatus {
   prId: string;
-  runId: string;
-  status: AiRunStatus;
+  runId: string | null;
+  status: AiRunStatus | null;
   stale: boolean;
   trigger: AiRunTrigger;
+  /**
+   * New commits stopped this PR's automatic review: a fresh one starts at this time, once the PR
+   * has been quiet for `AUTO_REVIEW_QUIET_MS`. Null otherwise.
+   */
+  restartAt: string | null;
+}
+
+/** A PR's AI runs, and when an automatic review that new commits stopped starts again. */
+export interface AiRunsResponse {
+  runs: AiRun[];
+  restartAt: string | null;
 }
 
 /** Fingerprints of the evidence used to generate a review, persisted with the run. */

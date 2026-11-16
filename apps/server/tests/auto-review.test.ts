@@ -1,23 +1,29 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { createApp } from '@/app.js';
-import { AutoReviewer } from '@/ai/auto-review.js';
 import { FixtureProvider } from '@/ai/fixture.js';
 import { AiRunner } from '@/ai/runner.js';
 import type { RepositoryExporter } from '@/ai/workspace.js';
 import { aiRuns, autoReviewLog } from '@/db/schema.js';
+import { AutoReviewer, autoReviewCandidates } from '@/ai/auto-review.js';
 import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
+import { GitHubError } from '@/github/errors.js';
 import { defaultScenario, type ScenarioPull } from '@/demo/scenario.js';
 import { DiffService } from '@/diff/service.js';
 import { EventBus } from '@/events.js';
 import { Notifier } from '@/notify/notifier.js';
 import { ReviewService } from '@/review/service.js';
 import { SyncService } from '@/sync/index.js';
-import type { AiReviewStatus, CodexAccountStatus } from '@review-desk/shared/ai';
+import {
+  AUTO_REVIEW_QUIET_MS,
+  type AiReviewStatus,
+  type CodexAccountStatus,
+} from '@review-desk/shared/ai';
 import { defaultNotificationSettings, type ReviewNotification } from '@review-desk/shared/notify';
 
 const cleanups: (() => unknown)[] = [];
@@ -75,6 +81,7 @@ async function setup() {
   events.subscribe((stored) => {
     if (stored.event.type === 'notify') notified.push(...stored.event.notifications);
   });
+  runner.onSettled = (row) => reviewer.settled(row);
   runner.onFinished = (row) => reviewer.finished(row);
   // The app does not await the pass; tests do, so each sync's outcome is settled.
   sync.afterSync = async (login) => {
@@ -149,6 +156,34 @@ async function setup() {
     reviewer = new AutoReviewer(sync, runner, notifier);
   };
 
+  /** Pushes a commit to the PR on GitHub. The app sees it on its next sync or refresh. */
+  const push = (number: number, label: string) => {
+    const snapshot = pull(number).snapshot;
+    const oid = createHash('sha1').update(label).digest('hex');
+    const committedAt = new Date(Date.now()).toISOString();
+
+    github.scenario.world.repos.derive(
+      snapshot.repository,
+      oid,
+      snapshot.headOid,
+      { [`notes/${label}.md`]: `${label}\n` },
+      committedAt,
+    );
+    snapshot.headOid = oid;
+    snapshot.headCommittedAt = committedAt;
+    snapshot.updatedAt = new Date().toISOString();
+
+    return oid;
+  };
+
+  /** Moves the clock the auto reviewer reads forward. */
+  const realNow = Date.now.bind(Date);
+  let offset = 0;
+  const later = (ms: number) => {
+    offset += ms;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
+  };
+
   return {
     store,
     github,
@@ -167,6 +202,9 @@ async function setup() {
     logFor,
     settled,
     restart,
+    push,
+    later,
+    restarts: () => reviewer.restarts('you'),
   };
 }
 
@@ -535,6 +573,896 @@ describe('automatic review', () => {
   });
 });
 
+describe('automatic review after new commits', () => {
+  /** Turns it on and starts a long automatic review of the new request on #1846. */
+  async function reviewing() {
+    const context = await setup();
+    const { github, sync, providers, enable, runs } = context;
+
+    enable();
+    providers.codex.delayMs = 5_000;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+
+    expect(first).toEqual(
+      expect.objectContaining({ trigger: 'auto', status: expect.stringMatching(/queued|running/) }),
+    );
+
+    return { ...context, first };
+  }
+
+  it('stops the running review, waits for the PR to go quiet, then reviews the new head', async () => {
+    const { sync, providers, runs, logFor, settled, push, later, restarts, notified, idOf, first } =
+      await reviewing();
+    const head = push(1846, 'follow-up');
+
+    await sync.sync();
+
+    expect(runs(1846)).toEqual([expect.objectContaining({ id: first.id, status: 'cancelled' })]);
+
+    const [waiting] = logFor(1846);
+
+    expect(waiting).toEqual(
+      expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+    );
+    expect(Date.parse(waiting.restartAt!) - Date.parse(waiting.updatedAt)).toBeGreaterThanOrEqual(
+      AUTO_REVIEW_QUIET_MS - 1_000,
+    );
+    expect(restarts()).toEqual(new Map([[idOf(1846), waiting.restartAt]]));
+
+    // Not yet quiet for long enough.
+    later(AUTO_REVIEW_QUIET_MS - 60_000);
+    await sync.sync();
+    expect(runs(1846)).toHaveLength(1);
+
+    providers.codex.delayMs = 5;
+    later(60_000);
+    await sync.sync();
+    await settled();
+
+    const fresh = runs(1846).find((run) => run.id !== first.id);
+
+    expect(fresh).toEqual(
+      expect.objectContaining({ trigger: 'auto', status: 'done', headOid: head }),
+    );
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'started', runId: fresh!.id, restartAt: null }),
+    ]);
+    expect(restarts()).toEqual(new Map());
+    await vi.waitFor(() =>
+      expect(notified.filter((item) => item.kind === 'ai_review_ready')).toEqual([
+        expect.objectContaining({ key: `ai:${fresh!.id}` }),
+      ]),
+    );
+  });
+
+  it('starts the wait over when more commits arrive during it', async () => {
+    const { sync, providers, runs, logFor, settled, push, later } = await reviewing();
+
+    push(1846, 'first-push');
+    await sync.sync();
+
+    const before = logFor(1846)[0].restartAt!;
+
+    later(2 * 60_000);
+
+    const head = push(1846, 'second-push');
+
+    await sync.sync();
+
+    const [waiting] = logFor(1846);
+
+    expect(waiting).toEqual(expect.objectContaining({ status: 'waiting', headOid: head }));
+    expect(Date.parse(waiting.restartAt!)).toBeGreaterThan(Date.parse(before));
+
+    // Quiet since the first push, but not since the second.
+    later(AUTO_REVIEW_QUIET_MS - 60_000);
+    await sync.sync();
+    expect(runs(1846)).toHaveLength(1);
+
+    providers.codex.delayMs = 5;
+    later(60_000);
+    await sync.sync();
+    await settled();
+
+    expect(runs(1846).at(-1)).toEqual(
+      expect.objectContaining({ trigger: 'auto', status: 'done', headOid: head }),
+    );
+  });
+
+  it('waits again when GitHub has newer commits than the last sync when restarting', async () => {
+    const { sync, runs, logFor, push, later, first } = await reviewing();
+
+    push(1846, 'seen-by-sync');
+    await sync.sync();
+    later(AUTO_REVIEW_QUIET_MS);
+
+    const refresh = sync.refresh.bind(sync);
+    let head = '';
+
+    vi.spyOn(sync, 'refresh').mockImplementationOnce(async (id) => {
+      head = push(1846, 'pushed-while-restarting');
+
+      return refresh(id);
+    });
+    await sync.sync();
+
+    expect(runs(1846)).toEqual([expect.objectContaining({ id: first.id, status: 'cancelled' })]);
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+    ]);
+  });
+
+  it('waits when new commits arrive while the first review is being prepared', async () => {
+    const { github, sync, enable, runs, logFor, push, restarts, idOf } = await setup();
+    const refresh = sync.refresh.bind(sync);
+    let calls = 0;
+    let head = '';
+
+    enable();
+    github.advance();
+    github.advance();
+    // start() reads the PR again after building the review input; GitHub moved on in between.
+    vi.spyOn(sync, 'refresh').mockImplementation(async (id) => {
+      calls += 1;
+      if (calls === 2) head = push(1846, 'pushed-while-preparing');
+
+      return refresh(id);
+    });
+    await sync.sync();
+
+    expect(runs(1846)).toEqual([]);
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'waiting', runId: null, headOid: head }),
+    ]);
+    expect(restarts()).toEqual(new Map([[idOf(1846), logFor(1846)[0].restartAt]]));
+  });
+
+  it('reviews again when new commits arrived just before the review finished', async () => {
+    const { github, sync, providers, enable, runs, logFor, settled, push, later, notified } =
+      await setup();
+
+    enable();
+    providers.codex.delayMs = 100;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+
+    // Pushed while it runs; no sync sees it before the review finishes.
+    const head = push(1846, 'pushed-before-finishing');
+
+    await settled();
+    expect(runs(1846)).toEqual([expect.objectContaining({ id: first.id, status: 'done' })]);
+    await vi.waitFor(() =>
+      expect(logFor(1846)).toEqual([
+        expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+      ]),
+    );
+    expect(notified.filter((item) => item.kind === 'ai_review_ready')).toEqual([]);
+
+    providers.codex.delayMs = 5;
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+    await settled();
+
+    expect(runs(1846).at(-1)).toEqual(
+      expect.objectContaining({ trigger: 'auto', status: 'done', headOid: head }),
+    );
+  });
+
+  it('announces a review that finished before any new commits', async () => {
+    const { github, sync, enable, runs, logFor, settled, notified } = await setup();
+
+    enable();
+    github.advance();
+    github.advance();
+    await sync.sync();
+    await settled();
+
+    await vi.waitFor(() =>
+      expect(notified.filter((item) => item.kind === 'ai_review_ready')).toHaveLength(1),
+    );
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'started', runId: runs(1846)[0].id }),
+    ]);
+  });
+
+  it('stops a review saved by a server restart when the PR moved on', async () => {
+    const { sync, runner, runs, logFor, push, first } = await reviewing();
+
+    runner.pause('you', first.id, 'restart');
+
+    const head = push(1846, 'pushed-while-down');
+
+    await sync.sync();
+
+    expect(runs(1846)).toEqual([expect.objectContaining({ id: first.id, status: 'cancelled' })]);
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+    ]);
+  });
+
+  it('leaves reviews you paused or started yourself alone', async () => {
+    const { sync, runner, runs, logFor, push, idOf, first } = await reviewing();
+    const manual = await runner.start('you', idOf(1839), 'full_review');
+
+    runner.pause('you', first.id);
+    push(1846, 'after-pause');
+    push(1839, 'after-manual-start');
+    await sync.sync();
+
+    expect(runs(1846)).toEqual([
+      expect.objectContaining({ id: first.id, status: 'paused', pauseReason: 'user' }),
+    ]);
+    expect(runs(1839)).toEqual([
+      expect.objectContaining({ id: manual.id, status: expect.stringMatching(/queued|running/) }),
+    ]);
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'started', runId: first.id })]);
+  });
+
+  it('skips the restart when you start a review during the wait', async () => {
+    const { sync, runner, providers, runs, logFor, settled, push, later, restarts, idOf, first } =
+      await reviewing();
+
+    push(1846, 'before-manual');
+    await sync.sync();
+    providers.codex.delayMs = 5_000;
+
+    const manual = await runner.start('you', idOf(1846), 'full_review');
+
+    expect(restarts()).toEqual(new Map());
+
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+
+    expect(
+      runs(1846)
+        .map((run) => run.id)
+        .sort(),
+    ).toEqual([first.id, manual.id].sort());
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'skipped', runId: manual.id }),
+    ]);
+
+    runner.cancel('you', manual.id);
+    await settled();
+  });
+
+  it('restarts for a newer request that found the stopped review in progress', async () => {
+    const { sync, pull, requestEvent, providers, runs, logFor, settled, push, later, first } =
+      await reviewing();
+    const restarted = (head: string) =>
+      expect(runs(1846).at(-1)).toEqual(
+        expect.objectContaining({ trigger: 'auto', status: 'done', headOid: head }),
+      );
+    const snapshot = pull(1846).snapshot;
+
+    // Asked again while the review runs: the newer request waits on the same run.
+    snapshot.requestEvents.push(requestEvent('req-1846-again', direct));
+    snapshot.updatedAt = new Date().toISOString();
+    await sync.sync();
+    expect(logFor(1846)).toContainEqual(
+      expect.objectContaining({ status: 'skipped', runId: first.id }),
+    );
+
+    const head = push(1846, 'after-asking-again');
+
+    await sync.sync();
+    expect(logFor(1846).map((entry) => entry.status)).toEqual(['waiting', 'waiting']);
+
+    providers.codex.delayMs = 5;
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+    await settled();
+
+    restarted(head);
+
+    // The request it replaced stops waiting, so it never holds back a later request.
+    await vi.waitFor(() =>
+      expect(logFor(1846).map((entry) => entry.status)).toEqual(['skipped', 'started']),
+    );
+
+    snapshot.requestEvents.push(requestEvent('req-1846-third', direct));
+
+    const latest = push(1846, 'with-third-request');
+
+    await sync.sync();
+    await settled();
+
+    restarted(latest);
+    expect(runs(1846)).toHaveLength(3);
+  });
+
+  it('finishes the check later when GitHub cannot be asked as the review finishes', async () => {
+    const { github, sync, providers, enable, runs, logFor, settled, push, later } = await setup();
+
+    enable();
+    providers.codex.delayMs = 100;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+    const head = push(1846, 'pushed-before-an-outage');
+    const refresh = vi
+      .spyOn(sync, 'refresh')
+      .mockRejectedValueOnce(new GitHubError('GitHub is unavailable.'));
+
+    await settled();
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalled());
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'checking', runId: first.id }),
+    ]);
+
+    // The next sync sees the commit, made before the review finished.
+    await sync.sync();
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+    ]);
+
+    providers.codex.delayMs = 5;
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+    await settled();
+
+    expect(runs(1846).at(-1)).toEqual(
+      expect.objectContaining({ trigger: 'auto', status: 'done', headOid: head }),
+    );
+  });
+
+  it('leaves commits made after the review finished for you, when checked later', async () => {
+    const { github, sync, enable, runs, logFor, settled, push, later } = await setup();
+
+    enable();
+    github.advance();
+    github.advance();
+
+    const refresh = sync.refresh.bind(sync);
+
+    // GitHub is unavailable for the check as the review finishes, and for a while after.
+    const outage = vi.spyOn(sync, 'refresh').mockImplementation(async (id) => {
+      if (runs(1846).some((run) => run.status === 'done'))
+        throw new GitHubError('GitHub is unavailable.');
+
+      return refresh(id);
+    });
+
+    await sync.sync();
+    await settled();
+    await vi.waitFor(() => expect(logFor(1846)[0].status).toBe('checking'));
+
+    later(60_000);
+    push(1846, 'pushed-after-finishing');
+
+    // The sync sees the new head, but the check waits until GitHub answers it.
+    await sync.sync();
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'checking' })]);
+
+    outage.mockRestore();
+    await sync.sync();
+
+    expect(runs(1846)).toHaveLength(1);
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'started' })]);
+  });
+
+  it('reviews again when the committer clock runs ahead of the review', async () => {
+    const { github, sync, providers, enable, runs, logFor, settled, push, later, notified } =
+      await setup();
+
+    enable();
+    providers.codex.delayMs = 100;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+
+    // Pushed while it runs from a machine whose clock is ten minutes ahead.
+    later(10 * 60_000);
+
+    const head = push(1846, 'committed-in-the-future');
+
+    later(-10 * 60_000);
+    await settled();
+    await vi.waitFor(() =>
+      expect(logFor(1846)).toEqual([
+        expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+      ]),
+    );
+    expect(notified.filter((item) => item.kind === 'ai_review_ready')).toEqual([]);
+  });
+
+  it('lets a request wait for the check of the review before it', async () => {
+    const { github, sync, pull, requestEvent, providers, enable, runs, logFor, settled, push } =
+      await setup();
+
+    enable();
+    providers.codex.delayMs = 100;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+    const head = push(1846, 'pushed-before-a-slow-check');
+    const refresh = sync.refresh.bind(sync);
+    let release = () => {};
+    const answered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    // GitHub is slow to answer the check as the review finishes.
+    vi.spyOn(sync, 'refresh').mockImplementationOnce(async (id) => {
+      await answered;
+
+      return refresh(id);
+    });
+    await settled();
+
+    // Asked again meanwhile: the request waits for the check instead of starting a review.
+    pull(1846).snapshot.requestEvents.push(requestEvent('req-1846-during-check', direct));
+    pull(1846).snapshot.updatedAt = new Date().toISOString();
+    await sync.sync();
+    expect(runs(1846)).toHaveLength(1);
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'checking' })]);
+
+    release();
+    await vi.waitFor(() =>
+      expect(logFor(1846)).toEqual([
+        expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+      ]),
+    );
+
+    // The request takes over the wait, so nothing is left behind to hold back later requests.
+    await sync.sync();
+    expect(runs(1846)).toHaveLength(1);
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'skipped', restartAt: null }),
+      expect.objectContaining({ status: 'waiting', headOid: head }),
+    ]);
+  });
+
+  it('lets a request wait when the previous review ends while it is being started', async () => {
+    const { github, sync, pull, requestEvent, runner, providers, enable, runs, logFor, push } =
+      await setup();
+
+    enable();
+    providers.codex.delayMs = 100;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+    let release = () => {};
+    const answered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const plan = vi.spyOn(runner, 'codexStatus').mockImplementationOnce(async () => {
+      await answered;
+
+      return providers.codex.account;
+    });
+
+    // Asked again; while the plan is read for it, the PR moves on and the first review ends.
+    pull(1846).snapshot.requestEvents.push(requestEvent('req-1846-while-ending', direct));
+    pull(1846).snapshot.updatedAt = new Date().toISOString();
+
+    const syncing = sync.sync();
+
+    await vi.waitFor(() => expect(plan).toHaveBeenCalled());
+
+    const head = push(1846, 'pushed-while-ending');
+
+    await vi.waitFor(() =>
+      expect(logFor(1846)).toEqual([
+        expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+      ]),
+    );
+    release();
+    await syncing;
+
+    expect(runs(1846)).toHaveLength(1);
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'waiting', headOid: head })]);
+
+    await sync.sync();
+    expect(runs(1846)).toHaveLength(1);
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'skipped', restartAt: null }),
+      expect.objectContaining({ status: 'waiting', headOid: head }),
+    ]);
+  });
+
+  it('writes nothing when a restart fails after it was turned off and on again', async () => {
+    const { sync, runner, enable, runs, logFor, push, later } = await reviewing();
+
+    push(1846, 'before-toggled-restart');
+    await sync.sync();
+    later(AUTO_REVIEW_QUIET_MS);
+
+    let fail = () => {};
+    const failed = new Promise<void>((resolve) => {
+      fail = resolve;
+    });
+    const start = vi.spyOn(runner, 'start').mockImplementationOnce(async () => {
+      await failed;
+
+      throw new Error('The diff could not be built.');
+    });
+    const syncing = sync.sync();
+
+    await vi.waitFor(() => expect(start).toHaveBeenCalled());
+    enable(false);
+    enable();
+    fail();
+    await syncing;
+
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'primed', restartAt: null })]);
+
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+    expect(runs(1846)).toHaveLength(1);
+  });
+
+  it('keeps the check when the server stops before the run is announced', async () => {
+    const { github, sync, runner, providers, enable, runs, logFor, settled, push } = await setup();
+
+    enable();
+    providers.codex.delayMs = 100;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+    const head = push(1846, 'pushed-before-stopping');
+
+    // The outcome is saved, then the server stops before anything else runs.
+    runner.onFinished = undefined;
+    await settled();
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'checking' })]);
+
+    await sync.sync();
+
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+    ]);
+  });
+
+  it('reviews again when new commits arrived just before the review failed', async () => {
+    const { github, sync, providers, enable, runs, logFor, settled, push, notified } =
+      await setup();
+
+    enable();
+    providers.codex.delayMs = 100;
+    providers.codex.failNext = 'The agent crashed.';
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+    const head = push(1846, 'pushed-before-failing');
+
+    await settled();
+    await vi.waitFor(() =>
+      expect(logFor(1846)).toEqual([
+        expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+      ]),
+    );
+    expect(notified.filter((item) => item.kind === 'ai_review_ready')).toEqual([]);
+  });
+
+  it('drops the restart when you start a review during the wait, even if you stop it', async () => {
+    const { sync, runner, runs, logFor, push, later, restarts, idOf, first } = await reviewing();
+
+    push(1846, 'before-stopped-manual');
+    await sync.sync();
+
+    const manual = await runner.start('you', idOf(1846), 'full_review');
+
+    runner.cancel('you', manual.id);
+    expect(restarts()).toEqual(new Map());
+
+    // Another push starts the quiet period over, but not the wait.
+    later(60_000);
+    push(1846, 'after-stopped-manual');
+    await sync.sync();
+    expect(restarts()).toEqual(new Map());
+
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+
+    expect(
+      runs(1846)
+        .map((run) => run.id)
+        .sort(),
+    ).toEqual([first.id, manual.id].sort());
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'skipped', runId: manual.id }),
+    ]);
+  });
+
+  it('reviews again when a commit made while it ran is behind a later one', async () => {
+    const { github, sync, providers, enable, runs, logFor, settled, push, later } = await setup();
+
+    enable();
+    providers.codex.delayMs = 100;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+
+    push(1846, 'made-while-running');
+
+    const outage = vi
+      .spyOn(sync, 'refresh')
+      .mockRejectedValue(new GitHubError('GitHub is unavailable.'));
+
+    await settled();
+    await vi.waitFor(() => expect(logFor(1846)[0].status).toBe('checking'));
+
+    // A later commit goes on top before GitHub can be asked.
+    later(60_000);
+
+    const head = push(1846, 'made-after-finishing');
+
+    outage.mockRestore();
+    await sync.sync();
+
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'waiting', runId: first.id, headOid: head }),
+    ]);
+  });
+
+  it('remembers a review you started when new commits interrupt the restart', async () => {
+    const { sync, runner, runs, logFor, push, later, idOf, first } = await reviewing();
+
+    push(1846, 'before-interrupted-restart');
+    await sync.sync();
+    later(AUTO_REVIEW_QUIET_MS);
+
+    const refresh = sync.refresh.bind(sync);
+    let calls = 0;
+    let manual = '';
+
+    // While the restart prepares, you start and stop a review, then the PR moves on.
+    vi.spyOn(sync, 'refresh').mockImplementation(async (id) => {
+      calls += 1;
+
+      if (calls === 1) {
+        manual = (await runner.start('you', idOf(1846), 'full_review')).id;
+        runner.cancel('you', manual);
+      }
+
+      if (calls === 4) push(1846, 'interrupting-the-restart');
+
+      return refresh(id);
+    });
+    await sync.sync();
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'waiting' })]);
+
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+
+    expect(
+      runs(1846)
+        .map((run) => run.id)
+        .sort(),
+    ).toEqual([first.id, manual].sort());
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'skipped', runId: manual })]);
+  });
+
+  it('waits again after a restart fails to start, and pushes still extend the wait', async () => {
+    const { sync, runner, providers, runs, logFor, settled, push, later } = await reviewing();
+
+    push(1846, 'before-failed-restart');
+    await sync.sync();
+    later(AUTO_REVIEW_QUIET_MS);
+    vi.spyOn(runner, 'start').mockRejectedValueOnce(new Error('The diff could not be built.'));
+    await sync.sync();
+
+    expect(runs(1846)).toHaveLength(1);
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'waiting', attempts: 1 })]);
+
+    later(60_000);
+
+    const head = push(1846, 'after-failed-restart');
+
+    await sync.sync();
+    later(AUTO_REVIEW_QUIET_MS - 60_000);
+    await sync.sync();
+    expect(runs(1846)).toHaveLength(1);
+
+    providers.codex.delayMs = 5;
+    later(60_000);
+    await sync.sync();
+    await settled();
+
+    expect(runs(1846).at(-1)).toEqual(
+      expect.objectContaining({ trigger: 'auto', status: 'done', headOid: head }),
+    );
+  });
+
+  it('drops the restart when you start and stop a review while it is starting', async () => {
+    const { sync, runner, runs, logFor, push, later, idOf, first } = await reviewing();
+
+    push(1846, 'before-restarting');
+    await sync.sync();
+    later(AUTO_REVIEW_QUIET_MS);
+
+    const refresh = sync.refresh.bind(sync);
+    let manual = '';
+
+    vi.spyOn(sync, 'refresh').mockImplementationOnce(async (id) => {
+      const started = await runner.start('you', idOf(1846), 'full_review');
+
+      manual = started.id;
+      runner.cancel('you', manual);
+
+      return refresh(id);
+    });
+    await sync.sync();
+    await sync.sync();
+
+    expect(
+      runs(1846)
+        .map((run) => run.id)
+        .sort(),
+    ).toEqual([first.id, manual].sort());
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'skipped', runId: manual })]);
+  });
+
+  it('makes a request found with new commits wait for the PR to go quiet too', async () => {
+    const { sync, pull, requestEvent, providers, runs, logFor, settled, push, later, first } =
+      await reviewing();
+    const snapshot = pull(1846).snapshot;
+
+    // Asked again and pushed to before the next sync.
+    snapshot.requestEvents.push(requestEvent('req-1846-with-push', direct));
+
+    const head = push(1846, 'with-new-request');
+
+    await sync.sync();
+
+    expect(runs(1846)).toEqual([expect.objectContaining({ id: first.id, status: 'cancelled' })]);
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'skipped', restartAt: null }),
+      expect.objectContaining({ status: 'waiting', headOid: head }),
+    ]);
+
+    providers.codex.delayMs = 5;
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+    await settled();
+
+    expect(runs(1846)).toHaveLength(2);
+    expect(runs(1846).at(-1)).toEqual(
+      expect.objectContaining({ trigger: 'auto', status: 'done', headOid: head }),
+    );
+  });
+
+  it('waits again when the PR returns to a head that was already reviewed', async () => {
+    const { github, sync, providers, enable, runs, logFor, settled, push, pull, later } =
+      await setup();
+
+    enable();
+    providers.codex.delayMs = 100;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const [first] = runs(1846);
+    const reviewed = first.headOid;
+
+    push(1846, 'pushed-then-reverted');
+    await settled();
+    await vi.waitFor(() => expect(logFor(1846)[0].status).toBe('waiting'));
+
+    // Force-pushed back to the reviewed head just before the restart.
+    later(AUTO_REVIEW_QUIET_MS);
+
+    const refresh = sync.refresh.bind(sync);
+
+    vi.spyOn(sync, 'refresh').mockImplementationOnce(async (id) => {
+      pull(1846).snapshot.headOid = reviewed;
+      pull(1846).snapshot.updatedAt = new Date().toISOString();
+
+      return refresh(id);
+    });
+    await sync.sync();
+
+    expect(runs(1846)).toEqual([expect.objectContaining({ id: first.id, status: 'done' })]);
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'waiting', headOid: reviewed }),
+    ]);
+
+    // Quiet at the reviewed head: its review stands.
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+
+    expect(runs(1846)).toHaveLength(1);
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'started', runId: first.id })]);
+  });
+
+  it('restarts a review that kept running while it was turned off and on again', async () => {
+    const { sync, providers, enable, runs, logFor, settled, push, later } = await reviewing();
+
+    enable(false);
+    enable();
+
+    const head = push(1846, 'after-turning-on-again');
+
+    await sync.sync();
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'waiting' })]);
+
+    providers.codex.delayMs = 5;
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+    await settled();
+
+    expect(runs(1846).at(-1)).toEqual(
+      expect.objectContaining({ trigger: 'auto', status: 'done', headOid: head }),
+    );
+  });
+
+  it('drops the wait when turned off, and does not restart it when turned on', async () => {
+    const { sync, enable, runs, logFor, push, later, restarts, idOf } = await reviewing();
+
+    push(1846, 'before-turning-off');
+    await sync.sync();
+
+    const updates: string[] = [];
+
+    sync.events.subscribe(({ event }) => {
+      if (event.type === 'ai.updated') updates.push(event.prId);
+    });
+    enable(false);
+    expect(restarts()).toEqual(new Map());
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'primed', headOid: null, restartAt: null }),
+    ]);
+    expect(updates).toContain(idOf(1846));
+
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+    expect(runs(1846)).toHaveLength(1);
+
+    enable();
+    await sync.sync();
+
+    expect(runs(1846)).toHaveLength(1);
+    expect(logFor(1846)).toEqual([
+      expect.objectContaining({ status: 'primed', headOid: null, restartAt: null }),
+    ]);
+  });
+
+  it('keeps waiting while the ChatGPT plan is used up', async () => {
+    const { sync, runner, providers, runs, logFor, settled, push, later } = await reviewing();
+
+    push(1846, 'before-limit');
+    await sync.sync();
+    later(AUTO_REVIEW_QUIET_MS);
+
+    const blocked: CodexAccountStatus = { ...providers.codex.account, limitReached: true };
+    const status = vi.spyOn(runner, 'codexStatus').mockResolvedValue(blocked);
+
+    await sync.sync();
+    expect(runs(1846)).toHaveLength(1);
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'waiting' })]);
+
+    status.mockRestore();
+    providers.codex.delayMs = 5;
+    await sync.sync();
+    await settled();
+
+    expect(runs(1846)).toHaveLength(2);
+    expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'started' })]);
+  });
+});
+
 describe('automatic review routes', () => {
   it('keeps `since` on the server and lists review status for the inbox', async () => {
     const store = new Store(':memory:');
@@ -598,7 +1526,55 @@ describe('automatic review routes', () => {
     await expect
       .poll(async () => (await reviews()).reviews, { timeout: 5_000 })
       .toEqual([
-        { prId: id, runId: expect.any(String), status: 'done', stale: false, trigger: 'auto' },
+        {
+          prId: id,
+          runId: expect.any(String),
+          status: 'done',
+          stale: false,
+          trigger: 'auto',
+          restartAt: null,
+        },
       ]);
+
+    // New commits stopped another PR's first review before it had a run.
+    const [waiting] = autoReviewCandidates(sync.list().items).filter(
+      ({ item }) => item.number === 1839,
+    );
+    const restartAt = new Date(Date.now() + 60_000).toISOString();
+    const headOid = sync.detail(waiting.item.id)!.snapshot.headOid;
+
+    store.db
+      .insert(autoReviewLog)
+      .values({
+        account: 'you',
+        key: waiting.key,
+        prId: waiting.item.id,
+        status: 'waiting',
+        headOid,
+        restartAt,
+        updatedAt: new Date().toISOString(),
+      })
+      .onConflictDoUpdate({
+        target: [autoReviewLog.account, autoReviewLog.key],
+        set: { status: 'waiting', headOid, restartAt },
+      })
+      .run();
+
+    expect((await reviews()).reviews).toContainEqual({
+      prId: waiting.item.id,
+      runId: null,
+      status: null,
+      stale: false,
+      trigger: 'auto',
+      restartAt,
+    });
+
+    const detail = await app.inject({
+      method: 'GET',
+      url: `/api/pulls/${encodeURIComponent(waiting.item.id)}/ai?account=you`,
+      headers,
+    });
+
+    expect(detail.json()).toEqual({ runs: [], restartAt });
   });
 });

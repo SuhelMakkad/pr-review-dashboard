@@ -5,6 +5,7 @@ import type {
   AiProviderStatus,
   AiReviewStatus,
   AiRun,
+  AiRunsResponse,
   AiSettings,
   AiTask,
   CodexAccountStatus,
@@ -39,7 +40,13 @@ export function useAiSettings(account: string) {
   return useMutation({
     mutationFn: (settings: AiSettings) =>
       api<AiSettings>('/api/ai/settings', { method: 'PUT', body: { account, settings } }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['ai-overview'] }),
+    // Turning automatic review off drops pending restarts, which lists and panels show.
+    onSuccess: () =>
+      Promise.all([
+        client.invalidateQueries({ queryKey: ['ai-overview'] }),
+        client.invalidateQueries({ queryKey: aiReviewsKey }),
+        client.invalidateQueries({ queryKey: ['ai'] }),
+      ]),
   });
 }
 
@@ -99,7 +106,7 @@ export function useAi(prId: string | null, account: string) {
   const runs = useQuery({
     queryKey: key,
     queryFn: () =>
-      api<{ runs: AiRun[] }>(
+      api<AiRunsResponse>(
         `/api/pulls/${encodeURIComponent(prId!)}/ai?account=${encodeURIComponent(account)}`,
       ),
     enabled: Boolean(prId && account),
@@ -227,6 +234,8 @@ export function useAi(prId: string | null, account: string) {
 
   return {
     runs,
+    /** New commits stopped the automatic review; a fresh one starts at this time. */
+    restartAt: runs.data?.restartAt ?? null,
     start,
     cancel,
     pause: (runId: string) => control.mutate({ runId, operation: 'pause' }),

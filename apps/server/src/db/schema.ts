@@ -205,11 +205,23 @@ export const autoReviewLog = sqliteTable(
     account: text('account').notNull(),
     key: text('key').notNull(),
     prId: text('pr_id').notNull(),
-    status: text('status').$type<'primed' | 'started' | 'skipped' | 'failed'>().notNull(),
+    /**
+     * `checking`: its automatic review finished and is being checked for commits that arrived
+     * while it ran. `waiting`: new commits stopped or outdated its automatic review; a fresh one
+     * starts at `restartAt`.
+     */
+    status: text('status')
+      .$type<'primed' | 'started' | 'skipped' | 'failed' | 'waiting' | 'checking'>()
+      .notNull(),
     runId: text('run_id'),
     attempts: integer('attempts').notNull().default(0),
     error: text('error'),
     updatedAt: text('updated_at').notNull(),
+    /** While waiting: the newest head seen. Another push starts the wait over. */
+    headOid: text('head_oid'),
+    restartAt: text('restart_at'),
+    /** When the wait began; pushes do not move it. A review started since replaces the restart. */
+    waitingSince: text('waiting_since'),
   },
   (table) => [primaryKey({ columns: [table.account, table.key] })],
 );

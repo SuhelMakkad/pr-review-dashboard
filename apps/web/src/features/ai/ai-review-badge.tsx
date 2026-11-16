@@ -1,5 +1,6 @@
-import { CircleAlert, LoaderCircle, Sparkles, type LucideIcon } from 'lucide-react';
+import { CircleAlert, LoaderCircle, RefreshCw, Sparkles, type LucideIcon } from 'lucide-react';
 import type { AiReviewStatus } from '@review-desk/shared/ai';
+import { restartCopy } from '@/features/ai/restart';
 import { tone } from '@/features/pulls/meta';
 import { Reveal } from '@/ui/motion';
 
@@ -14,6 +15,14 @@ interface BadgeMeta {
 function badgeFor(review: AiReviewStatus): BadgeMeta | null {
   const started =
     review.trigger === 'auto' ? 'Started automatically when your review was requested. ' : '';
+
+  if (review.restartAt && review.status !== 'queued' && review.status !== 'running')
+    return {
+      label: 'AI review restarting',
+      hint: restartCopy(review.restartAt),
+      tone: 'ai',
+      icon: RefreshCw,
+    };
 
   switch (review.status) {
     case 'queued':

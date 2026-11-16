@@ -4,7 +4,11 @@ import type { AutoReviewer } from '@/ai/auto-review.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { safeError } from '@/github/errors.js';
 import { ReviewError } from '@/review/service.js';
-import { defaultAiSettings } from '@review-desk/shared/ai';
+import {
+  defaultAiSettings,
+  type AiReviewStatus,
+  type AiRunsResponse,
+} from '@review-desk/shared/ai';
 
 const account = z.string().min(1).max(100);
 const provider = z.enum(['codex', 'claude']);
@@ -122,15 +126,37 @@ export function registerAiRoutes(
   });
 
   app.get<{ Querystring: { account?: string } }>('/api/ai/reviews', async (request, reply) =>
-    handle(reply, () => ({ reviews: runner.reviewStatuses(String(request.query.account ?? '')) })),
+    handle(reply, () => {
+      const account = String(request.query.account ?? '');
+      const restarts = autoReviewer.restarts(account);
+      const reviews: AiReviewStatus[] = runner
+        .reviewStatuses(account)
+        .map((review) => ({ ...review, restartAt: restarts.get(review.prId) ?? null }));
+      const listed = new Set(reviews.map((review) => review.prId));
+
+      // New commits stopped the first automatic review before it had a run.
+      for (const [prId, restartAt] of restarts) {
+        if (listed.has(prId)) continue;
+
+        reviews.push({ prId, runId: null, status: null, stale: false, trigger: 'auto', restartAt });
+      }
+
+      return { reviews };
+    }),
   );
 
   app.get<{ Params: { id: string }; Querystring: { account?: string } }>(
     '/api/pulls/:id/ai',
     async (request, reply) =>
-      handle(reply, () => ({
-        runs: runner.runs(String(request.query.account ?? ''), request.params.id),
-      })),
+      handle(reply, () => {
+        const account = String(request.query.account ?? '');
+        const response: AiRunsResponse = {
+          runs: runner.runs(account, request.params.id),
+          restartAt: autoReviewer.restarts(account).get(request.params.id) ?? null,
+        };
+
+        return response;
+      }),
   );
 
   app.post<{ Params: { id: string } }>('/api/pulls/:id/ai', async (request, reply) => {
