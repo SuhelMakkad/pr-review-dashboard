@@ -40,6 +40,8 @@ const schemas = {
       autoReview: z
         .strictObject({ enabled: z.boolean(), since: z.string().max(40).nullable().optional() })
         .optional(),
+      // Optional so a window opened before the setting existed keeps its saved value.
+      postFindings: z.boolean().optional(),
     }),
   }),
   start: z.strictObject({

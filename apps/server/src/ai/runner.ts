@@ -140,14 +140,22 @@ export class AiRunner {
         ]),
       ) as AiSettings['tasks'],
       autoReview: { ...defaults.autoReview, ...saved?.autoReview },
+      postFindings: saved?.postFindings ?? defaults.postFindings,
     };
   }
 
-  /** Saves settings. `autoReview.since` is the server's: set when turned on, cleared when off. */
+  /**
+   * Saves settings. `autoReview.since` is the server's: set when turned on, cleared when off.
+   * Settings left out keep their saved value.
+   */
   saveSettings(
-    settings: Omit<AiSettings, 'autoReview'> & { autoReview?: { enabled: boolean } },
+    settings: Omit<AiSettings, 'autoReview' | 'postFindings'> & {
+      autoReview?: { enabled: boolean };
+      postFindings?: boolean;
+    },
   ): AiSettings {
-    const previous = this.settings().autoReview;
+    const current = this.settings();
+    const previous = current.autoReview;
     const enabled = settings.autoReview?.enabled ?? previous.enabled;
     const since = !enabled
       ? null
@@ -162,6 +170,7 @@ export class AiRunner {
         full_review: { ...settings.tasks.full_review, provider: 'codex' },
       },
       autoReview: { enabled, since },
+      postFindings: settings.postFindings ?? current.postFindings,
     });
 
     return this.settings();
@@ -297,7 +306,7 @@ export class AiRunner {
 
     if (!pr) return 'This PR is no longer tracked.';
     if (!row.request) return 'This run has no saved checkpoint. Generate a new review.';
-    if (reviewFingerprint(pr) !== reviewFingerprint(row.request.snapshot))
+    if (reviewFingerprint(pr, row.account) !== reviewFingerprint(row.request.snapshot, row.account))
       return 'The PR or its review discussion changed while this run was stopped. Generate a new review.';
 
     return this.staleReason(row);
@@ -311,7 +320,7 @@ export class AiRunner {
 
     if (!pr || !['full_review', 'draft_summary'].includes(row.task)) return null;
     if (!row.context) return 'Generate a new review to verify that it covers the current PR.';
-    if (row.context.review !== reviewFingerprint(pr))
+    if (row.context.review !== reviewFingerprint(pr, row.account))
       return 'The PR or its review discussion changed after this was generated.';
 
     if (row.task === 'draft_summary') {
@@ -405,7 +414,7 @@ export class AiRunner {
     const completedReview = task === 'draft_summary' ? this.completedReview(account, prId) : null;
     const context: AiRunContext | null = ['full_review', 'draft_summary'].includes(task)
       ? {
-          review: reviewFingerprint(detail.snapshot),
+          review: reviewFingerprint(detail.snapshot, account),
           ...(task === 'draft_summary'
             ? {
                 draft: draftFingerprint(this.reviews.draft(account, prId)),

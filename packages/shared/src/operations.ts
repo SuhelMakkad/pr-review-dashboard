@@ -17,7 +17,9 @@ export type GitHubAction =
   | { type: 'resolve'; threadId: string; resolved: boolean }
   | { type: 'viewed'; path: string; viewed: boolean }
   | { type: 'reviewers'; logins: string[] }
-  | { type: 'discard'; reviewId: string; restoreOperationId?: string };
+  | { type: 'discard'; reviewId: string; restoreOperationId?: string }
+  /** A finished full review, posted as a conversation comment because Settings asked for it. */
+  | { type: 'ai_review'; runId: string; expectedHeadOid: string; body: string };
 
 export type OperationControl = 'cancel' | 'retry' | 'check' | 'reopen' | 'dismiss' | 'restore';
 
@@ -63,6 +65,7 @@ export const operationLabels: Record<GitHubAction['type'], string> = {
   viewed: 'Update file viewed state',
   reviewers: 'Request reviewers',
   discard: 'Discard pending review',
+  ai_review: 'Post AI review',
 };
 
 export const operationInProgress = (status: OperationStatus) =>

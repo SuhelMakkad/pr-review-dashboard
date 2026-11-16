@@ -9,6 +9,7 @@ import {
   type OperationList,
   type OperationReceipt,
 } from '@review-desk/shared/operations';
+import { postedReviewMarker } from '@/ai/freshness.js';
 import { githubOperations } from '@/db/schema.js';
 import { DiffService } from '@/diff/service.js';
 import type { GitHubApi } from '@/github/api.js';
@@ -30,7 +31,7 @@ const MUTATIONS = new Set([
   'addConversationComment',
   'requestReviews',
 ]);
-const CONTENT_ACTIONS = new Set(['review', 'comment', 'reply', 'discard']);
+const CONTENT_ACTIONS = new Set(['review', 'comment', 'reply', 'discard', 'ai_review']);
 const TERMINAL = ['succeeded', 'cancelled'] as const;
 const now = () => new Date().toISOString();
 const fingerprint = (input: unknown) =>
@@ -151,11 +152,12 @@ export class OperationQueue {
     )
       controls.push('retry');
 
+    // A posted AI review has no draft to return to: it can only be left unposted.
     if (
       !started ||
       (uncertain && !this.pendingId(row) && !row.steps.some((step) => step.completedAt))
     )
-      controls.push('reopen');
+      controls.push(row.action.type === 'ai_review' ? 'cancel' : 'reopen');
     // Cleanup is safe even after an uncertain comment: the cleanup job first verifies that the
     // known review is still pending and saves all of its remote content before deleting it.
     if (['review', 'comment'].includes(row.action.type) && this.pendingId(row))
@@ -296,7 +298,10 @@ export class OperationQueue {
 
     this.sync.store.transaction(() => {
       const drafts = new DraftStore(this.sync.store);
-      if (CONTENT_ACTIONS.has(action.type)) drafts.assertEditable(account, prId);
+
+      // A conversation comment never joins your pending review, so it can wait behind it.
+      if (CONTENT_ACTIONS.has(action.type) && action.type !== 'ai_review')
+        drafts.assertEditable(account, prId);
 
       if (action.type === 'review') {
         if (
@@ -410,11 +415,19 @@ export class OperationQueue {
         409,
         'This action is no longer available. Refresh Activity.',
       );
-    if (command === 'reopen' && row.steps.some((step) => step.uncertain) && !confirmed)
+    const uncertain = row.steps.some((step) => step.uncertain);
+
+    if (command === 'reopen' && uncertain && !confirmed)
       throw new ReviewError(
         'CONFIRM_REQUIRED',
         409,
         'Check GitHub and confirm this action did not post before reopening it.',
+      );
+    if (command === 'cancel' && uncertain && !confirmed)
+      throw new ReviewError(
+        'CONFIRM_REQUIRED',
+        409,
+        'Check GitHub before stopping: this action may already have posted.',
       );
     if (command === 'restore') return this.restore(row);
 
@@ -446,7 +459,11 @@ export class OperationQueue {
           progress:
             command === 'reopen'
               ? 'Returned to your draft. Saved content is available here.'
-              : 'Cancelled before sending. Your draft is preserved.',
+              : row.action.type !== 'ai_review'
+                ? 'Cancelled before sending. Your draft is preserved.'
+                : uncertain
+                  ? 'Stopped. Check GitHub: this review may already be posted.'
+                  : 'Cancelled. Nothing was posted.',
         });
         new DraftStore(this.sync.store).unlock(account, row.prId, id);
       });
@@ -544,6 +561,7 @@ export class OperationQueue {
         viewed: ['setFileViewed'],
         reviewers: ['requestReviews'],
         discard: ['deleteReview'],
+        ai_review: ['addConversationComment'],
       };
 
       // A durable final receipt already proves success, even if the PR changed after a crash.
@@ -569,6 +587,21 @@ export class OperationQueue {
       await this.sync.refresh(row.prId);
       if (this.row(row.account, row.id).status === 'cancelled') return;
       const pr = this.sync.detail(row.prId)?.snapshot;
+
+      // Posting was automatic, so an outdated review is skipped rather than left needing attention,
+      // which would also hold back your own actions on the PR.
+      if (row.action.type === 'ai_review' && pr?.headOid !== row.action.expectedHeadOid) {
+        this.save({
+          ...row,
+          status: 'cancelled',
+          finishedAt: now(),
+          progress: pr
+            ? 'Not posted: new commits arrived after this review. Run it again to review them.'
+            : 'Not posted: this PR is no longer tracked.',
+        });
+        return;
+      }
+
       if (!pr) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer available.');
 
       const action = row.action;
@@ -781,6 +814,11 @@ export class OperationQueue {
           if (backup) await github.deleteReview(action.reviewId);
           break;
         }
+        case 'ai_review': {
+          const posted = await github.addConversationComment(row.prId, row.action.body);
+          result = { url: posted.url };
+          break;
+        }
       }
 
       this.complete(this.row(row.account, row.id), result);
@@ -797,6 +835,8 @@ export class OperationQueue {
 
       return `Saving comment ${completed + 1} of ${row.action.draft.comments.filter((comment) => comment.status === 'draft').length} to your pending review.`;
     }
+
+    if (row.action.type === 'ai_review') return 'Posting the AI review to the PR conversation.';
 
     return method === 'submitReview'
       ? 'Submitting your pending review to GitHub.'
@@ -990,6 +1030,24 @@ export class OperationQueue {
         }
       } else if (step.method === 'deleteReview') {
         confirmed = (await this.sync.github.reviewReceipt(String(step.args[0]))) === null;
+      } else if (step.method === 'addConversationComment' && row.action.type === 'ai_review') {
+        // The run's marker identifies the comment exactly. Absence is not proof: GitHub may not
+        // list it yet, so an unfound comment stays unconfirmed rather than being sent again.
+        const marker = postedReviewMarker(row.action.runId);
+
+        await this.sync.refresh(row.prId);
+        const posted = this.sync
+          .detail(row.prId)
+          ?.snapshot.conversation.find(
+            (comment) =>
+              comment.author.login.toLowerCase() === row.account.toLowerCase() &&
+              comment.body.startsWith(marker),
+          );
+
+        if (posted) {
+          confirmed = true;
+          result = { id: posted.id, url: posted.url };
+        }
       } else if (step.method === 'setFileViewed' || step.method === 'setThreadResolved') {
         await this.sync.refresh(row.prId);
         const pr = this.sync.detail(row.prId)?.snapshot;

@@ -107,7 +107,7 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
         method: 'POST',
         body: {
           account: operation.account,
-          confirm: command === 'restore' || command === 'reopen',
+          confirm: command === 'restore' || command === 'reopen' || command === 'cancel',
         },
       }),
     onSuccess: (_receipt, command) => {
@@ -148,7 +148,9 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
         ? operation.action.body
         : operation.action.type === 'comment'
           ? operation.action.comment.body
-          : '';
+          : operation.action.type === 'ai_review'
+            ? operation.action.body
+            : '';
 
   return (
     <article
@@ -227,13 +229,23 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
                 )
               )
                 return;
+              if (
+                command === 'cancel' &&
+                operation.error?.code === 'UNCONFIRMED' &&
+                !window.confirm(
+                  'This may already be on GitHub. Stop tracking it here? Check the PR before posting it another way.',
+                )
+              )
+                return;
 
               control.mutate(command);
             }}
           >
             {command === 'reopen' && operation.error?.code === 'HEAD_MOVED'
               ? 'Review new commits'
-              : controlLabels[command]}
+              : command === 'cancel' && operation.action.type === 'ai_review'
+                ? "Don't post"
+                : controlLabels[command]}
           </Button>
         ))}
         <a
@@ -261,6 +273,12 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
           {operation.action.type === 'review' && (
             <p>
               Reviewed commit: <code>{operation.action.review.expectedHeadOid.slice(0, 7)}</code>
+            </p>
+          )}
+          {operation.action.type === 'ai_review' && (
+            <p>
+              Posted automatically from an AI review of{' '}
+              <code>{operation.action.expectedHeadOid.slice(0, 7)}</code>.
             </p>
           )}
           {body && <MarkdownView>{body}</MarkdownView>}

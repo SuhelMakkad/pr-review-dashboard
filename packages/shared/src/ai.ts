@@ -1,4 +1,7 @@
-/** AI assist contract. Agents are advisory: nothing they produce is posted without the user. */
+/**
+ * AI assist contract. Agents are advisory: nothing they produce is posted without the user, except
+ * finished full reviews when the user turns on `postFindings`.
+ */
 
 export type AiProvider = 'codex' | 'claude';
 export type AiTask =
@@ -123,6 +126,11 @@ export interface AiSettings {
   defaultProvider: AiProvider;
   tasks: Record<AiTask, AiTaskSettings>;
   autoReview: AutoReviewSettings;
+  /**
+   * Posts each full review that finishes, automatic or manual, to its PR as one conversation
+   * comment from your account. Never approves or requests changes.
+   */
+  postFindings: boolean;
 }
 
 export interface AiProviderStatus {
@@ -182,6 +190,7 @@ export const defaultAiSettings = (): AiSettings => ({
     draft_summary: { provider: null, effort: 'low', model: null },
   },
   autoReview: { enabled: false, since: null },
+  postFindings: false,
 });
 
 /** Codex runs are refused: the plan's limit is used up, or the sign-in would not bill the plan. */

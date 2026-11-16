@@ -64,6 +64,54 @@ test('reviews a newly requested PR automatically and leaves posting to you', asy
   expect(await demoWrites(page)).toEqual([]);
 });
 
+test('posts the findings of an automatic review to the PR when asked', async ({ page }) => {
+  await openFresh(page, '/settings');
+
+  const post = page.getByRole('checkbox', { name: 'Post findings to the PR' });
+
+  await expect(post).not.toBeChecked();
+
+  // Saved back to back: the second save must not undo the first.
+  await post.check();
+  await page.getByRole('checkbox', { name: 'Review requested PRs automatically' }).check();
+  await expect(
+    page.getByText('Findings are posted to the PR when each review finishes.', { exact: false }),
+  ).toBeVisible();
+  await expectAccessible(page);
+
+  await page.reload();
+  await expect(post).toBeChecked();
+
+  await page.goto('/inbox/attention');
+  await expect(page.getByRole('listbox', { name: /pull requests/i })).toBeVisible();
+  await advance(page);
+  await advance(page);
+
+  const row = page
+    .getByRole('option')
+    .filter({ hasText: 'Reminder banner for upcoming events' });
+
+  await expect(row.getByText('AI review ready')).toBeVisible();
+
+  await page.goto('/inbox/attention/acme/web/1846');
+
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await expect(report.getByText('Posted to the PR conversation.')).toBeVisible();
+  await expect(report.getByRole('link', { name: 'Open on GitHub' })).toHaveAttribute(
+    'href',
+    /#issuecomment-/,
+  );
+
+  // Its own comment does not make the review out of date.
+  await expect(report.getByText('Up to date', { exact: false })).toBeVisible();
+
+  const writes = await demoWrites(page);
+
+  expect(writes.map((write) => write.op)).toEqual(['AddComment']);
+  expect(String(writes[0].details.body)).toContain('**AI review** · ');
+});
+
 test('does nothing when automatic review is off', async ({ page }) => {
   await openFresh(page, '/inbox/attention');
   await expect(page.getByRole('listbox', { name: /pull requests/i })).toBeVisible();

@@ -5,8 +5,21 @@ import type { PullRequestSnapshot } from '@review-desk/shared/types';
 const fingerprint = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-/** Ignore refresh times, viewed files and checks: they do not change the review's evidence. */
-export function reviewFingerprint(pr: PullRequestSnapshot): string {
+/** Opens every AI review the dashboard posts, so it can recognise its own comments later. */
+export const postedReviewMarker = (runId: string) => `<!-- review-desk:ai-review run=${runId} -->`;
+
+const postedReviewPrefix = '<!-- review-desk:ai-review ';
+
+/**
+ * Ignore refresh times, viewed files and checks: they do not change the review's evidence. Neither
+ * does an AI review this account posted from a run: it repeats that run, so it is not new
+ * discussion, and counting it would mark the review it came from out of date.
+ */
+export function reviewFingerprint(pr: PullRequestSnapshot, account: string): string {
+  const posted = (comment: PullRequestSnapshot['conversation'][number]) =>
+    comment.author.login.toLowerCase() === account.toLowerCase() &&
+    comment.body.startsWith(postedReviewPrefix);
+
   return fingerprint({
     baseOid: pr.baseOid,
     headOid: pr.headOid,
@@ -14,7 +27,7 @@ export function reviewFingerprint(pr: PullRequestSnapshot): string {
     body: pr.body,
     reviews: pr.reviews,
     threads: pr.threads,
-    conversation: pr.conversation,
+    conversation: pr.conversation.filter((comment) => !posted(comment)),
     requests: pr.requestEvents,
   });
 }

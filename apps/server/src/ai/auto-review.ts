@@ -80,8 +80,9 @@ function readyCopy(row: AiRunRow): string {
 }
 
 /**
- * Starts a full review when your review is requested. It stops at the finished report: preparing
- * and posting a GitHub review stay explicit, so nothing here can reach GitHub.
+ * Starts a full review when your review is requested. It stops at the finished report, so nothing
+ * here can reach GitHub: posting the report is FindingsPoster's job, and only when Settings asks
+ * for it. Preparing and submitting a GitHub review stay explicit.
  */
 export class AutoReviewer {
   private running: Promise<void> | null = null;

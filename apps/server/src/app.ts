@@ -26,6 +26,7 @@ import { FixtureLinear, LinearService, type LinearSource } from '@/linear/servic
 import type { LinearConnector } from '@/linear/oauth.js';
 import { AiRunner } from '@/ai/runner.js';
 import { AutoReviewer } from '@/ai/auto-review.js';
+import { FindingsPoster } from '@/ai/post-findings.js';
 import { downloadRepository, type RepositoryExporter } from '@/ai/workspace.js';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -146,8 +147,12 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
 
   const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);
   const autoReviewer = new AutoReviewer(service, runner, notifier);
+  const poster = new FindingsPoster(service, runner, operations);
 
-  runner.onFinished = (row) => autoReviewer.finished(row);
+  runner.onFinished = (row) => {
+    poster.finished(row);
+    autoReviewer.finished(row);
+  };
   registerAiRoutes(app, runner, autoReviewer);
   app.addHook('onClose', () => autoReviewer.close());
 

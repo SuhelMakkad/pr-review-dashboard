@@ -248,34 +248,48 @@ function CodexModelSelect({
   );
 }
 
+type AiToggle = 'autoReview' | 'postFindings';
+
 function AiSection({ account }: { account: string }) {
   const client = useQueryClient();
   const overview = useAiOverview();
   const save = useAiSettings(account);
-  // The choice being saved, shown until the server confirms it, so the checkbox never flickers.
-  const [autoPending, setAutoPending] = useState<boolean | null>(null);
-  const settings = overview.data?.settings;
+  // Choices being saved, shown until the server confirms them, so the checkboxes never flicker.
+  const [pending, setPending] = useState<Partial<Record<AiToggle, boolean>>>({});
+  const saved = overview.data?.settings;
   const providers = overview.data?.providers ?? [];
   const codex = overview.data?.codex ?? null;
 
-  if (!settings) return <SectionSkeleton label="Loading AI settings…" rows={4} />;
+  if (!saved) return <SectionSkeleton label="Loading AI settings…" rows={5} />;
+
+  const autoReview = pending.autoReview ?? saved.autoReview.enabled;
+  const postFindings = pending.postFindings ?? saved.postFindings;
+  // Every save carries the toggles still being saved, so one change never undoes another.
+  const settings = {
+    ...saved,
+    autoReview: { ...saved.autoReview, enabled: autoReview },
+    postFindings,
+  };
 
   const update = (next: typeof settings) => save.mutate(next);
-  const autoReview = autoPending ?? settings.autoReview.enabled;
 
-  const setAutoReview = (enabled: boolean) => {
-    setAutoPending(enabled);
+  const settle = (toggle: AiToggle) => setPending(({ [toggle]: _settled, ...rest }) => rest);
+
+  const setToggle = (toggle: AiToggle, enabled: boolean) => {
+    setPending((current) => ({ ...current, [toggle]: enabled }));
     save.mutate(
-      { ...settings, autoReview: { ...settings.autoReview, enabled } },
+      toggle === 'autoReview'
+        ? { ...settings, autoReview: { ...settings.autoReview, enabled } }
+        : { ...settings, postFindings: enabled },
       {
-        onSuccess: (saved) => {
+        onSuccess: (next) => {
           client.setQueryData<typeof overview.data>(['ai-overview'], (current) =>
-            current ? { ...current, settings: saved } : current,
+            current ? { ...current, settings: next } : current,
           );
-          setAutoPending(null);
+          settle(toggle);
         },
         onError: (error) => {
-          setAutoPending(null);
+          settle(toggle);
           toast.error(error.message);
         },
       },
@@ -323,15 +337,29 @@ function AiSection({ account }: { account: string }) {
       )}
       <Row
         label="Review requested PRs automatically"
-        hint={`Runs a full review as soon as you or one of your teams is asked to review, including re-requests. Uses your ChatGPT plan. Findings are never posted for you.${
-          autoReview ? ' Requests already waiting when you turned this on are not reviewed.' : ''
-        }`}
+        hint={`Runs a full review as soon as you or one of your teams is asked to review, including re-requests. Uses your ChatGPT plan. ${
+          postFindings
+            ? 'Findings are posted to the PR when each review finishes.'
+            : 'Findings are never posted for you.'
+        }${autoReview ? ' Requests already waiting when you turned this on are not reviewed.' : ''}`}
       >
         <input
           type="checkbox"
           aria-label="Review requested PRs automatically"
           checked={autoReview}
-          onChange={(event) => setAutoReview(event.target.checked)}
+          onChange={(event) => setToggle('autoReview', event.target.checked)}
+          className="size-4 shrink-0 accent-accent"
+        />
+      </Row>
+      <Row
+        label="Post findings to the PR"
+        hint="When a full review finishes, automatic or started by you, its summary and findings are posted to the PR as one comment from your account. Your review request stays open, and it never approves or requests changes. A review is not posted once new commits arrive. Activity shows each post."
+      >
+        <input
+          type="checkbox"
+          aria-label="Post findings to the PR"
+          checked={postFindings}
+          onChange={(event) => setToggle('postFindings', event.target.checked)}
           className="size-4 shrink-0 accent-accent"
         />
       </Row>

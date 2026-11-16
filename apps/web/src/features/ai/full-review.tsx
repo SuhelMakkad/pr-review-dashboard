@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router';
 import { LoaderCircle, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { codexBlocked, type FullReviewResult } from '@review-desk/shared/ai';
+import { operationInProgress, type GitHubOperation } from '@review-desk/shared/operations';
 import type { PrepareReviewOptions } from '@review-desk/shared/review';
 import type { CiState } from '@review-desk/shared/types';
 import { ApiError } from '@/lib/api';
@@ -16,9 +17,50 @@ import { Skeleton, SkeletonRegion, SkeletonText } from '@/ui/skeleton';
 import { AiCard } from '@/features/ai/assist-panel';
 import { useAi, useAiOverview } from '@/features/ai/use-ai';
 import { useInboxNavigation } from '@/features/inbox/inbox-context';
-import { openActivity } from '@/features/activity/use-operations';
+import { openActivity, useOperations } from '@/features/activity/use-operations';
 
-/** A complete review stays on the dashboard until the user explicitly prepares and posts it. */
+/** Where this review's automatic post to the PR conversation stands. */
+function PostingStatus({ operation }: { operation: GitHubOperation }) {
+  if (operation.status === 'succeeded')
+    return (
+      <p className="text-xs text-ok">
+        Posted to the PR conversation.{' '}
+        {operation.result?.url && (
+          <a
+            href={operation.result.url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-accent hover:underline"
+          >
+            Open on GitHub
+          </a>
+        )}
+      </p>
+    );
+
+  if (operation.status === 'needs_attention')
+    return (
+      <p role="alert" className="text-xs text-pending">
+        Posting to the PR needs attention.{' '}
+        <button type="button" onClick={openActivity} className="text-accent hover:underline">
+          View activity
+        </button>
+      </p>
+    );
+
+  return (
+    <p role="status" className="text-xs text-fg-muted">
+      {operationInProgress(operation.status)
+        ? 'Posting to the PR conversation…'
+        : operation.progress}
+    </p>
+  );
+}
+
+/**
+ * A complete review stays on the dashboard until the user explicitly prepares and posts it, unless
+ * Settings posts each finished review to the PR.
+ */
 export function FullReview({
   prId,
   account,
@@ -48,6 +90,15 @@ export function FullReview({
   const [selection, setSelection] = useState<{ runId: string; indices: number[] } | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
   const result = run?.status === 'done' ? (run.result as FullReviewResult | null) : null;
+  const operations = useOperations(account);
+  const autoPost = overview.data?.settings.postFindings ?? false;
+  const posting = run
+    ? operations.data?.pages
+        .flatMap((page) => page.items)
+        .find((item) => item.action.type === 'ai_review' && item.action.runId === run.id)
+    : undefined;
+  const willPost =
+    autoPost && !posting && ['queued', 'running', 'paused'].includes(run?.status ?? '');
   const codex = overview.data?.providers.find((provider) => provider.id === 'codex');
   const plan = overview.data?.codex ?? null;
   const blocked = codexBlocked(plan);
@@ -124,7 +175,10 @@ export function FullReview({
                 <Sparkles size={14} aria-hidden="true" /> Full review
               </h3>
               <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-                Find issues across the complete PR. Review the findings before posting.
+                Find issues across the complete PR.{' '}
+                {autoPost
+                  ? 'Its findings are posted to the PR when it finishes.'
+                  : 'Review the findings before posting.'}
               </p>
             </div>
             <Button
@@ -162,7 +216,16 @@ export function FullReview({
             {run.trigger === 'auto' && (
               <p className="flex items-center gap-1.5 text-2xs text-fg-subtle">
                 <Sparkles size={11} aria-hidden="true" /> Started automatically when your review was
-                requested. Nothing is posted until you prepare and submit a review.
+                requested.
+                {!autoPost &&
+                  !posting &&
+                  ' Nothing is posted until you prepare and submit a review.'}
+              </p>
+            )}
+            {posting && <PostingStatus operation={posting} />}
+            {willPost && (
+              <p className="text-2xs text-fg-subtle">
+                Its findings will be posted to the PR when this review finishes.
               </p>
             )}
             <AiCard
