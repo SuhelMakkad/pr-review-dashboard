@@ -94,7 +94,9 @@ describe('review diffs', () => {
     );
 
     expect(manifest.kind).toBe('fast-forward');
-    expect(manifest.files.map((file) => file.path)).toEqual(['src/collections/CollectionFilterEditor.tsx']);
+    expect(manifest.files.map((file) => file.path)).toEqual([
+      'src/collections/CollectionFilterEditor.tsx',
+    ]);
     close();
   });
 

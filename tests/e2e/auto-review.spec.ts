@@ -43,9 +43,7 @@ test('reviews a newly requested PR automatically and leaves posting to you', asy
   expect(await advance(page)).toMatch(/new reply/);
   expect(await advance(page)).toMatch(/new review request/);
 
-  const row = page
-    .getByRole('option')
-    .filter({ hasText: 'Reminder banner for upcoming events' });
+  const row = page.getByRole('option').filter({ hasText: 'Reminder banner for upcoming events' });
 
   await expect(row.getByText('AI review ready')).toBeVisible();
   await expect(page.getByText(/^AI review ready · /)).toBeVisible();
