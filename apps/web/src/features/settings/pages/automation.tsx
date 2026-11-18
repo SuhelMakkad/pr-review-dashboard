@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { forgeTerms } from '@review-desk/shared/accounts';
 import { toast } from 'sonner';
 import { Enter } from '@/ui/motion';
 import { Switch } from '@/ui/switch';
@@ -71,7 +72,7 @@ export function AutomationSettings({ account }: { account: string }) {
       </SettingsCard>
 
       <SettingsCard
-        title="Posting to GitHub"
+        title={`Posting to ${forgeTerms(account).name}`}
         description="Posts go out as you, so they are off until you turn them on."
       >
         <SettingRow

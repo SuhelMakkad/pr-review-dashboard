@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CircleAlert, RefreshCw } from 'lucide-react';
 import { useLive } from '@/lib/live';
-import { useStatus, useSyncNow } from '@/lib/queries';
+import { useForge, useStatus, useSyncNow } from '@/lib/queries';
 import { dateTime, relativePhrase } from '@/lib/time';
 import { cn } from '@/ui/cn';
 import { Kbd } from '@/ui/kbd';
@@ -29,6 +29,7 @@ export function StatusBar({ hints }: { hints: Hint[] }) {
   const status = useStatus();
   const sync = useSyncNow();
   const state = status.data;
+  const forge = useForge();
   const coolingDown = Boolean(state?.retryAt && Date.parse(state.retryAt) > Date.now());
   const problems = [...(state?.error ? [state.error] : []), ...(state?.warnings ?? [])];
 
@@ -64,7 +65,7 @@ export function StatusBar({ hints }: { hints: Hint[] }) {
       {live.demo && (
         <span
           className="rounded-xs bg-ai/15 px-1.5 font-medium text-ai"
-          title="Demo mode uses a fictional scenario; nothing reaches GitHub."
+          title={`Demo mode uses a fictional scenario; nothing reaches ${forge.name}.`}
         >
           Demo data
         </span>
@@ -75,7 +76,7 @@ export function StatusBar({ hints }: { hints: Hint[] }) {
         title={state?.lastSuccessfulSync ? dateTime(state.lastSuccessfulSync) : undefined}
       >
         {state?.syncing
-          ? 'Syncing with GitHub…'
+          ? `Syncing with ${forge.name}…`
           : state?.lastSuccessfulSync
             ? `Synced ${relativePhrase(state.lastSuccessfulSync)}`
             : 'Waiting for first sync'}
@@ -107,7 +108,9 @@ export function StatusBar({ hints }: { hints: Hint[] }) {
           </PopoverTrigger>
           <PopoverContent side="top" align="start" sideOffset={8} className="w-[420px] p-3 text-xs">
             <p className="mb-2 font-semibold">
-              {state?.error ? 'GitHub could not be reached' : 'Some data could not be refreshed'}
+              {state?.error
+                ? `${forge.name} could not be reached`
+                : 'Some data could not be refreshed'}
             </p>
             <ul className="max-h-60 space-y-1.5 overflow-auto text-fg-muted">
               {problems.map((problem, index) => (

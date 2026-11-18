@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useRef, useState } from 'react';
 import { Lock } from 'lucide-react';
+import { forgeTerms } from '@review-desk/shared/accounts';
 
 type SaveState = 'saved' | 'dirty' | 'saving' | 'error';
 
@@ -88,7 +89,7 @@ export const Notes = forwardRef<
         onKeyDown={(event) => {
           if (event.key === 'Escape') event.currentTarget.blur();
         }}
-        placeholder="Reminders for your next pass. Never sent to GitHub."
+        placeholder={`Reminders for your next pass. Never sent to ${forgeTerms(account).name}.`}
         aria-label="Private note"
         rows={3}
         className="w-full resize-y rounded-sm border border-line bg-sunken px-3 py-2 text-sm outline-none placeholder:text-fg-subtle focus:border-accent"

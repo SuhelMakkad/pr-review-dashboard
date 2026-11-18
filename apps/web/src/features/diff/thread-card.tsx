@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { CheckCheck, ChevronRight, MessageSquare, Reply, RotateCcw } from 'lucide-react';
 import type { ReviewThread } from '@review-desk/shared/types';
+import { isSameUser } from '@review-desk/shared/accounts';
 import type { GitHubOperation, OperationReceipt } from '@review-desk/shared/operations';
 import { operationUnsettled } from '@review-desk/shared/operations';
 import { openActivity } from '@/features/activity/use-operations';
@@ -96,7 +97,7 @@ export function ThreadCard({
                 <div className="mb-1 flex items-center gap-2 text-xs">
                   <Avatar login={comment.author.login} size={16} />
                   <span className="font-medium">{comment.author.login}</span>
-                  {comment.author.login.toLowerCase() === account.toLowerCase() && (
+                  {isSameUser(comment.author.login, account) && (
                     <span className="text-fg-subtle">you</span>
                   )}
                   <a

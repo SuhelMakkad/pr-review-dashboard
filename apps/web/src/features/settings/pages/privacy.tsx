@@ -6,7 +6,7 @@ const points = [
     term: 'Storage',
     detail: (
       <>
-        Cached GitHub data, notes, snoozes and acknowledgements live in{' '}
+        Cached GitHub and GitLab data, notes, snoozes and acknowledgements live in{' '}
         <code>.data/review-desk.sqlite</code> on this machine.
       </>
     ),
@@ -22,6 +22,8 @@ const points = [
       <>
         GitHub credentials come from the GitHub CLI. When you pick an account, its token goes only
         to the <code>gh</code> commands the server runs; it is never saved or sent to this window.
+        GitLab requests run through <code>glab</code>, which keeps its own token; Review Desk never
+        reads it.
       </>
     ),
   },

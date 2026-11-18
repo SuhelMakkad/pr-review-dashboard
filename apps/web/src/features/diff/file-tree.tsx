@@ -47,7 +47,7 @@ export const FileTree = forwardRef<
         <span className="font-semibold text-fg-muted">
           {files.length} {files.length === 1 ? 'file' : 'files'}
         </span>
-        <span className="text-fg-subtle tabular-nums" title="Files you marked as viewed on GitHub">
+        <span className="text-fg-subtle tabular-nums" title="Files you marked as viewed">
           {viewed}/{files.length} viewed
         </span>
       </div>

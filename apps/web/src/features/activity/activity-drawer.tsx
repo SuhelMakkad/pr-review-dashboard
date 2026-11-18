@@ -10,7 +10,9 @@ import {
   type OperationControl,
   type OperationReceipt,
 } from '@review-desk/shared/operations';
+import { forgeTerms } from '@review-desk/shared/accounts';
 import { api } from '@/lib/api';
+import { numberSign, refOf } from '@/lib/pr-ref';
 import { storage } from '@/lib/storage';
 import { dateTime, relativePhrase } from '@/lib/time';
 import { useStatus } from '@/lib/queries';
@@ -48,6 +50,8 @@ function label(operation: GitHubOperation) {
 }
 
 function statusLabel(operation: GitHubOperation) {
+  const forge = forgeTerms(operation.account).name;
+
   if (operation.status === 'needs_attention')
     return operation.error?.code === 'UNCONFIRMED' ? 'Unconfirmed' : 'Needs attention';
   if (operation.status === 'succeeded')
@@ -55,13 +59,13 @@ function statusLabel(operation: GitHubOperation) {
       ? 'Added to pending review'
       : operation.action.type === 'discard'
         ? 'Completed'
-        : 'Confirmed by GitHub';
+        : `Confirmed by ${forge}`;
 
   return {
     queued: 'Queued',
-    running: 'Sending to GitHub',
+    running: `Sending to ${forge}`,
     waiting: 'Waiting to retry',
-    checking: 'Checking GitHub',
+    checking: `Checking ${forge}`,
     cancelled: 'Cancelled',
   }[operation.status];
 }
@@ -122,7 +126,7 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
           JSON.stringify(operation.action),
         );
         window.dispatchEvent(new Event('review-desk-recovered'));
-        const [owner, repo] = operation.repository.split('/');
+        const { owner, repo } = refOf(operation);
 
         setActivityOpen(false);
         void navigate({
@@ -157,7 +161,7 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
   return (
     <article
       className="space-y-2 border-b border-line px-4 py-3"
-      aria-label={`${label(operation)} on ${operation.repository} #${operation.number}`}
+      aria-label={`${label(operation)} on ${operation.repository} ${numberSign(operation.prUrl)}${operation.number}`}
     >
       <div className="flex items-start justify-between gap-3">
         <h3 className="text-sm font-medium">{label(operation)}</h3>
@@ -173,8 +177,8 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
         <Link
           to="/pr/$owner/$repo/$number/files"
           params={{
-            owner: operation.repository.split('/')[0],
-            repo: operation.repository.split('/')[1],
+            owner: refOf(operation).owner,
+            repo: refOf(operation).repo,
             number: String(operation.number),
           }}
           search={
@@ -185,7 +189,8 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
           onClick={() => setActivityOpen(false)}
           className="hover:text-accent hover:underline"
         >
-          {operation.repository} #{operation.number}
+          {operation.repository} {numberSign(operation.prUrl)}
+          {operation.number}
         </Link>{' '}
         · @{operation.account}
       </p>
@@ -247,7 +252,9 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
               ? 'Review new commits'
               : command === 'cancel' && operation.action.type === 'ai_review'
                 ? "Don't post"
-                : controlLabels[command]}
+                : command === 'check'
+                  ? `Check ${forgeTerms(operation.account).name}`
+                  : controlLabels[command]}
           </Button>
         ))}
         <a
@@ -256,7 +263,7 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
           rel="noreferrer"
           className="inline-flex items-center gap-1 px-1 py-1 text-xs text-accent hover:underline"
         >
-          Open GitHub <ExternalLink size={11} aria-hidden="true" />
+          Open {forgeTerms(operation.account).name} <ExternalLink size={11} aria-hidden="true" />
         </a>
       </div>
       {control.error && (
@@ -434,7 +441,7 @@ export function ActivityDrawer() {
         <div>
           <DialogTitle className="text-base font-semibold">Activity</DialogTitle>
           <DialogDescription id="activity-description" className="mt-1 text-xs text-fg-muted">
-            GitHub actions · saved on this device
+            {forgeTerms(account).name} actions · saved on this device
           </DialogDescription>
         </div>
         <DialogClose asChild>
@@ -491,7 +498,7 @@ export function ActivityDrawer() {
         {!operations.isPending && !operations.error && items.length === 0 && (
           <Enter key="empty" preset="fade">
             <p className="p-4 text-sm text-fg-muted">
-              Your GitHub actions and their results will appear here.
+              Your {forgeTerms(account).name} actions and their results will appear here.
             </p>
           </Enter>
         )}

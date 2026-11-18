@@ -3,7 +3,7 @@ import { Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Toaster } from 'sonner';
 import { useShortcuts, type Shortcut } from '@/lib/shortcuts';
 import { setBadge } from '@/lib/notifications';
-import { useMine, useNotificationSettings, usePulls, useStatus } from '@/lib/queries';
+import { useForge, useMine, useNotificationSettings, usePulls, useStatus } from '@/lib/queries';
 import { useRemountKey } from '@/lib/remount-key';
 import { useEffect } from 'react';
 import { useAppearance } from '@/lib/theme';
@@ -19,7 +19,7 @@ import { ActivityDrawer } from '@/features/activity/activity-drawer';
 import { firstSettingsSlug } from '@/features/settings/sections';
 import { useActivityOpen } from '@/features/activity/use-operations';
 
-function hintsFor(pathname: string): Hint[] {
+function hintsFor(pathname: string, forge: string): Hint[] {
   if (pathname.startsWith('/inbox/')) {
     return pathname.split('/').length > 3
       ? [
@@ -43,13 +43,14 @@ function hintsFor(pathname: string): Hint[] {
   if (pathname.startsWith('/pr/'))
     return [
       { keys: 'Escape', label: 'Back' },
-      { keys: 'o', label: 'GitHub' },
+      { keys: 'o', label: forge },
     ];
 
   return [];
 }
 
 export function Shell() {
+  const forge = useForge();
   const activityOpen = useActivityOpen();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -133,7 +134,7 @@ export function Shell() {
               </Enter>
             </Fragment>
           </main>
-          <StatusBar hints={hintsFor(pathname)} />
+          <StatusBar hints={hintsFor(pathname, forge.name)} />
         </div>
         <CommandPalette
           open={paletteOpen}

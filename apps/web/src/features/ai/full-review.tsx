@@ -6,7 +6,9 @@ import { codexBlocked, hasBlockingFindings, type FullReviewResult } from '@revie
 import { operationInProgress, type GitHubOperation } from '@review-desk/shared/operations';
 import type { PrepareReviewOptions } from '@review-desk/shared/review';
 import type { CiState } from '@review-desk/shared/types';
+import { forgeTerms } from '@review-desk/shared/accounts';
 import { ApiError } from '@/lib/api';
+import { refOf } from '@/lib/pr-ref';
 import { dateTime } from '@/lib/time';
 import { Button } from '@/ui/button';
 import { MarkdownView } from '@/ui/markdown';
@@ -23,11 +25,12 @@ import { openActivity, useOperations } from '@/features/activity/use-operations'
 /** Where this review's automatic approval or comment stands. */
 function PostingStatus({ operation }: { operation: GitHubOperation }) {
   const approving = operation.action.type === 'ai_review' && operation.action.event === 'APPROVE';
+  const forge = forgeTerms(operation.account);
 
   if (operation.status === 'succeeded')
     return (
       <p className="text-xs text-ok">
-        {approving ? 'Approved the PR.' : 'Posted to the PR conversation.'}{' '}
+        {approving ? `Approved the ${forge.short}.` : `Posted to the ${forge.short} conversation.`}{' '}
         {operation.result?.url && (
           <a
             href={operation.result.url}
@@ -35,7 +38,7 @@ function PostingStatus({ operation }: { operation: GitHubOperation }) {
             rel="noreferrer"
             className="text-accent hover:underline"
           >
-            Open on GitHub
+            Open on {forge.name}
           </a>
         )}
       </p>
@@ -82,6 +85,7 @@ export function FullReview({
   ci: CiState;
 }) {
   const ai = useAi(prId, account);
+  const forge = forgeTerms(account);
   const overview = useAiOverview();
   const review = useReview(prId, account);
   const inbox = useInboxNavigation();
@@ -132,11 +136,9 @@ export function FullReview({
       ? prepareError.details.draftRevision
       : null;
   const launch = () => ai.start.mutate({ task: 'full_review', force: Boolean(run) });
-  const target = {
-    owner: repository.split('/')[0],
-    repo: repository.split('/')[1],
-    number: String(number),
-  };
+  // GitLab projects can sit in nested groups: the project name is the last segment.
+  const { owner, repo } = refOf({ repository, number });
+  const target = { owner, repo, number: String(number) };
 
   const prepare = (options: PrepareReviewOptions = {}) => {
     if (!run || locked) return;
@@ -348,11 +350,11 @@ export function FullReview({
                           ? 'Preparing draft…'
                           : reusable
                             ? 'Use prepared review'
-                            : 'Prepare GitHub review'}
+                            : `Prepare ${forge.name} review`}
                     </Button>
                     <Reveal show={preparing}>
                       <p role="status" className="text-xs text-fg-muted">
-                        Preparing your GitHub review. You can navigate away; preparation will
+                        Preparing your {forge.name} review. You can navigate away; preparation will
                         continue.
                       </p>
                     </Reveal>

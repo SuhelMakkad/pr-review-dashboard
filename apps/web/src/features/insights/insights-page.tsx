@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, LoaderCircle, RefreshCw, Table2 } from 'lucide-react';
 import type { Insights } from '@review-desk/shared/insights';
 import { api } from '@/lib/api';
-import { usePulls } from '@/lib/queries';
+import { useForge, usePulls } from '@/lib/queries';
 import { relativePhrase } from '@/lib/time';
 import { Button } from '@/ui/button';
 import { cn } from '@/ui/cn';
@@ -138,6 +138,7 @@ const shortDate = (iso: string) =>
 
 /** Your review habits over time: speed, volume, verdicts and the queue, from local history. */
 export function InsightsPage() {
+  const forge = useForge();
   const client = useQueryClient();
   const pulls = usePulls();
   const account = pulls.data?.account ?? '';
@@ -181,7 +182,7 @@ export function InsightsPage() {
             {data?.backfill?.running ? (
               <>
                 <LoaderCircle size={12} className="animate-spin" aria-hidden="true" /> Reading your
-                last 90 days of reviews from GitHub…
+                last 90 days of reviews from {forge.name}…
               </>
             ) : data?.backfill?.lastError ? (
               <span className="text-fail">History is incomplete: {data.backfill.lastError}</span>
