@@ -36,8 +36,11 @@ function toDiffFile(file: RemoteFile, viewed?: DiffFile['viewed']): DiffFile {
     additions: file.additions,
     deletions: file.deletions,
     patch: file.patch,
-    binary: !file.patch && changedLines === 0 && status !== 'renamed' ? true : undefined,
-    tooLarge: !file.patch && changedLines > 0 ? true : undefined,
+    binary:
+      !file.patch && !file.tooLarge && changedLines === 0 && status !== 'renamed'
+        ? true
+        : undefined,
+    tooLarge: file.tooLarge || (!file.patch && changedLines > 0) ? true : undefined,
     generated: isGeneratedPath(file.path) || undefined,
     viewed,
   };
@@ -81,7 +84,7 @@ export class DiffService {
   }
 
   private async full(pr: PullRequestSnapshot): Promise<DiffManifest> {
-    const key = `${pr.repository}:${pr.baseOid}:${pr.headOid}:full`;
+    const key = `${pr.url}:${pr.baseOid}:${pr.headOid}:full`;
     const cached = this.cache.get(key);
 
     if (cached) return cached;
@@ -108,7 +111,7 @@ export class DiffService {
 
     if (reviewOid === pr.headOid) return { ...base, kind: 'identical', files: [] };
 
-    const key = `${pr.repository}:${reviewOid}:${pr.headOid}:since`;
+    const key = `${pr.url}:${reviewOid}:${pr.headOid}:since`;
     const cached = this.cache.get(key);
 
     if (cached) return cached;
@@ -122,7 +125,7 @@ export class DiffService {
         ...full,
         mode: 'since-review',
         kind: 'unavailable',
-        note: `The commit you reviewed (${shortSha(reviewOid)}) is no longer on GitHub, so this shows the full diff.`,
+        note: `The commit you reviewed (${shortSha(reviewOid)}) is no longer on ${pr.url.includes('/-/merge_requests/') ? 'GitLab' : 'GitHub'}, so this shows the full diff.`,
       };
     }
 
