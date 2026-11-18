@@ -1,3 +1,5 @@
+import { forgeOf } from '@review-desk/shared/accounts';
+import { withoutQuickActions } from '@/gitlab/quick-actions.js';
 import {
   hasBlockingFindings,
   type FullReviewResult,
@@ -75,7 +77,11 @@ export class FindingsPoster {
         runId: row.id,
         expectedHeadOid: row.headOid,
         event: hasBlockingFindings(result) ? 'COMMENT' : 'APPROVE',
-        body: postedReviewBody(row.id, row.headOid, result),
+        // Generated text: on GitLab, no line of it may run as a quick action.
+        body:
+          forgeOf(row.account) === 'gitlab'
+            ? withoutQuickActions(postedReviewBody(row.id, row.headOid, result))
+            : postedReviewBody(row.id, row.headOid, result),
       });
     } catch {
       // Not posted, for example because the PR is no longer tracked. The report stays in the

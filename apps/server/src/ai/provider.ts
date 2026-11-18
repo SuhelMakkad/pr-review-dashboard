@@ -44,8 +44,8 @@ export interface AgentProvider {
 export class AgentError extends Error {}
 
 /**
- * Environment for agent processes: no GitHub credentials, and a gh config directory with no
- * logins, so nothing the agent runs can reach GitHub as the user.
+ * Environment for agent processes: no GitHub or GitLab credentials, and gh and glab config
+ * directories with no logins, so nothing the agent runs can reach GitHub or GitLab as the user.
  */
 export function agentEnvironment(workDir: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -56,14 +56,30 @@ export function agentEnvironment(workDir: string): NodeJS.ProcessEnv {
     'GH_ENTERPRISE_TOKEN',
     'GITHUB_ENTERPRISE_TOKEN',
     'GH_DEBUG',
+    'GITLAB_TOKEN',
+    'GITLAB_ACCESS_TOKEN',
+    'OAUTH_TOKEN',
+    'CI_JOB_TOKEN',
+    'GLAB_ENABLE_CI_AUTOLOGIN',
+    'GLAB_DEBUG',
+    'GLAB_DEBUG_HTTP',
+    'GLAB_CLIENT_CERT',
+    'CLIENT_CERT',
+    'GLAB_CLIENT_KEY',
+    'CLIENT_KEY',
+    'GLAB_CLIENT_CERT_PASSWORD',
+    'CLIENT_CERT_PASSWORD',
   ]) {
     delete env[key];
   }
 
   const ghConfig = join(workDir, '.gh-empty');
+  const glabConfig = join(workDir, '.glab-empty');
 
   mkdirSync(ghConfig, { recursive: true, mode: 0o700 });
+  mkdirSync(glabConfig, { recursive: true, mode: 0o700 });
   env.GH_CONFIG_DIR = ghConfig;
+  env.GLAB_CONFIG_DIR = glabConfig;
 
   return env;
 }
