@@ -68,8 +68,8 @@ describe('GitHub CLI accounts', () => {
     const credentials = new GhCredentials(fakeGh());
 
     expect(await credentials.list()).toEqual([
-      { login: 'work-me', cliActive: false, ok: true },
-      { login: 'home-me', cliActive: false, ok: false },
+      { login: 'work-me', forge: 'github', host: 'github.com', cliActive: false, ok: true },
+      { login: 'home-me', forge: 'github', host: 'github.com', cliActive: false, ok: false },
     ]);
   });
 
@@ -177,8 +177,14 @@ describe('switching accounts', () => {
     });
 
     vi.spyOn(fixture, 'list').mockResolvedValue([
-      { login: 'you', cliActive: true, ok: true },
-      { login: DEMO_SECOND_ACCOUNT, cliActive: false, ok: false },
+      { login: 'you', forge: 'github', host: 'github.com', cliActive: true, ok: true },
+      {
+        login: DEMO_SECOND_ACCOUNT,
+        forge: 'github',
+        host: 'github.com',
+        cliActive: false,
+        ok: false,
+      },
     ]);
 
     await expect(service.switchAccount('you', DEMO_SECOND_ACCOUNT)).rejects.toMatchObject({
@@ -304,8 +310,24 @@ describe('account routes', () => {
     expect(list.json()).toEqual({
       switchable: true,
       accounts: [
-        { login: 'you', current: true, cliActive: true, ok: true, inProgress: 0 },
-        { login: DEMO_SECOND_ACCOUNT, current: false, cliActive: false, ok: true, inProgress: 0 },
+        {
+          login: 'you',
+          forge: 'github',
+          host: 'github.com',
+          current: true,
+          cliActive: true,
+          ok: true,
+          inProgress: 0,
+        },
+        {
+          login: DEMO_SECOND_ACCOUNT,
+          forge: 'github',
+          host: 'github.com',
+          current: false,
+          cliActive: false,
+          ok: true,
+          inProgress: 0,
+        },
       ],
     });
 

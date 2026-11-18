@@ -1,17 +1,23 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
+import { GITHUB_HOST, parseAccount, type Forge } from '@review-desk/shared/accounts';
 import { GitHubError, registerSecret, safeError } from '@/github/errors.js';
 
-/** An account signed in to the GitHub CLI for github.com. */
+/**
+ * An account signed in to the GitHub CLI (github.com) or the GitLab CLI (any GitLab host). `login`
+ * is the account key: the GitHub login, or `username@host` for GitLab.
+ */
 export interface CliAccount {
   login: string;
-  /** The GitHub CLI's own active account, which `gh` uses in a terminal. */
+  forge: Forge;
+  host: string;
+  /** The CLI's own account for that host, which `gh` or `glab` uses in a terminal. */
   cliActive: boolean;
-  /** False when the GitHub CLI could not verify this sign-in. */
+  /** False when the CLI could not verify this sign-in. */
   ok: boolean;
 }
 
-/** Chooses which GitHub CLI account the server works as. */
+/** Chooses which CLI account the server works as. */
 export interface GitHubAccounts {
   list(): Promise<CliAccount[]>;
   /** Pins every request to one account; null follows the GitHub CLI's active account. */
@@ -42,6 +48,11 @@ const scope = new AsyncLocalStorage<string>();
  */
 export function asAccount<T>(login: string, work: () => T): T {
   return scope.run(login, work);
+}
+
+/** The account the current work was started as with `asAccount`, if any. */
+export function scopedAccount(): string | null {
+  return scope.getStore() ?? null;
 }
 
 /** Child environment for gh: never forward debug output that could print credentials. */
@@ -119,6 +130,8 @@ export class GhCredentials implements GitHubAccounts {
       .filter((raw) => raw.login && !ENVIRONMENT_SOURCES.has(raw.tokenSource ?? ''))
       .map((raw) => ({
         login: raw.login!,
+        forge: 'github' as const,
+        host: GITHUB_HOST,
         cliActive: Boolean(raw.active),
         ok: raw.state === 'success',
       }));
@@ -127,7 +140,13 @@ export class GhCredentials implements GitHubAccounts {
   /** The environment for one `gh` call, carrying the token of the account it acts as. */
   async environment(): Promise<NodeJS.ProcessEnv> {
     const env = baseGhEnvironment();
-    const login = this.selected ? (scope.getStore() ?? this.selected) : null;
+    const scoped = scope.getStore();
+    // Work scoped to a GitLab account (`user@host`) never runs gh; it never gets a GitHub token.
+    const login = this.selected
+      ? scoped && parseAccount(scoped).forge === 'github'
+        ? scoped
+        : this.selected
+      : null;
 
     if (!login) return env;
 

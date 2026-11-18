@@ -8,8 +8,11 @@ import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { seedDemoQueue } from '@/demo/history.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { EventBus } from '@/events.js';
+import { ForgeRouter } from '@/forge/router.js';
 import { ghCredentials } from '@/github/credentials.js';
 import { GitHub } from '@/github/read.js';
+import { GlabAccounts } from '@/gitlab/accounts.js';
+import { GitLab } from '@/gitlab/read.js';
 import { createSessionToken } from '@/http/security.js';
 import { ClaudeProvider } from '@/ai/claude.js';
 import { CodexProvider } from '@/ai/codex.js';
@@ -28,12 +31,13 @@ const demoAnchor = process.env.REVIEW_DESK_DEMO_NOW
 const fixture =
   config.mode === 'demo' ? new FixtureGitHub(() => defaultScenario(demoAnchor)) : undefined;
 const store = new Store(config.databasePath);
-const service = new SyncService(
-  store,
-  fixture ?? new GitHub(),
-  new EventBus(),
-  fixture ?? ghCredentials,
-);
+// GitHub accounts come from the GitHub CLI, GitLab accounts (any host) from the GitLab CLI.
+const forges = fixture
+  ? null
+  : new ForgeRouter(new GitHub(), ghCredentials, new GlabAccounts(), (host) =>
+      GitLab.forHost(host, store),
+    );
+const service = new SyncService(store, fixture ?? forges!, new EventBus(), fixture ?? forges);
 const sessionToken = createSessionToken();
 const bootId = randomUUID();
 const linearOAuth = fixture ? null : new LinearOAuth(new KeychainCredentialStore());

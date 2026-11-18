@@ -222,8 +222,16 @@ export class GhCli implements GitHubTransport {
     const parsed = parseIncludedResponse(result.stdout);
 
     if (!parsed) {
+      const message = safeError(
+        result.stderr.trim() || 'GitHub request failed. Check gh auth status.',
+      );
+
+      // gh exits with 4 when no account is signed in, before any request is sent.
       throw new GitHubError(
-        safeError(result.stderr.trim() || 'GitHub request failed. Check gh auth status.'),
+        message,
+        null,
+        null,
+        result.code === 4 || /gh auth login|not logged in/i.test(message) ? 'auth' : 'unknown',
       );
     }
 

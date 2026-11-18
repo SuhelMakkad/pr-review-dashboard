@@ -91,8 +91,20 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
 
   async list(): Promise<CliAccount[]> {
     return [
-      { login: this.scenario.world.viewer.login, cliActive: true, ok: true },
-      { login: DEMO_SECOND_ACCOUNT, cliActive: false, ok: true },
+      {
+        login: this.scenario.world.viewer.login,
+        forge: 'github',
+        host: 'github.com',
+        cliActive: true,
+        ok: true,
+      },
+      {
+        login: DEMO_SECOND_ACCOUNT,
+        forge: 'github',
+        host: 'github.com',
+        cliActive: false,
+        ok: true,
+      },
     ];
   }
 
