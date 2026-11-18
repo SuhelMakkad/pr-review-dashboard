@@ -369,7 +369,9 @@ describe('adding PRs by hand', () => {
     const input = await screen.findByRole('textbox', { name: 'Pull request' });
 
     await user.type(input, 'not a pr{Enter}');
-    expect(screen.getByText('Enter a GitHub PR link, or owner/repo#123.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Enter a PR or MR link, owner/repo#123, or group/project!123.'),
+    ).toBeInTheDocument();
     expect(queueChanges).toEqual([]);
 
     await user.clear(input);

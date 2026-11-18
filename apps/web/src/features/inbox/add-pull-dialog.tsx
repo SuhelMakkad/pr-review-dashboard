@@ -1,11 +1,16 @@
 import { useState } from 'react';
 import { Plus, X } from 'lucide-react';
+import { instanceUrl, parseAccount } from '@review-desk/shared/accounts';
 import { formatRef, parsePrRef } from '@/lib/pr-ref';
+import { useForge, useStatus } from '@/lib/queries';
 import { Button, IconButton } from '@/ui/button';
 import { DialogClose, DialogDescription, DialogTitle, Modal } from '@/ui/dialog';
 import { useAddAndOpen } from '@/features/pulls/use-track';
 
-/** Adds any open PR to your review queue from a GitHub link or `owner/repo#123`. */
+/**
+ * Adds any open PR or MR to your review queue from a GitHub or GitLab link, `owner/repo#123`, or
+ * `group/project!123`.
+ */
 export function AddPullDialog({
   open,
   onOpenChange,
@@ -17,6 +22,13 @@ export function AddPullDialog({
   const [tried, setTried] = useState(false);
   const { add, pending, error, reset } = useAddAndOpen();
   const ref = parsePrRef(text);
+  const forge = useForge();
+  const actor = useStatus().data?.account;
+  const account = parseAccount(actor?.login ?? '');
+  const placeholder =
+    account.forge === 'gitlab'
+      ? `${instanceUrl(actor?.webUrl) ?? `https://${account.host}`}/group/project/-/merge_requests/123 or group/project!123`
+      : 'https://github.com/owner/repo/pull/123 or owner/repo#123';
 
   // Cleared once the dialog has faded out, so its text never changes in view.
   const clear = () => {
@@ -41,7 +53,7 @@ export function AddPullDialog({
   const message = error
     ? error.message
     : tried && text.trim() && !ref
-      ? 'Enter a GitHub PR link, or owner/repo#123.'
+      ? 'Enter a PR or MR link, owner/repo#123, or group/project!123.'
       : null;
 
   return (
@@ -52,14 +64,16 @@ export function AddPullDialog({
       className="top-[18vh] w-[480px] p-5"
     >
       <div className="mb-1 flex items-center justify-between">
-        <DialogTitle className="text-base font-semibold">Add a PR to your queue</DialogTitle>
+        <DialogTitle className="text-base font-semibold">
+          Add a {forge.short} to your queue
+        </DialogTitle>
         <DialogClose asChild>
           <IconButton label="Close" icon={<X size={15} />} size="sm" />
         </DialogClose>
       </div>
       <DialogDescription className="mb-4 text-sm text-fg-muted">
-        Track any open PR, even when nobody asked for your review. It stays until it is merged,
-        closed or removed.
+        Track any open {forge.short}, even when nobody asked for your review. It stays until it is
+        merged, closed or removed.
       </DialogDescription>
       <form
         onSubmit={(event) => {
@@ -68,7 +82,7 @@ export function AddPullDialog({
         }}
       >
         <label htmlFor="add-pull-ref" className="mb-1.5 block text-xs font-medium text-fg">
-          Pull request
+          {forge.long[0].toUpperCase() + forge.long.slice(1)}
         </label>
         <input
           id="add-pull-ref"
@@ -79,7 +93,7 @@ export function AddPullDialog({
             setTried(false);
             reset();
           }}
-          placeholder="https://github.com/owner/repo/pull/123 or owner/repo#123"
+          placeholder={placeholder}
           aria-invalid={Boolean(message)}
           aria-describedby="add-pull-message"
           autoComplete="off"

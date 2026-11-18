@@ -21,8 +21,9 @@ import {
   Activity,
   UsersRound,
 } from 'lucide-react';
-import { formatRef, parsePrRef, refOf, sameRef } from '@/lib/pr-ref';
-import { useAccounts, useMine, usePulls, useSyncNow } from '@/lib/queries';
+import { formatRef, numberSign, parsePrRef, placeRef, refOf, sameRef } from '@/lib/pr-ref';
+import { accountHandle } from '@review-desk/shared/accounts';
+import { useAccounts, useForge, useMine, usePulls, useStatus, useSyncNow } from '@/lib/queries';
 import { appearance } from '@/lib/theme';
 import { snoozePresets } from '@/lib/time';
 import { DialogTitle, Modal } from '@/ui/dialog';
@@ -57,6 +58,8 @@ export function CommandPalette({
   const addPull = useAddAndOpen();
   const untrack = useUntrackPull();
   const actions = usePullActions();
+  const forge = useForge();
+  const status = useStatus();
   const { item: current } = useCurrentPull();
   const accounts = useAccounts(open);
   const switcher = useAccountSwitcher();
@@ -65,7 +68,12 @@ export function CommandPalette({
     (account) => account.ok && account.login !== switcher.current,
   );
   const items = pulls.data?.items ?? [];
-  const pastedRef = parsePrRef(query);
+  const parsedRef = parsePrRef(query);
+  // A link from another host, forge or instance cannot be opened as this account: the same path
+  // there is another PR. A link into this GitLab loses its relative URL root.
+  const placed = parsedRef ? placeRef(parsedRef, status.data?.account) : null;
+  const elsewhere = placed?.elsewhere ?? null;
+  const pastedRef = placed?.ref ?? null;
   const pastedTracked =
     pastedRef && [...items, ...(mine.data?.items ?? [])].some((item) => sameRef(item, pastedRef));
 
@@ -100,7 +108,7 @@ export function CommandPalette({
           <Command.Input
             value={query}
             onValueChange={setQuery}
-            placeholder="Jump to a PR, run an action, or paste a GitHub PR link…"
+            placeholder={`Jump to a ${forge.short}, run an action, or paste a ${forge.name} ${forge.short} link…`}
             className="h-12 flex-1 bg-transparent text-base text-fg outline-none placeholder:text-fg-subtle"
           />
           <Kbd keys="Escape" />
@@ -110,15 +118,39 @@ export function CommandPalette({
             No matching PRs or actions.
           </Command.Empty>
 
+          {parsedRef && elsewhere && (
+            <Command.Group heading="Link on another host" className={groupClass}>
+              <Command.Item
+                value={`other-host ${query}`}
+                className={itemClass}
+                onSelect={run(() =>
+                  toast.error(
+                    `That link is on ${elsewhere}. Switch to an account there to open it.`,
+                  ),
+                )}
+              >
+                <GitPullRequest size={15} className="text-fg-subtle" aria-hidden="true" />
+                {formatRef(parsedRef)} is on {elsewhere}: switch to an account there
+              </Command.Item>
+            </Command.Group>
+          )}
+
           {pastedRef && (
-            <Command.Group heading="GitHub link" className={groupClass}>
+            <Command.Group
+              heading={pastedRef.gitlab ? 'GitLab link' : 'GitHub link'}
+              className={groupClass}
+            >
               <Command.Item
                 value={`open-link ${query}`}
                 className={itemClass}
                 onSelect={run(() =>
                   navigate({
                     to: '/pr/$owner/$repo/$number',
-                    params: { ...pastedRef, number: String(pastedRef.number) },
+                    params: {
+                      owner: pastedRef.owner,
+                      repo: pastedRef.repo,
+                      number: String(pastedRef.number),
+                    },
                   }),
                 )}
               >
@@ -144,13 +176,16 @@ export function CommandPalette({
           )}
 
           {current && (
-            <Command.Group heading={`#${current.number} ${current.title}`} className={groupClass}>
+            <Command.Group
+              heading={`${numberSign(current.url)}${current.number} ${current.title}`}
+              className={groupClass}
+            >
               <Command.Item
                 className={itemClass}
                 onSelect={run(() => actions.openOnGitHub(current))}
               >
                 <ArrowUpRight size={15} className="text-fg-subtle" aria-hidden="true" />
-                Open on GitHub
+                Open on {forge.name}
                 <Kbd keys="o" className="ml-auto" />
               </Command.Item>
               <Command.Item className={itemClass} onSelect={run(() => actions.done(current))}>
@@ -181,7 +216,7 @@ export function CommandPalette({
                 onSelect={run(() => void actions.copyLink(current))}
               >
                 <Copy size={15} className="text-fg-subtle" aria-hidden="true" />
-                Copy GitHub link
+                Copy {forge.name} link
                 <Kbd keys="y" className="ml-auto" />
               </Command.Item>
               {onlyAddedByHand(current) && (
@@ -200,7 +235,7 @@ export function CommandPalette({
               return (
                 <Command.Item
                   key={item.id}
-                  value={`#${item.number} ${item.title} ${item.repository} ${item.author.login}`}
+                  value={`${numberSign(item.url)}${item.number} ${item.title} ${item.repository} ${item.author.login}`}
                   className={itemClass}
                   onSelect={run(() =>
                     navigate({
@@ -216,7 +251,9 @@ export function CommandPalette({
                   />
                   <span className="truncate">{item.title}</span>
                   <span className="ml-auto shrink-0 text-xs text-fg-subtle">
-                    {item.repository}#{item.number}
+                    {item.repository}
+                    {numberSign(item.url)}
+                    {item.number}
                   </span>
                 </Command.Item>
               );
@@ -299,22 +336,24 @@ export function CommandPalette({
           <Command.Group heading="App" className={groupClass}>
             <Command.Item className={itemClass} onSelect={run(openActivity)}>
               <Activity size={15} className="text-fg-subtle" aria-hidden="true" />
-              View GitHub activity
+              View {forge.name} activity
             </Command.Item>
             <Command.Item className={itemClass} onSelect={run(() => sync.mutate())}>
               <RefreshCw size={15} className="text-fg-subtle" aria-hidden="true" />
-              Sync with GitHub now
+              Sync with {forge.name} now
             </Command.Item>
             {otherAccounts.map((account) => (
               <Command.Item
                 key={account.login}
-                value={`switch github account ${account.login}`}
+                value={`switch ${account.forge} account ${account.login}`}
                 className={itemClass}
                 disabled={switcher.switching}
                 onSelect={run(() => switcher.switchTo(account.login))}
               >
                 <UsersRound size={15} className="text-fg-subtle" aria-hidden="true" />
-                Switch GitHub account to {account.login}
+                {account.forge === 'gitlab'
+                  ? `Switch GitLab account to ${accountHandle(account.login)} on ${account.host}`
+                  : `Switch GitHub account to ${account.login}`}
               </Command.Item>
             ))}
             <Command.Item className={itemClass} onSelect={run(appearance.cycleTheme)}>
