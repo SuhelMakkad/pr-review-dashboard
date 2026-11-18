@@ -1,3 +1,4 @@
+import { pullPath, shortRef } from '@review-desk/shared/accounts';
 import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import {
   AUTO_REVIEW_QUIET_MS,
@@ -243,9 +244,9 @@ export class AutoReviewer {
       key: `ai:${row.id}`,
       kind: 'ai_review_ready',
       prId: row.prId,
-      title: `${pr.repository.split('/')[1]}#${pr.number} · ${pr.title}`,
+      title: `${shortRef(pr)} · ${pr.title}`,
       body: readyCopy(row),
-      path: `/inbox/attention/${pr.repository}/${pr.number}`,
+      path: pullPath('inbox/attention', pr),
     };
 
     void this.notifier.announce(row.account, [notification]).catch(() => undefined);

@@ -1,3 +1,4 @@
+import { pullPath, shortRef } from '@review-desk/shared/accounts';
 import { and, eq } from 'drizzle-orm';
 import { addedByHand } from '@review-desk/shared/attention';
 import type { AuthorItem } from '@review-desk/shared/author';
@@ -16,7 +17,7 @@ import type { EventBus } from '@/events.js';
 const SETTINGS_KEY = 'notification-settings';
 
 const pathFor = (item: { repository: string; number: number }, base: 'inbox/attention' | 'mine') =>
-  `/${base}/${item.repository}/${item.number}`;
+  pullPath(base, item);
 
 const reviewerCopy: Record<string, (item: PullRequestItem) => string> = {
   first_review: (item) => `${item.author.login} asked for your review`,
@@ -42,7 +43,7 @@ export function candidates(reviewing: PullRequestItem[], mine: AuthorItem[]): Re
         key: `review:${item.id}:${reason.key}`,
         kind: reason.kind as NotificationKind,
         prId: item.id,
-        title: `${item.repository.split('/')[1]}#${item.number} · ${item.title}`,
+        title: `${shortRef(item)} · ${item.title}`,
         body: reviewerCopy[reason.kind]?.(item) ?? reason.label,
         path: pathFor(item, 'inbox/attention'),
       });
@@ -50,7 +51,7 @@ export function candidates(reviewing: PullRequestItem[], mine: AuthorItem[]): Re
   }
 
   for (const item of mine) {
-    const title = `${item.repository.split('/')[1]}#${item.number} · ${item.title}`;
+    const title = `${shortRef(item)} · ${item.title}`;
 
     for (const blocker of item.blockers) {
       if (blocker.kind === 'changes_requested' || blocker.kind === 'ci_failing') {
