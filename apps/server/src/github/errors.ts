@@ -21,6 +21,9 @@ export function registerSecret(secret: string): void {
 const secretPatterns: RegExp[] = [
   /gh[opusr]_[A-Za-z0-9_]+/g,
   /github_pat_[A-Za-z0-9_]+/g,
+  // GitLab tokens: personal, OAuth, deploy, runner, CI build, pipeline trigger, feed, agent, etc.
+  /\bgl(?:pat|oas|dt|rt|rtr|cbt|ptt|ft|imt|agent|wt|soat|ffct|sa)-[A-Za-z0-9_.-]{8,}/g,
+  /\bGR1348941[A-Za-z0-9_-]{8,}/g,
   /lin_(?:api|oauth)_[A-Za-z0-9]+/g,
   /\bsk-[A-Za-z0-9_-]{20,}/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
