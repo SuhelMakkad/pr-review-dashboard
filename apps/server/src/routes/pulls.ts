@@ -17,11 +17,20 @@ const updateSchema = z
 const trackSchema = z
   .object({
     account: z.string().min(1).max(100),
+    // `owner/repo` on GitHub; GitLab projects can sit in nested groups (`group/sub/project`).
     repository: z
       .string()
-      .max(200)
-      .regex(/^[\w.-]+\/[\w.-]+$/),
+      .max(400)
+      .regex(/^[\w.-]+(?:\/[\w.-]+)+$/),
     number: z.number().int().positive().max(1_000_000_000),
+    /** The host of a pasted link (`github.com`, or a GitLab host, port included). */
+    host: z
+      .string()
+      .max(255)
+      .regex(/^[\w.-]+(?::\d{1,5})?$/)
+      .optional(),
+    /** True for a GitLab reference (`group/project!123` or an MR link). */
+    gitlab: z.boolean().optional(),
   })
   .strict();
 
@@ -72,14 +81,15 @@ export function registerPullRoutes(app: FastifyInstance, service: SyncService): 
 
     if (!parsed.success)
       return reply.code(400).send({
-        error: 'Enter a PR as owner/repo#123 or a GitHub PR link.',
+        error:
+          'Enter a PR as owner/repo#123, a GitLab MR as group/project!123, or a link to either.',
         details: z.flattenError(parsed.error),
       });
 
-    const { account, repository, number } = parsed.data;
+    const { account, repository, number, host, gitlab } = parsed.data;
 
     try {
-      return await service.track(account, repository, number);
+      return await service.track(account, repository, number, host, gitlab);
     } catch (error) {
       return queueError(reply, error);
     }

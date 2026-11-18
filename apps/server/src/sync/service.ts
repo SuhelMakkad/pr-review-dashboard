@@ -12,6 +12,14 @@ import {
   type SyncStatus,
   type TriageUpdate,
 } from '@review-desk/shared/types';
+import {
+  forForge,
+  forgeTerms,
+  fullRef,
+  instanceUrl,
+  isSameUser,
+  parseAccount,
+} from '@review-desk/shared/accounts';
 import type { Store } from '@/db/store.js';
 import { EventBus } from '@/events.js';
 import type { DetectResult, GitHubApi } from '@/github/api.js';
@@ -20,6 +28,12 @@ import { GitHubError, safeError } from '@/github/errors.js';
 import { GitHub } from '@/github/read.js';
 import { extractActivity } from '@/insights/extract.js';
 import { ReviewError } from '@/review/errors.js';
+
+const signInCommand = (account: string) => {
+  const { forge, host } = parseAccount(account);
+
+  return forge === 'gitlab' ? `glab auth login --hostname ${host}` : 'gh auth login';
+};
 
 export const initialStatus = (): SyncStatus => ({
   account: null,
@@ -61,7 +75,8 @@ export interface MineList {
 /** The account picked in the app; when absent, the GitHub CLI's active account is used. */
 export const SELECTED_ACCOUNT_KEY = 'selectedAccount';
 
-const sameLogin = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+/** Account keys match exactly (ignoring case): `alice` on GitHub is not `alice@gitlab.com`. */
+const sameAccount = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
 const ordered = (sources: Iterable<Source>) =>
   SOURCE_ORDER.filter((source) => [...sources].includes(source));
 
@@ -159,20 +174,21 @@ export class SyncService {
     if (!accounts)
       throw new ReviewError('UNSUPPORTED', 409, 'Switching accounts is not available here.');
 
-    const target = (await accounts.list()).find((account) => sameLogin(account.login, to));
+    const target = (await accounts.list()).find((account) => sameAccount(account.login, to));
+    const signIn = signInCommand(to);
 
     if (!target)
       throw new ReviewError(
         'NOT_SIGNED_IN',
         404,
-        `${to} is not signed in to the GitHub CLI. Run gh auth login to add it.`,
+        `${to} is not signed in to the ${forgeTerms(to).name} CLI. Run ${signIn} to add it.`,
       );
 
     if (!target.ok)
       throw new ReviewError(
         'SIGN_IN_FAILED',
         409,
-        `The GitHub CLI could not verify ${target.login}. Run gh auth login to sign in again.`,
+        `The ${forgeTerms(to).name} CLI could not verify ${target.login}. Run ${signIn} to sign in again.`,
       );
 
     const previous = this.running;
@@ -184,7 +200,7 @@ export class SyncService {
         throw new ReviewError(
           'ACCOUNT_CHANGED',
           409,
-          'GitHub account changed. Refresh before switching.',
+          this.worded('GitHub account changed. Refresh before switching.'),
         );
 
       accounts.select(target.login);
@@ -225,7 +241,7 @@ export class SyncService {
 
     if (retryAt)
       throw new GitHubError(
-        'GitHub is rate limited. Saved data is still available.',
+        this.worded('GitHub is rate limited. Saved data is still available.'),
         retryAt,
         429,
         'rate_limit',
@@ -240,7 +256,7 @@ export class SyncService {
       throw new ReviewError(
         'ACCOUNT_CHANGED',
         409,
-        'GitHub account changed. Refresh before changing your queue.',
+        this.worded('GitHub account changed. Refresh before changing your queue.'),
       );
 
     return login;
@@ -274,12 +290,51 @@ export class SyncService {
    * Adds a PR to the queue by hand. From then on it is tracked like any other PR: it stays until it
    * is closed or merged, or until you remove it with `untrack`. Adding a tracked PR is harmless.
    */
-  async track(account: string, repository: string, number: number): Promise<PullRequestDetail> {
+  async track(
+    account: string,
+    path: string,
+    number: number,
+    host?: string,
+    /** True for a GitLab reference such as `group/project!12`. */
+    gitlab = false,
+  ): Promise<PullRequestDetail> {
     const login = this.activeLogin(account);
 
     this.assertNotCoolingDown();
 
-    const label = `${repository}#${number}`;
+    const { forge, host: accountHost } = parseAccount(login);
+    const instance = instanceUrl(this.status.account?.webUrl);
+    // A link names the web host, which GitLab can serve apart from glab's host name for its API.
+    const hosts = [accountHost, instance ? new URL(instance).host : null].filter(
+      (candidate): candidate is string => Boolean(candidate),
+    );
+
+    if (host && !hosts.some((candidate) => candidate.toLowerCase() === host.toLowerCase()))
+      throw new ReviewError(
+        'OTHER_HOST',
+        409,
+        `That ${forge === 'gitlab' ? 'link' : 'PR'} is on ${host}, but you are working as ${login}. Switch to an account on ${host} to add it.`,
+      );
+
+    // A nested path or a `group/project!12` reference names a GitLab project; GitHub would read
+    // only its first two segments and could find a different PR.
+    if (forge === 'github' && (gitlab || path.split('/').length !== 2))
+      throw new ReviewError(
+        'OTHER_HOST',
+        409,
+        `${path}${gitlab ? `!${number}` : ''} looks like a GitLab merge request, but you are working as ${login} on GitHub. Switch to a GitLab account to add it.`,
+      );
+
+    // Only a link carries the relative URL root; a typed `group/project!12` never does.
+    const repository = forge === 'gitlab' && host ? this.withoutRelativeRoot(path) : path;
+
+    if (repository === null)
+      throw new ReviewError(
+        'OTHER_HOST',
+        409,
+        `That link is for another GitLab on ${host}, not the one ${login} is signed in to.`,
+      );
+    const label = `${repository}${forge === 'gitlab' ? '!' : '#'}${number}`;
     const resolved = await asAccount(login, () => this.github.resolvePull(repository, number));
 
     if (!resolved)
@@ -312,9 +367,31 @@ export class SyncService {
 
     const detail = this.detail(snapshot.id);
 
-    if (!detail) throw new ReviewError('ACCOUNT_CHANGED', 409, 'GitHub account changed. Refresh.');
+    if (!detail)
+      throw new ReviewError(
+        'ACCOUNT_CHANGED',
+        409,
+        this.worded('GitHub account changed. Refresh.'),
+      );
 
     return detail;
+  }
+
+  /**
+   * A GitLab link's project path without the instance's relative URL root: for a GitLab served at
+   * `https://example.com/gitlab`, `gitlab/group/project` is the project `group/project`. The root
+   * comes from the signed-in account's own profile address, which GitLab writes with it.
+   */
+  private withoutRelativeRoot(path: string): string | null {
+    const base = instanceUrl(this.status.account?.webUrl);
+    const root = base ? new URL(base).pathname.replace(/^\/+|\/+$/g, '') : '';
+
+    if (!root) return path;
+
+    // Every link into this GitLab starts with its root; any other is another instance.
+    return path.toLowerCase().startsWith(`${root.toLowerCase()}/`)
+      ? path.slice(root.length + 1)
+      : null;
   }
 
   /**
@@ -375,6 +452,11 @@ export class SyncService {
         this.status.account = account;
       }
 
+      // Kept from the last sync when it cannot be read now.
+      this.status.capabilities =
+        (await this.github.capabilities?.().catch(() => this.status.capabilities)) ??
+        this.status.capabilities;
+
       await this.refreshTeams(account.login, scheduled);
 
       retryAt = await this.discover(account.login, scheduled);
@@ -406,7 +488,7 @@ export class SyncService {
 
         if (result && result.state === null) {
           this.status.warnings.push(
-            `${cached ? `${cached.repository}#${cached.number}` : id} is unavailable; its cached record was retained.`,
+            `${cached ? fullRef(cached) : id} is unavailable; its cached record was retained.`,
           );
           continue;
         }
@@ -466,9 +548,7 @@ export class SyncService {
             this.forced.delete(id);
             changed.add(id);
           } catch (error) {
-            this.status.warnings.push(
-              `${cached ? `${cached.repository}#${cached.number}` : id}: ${safeError(error)}`,
-            );
+            this.status.warnings.push(`${cached ? fullRef(cached) : id}: ${safeError(error)}`);
 
             if (error instanceof GitHubError && error.retryAt) retryAt = error.retryAt;
           }
@@ -487,8 +567,9 @@ export class SyncService {
       if (this.status.warnings.length === 0)
         this.status.lastSuccessfulSync = new Date().toISOString();
       if (retryAt)
-        this.status.error =
-          'GitHub rate limit reached. Refresh will resume automatically after the cooldown.';
+        this.status.error = this.worded(
+          'GitHub rate limit reached. Refresh will resume automatically after the cooldown.',
+        );
     } catch (error) {
       this.status.error = safeError(error);
       retryAt = error instanceof GitHubError ? error.retryAt : null;
@@ -654,6 +735,11 @@ export class SyncService {
     this.events.emit({ type: 'status', status: structuredClone(this.status) });
   }
 
+  /** A message written for GitHub, worded for the current account's forge. */
+  private worded(text: string): string {
+    return forForge(text, this.status.account?.login);
+  }
+
   private openSnapshots(account: string): PullRequestSnapshot[] {
     return this.store.snapshots(account).filter((pr) => pr.state === 'OPEN');
   }
@@ -666,7 +752,7 @@ export class SyncService {
 
     const now = Date.now();
     const items = this.openSnapshots(account)
-      .filter((pr) => !sameLogin(pr.author.login, account))
+      .filter((pr) => !isSameUser(pr.author.login, account))
       .filter(
         (pr) =>
           pr.sources.length === 0 || pr.sources.some((source) => REVIEW_SOURCES.includes(source)),
@@ -701,7 +787,7 @@ export class SyncService {
       account,
       items: sortAuthorItems(
         this.openSnapshots(account)
-          .filter((pr) => sameLogin(pr.author.login, account))
+          .filter((pr) => isSameUser(pr.author.login, account))
           .map((pr) =>
             deriveAuthorItem(pr, account, this.store.triage(account, pr.id).note.trim().length > 0),
           ),
