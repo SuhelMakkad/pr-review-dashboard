@@ -35,11 +35,11 @@ export const settingsSections = [
   },
   {
     slug: 'github',
-    label: 'GitHub',
+    label: 'GitHub & GitLab',
     group: 'Connections',
     icon: GitHubMark,
     description: 'The account Review Desk works as, and how fresh its data is.',
-    keywords: ['account', 'switch', 'teams', 'sync', 'gh cli'],
+    keywords: ['account', 'switch', 'teams', 'sync', 'gh cli', 'gitlab', 'glab', 'host'],
   },
   {
     slug: 'linear',

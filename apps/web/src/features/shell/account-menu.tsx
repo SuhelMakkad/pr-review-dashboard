@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Check } from 'lucide-react';
 import { toast } from 'sonner';
+import { accountHandle } from '@review-desk/shared/accounts';
 import { useAccounts, useStatus, useSwitchAccount } from '@/lib/queries';
 import { Avatar } from '@/ui/avatar';
 import { FadeSwap } from '@/ui/motion';
@@ -37,12 +38,12 @@ function subscribeSwitch(listener: () => void) {
   return () => switchListeners.delete(listener);
 }
 
-/** True while Review Desk is switching GitHub accounts, wherever the switch started. */
+/** True while Review Desk is switching accounts, wherever the switch started. */
 export function useSwitchingAccount(): boolean {
   return useSyncExternalStore(subscribeSwitch, () => switchPending);
 }
 
-/** Switches the GitHub account Review Desk works as, announcing the outcome. */
+/** Switches the GitHub or GitLab account Review Desk works as, announcing the outcome. */
 export function useAccountSwitcher() {
   const status = useStatus();
   const mutation = useSwitchAccount();
@@ -66,8 +67,9 @@ export function useAccountSwitcher() {
 }
 
 /**
- * Lists the accounts signed in to the GitHub CLI and switches between them. `children` is the
- * trigger. The GitHub CLI's own active account, used in terminals, never changes.
+ * Lists the accounts signed in to the GitHub CLI and the GitLab CLI (one per GitLab host) and
+ * switches between them. `children` is the trigger. The CLIs' own accounts, used in terminals,
+ * never change.
  */
 export function AccountMenu({
   children,
@@ -87,9 +89,9 @@ export function AccountMenu({
     <Menu open={open} onOpenChange={setOpen} modal={false}>
       <MenuTrigger asChild>{children}</MenuTrigger>
       <MenuContent side={side} align={align} sideOffset={6} className="w-64">
-        <MenuLabel className={menuLabelClass}>GitHub accounts</MenuLabel>
+        <MenuLabel className={menuLabelClass}>Accounts</MenuLabel>
 
-        {/* The menu eases to the size of whatever the GitHub CLI check returns. */}
+        {/* The menu eases to the size of whatever the CLI checks return. */}
         <FadeSwap
           swapKey={
             accounts.isPending
@@ -103,7 +105,7 @@ export function AccountMenu({
           smoothHeight
         >
           {accounts.isPending ? (
-            <SkeletonRegion label="Checking GitHub CLI sign-ins…">
+            <SkeletonRegion label="Checking GitHub and GitLab CLI sign-ins…">
               {[0, 1].map((index) => (
                 <div key={index} className="flex h-8 items-center gap-2 px-2">
                   <span className="w-4" />
@@ -132,14 +134,19 @@ export function AccountMenu({
                       <Check size={14} />
                     </MenuItemIndicator>
                   </span>
-                  <Avatar login={account.login} size={18} />
-                  <span className="flex-1 truncate">{account.login}</span>
+                  <Avatar login={accountHandle(account.login)} size={18} />
+                  <span className="min-w-0 flex-1 truncate">
+                    {accountHandle(account.login)}
+                    {account.forge === 'gitlab' && (
+                      <span className="ml-1.5 text-2xs text-fg-subtle">{account.host}</span>
+                    )}
+                  </span>
                   {!account.ok ? (
                     <span className="text-xs text-fail">Sign in again</span>
                   ) : account.login !== current && account.inProgress > 0 ? (
                     <span
                       className="text-xs text-pending"
-                      title="GitHub actions queued as this account send when you switch back."
+                      title="Actions queued as this account send when you switch back."
                     >
                       {account.inProgress} waiting
                     </span>
@@ -153,7 +160,7 @@ export function AccountMenu({
         <MenuSeparator />
         <p className="px-2 pt-0.5 pb-1.5 text-2xs leading-relaxed text-fg-subtle">
           Each account keeps its own queue, drafts and history. Add one with{' '}
-          <code>gh auth login</code>.
+          <code>gh auth login</code> or <code>glab auth login</code>.
         </p>
       </MenuContent>
     </Menu>

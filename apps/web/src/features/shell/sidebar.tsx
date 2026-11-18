@@ -10,6 +10,7 @@ import {
   Sun,
 } from 'lucide-react';
 import { appearance, useAppearance } from '@/lib/theme';
+import { parseAccount } from '@review-desk/shared/accounts';
 import { useMine, usePulls, useStatus } from '@/lib/queries';
 import { Avatar } from '@/ui/avatar';
 import { cn } from '@/ui/cn';
@@ -33,6 +34,7 @@ export function Sidebar() {
   const items = pulls.data?.items ?? [];
   const ThemeIcon = themeIcons[theme];
   const login = status.data?.account?.login;
+  const account = login ? parseAccount(login) : null;
   const switching = useSwitchingAccount();
   const onMine = pathname.startsWith('/mine');
   const onInsights = pathname.startsWith('/insights');
@@ -167,12 +169,20 @@ export function Sidebar() {
                 type="button"
                 className="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-left hover:bg-hover data-[state=open]:bg-hover"
               >
-                <Avatar login={login ?? '?'} size={22} />
-                <span className="sr-only">Switch GitHub account, now</span>
+                <Avatar login={account?.handle ?? '?'} size={22} />
+                <span className="sr-only">
+                  Switch {account?.forge === 'gitlab' ? 'GitLab' : 'GitHub'} account, now
+                </span>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs font-medium">{login ?? 'Connecting…'}</div>
-                  <div className="text-2xs text-fg-subtle">
-                    {switching ? 'Switching…' : 'via GitHub CLI'}
+                  <div className="truncate text-xs font-medium">
+                    {account?.handle ?? 'Connecting…'}
+                  </div>
+                  <div className="truncate text-2xs text-fg-subtle">
+                    {switching
+                      ? 'Switching…'
+                      : account?.forge === 'gitlab'
+                        ? `${account.host} via GitLab CLI`
+                        : 'via GitHub CLI'}
                   </div>
                 </div>
                 <ChevronsUpDown size={13} className="shrink-0 text-fg-subtle" aria-hidden="true" />
