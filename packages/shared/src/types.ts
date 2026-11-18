@@ -1,3 +1,5 @@
+import type { Forge } from '@/accounts.js';
+
 export type CiState = 'success' | 'failure' | 'pending' | 'none';
 export type ReviewState = 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED';
 /** Why a PR is tracked: one of the GitHub search feeds, or `manual` when you added it yourself. */
@@ -29,6 +31,11 @@ export type Queue = 'attention' | 'waiting' | 'caught_up' | 'snoozed' | 'all';
 export interface Actor {
   login: string;
   avatarUrl?: string;
+  /**
+   * The account's own profile page, set for the signed-in GitLab account. Its parent is the
+   * instance's web address, relative URL root included (`https://example.com/gitlab`).
+   */
+  webUrl?: string;
 }
 
 export interface Review {
@@ -218,8 +225,16 @@ export interface PullRequestItem {
   tickets: string[];
 }
 
+/** What the current account's forge supports, where GitHub and GitLab differ. */
+export interface ForgeCapabilities {
+  /** Submitting a review that requests changes (GitHub; GitLab 19.2 and later). */
+  requestChanges: boolean;
+}
+
 export interface SyncStatus {
   account: Actor | null;
+  /** Absent until the first sync, and for GitHub: everything is supported. */
+  capabilities?: ForgeCapabilities;
   teams: string[];
   syncing: boolean;
   lastAttemptAt: string | null;
@@ -231,14 +246,23 @@ export interface SyncStatus {
   warnings: string[];
 }
 
-/** An account signed in to the GitHub CLI that Review Desk can switch to. */
+/**
+ * An account signed in to the GitHub CLI or the GitLab CLI that Review Desk can switch to. `login`
+ * is the account key: a GitHub login, or `username@host` for GitLab (see `accounts.ts`).
+ */
 export interface GitHubAccount {
   login: string;
+  forge: Forge;
+  /** `github.com`, or the GitLab host the account belongs to. */
+  host: string;
   /** The account Review Desk works as now. */
   current: boolean;
-  /** The GitHub CLI's own active account, which `gh` uses in a terminal. */
+  /**
+   * The CLI's own account for that host, which `gh` or `glab` uses in a terminal. The GitLab CLI
+   * keeps one account per host, so every GitLab account is its host's CLI account.
+   */
   cliActive: boolean;
-  /** False when the GitHub CLI could not verify this sign-in. */
+  /** False when the CLI could not verify this sign-in. */
   ok: boolean;
   /** GitHub actions queued as this account that are still being sent. */
   inProgress: number;

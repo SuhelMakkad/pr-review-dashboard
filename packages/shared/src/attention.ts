@@ -1,3 +1,4 @@
+import { accountHandle, isSameUser } from '@/accounts.js';
 import { extractTickets } from '@/tickets.js';
 import type {
   AttentionReason,
@@ -17,11 +18,11 @@ export const emptyTriage = (): LocalTriageState => ({
   doneActivityKeys: [],
 });
 
-const sameLogin = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+const sameLogin = isSameUser;
 
 /** Matches "@login" as a whole handle (not inside emails or longer handles). */
 export function mentionPattern(login: string): RegExp {
-  const escaped = login.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = accountHandle(login).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   return new RegExp(`(^|[^\\w@./-])@${escaped}(?![\\w-])`, 'i');
 }

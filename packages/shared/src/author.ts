@@ -1,3 +1,4 @@
+import { isSameUser } from '@/accounts.js';
 import { extractTickets } from '@/tickets.js';
 import type { CiState, PullRequestSnapshot, Reviewer, ReviewerVerdict } from '@/types.js';
 
@@ -52,7 +53,7 @@ export interface AuthorItem {
   tickets: string[];
 }
 
-const same = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+const same = isSameUser;
 
 function latestVerdicts(verdicts: ReviewerVerdict[]): ReviewerVerdict[] {
   const byLogin = new Map<string, ReviewerVerdict>();
