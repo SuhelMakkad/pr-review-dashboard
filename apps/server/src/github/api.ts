@@ -1,4 +1,10 @@
-import type { Actor, FeedSource, PullRequestSnapshot, Source } from '@review-desk/shared/types';
+import type {
+  Actor,
+  FeedSource,
+  ForgeCapabilities,
+  PullRequestSnapshot,
+  Source,
+} from '@review-desk/shared/types';
 import type { GitHubWrites } from '@/github/write.js';
 
 export interface RateBudget {
@@ -28,6 +34,8 @@ export interface RemoteFile {
   deletions: number;
   patch?: string;
   sha: string | null;
+  /** The forge left the patch out for its size (GitLab says so; GitHub only omits it). */
+  tooLarge?: boolean;
 }
 
 export interface CompareResult {
@@ -61,6 +69,8 @@ export interface ReviewReceipt {
 export interface GitHubApi extends GitHubWrites {
   reviewReceipt(id: string): Promise<ReviewReceipt | null>;
   identity(): Promise<Actor>;
+  /** Where the forge differs from GitHub; absent means everything is supported. */
+  capabilities?(): Promise<ForgeCapabilities>;
   teams(): Promise<string[]>;
   discover(login: string, source: FeedSource): Promise<string[]>;
   /** Finds a PR by repository and number; null when it does not exist or cannot be seen. */
