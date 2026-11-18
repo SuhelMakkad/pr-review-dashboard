@@ -9,6 +9,7 @@ import {
   type OperationList,
   type OperationReceipt,
 } from '@review-desk/shared/operations';
+import { forForge, isSameUser } from '@review-desk/shared/accounts';
 import { postedReviewMarker } from '@/ai/freshness.js';
 import { githubOperations } from '@/db/schema.js';
 import { DiffService } from '@/diff/service.js';
@@ -178,8 +179,14 @@ export class OperationQueue {
       ...operation
     } = row;
 
+    // Messages are written for GitHub; a GitLab account's actions read as GitLab's.
     return {
       ...operation,
+      progress: operation.progress && forForge(operation.progress, row.account),
+      error: operation.error && {
+        ...operation.error,
+        message: forForge(operation.error.message, row.account),
+      },
       controls: this.controls(row),
       ...(_backup
         ? { savedPendingReview: { body: _backup.body, comments: _backup.comments } }
@@ -1121,8 +1128,7 @@ export class OperationQueue {
           .detail(row.prId)
           ?.snapshot.conversation.find(
             (comment) =>
-              comment.author.login.toLowerCase() === row.account.toLowerCase() &&
-              comment.body.startsWith(marker),
+              isSameUser(comment.author.login, row.account) && comment.body.startsWith(marker),
           );
 
         if (posted) {

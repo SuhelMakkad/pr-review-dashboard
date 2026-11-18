@@ -1,3 +1,4 @@
+import { forgeOf, isSameUser } from '@review-desk/shared/accounts';
 import { commentableLines, mapLine } from '@review-desk/shared/diff';
 import type {
   DraftComment,
@@ -17,6 +18,7 @@ import type { ThreadInput } from '@/github/write.js';
 import type { SyncService } from '@/sync/service.js';
 import { DraftStore } from '@/review/drafts.js';
 import { ReviewError } from '@/review/errors.js';
+import { REQUEST_CHANGES_UNSUPPORTED } from '@/gitlab/write.js';
 import type { FrozenReview } from '@review-desk/shared/operations';
 
 export { ReviewError } from '@/review/errors.js';
@@ -343,8 +345,24 @@ export class ReviewService {
     return stale;
   }
 
+  /**
+   * Refuses a verdict the account's forge cannot record, before anything is queued or written.
+   * GitLab requests changes from 19.2 on; until a sync has read its version, it is assumed not to.
+   */
+  assertVerdictSupported(account: string, event: ReviewEvent): void {
+    if (
+      event === 'REQUEST_CHANGES' &&
+      forgeOf(account) === 'gitlab' &&
+      this.sync.status.capabilities?.requestChanges !== true
+    )
+      throw new ReviewError('UNSUPPORTED', 422, REQUEST_CHANGES_UNSUPPORTED);
+  }
+
   async submit(prId: string, request: SubmitReviewRequest): Promise<SubmitReviewResult> {
     await this.guard(request.account, true);
+
+    // Refused before resolving threads or saving comments.
+    this.assertVerdictSupported(request.account, request.event);
 
     const refreshed = this.execution
       ? null
@@ -524,7 +542,7 @@ export class ReviewService {
 
     const pr = this.snapshot(prId);
 
-    if (pr.author.login.toLowerCase() !== account.toLowerCase()) {
+    if (!isSameUser(pr.author.login, account)) {
       throw new ReviewError(
         'NOT_AUTHOR',
         403,

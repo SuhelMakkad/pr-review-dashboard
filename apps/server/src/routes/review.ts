@@ -1,3 +1,4 @@
+import { forForge } from '@review-desk/shared/accounts';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { safeError } from '@/github/errors.js';
@@ -61,7 +62,8 @@ const schemas = {
       account,
       operationId,
       logins: z
-        .array(z.string().regex(/^[A-Za-z0-9-]{1,39}$/))
+        // GitHub logins, and GitLab usernames, which can also contain `.` and `_`.
+        .array(z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$/))
         .min(1)
         .max(15),
     })
@@ -69,18 +71,25 @@ const schemas = {
 };
 
 async function handle(reply: FastifyReply, work: () => Promise<unknown>) {
+  // Messages are written for GitHub; a GitLab account's read as GitLab's.
+  const request = reply.request as { body?: unknown; query?: unknown };
+  const account =
+    (request.body as { account?: string } | undefined)?.account ??
+    (request.query as { account?: string } | undefined)?.account;
+  const worded = (text: string) => forForge(text, account);
+
   try {
     return (await work()) ?? { ok: true };
   } catch (error) {
     if (error instanceof ReviewError) {
       return reply
         .code(error.status)
-        .send({ error: error.message, code: error.code, ...error.details });
+        .send({ error: worded(error.message), code: error.code, ...error.details });
     }
 
     if (error instanceof Error && error.message === 'ACCOUNT_CHANGED') {
       return reply.code(409).send({
-        error: 'GitHub account changed. Refresh before writing.',
+        error: worded('GitHub account changed. Refresh before writing.'),
         code: 'ACCOUNT_CHANGED',
       });
     }
@@ -202,6 +211,8 @@ export function registerReviewRoutes(
     return (
       input &&
       handle(reply, async () => {
+        reviews.assertVerdictSupported(input.account, input.event);
+
         const draft = reviews.drafts.draft(input.account, request.params.id);
         const pending = reviews.draft(input.account, request.params.id).githubPendingReview;
         const frozen = {
