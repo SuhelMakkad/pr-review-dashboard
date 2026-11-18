@@ -7,11 +7,13 @@ import {
   MessageSquare,
   X,
 } from 'lucide-react';
+import { forgeTerms } from '@review-desk/shared/accounts';
 import type { CiState } from '@review-desk/shared/types';
 import { reviewEventLabels, type ReviewDraft, type ReviewEvent } from '@review-desk/shared/review';
 import type { OperationReceipt } from '@review-desk/shared/operations';
 import { openActivity } from '@/features/activity/use-operations';
 import { ApiError } from '@/lib/api';
+import { useStatus } from '@/lib/queries';
 import { dateTime } from '@/lib/time';
 import { Button, IconButton } from '@/ui/button';
 import { DialogClose, DialogTitle, Modal } from '@/ui/dialog';
@@ -97,6 +99,13 @@ export function FinishSheet({
   const generationError = ai.startError('draft_summary');
   const applicationError = ai.application?.status === 'error' ? ai.application.error : null;
   const locked = Boolean(draft.activeOperationId);
+  const forge = forgeTerms(account);
+  const capabilities = useStatus().data?.capabilities;
+  // GitLab requests changes through its API from 19.2 on; older releases take comments and approvals.
+  const unavailable = (option: ReviewEvent) =>
+    forge.name === 'GitLab' &&
+    option === 'REQUEST_CHANGES' &&
+    capabilities?.requestChanges !== true;
   const submitted = useRef(false);
   const current = useRef({ body, saveMeta, applying, locked });
 
@@ -140,7 +149,7 @@ export function FinishSheet({
   }, []);
 
   const choose = (next: ReviewEvent) => {
-    if (locked) return;
+    if (locked || unavailable(next)) return;
     setEvent(next);
     saveMeta({ event: next });
   };
@@ -170,7 +179,7 @@ export function FinishSheet({
       : []),
     ...(draft.githubPendingReview && draft.githubPendingReview.commentCount > 0
       ? [
-          `You already have ${draft.githubPendingReview.commentCount} ${draft.githubPendingReview.commentCount === 1 ? 'comment' : 'comments'} in a pending review on GitHub; they will be submitted with this review.`,
+          `You already have ${draft.githubPendingReview.commentCount} ${draft.githubPendingReview.commentCount === 1 ? 'comment' : 'comments'} in a pending review on ${forge.name}; they will be submitted with this review.`,
         ]
       : []),
   ];
@@ -236,10 +245,11 @@ export function FinishSheet({
               role="radio"
               aria-checked={event === option.event}
               onClick={() => choose(option.event)}
-              disabled={locked}
+              disabled={locked || unavailable(option.event)}
               className={cn(
                 'flex flex-col items-start gap-1 rounded-md border px-3 py-2 text-left',
                 event === option.event ? 'border-accent bg-selected' : 'border-line hover:bg-hover',
+                unavailable(option.event) && 'cursor-not-allowed opacity-60 hover:bg-transparent',
               )}
             >
               <span className="flex w-full items-center gap-1.5 text-sm font-medium">
@@ -251,7 +261,11 @@ export function FinishSheet({
                 {reviewEventLabels[option.event]}
                 <Kbd keys={option.keys} className="ml-auto" />
               </span>
-              <span className="text-xs text-fg-muted">{option.hint}</span>
+              <span className="text-xs text-fg-muted">
+                {unavailable(option.event)
+                  ? 'Needs GitLab 19.2 or later. Say what needs to change in a comment.'
+                  : option.hint}
+              </span>
             </button>
           ))}
         </div>
@@ -522,7 +536,7 @@ export function FinishSheet({
 
       <div className="flex items-center gap-3 border-t border-line px-5 py-3">
         <span className="text-xs text-fg-muted">
-          Posts to GitHub as <strong className="text-fg">@{account}</strong>
+          Posts to {forge.name} as <strong className="text-fg">@{account}</strong>
         </span>
         <Button
           className="ml-auto"
@@ -535,7 +549,7 @@ export function FinishSheet({
             ? 'Queueing…'
             : locked
               ? 'Review queued'
-              : `Submit ${reviewEventLabels[event]} to GitHub`}
+              : `Submit ${reviewEventLabels[event]} to ${forge.name}`}
         </Button>
       </div>
     </Modal>
