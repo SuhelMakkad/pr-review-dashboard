@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isSameUser } from '@review-desk/shared/accounts';
 import type { ReviewDraft } from '@review-desk/shared/review';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 
@@ -17,8 +18,7 @@ const postedReviewPrefix = '<!-- review-desk:ai-review ';
  */
 export function reviewFingerprint(pr: PullRequestSnapshot, account: string): string {
   const posted = (comment: PullRequestSnapshot['conversation'][number]) =>
-    comment.author.login.toLowerCase() === account.toLowerCase() &&
-    comment.body.startsWith(postedReviewPrefix);
+    isSameUser(comment.author.login, account) && comment.body.startsWith(postedReviewPrefix);
 
   return fingerprint({
     baseOid: pr.baseOid,

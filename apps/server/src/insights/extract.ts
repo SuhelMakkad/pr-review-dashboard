@@ -1,9 +1,10 @@
+import { isSameUser } from '@review-desk/shared/accounts';
 import type { ActivityEvent } from '@review-desk/shared/insights';
 import type { PullRequestSnapshot, Reviewer } from '@review-desk/shared/types';
 
 export type { ActivityEvent, ActivityKind } from '@review-desk/shared/insights';
 
-const same = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+const same = isSameUser;
 
 /**
  * Turns a snapshot into the viewer's review history: requests received (directly or via a team),

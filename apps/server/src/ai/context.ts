@@ -1,3 +1,4 @@
+import { isSameUser } from '@review-desk/shared/accounts';
 import { parseHunks, type DiffFile, type DiffManifest } from '@review-desk/shared/diff';
 import type { FullReviewResult } from '@review-desk/shared/ai';
 import type { ReviewDraft } from '@review-desk/shared/review';
@@ -116,7 +117,7 @@ export function sinceReviewInput(
   login: string,
 ): string {
   const mine = pr.threads.filter((thread) =>
-    thread.comments.some((comment) => comment.author.login.toLowerCase() === login.toLowerCase()),
+    thread.comments.some((comment) => isSameUser(comment.author.login, login)),
   );
   const note = diff.note ? `Note: ${diff.note}\n` : '';
 
