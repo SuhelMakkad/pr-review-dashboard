@@ -8,8 +8,10 @@ import { x } from 'tar';
 import type { DiffManifest } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi } from '@/github/api.js';
-import { ghCredentials } from '@/github/credentials.js';
+import { parseAccount } from '@review-desk/shared/accounts';
+import { ghCredentials, scopedAccount } from '@/github/credentials.js';
 import { safeError } from '@/github/errors.js';
+import { baseGlabEnvironment, glabCwd } from '@/gitlab/transport.js';
 import { AgentError } from '@/ai/provider.js';
 
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
@@ -59,9 +61,52 @@ export async function extractRepository(
   return omitted;
 }
 
+interface ArchiveCommand {
+  command: 'gh' | 'glab';
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  cwd?: string;
+}
+
+const COMMIT = /^[a-f0-9]{40,64}$/i;
+const GITHUB_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** GitLab projects can sit in nested groups: `group/subgroup/project`. */
+const GITLAB_PROJECT = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/;
+
+async function archiveCommand(repository: string, oid: string): Promise<ArchiveCommand> {
+  const account = parseAccount(scopedAccount() ?? '');
+
+  if (account.forge === 'gitlab') {
+    if (!GITLAB_PROJECT.test(repository) || !COMMIT.test(oid)) throw invalidRepository();
+
+    return {
+      command: 'glab',
+      args: [
+        'api',
+        '--hostname',
+        account.host,
+        `projects/${encodeURIComponent(repository)}/repository/archive.tar.gz?sha=${oid}`,
+      ],
+      env: baseGlabEnvironment(),
+      cwd: glabCwd(),
+    };
+  }
+
+  if (!GITHUB_REPOSITORY.test(repository) || !COMMIT.test(oid)) throw invalidRepository();
+
+  return {
+    command: 'gh',
+    args: ['api', '--hostname', 'github.com', `repos/${repository}/tarball/${oid}`],
+    env: await ghCredentials.environment(),
+  };
+}
+
+const invalidRepository = () =>
+  new AgentError('The repository or commit is invalid. Refresh this PR and try again.');
+
 /**
- * The server downloads immutable snapshots using gh, as the account the review belongs to; no
- * GitHub credentials reach Codex.
+ * The server downloads immutable snapshots using gh or glab, as the account the review belongs to;
+ * no GitHub or GitLab credentials reach the agent.
  */
 export const downloadRepository: RepositoryExporter = async (
   repository,
@@ -69,26 +114,19 @@ export const downloadRepository: RepositoryExporter = async (
   directory,
   signal,
 ) => {
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || !/^[a-f0-9]{40,64}$/i.test(oid)) {
-    throw new AgentError('The repository or commit is invalid. Refresh this PR and try again.');
-  }
-
+  const { command, args, env, cwd } = await archiveCommand(repository, oid);
   const archive = `${directory}.tar.gz`;
   const controller = new AbortController();
   const combined = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(120_000)]);
-  const env = await ghCredentials.environment();
 
   await mkdir(directory, { recursive: true, mode: 0o700 });
 
-  const child = spawn(
-    'gh',
-    ['api', '--hostname', 'github.com', `repos/${repository}/tarball/${oid}`],
-    {
-      env,
-      signal: combined,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
+  const child = spawn(command, args, {
+    env,
+    cwd,
+    signal: combined,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   let bytes = 0;
   let stderr = '';
   const limit = new Transform({
