@@ -13,6 +13,7 @@ import type {
   SyncStatus,
   TriageUpdate,
 } from '@review-desk/shared/types';
+import { forgeTerms, type ForgeTerms } from '@review-desk/shared/accounts';
 import type { AuthorItem } from '@review-desk/shared/author';
 import type { NotificationSettings } from '@review-desk/shared/notify';
 import type { DiffManifest, DiffMode } from '@review-desk/shared/diff';
@@ -34,6 +35,11 @@ export function useStatus() {
     refetchInterval: fallbackInterval(live, 10_000),
     staleTime: live.connected ? Infinity : 0,
   });
+}
+
+/** Names for the current account's forge (GitHub or GitLab, PR or MR), for labels and messages. */
+export function useForge(): ForgeTerms {
+  return forgeTerms(useStatus().data?.account?.login);
 }
 
 export function usePulls() {

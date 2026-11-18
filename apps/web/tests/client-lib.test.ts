@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { matchesFilters } from '@/features/inbox/filters';
-import { formatRef, parsePrRef } from '@/lib/pr-ref';
+import { filesUrl, formatRef, parsePrRef, placeRef, refOf } from '@/lib/pr-ref';
 import { adoptStatus, refresh } from '@/lib/live';
 import { applyOptimistic, runTriage } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
@@ -103,7 +103,10 @@ describe('client helpers', () => {
   it('parses pasted GitHub PR links and owner/repo#number references', () => {
     const ref = { owner: 'acme', repo: 'api', number: 12 };
 
-    expect(parsePrRef('https://github.com/acme/api/pull/12/files#diff')).toEqual(ref);
+    expect(parsePrRef('https://github.com/acme/api/pull/12/files#diff')).toEqual({
+      ...ref,
+      host: 'github.com',
+    });
     expect(parsePrRef(' acme/api#12 ')).toEqual(ref);
     expect(parsePrRef('acme/api/pull/12')).toEqual(ref);
     expect(parsePrRef('example-org/example-repo#111')).toEqual({
@@ -115,12 +118,101 @@ describe('client helpers', () => {
 
     for (const text of [
       'https://github.com/acme/api/issues/12',
+      'https://notgithub.com/acme/api/pull/12',
       'api#12',
       'acme/api#0',
       'fix acme/api#12 soon',
       'acme/api',
     ])
       expect(parsePrRef(text)).toBeNull();
+  });
+
+  it('parses GitLab MR links on any host and group/project!number references', () => {
+    expect(
+      parsePrRef('https://gitlab.example.com/platform/web/app/-/merge_requests/7/diffs'),
+    ).toEqual({
+      owner: 'platform/web',
+      repo: 'app',
+      number: 7,
+      host: 'gitlab.example.com',
+      gitlab: true,
+    });
+    // A custom port is part of the host; a relative URL root stays in the path for the server.
+    expect(parsePrRef('http://Git.Example.com:8443/gitlab/team/app/-/merge_requests/3')).toEqual({
+      owner: 'gitlab/team',
+      repo: 'app',
+      number: 3,
+      host: 'git.example.com:8443',
+      gitlab: true,
+    });
+    expect(parsePrRef('team/sub/app!42')).toEqual({
+      owner: 'team/sub',
+      repo: 'app',
+      number: 42,
+      gitlab: true,
+    });
+    expect(formatRef({ owner: 'team/sub', repo: 'app', number: 42, gitlab: true })).toBe(
+      'team/sub/app!42',
+    );
+
+    for (const text of [
+      'https://gitlab.example.com/team/app/-/issues/7',
+      'https://gitlab.example.com/app/-/merge_requests/7',
+      'app!7',
+      'team/app!0',
+    ])
+      expect(parsePrRef(text)).toBeNull();
+  });
+
+  it('places a pasted reference for the account in use, or names where it belongs', () => {
+    const ref = parsePrRef('https://other.example.com/team/app/-/merge_requests/1')!;
+    const account = { login: 'rev@git.example.com', webUrl: 'https://web.example.com/rev' };
+
+    expect(placeRef(ref, account).elsewhere).toBe('other.example.com');
+    expect(placeRef({ ...ref, host: 'web.example.com' }, account).ref).toMatchObject({
+      owner: 'team',
+    });
+    expect(placeRef({ ...ref, host: 'git.example.com' }, account).elsewhere).toBeNull();
+    expect(placeRef(parsePrRef('team/app!1')!, account).elsewhere).toBeNull();
+
+    // A GitLab reference cannot open on GitHub, where the same path is someone else's PR.
+    expect(placeRef(parsePrRef('team/app!1')!, { login: 'octocat' }).elsewhere).toBe('GitLab');
+    expect(placeRef(ref, { login: 'octocat' }).elsewhere).toBe('GitLab');
+
+    // Under a relative URL root, links into this GitLab lose the root; others are elsewhere.
+    const rooted = { login: 'rev@example.com', webUrl: 'https://example.com/gitlab/rev' };
+
+    const placed = placeRef(
+      parsePrRef('https://example.com/gitlab/team/app/-/merge_requests/2')!,
+      rooted,
+    ).ref;
+
+    // Without its host, adding it sends a path the server does not strip a second time.
+    expect(placed).toEqual({ owner: 'team', repo: 'app', number: 2, gitlab: true });
+    expect(
+      placeRef(parsePrRef('https://example.com/other/team/app/-/merge_requests/2')!, rooted)
+        .elsewhere,
+    ).toBe('example.com/other');
+  });
+
+  it('splits nested GitLab paths at the project name and links to each forge', () => {
+    const url = 'https://gitlab.example.com/team/sub/app/-/merge_requests/5';
+
+    expect(refOf({ repository: 'team/sub/app', number: 5, url })).toEqual({
+      owner: 'team/sub',
+      repo: 'app',
+      number: 5,
+      gitlab: true,
+    });
+    expect(refOf({ repository: 'acme/api', number: 1 })).toEqual({
+      owner: 'acme',
+      repo: 'api',
+      number: 1,
+    });
+    expect(filesUrl(url)).toBe(`${url}/diffs`);
+    expect(filesUrl('https://github.com/acme/api/pull/1')).toBe(
+      'https://github.com/acme/api/pull/1/files',
+    );
   });
 
   it('renders key caps for shortcuts and sequences', () => {
