@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import { toast } from 'sonner';
 import type { PullRequestItem } from '@review-desk/shared/types';
 import { useQueryClient } from '@tanstack/react-query';
+import { numberSign } from '@/lib/pr-ref';
 import { runTriage, usePulls, type TriageVariables } from '@/lib/queries';
 import { shortDateTime } from '@/lib/time';
 
@@ -51,7 +52,7 @@ export function usePullActions() {
             : null;
 
           toast(success.message, {
-            description: `#${item.number} ${item.title}`,
+            description: `${numberSign(item.url)}${item.number} ${item.title}`,
             action: undo ? { label: 'Undo', onClick: () => undoLast() } : undefined,
           });
         },

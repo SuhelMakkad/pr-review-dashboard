@@ -5,6 +5,7 @@ import type { DraftComment } from '@review-desk/shared/review';
 import type { ReviewThread } from '@review-desk/shared/types';
 import type { GitHubOperation } from '@review-desk/shared/operations';
 import { openActivity } from '@/features/activity/use-operations';
+import { filesUrl, isGitLabUrl } from '@/lib/pr-ref';
 import { MarkdownView } from '@/ui/markdown';
 import { Button } from '@/ui/button';
 import { EmptyState } from '@/ui/empty-state';
@@ -132,12 +133,12 @@ export function FileView({
                     Comment on file
                   </Button>
                   <a
-                    href={`${prUrl}/files`}
+                    href={filesUrl(prUrl)}
                     target="_blank"
                     rel="noreferrer"
                     className="text-sm text-accent underline"
                   >
-                    View on GitHub
+                    View on {isGitLabUrl(prUrl) ? 'GitLab' : 'GitHub'}
                   </a>
                 </div>
               )

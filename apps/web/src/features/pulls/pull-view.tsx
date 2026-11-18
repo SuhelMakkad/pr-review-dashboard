@@ -13,6 +13,7 @@ import {
   ListMinus,
   MessageSquare,
 } from 'lucide-react';
+import { forgeTerms, isSameUser } from '@review-desk/shared/accounts';
 import { addedByHand } from '@review-desk/shared/attention';
 import type {
   PullRequestDetail,
@@ -22,6 +23,7 @@ import type {
   Source,
 } from '@review-desk/shared/types';
 import { api } from '@/lib/api';
+import { filesUrl, numberSign, refOf } from '@/lib/pr-ref';
 import { usePullDetail, useTriage } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { dateTime, relativePhrase, shortDateTime } from '@/lib/time';
@@ -143,7 +145,7 @@ function Thread({
       <div className="divide-y divide-line">
         {thread.comments.map((comment) => {
           const isUnread = unread.has(`${comment.id}:${comment.updatedAt}`);
-          const mine = comment.author.login.toLowerCase() === account.toLowerCase();
+          const mine = isSameUser(comment.author.login, account);
 
           return (
             <div key={comment.id} className={cn('px-3 py-2.5', isUnread && 'bg-reply/8')}>
@@ -234,7 +236,8 @@ function PullDetailView({
 }) {
   const pr = detail.snapshot;
   const account = detail.account;
-  const authored = pr.author.login.toLowerCase() === account.toLowerCase();
+  const authored = isSameUser(pr.author.login, account);
+  const forge = forgeTerms(account);
   const actions = usePullActions();
   const triage = useTriage();
   const inbox = useInboxNavigation();
@@ -244,7 +247,7 @@ function PullDetailView({
   const noteRef = useRef<HTMLTextAreaElement>(null);
   const unread = new Set(item.unreadReplyKeys);
   const mine = pr.threads.filter((thread) =>
-    thread.comments.some((comment) => comment.author.login.toLowerCase() === account.toLowerCase()),
+    thread.comments.some((comment) => isSameUser(comment.author.login, account)),
   );
   const latest = item.latestReview;
   const why = whyLines(item, pr);
@@ -269,7 +272,7 @@ function PullDetailView({
   useShortcuts([
     {
       keys: 'o',
-      label: 'Open on GitHub',
+      label: `Open on ${forge.name}`,
       group: 'Pull request',
       run: () => actions.openOnGitHub(item),
     },
@@ -294,7 +297,7 @@ function PullDetailView({
     },
     {
       keys: 'y',
-      label: 'Copy GitHub link',
+      label: `Copy ${forge.name} link`,
       group: 'Pull request',
       run: () => void actions.copyLink(item),
     },
@@ -320,7 +323,10 @@ function PullDetailView({
             className="inline-flex items-center gap-1 text-xs text-fg-muted hover:text-accent"
           >
             {pr.repository}
-            <span className="text-fg-subtle">#{pr.number}</span>
+            <span className="text-fg-subtle">
+              {numberSign(pr.url)}
+              {pr.number}
+            </span>
             <ArrowUpRight size={12} aria-hidden="true" />
           </a>
           <h2
@@ -388,8 +394,8 @@ function PullDetailView({
           <Link
             to="/pr/$owner/$repo/$number/files"
             params={{
-              owner: pr.repository.split('/')[0],
-              repo: pr.repository.split('/')[1],
+              owner: refOf(pr).owner,
+              repo: refOf(pr).repo,
               number: String(pr.number),
             }}
             search={inbox?.queue ? { inbox: inbox.queue } : {}}
@@ -410,7 +416,7 @@ function PullDetailView({
             rel="noreferrer"
             className="inline-flex h-7 items-center gap-1.5 rounded-sm border border-line-strong px-2.5 text-xs font-medium hover:bg-hover"
           >
-            GitHub
+            {forge.name}
             <ArrowUpRight size={13} aria-hidden="true" />
             <Kbd keys="o" />
           </a>
@@ -459,7 +465,7 @@ function PullDetailView({
             variant="ghost"
             icon={<Copy size={13} />}
             onClick={() => void actions.copyLink(item)}
-            aria-label="Copy GitHub link"
+            aria-label={`Copy ${forge.name} link`}
           />
         </div>
 
@@ -631,7 +637,7 @@ function PullDetailView({
               ? 'This branch has merge conflicts.'
               : pr.mergeable === 'MERGEABLE'
                 ? 'No merge conflicts.'
-                : 'GitHub is still calculating mergeability.'}
+                : `${forge.name} is still calculating mergeability.`}
           </p>
           {pr.checks.length ? (
             <ul className="space-y-1">
@@ -665,12 +671,12 @@ function PullDetailView({
           title={`Files · ${pr.changedFiles}`}
           aside={
             <a
-              href={`${pr.url}/files`}
+              href={filesUrl(pr.url)}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 text-xs text-fg-muted hover:text-accent"
             >
-              View diff on GitHub <ArrowUpRight size={12} aria-hidden="true" />
+              View diff on {forge.name} <ArrowUpRight size={12} aria-hidden="true" />
             </a>
           }
         >

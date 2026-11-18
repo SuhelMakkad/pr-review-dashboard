@@ -7,7 +7,7 @@ import { githubCommand } from '@/lib/operation-command';
 import { openActivity } from '@/features/activity/use-operations';
 import { useOperations } from '@/features/activity/use-operations';
 import { operationUnsettled } from '@review-desk/shared/operations';
-import { refOf } from '@/lib/pr-ref';
+import { isGitLabUrl, refOf } from '@/lib/pr-ref';
 import { queryKeys } from '@/lib/query-keys';
 import { relativePhrase } from '@/lib/time';
 import { Button } from '@/ui/button';
@@ -49,7 +49,7 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
         return (
           <a
             className="inline-flex items-center gap-1 text-xs text-accent hover:underline"
-            href={`${item.url}/checks`}
+            href={`${item.url}/${isGitLabUrl(item.url) ? 'pipelines' : 'checks'}`}
             target="_blank"
             rel="noreferrer"
           >
@@ -65,7 +65,8 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
             target="_blank"
             rel="noreferrer"
           >
-            Update the branch on GitHub <ArrowUpRight size={11} />
+            Update the branch on {isGitLabUrl(item.url) ? 'GitLab' : 'GitHub'}{' '}
+            <ArrowUpRight size={11} />
           </a>
         );
       case 'unanswered_threads':
@@ -105,7 +106,8 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
             target="_blank"
             rel="noreferrer"
           >
-            Request reviewers on GitHub <ArrowUpRight size={11} />
+            Request reviewers on {isGitLabUrl(item.url) ? 'GitLab' : 'GitHub'}{' '}
+            <ArrowUpRight size={11} />
           </a>
         );
       default:

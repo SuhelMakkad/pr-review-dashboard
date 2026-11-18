@@ -2,6 +2,7 @@ import { forwardRef } from 'react';
 import type { AuthorItem } from '@review-desk/shared/author';
 import { shortAge } from '@/lib/time';
 import { LinearMark } from '@/ui/brand-icons';
+import { numberSign } from '@/lib/pr-ref';
 import { cn } from '@/ui/cn';
 import { ActiveIndicator } from '@/ui/motion';
 import { CiIndicator, tone } from '@/features/pulls/meta';
@@ -68,8 +69,11 @@ export const MineRow = forwardRef<
             </span>
           )}
           <span className="shrink-0">
-            {item.repository.split('/')[1]}
-            <span className="text-fg-subtle">#{item.number}</span>
+            {item.repository.split('/').at(-1)}
+            <span className="text-fg-subtle">
+              {numberSign(item.url)}
+              {item.number}
+            </span>
           </span>
           {item.tickets[0] && (
             <span

@@ -5,6 +5,7 @@ import type { PullRequestItem } from '@review-desk/shared/types';
 import { shortAge, shortDateTime } from '@/lib/time';
 import { Avatar } from '@/ui/avatar';
 import { LinearMark } from '@/ui/brand-icons';
+import { numberSign } from '@/lib/pr-ref';
 import { cn } from '@/ui/cn';
 import { ActiveIndicator } from '@/ui/motion';
 import { AiReviewBadge } from '@/features/ai/ai-review-badge';
@@ -85,8 +86,11 @@ export const QueueRow = forwardRef<
             </span>
           )}
           <span className="shrink-0">
-            {item.repository.split('/')[1]}
-            <span className="text-fg-subtle">#{item.number}</span>
+            {item.repository.split('/').at(-1)}
+            <span className="text-fg-subtle">
+              {numberSign(item.url)}
+              {item.number}
+            </span>
           </span>
           {item.tickets[0] && (
             <span

@@ -1,5 +1,6 @@
 import { Link, Outlet, useNavigate, useRouter, useRouterState } from '@tanstack/react-router';
 import { ArrowLeft, ArrowUpRight } from 'lucide-react';
+import { filesUrl, isGitLabUrl, numberSign } from '@/lib/pr-ref';
 import { usePulls, useMine } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { IconButton } from '@/ui/button';
@@ -59,7 +60,8 @@ export function PullLayout() {
         <IconButton label="Back" icon={<ArrowLeft size={16} />} onClick={back} />
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <span className="shrink-0 text-xs text-fg-subtle">
-            {ref ? `${ref.owner}/${ref.repo}` : ''} #{ref?.number}
+            {ref ? `${ref.owner}/${ref.repo}` : ''} {numberSign(item?.url)}
+            {ref?.number}
           </span>
           <span className="truncate text-sm font-medium">{item?.title}</span>
         </div>
@@ -86,12 +88,13 @@ export function PullLayout() {
         )}
         {item && (
           <a
-            href={onFiles ? `${item.url}/files` : item.url}
+            href={onFiles ? filesUrl(item.url) : item.url}
             target="_blank"
             rel="noreferrer"
             className="ml-2 inline-flex h-7 shrink-0 items-center gap-1 rounded-sm px-2 text-xs text-fg-muted hover:bg-hover hover:text-fg"
           >
-            GitHub <ArrowUpRight size={12} aria-hidden="true" />
+            {isGitLabUrl(item.url) ? 'GitLab' : 'GitHub'}{' '}
+            <ArrowUpRight size={12} aria-hidden="true" />
           </a>
         )}
       </header>
