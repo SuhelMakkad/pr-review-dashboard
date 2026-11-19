@@ -4,6 +4,7 @@ import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { DiffService } from '@/diff/service.js';
+import type { GitHubApi } from '@/github/api.js';
 import { EventBus } from '@/events.js';
 import { ReviewError, ReviewService } from '@/review/service.js';
 import { SyncService } from '@/sync/index.js';
@@ -49,6 +50,59 @@ const code = async (promise: Promise<unknown>) => {
 const ops = (github: FixtureGitHub) => github.writes.map((write) => write.op);
 
 describe('drafting', () => {
+  it('takes line comments only from a confirmed diff of the revision the PR has', async () => {
+    const { reviews, pr, github } = await setup();
+    const detail = pr(1839);
+    const path = detail.snapshot.files[0].path;
+    const revision = { headOid: detail.snapshot.headOid, baseOid: detail.snapshot.baseOid ?? null };
+
+    // Picked in a diff of another head than the PR has now.
+    expect(
+      await code(
+        reviews.addComment(detail.snapshot.id, {
+          account: 'you',
+          path,
+          line: 2,
+          body: 'Picked in an older diff',
+          revision: { ...revision, headOid: 'e'.repeat(40) },
+        }),
+      ),
+    ).toBe('HEAD_MOVED');
+
+    // A forge that keys diffs but has no record of this revision: its live diff is unconfirmed.
+    const pullFiles = github.pullFiles.bind(github);
+
+    (github as GitHubApi).pinnedFiles = async (repository, number) => ({
+      files: await pullFiles(repository, number),
+      pinned: false,
+    });
+
+    expect(
+      await code(
+        reviews.addComment(detail.snapshot.id, {
+          account: 'you',
+          path,
+          line: 2,
+          body: 'On a line of an unconfirmed diff',
+          revision,
+        }),
+      ),
+    ).toBe('DIFF_UNCONFIRMED');
+
+    // A whole-file comment has no lines to misplace.
+    expect(
+      await code(
+        reviews.addComment(detail.snapshot.id, {
+          account: 'you',
+          path,
+          line: null,
+          body: 'On the whole file',
+        }),
+      ),
+    ).toBe('ok');
+    expect(reviews.draft('you', detail.snapshot.id).comments).toHaveLength(1);
+  });
+
   it('keeps comments local until submit and rejects lines GitHub would refuse', async () => {
     const { reviews, pr, github } = await setup();
     const detail = pr(1839);

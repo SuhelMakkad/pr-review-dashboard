@@ -65,6 +65,10 @@ const resolvedTheme = (theme: string) =>
     : (theme as 'light' | 'dark');
 
 /** The review workspace: file tree, one file's diff with threads and drafts, threads rail, finish. */
+/** Why a line cannot be commented on in a diff whose revision could not be confirmed. */
+const UNPINNED_LINES =
+  'This version of the diff could not be confirmed. Reload it to comment on lines; whole-file comments still work.';
+
 export function FilesWorkspace() {
   const { item } = useCurrentPull();
   const pulls = usePulls();
@@ -273,6 +277,12 @@ function Workspace() {
     if (!current) return;
     if (locked) {
       openActivity();
+      return;
+    }
+
+    if (selection && diff.data?.unpinned) {
+      toast.error(UNPINNED_LINES);
+
       return;
     }
 
@@ -513,6 +523,10 @@ function Workspace() {
               side: target.line === null ? 'RIGHT' : target.side,
               startLine: target.line === null ? null : target.startLine,
               body,
+              // The lines are this diff's; the server refuses them for another revision.
+              ...(target.line !== null && diff.data?.revision
+                ? { revision: diff.data.revision }
+                : {}),
             });
             setComposer(null);
             setComposerError(null);
@@ -765,6 +779,11 @@ function Workspace() {
                   onCommentLine={(target) => {
                     if (locked) {
                       openActivity();
+                      return;
+                    }
+
+                    if (diff.data?.unpinned) {
+                      toast.error(UNPINNED_LINES);
                       return;
                     }
 

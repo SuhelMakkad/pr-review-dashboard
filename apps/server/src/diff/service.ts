@@ -149,8 +149,9 @@ export class DiffService {
     };
 
     // Diffs that could not be pinned to this revision are shown, not kept: the next view reads
-    // them again, and they cannot be marked viewed meanwhile. This holds for an empty list too.
-    if (listing && !listing.pinned) return manifest;
+    // them again, and meanwhile they cannot be marked viewed or commented on by line. This holds
+    // for an empty list too.
+    if (listing && !listing.pinned) return { ...manifest, unpinned: true };
 
     return this.remember(key, manifest);
   }

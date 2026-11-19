@@ -64,7 +64,13 @@ export function useReview(prId: string | null, account: string) {
     client.invalidateQueries({ queryKey: queryKeys.draft(prId ?? 'none', account) });
 
   const addComment = useMutation({
-    mutationFn: (input: CommentTarget & { body: string; origin?: 'user' | 'ai' }) =>
+    mutationFn: (
+      input: CommentTarget & {
+        body: string;
+        origin?: 'user' | 'ai';
+        revision?: { headOid: string; baseOid: string | null };
+      },
+    ) =>
       api<DraftComment>(`/api/pulls/${enc}/draft/comments`, {
         method: 'POST',
         body: { account, ...input },

@@ -43,6 +43,11 @@ export interface DiffManifest {
    * could not be confirmed as the diff shown, and cannot be marked viewed from this view.
    */
   keyed?: boolean;
+  /**
+   * The patches shown could not be confirmed as `revision`'s (the forge's record of it was not
+   * available, so they are its live diff). Readable, but its lines cannot be commented on.
+   */
+  unpinned?: boolean;
   /** The account whose view this is (viewed state, "since your review"); set by the diff route. */
   account?: string;
   mode: DiffMode;

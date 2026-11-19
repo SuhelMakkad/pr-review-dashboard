@@ -26,6 +26,13 @@ const newComment = z
     startSide: side.nullable().optional(),
     body,
     origin: z.enum(['user', 'ai']).optional(),
+    revision: z
+      .object({
+        headOid: z.string().min(7).max(64),
+        baseOid: z.string().min(7).max(64).nullable(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

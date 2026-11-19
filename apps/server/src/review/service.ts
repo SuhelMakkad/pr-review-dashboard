@@ -181,6 +181,15 @@ export class ReviewService {
     if (input.line === null) return;
 
     const full = await this.diffs.manifest(pr, 'full', null);
+
+    // Its lines might be another revision's: a comment's line numbers would then land elsewhere.
+    if (full.unpinned)
+      throw new ReviewError(
+        'DIFF_UNCONFIRMED',
+        409,
+        'This version of the diff could not be confirmed, so comments can only go on whole files until it reloads.',
+      );
+
     const file = full.files.find((candidate) => candidate.path === input.path);
     const lines = commentableLines(file?.patch);
     const visible = (input.side ?? 'RIGHT') === 'LEFT' ? lines.left : lines.right;
@@ -199,6 +208,18 @@ export class ReviewService {
     await this.guard(input.account);
 
     const pr = this.snapshot(prId);
+
+    // The line was picked in the diff of another revision than the PR has now.
+    if (
+      input.line !== null &&
+      input.revision &&
+      (input.revision.headOid !== pr.headOid || input.revision.baseOid !== (pr.baseOid ?? null))
+    )
+      throw new ReviewError(
+        'HEAD_MOVED',
+        409,
+        'The PR changed while you were commenting. Reload the diff, then comment again.',
+      );
 
     await this.assertCommentable(pr, input);
 
