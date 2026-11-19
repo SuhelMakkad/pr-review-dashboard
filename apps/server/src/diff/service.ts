@@ -94,7 +94,10 @@ export class DiffService {
    * cannot be marked viewed from it.
    */
   private async withKeys(manifest: DiffManifest, pr: PullRequestSnapshot): Promise<DiffManifest> {
-    if (manifest.files.length === 0 || !pr.files.some((file) => file.viewedKey)) return manifest;
+    // Nothing to key; or the full diff itself, shown because the reviewed commit is gone, whose
+    // keys (or their absence) are its own.
+    if (manifest.files.length === 0 || manifest.kind === 'unavailable') return manifest;
+    if (!pr.files.some((file) => file.viewedKey)) return manifest;
 
     const full = await this.full(pr).catch(() => null);
     const keys = new Map(full?.files.map((file) => [file.path, file.viewedKey]) ?? []);
@@ -127,8 +130,14 @@ export class DiffService {
 
     if (cached) return cached;
 
-    const files = await this.github.pullFiles(pr.repository, pr.number, pr.headOid);
-    const keyed = files.some((file) => file.keyed);
+    // Where viewed state follows each diff, the files of exactly this revision, keyed.
+    const listing =
+      (await this.github.pinnedFiles?.(pr.repository, pr.number, {
+        headOid: pr.headOid,
+        baseOid: pr.baseOid ?? null,
+      })) ?? null;
+    const files = listing ? listing.files : await this.github.pullFiles(pr.repository, pr.number);
+    const keyed = listing !== null;
     const manifest: DiffManifest = {
       prId: pr.id,
       mode: 'full',
@@ -139,9 +148,9 @@ export class DiffService {
       files: files.map((file) => toDiffFile(file)),
     };
 
-    // Diffs that could not be confirmed as this head's are shown, not kept: the next view reads
-    // them again, and they cannot be marked viewed meanwhile.
-    if (keyed && files.some((file) => !file.viewedKey)) return manifest;
+    // Diffs that could not be pinned to this revision are shown, not kept: the next view reads
+    // them again, and they cannot be marked viewed meanwhile. This holds for an empty list too.
+    if (listing && !listing.pinned) return manifest;
 
     return this.remember(key, manifest);
   }

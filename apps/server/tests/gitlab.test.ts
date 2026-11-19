@@ -188,6 +188,10 @@ const MR = 'projects/7/merge_requests/12';
 const MR_BY_PATH = 'projects/acme%2Fplatform%2Fweb/merge_requests/12';
 
 function gitlab(overrides: { mr?: Record<string, unknown>; diffs?: unknown[] } = {}) {
+  const versions = [
+    { id: 2, head_commit_sha: HEAD2, start_commit_sha: START, created_at: seconds(4, 30) },
+    { id: 1, head_commit_sha: HEAD1, start_commit_sha: START, created_at: at(0) },
+  ];
   const diffs = overrides.diffs ?? [
     {
       diff: APP_DIFF,
@@ -219,12 +223,9 @@ function gitlab(overrides: { mr?: Record<string, unknown>; diffs?: unknown[] } =
     .on('GET', `${MR}/approvals`, {
       data: { approved: false, user_has_approved: false, approved_by: [{ user: users.rev }] },
     })
-    .on('GET', `${MR}/versions`, {
-      data: [
-        { id: 2, head_commit_sha: HEAD2, created_at: seconds(4, 30) },
-        { id: 1, head_commit_sha: HEAD1, created_at: at(0) },
-      ],
-    })
+    .on('GET', `${MR}/versions`, { data: versions })
+    .on('GET', `${MR_BY_PATH}/versions`, { data: versions })
+    .on('GET', `${MR_BY_PATH}/versions/2`, { data: { ...versions[0], diffs } })
     .on('GET', `${MR}/diffs`, { data: diffs })
     // The same merge request by its project path, as listing its files reads it.
     .on('GET', MR_BY_PATH, { data: mergeRequest(overrides.mr) })
@@ -693,43 +694,35 @@ describe('GitLab merge request snapshots', () => {
     expect(after).not.toBe(before);
   });
 
-  it('keys the files it lists like the snapshot does, from the same diffs', async () => {
+  it('lists the files of exactly the revision shown, from its diff version', async () => {
     const { client } = gitlab();
-    const listed = await client.pullFiles('acme/platform/web', 12, HEAD2);
+    const listed = await client.pinnedFiles('acme/platform/web', 12, {
+      headOid: HEAD2,
+      baseOid: START,
+    });
     const pr = await client.snapshot('MR_7_12', VIEWER, []);
 
-    expect(listed.map((file) => file.viewedKey)).toEqual(pr.files.map((file) => file.viewedKey));
-    expect(listed[0]?.viewedKey).toEqual(expect.any(String));
+    expect(listed.pinned).toBe(true);
+    expect(listed.files.map((file) => file.viewedKey)).toEqual(
+      pr.files.map((file) => file.viewedKey),
+    );
+    expect(listed.files[0]?.viewedKey).toEqual(expect.any(String));
   });
 
-  it('keys the files it lists only when they are the revision asked for', async () => {
-    const { client, fake } = gitlab();
+  it('pins nothing for a revision GitLab has no diff version of', async () => {
+    const { client } = gitlab();
 
-    // Another head than the one shown: listed, but not keyed.
-    expect(
-      (await client.pullFiles('acme/platform/web', 12, HEAD1)).every(
-        (file) => file.keyed && !file.viewedKey,
-      ),
-    ).toBe(true);
+    // An older head than the version on record, and the same head retargeted onto another base.
+    for (const revision of [
+      { headOid: HEAD3, baseOid: START },
+      { headOid: HEAD2, baseOid: BASE },
+    ]) {
+      const listed = await client.pinnedFiles('acme/platform/web', 12, revision);
 
-    // A push between the reads around the diffs: not keyed either.
-    let reads = 0;
-
-    fake.on('GET', MR_BY_PATH, () => {
-      reads++;
-
-      return reads === 1
-        ? { data: mergeRequest() }
-        : {
-            data: mergeRequest({
-              sha: HEAD3,
-              diff_refs: { base_sha: BASE, start_sha: START, head_sha: HEAD3 },
-            }),
-          };
-    });
-    expect(
-      (await client.pullFiles('acme/platform/web', 12, HEAD2)).every((file) => !file.viewedKey),
-    ).toBe(true);
+      expect(listed.pinned).toBe(false);
+      expect(listed.files.length).toBeGreaterThan(0);
+      expect(listed.files.every((file) => !file.viewedKey)).toBe(true);
+    }
   });
 
   it('detects changes per project and asks about running pipelines', async () => {

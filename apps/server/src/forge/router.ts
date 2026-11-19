@@ -157,8 +157,16 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
     return this.target().snapshot(id, login, sources, previous);
   }
 
-  pullFiles(repository: string, number: number, head?: string) {
-    return this.target().pullFiles(repository, number, head);
+  pullFiles(repository: string, number: number) {
+    return this.target().pullFiles(repository, number);
+  }
+
+  async pinnedFiles(
+    repository: string,
+    number: number,
+    revision: { headOid: string; baseOid: string | null },
+  ) {
+    return (await this.target().pinnedFiles?.(repository, number, revision)) ?? null;
   }
 
   compare(repository: string, base: string, head: string) {

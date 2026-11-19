@@ -18,6 +18,7 @@ import type {
   DetectOptions,
   DetectResult,
   GitHubApi,
+  PinnedFiles,
   RateBudget,
   RemoteFile,
   ResolvedPull,
@@ -575,27 +576,51 @@ export class GitLab implements GitHubApi {
     );
   }
 
-  async pullFiles(repository: string, number: number, head?: string): Promise<RemoteFile[]> {
-    const path = `${projectPath(repository)}/merge_requests/${number}`;
-    const read = () =>
-      call<RawMergeRequest>(this.transport, { path }, 'Could not load the merge request');
-    // The diffs are read between two reads of the merge request: they are revision `head`'s only
-    // if both say so. Only then are they keyed for viewed marks.
-    const before = await read();
-    const diffs = await this.diffs(path);
-    const after = await read().catch(() => null);
-    const pinned =
-      after !== null &&
-      before.sha === after.sha &&
-      before.diff_refs?.start_sha === after.diff_refs?.start_sha &&
-      (head === undefined || before.sha === head);
-    const revision = { head: before.sha, start: before.diff_refs?.start_sha ?? null };
+  async pullFiles(repository: string, number: number): Promise<RemoteFile[]> {
+    const diffs = await this.diffs(`${projectPath(repository)}/merge_requests/${number}`);
 
-    return diffs.map((diff) => ({
-      ...remoteFile(diff),
-      keyed: true,
-      ...(pinned ? { viewedKey: diffKey(diff, revision) } : {}),
-    }));
+    return diffs.map(remoteFile);
+  }
+
+  /**
+   * The files of the merge request diff version for exactly `revision` (its head and start, the
+   * snapshot's head and base). GitLab keeps every version's diffs and never changes them, so the
+   * files, their patches and their keys are that revision's however the merge request moves
+   * meanwhile. Without such a version (it moved on, or was retargeted), the live diff, unkeyed.
+   */
+  async pinnedFiles(
+    repository: string,
+    number: number,
+    revision: { headOid: string; baseOid: string | null },
+  ): Promise<PinnedFiles> {
+    const path = `${projectPath(repository)}/merge_requests/${number}`;
+    const versions = await paginate<RawVersion>(
+      this.transport,
+      `${path}/versions`,
+      'Could not load versions',
+    );
+    const version = versions.find(
+      (candidate) =>
+        candidate.head_commit_sha === revision.headOid &&
+        (candidate.start_commit_sha ?? null) === revision.baseOid,
+    );
+
+    if (!version) return { files: (await this.diffs(path)).map(remoteFile), pinned: false };
+
+    const detail = await call<RawVersion & { diffs?: RawDiff[] }>(
+      this.transport,
+      { path: `${path}/versions/${version.id}` },
+      'Could not load the merge request diff',
+    );
+    const key = { head: version.head_commit_sha, start: version.start_commit_sha ?? null };
+
+    return {
+      files: (detail.diffs ?? []).map((diff) => ({
+        ...remoteFile(diff),
+        viewedKey: diffKey(diff, key),
+      })),
+      pinned: true,
+    };
   }
 
   async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {

@@ -6,6 +6,7 @@ import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { SyncService } from '@/sync/index.js';
+import type { GitHubApi } from '@/github/api.js';
 
 async function demo() {
   const store = new Store(':memory:');
@@ -153,12 +154,13 @@ describe('viewed keys in diff manifests', () => {
       const pullFiles = github.pullFiles.bind(github);
 
       // The forge keys each file's diff (as GitLab does); the manifest is built and cached for A.
-      github.pullFiles = async (...args) =>
-        (await pullFiles(...args)).map((file) => ({
+      (github as GitHubApi).pinnedFiles = async (repository, number) => ({
+        files: (await pullFiles(repository, number)).map((file) => ({
           ...file,
-          keyed: true,
           viewedKey: `rendered:${file.path}`,
-        }));
+        })),
+        pinned: true,
+      });
 
       const first = await diffs.manifest(
         { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: `rendered:${file.path}` })) },
@@ -192,7 +194,7 @@ describe('viewed keys in diff manifests', () => {
   });
 });
 
-describe('diffs whose revision cannot be confirmed', () => {
+describe('diffs that cannot be pinned to the revision shown', () => {
   it('shows them without keeping them, and they cannot be marked viewed', async () => {
     const { diffs, github, byNumber, close } = await demo();
 
@@ -202,11 +204,11 @@ describe('diffs whose revision cannot be confirmed', () => {
       const pullFiles = github.pullFiles.bind(github);
       let reads = 0;
 
-      // A forge that keys diffs, but could not pin this listing to the head asked for.
-      github.pullFiles = async (...args) => {
+      // A forge that keys diffs, but has no record of this revision.
+      (github as GitHubApi).pinnedFiles = async (repository, number) => {
         reads++;
 
-        return (await pullFiles(...args)).map((file) => ({ ...file, keyed: true }));
+        return { files: await pullFiles(repository, number), pinned: false };
       };
 
       const first = await diffs.manifest(keyed, 'full', null);
@@ -221,6 +223,27 @@ describe('diffs whose revision cannot be confirmed', () => {
     }
   });
 
+  it('keeps no empty list it could not pin either', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(1839).snapshot;
+      let reads = 0;
+
+      (github as GitHubApi).pinnedFiles = async () => {
+        reads++;
+
+        return { files: [], pinned: false };
+      };
+
+      expect((await diffs.manifest(pr, 'full', null)).files).toEqual([]);
+      await diffs.manifest(pr, 'full', null);
+      expect(reads).toBe(2);
+    } finally {
+      close();
+    }
+  });
+
   it('keeps a since-review view when its keys cannot be read, and skips the read when empty', async () => {
     const { diffs, github, byNumber, close } = await demo();
 
@@ -229,7 +252,7 @@ describe('diffs whose revision cannot be confirmed', () => {
       const keyed = { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: 'stored' })) };
       let reads = 0;
 
-      github.pullFiles = async () => {
+      (github as GitHubApi).pinnedFiles = async () => {
         reads++;
         throw new Error('GitLab is unavailable');
       };
@@ -246,6 +269,37 @@ describe('diffs whose revision cannot be confirmed', () => {
       expect(since.files.length).toBeGreaterThan(0);
       expect(since.keyed).toBe(true);
       expect(since.files.every((file) => !file.viewedKey)).toBe(true);
+    } finally {
+      close();
+    }
+  });
+
+  it('shows the full diff with its own keys when the reviewed commit is gone, read once', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(2041).snapshot;
+      const keyed = { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: 'stored' })) };
+      const pullFiles = github.pullFiles.bind(github);
+      let reads = 0;
+
+      (github as GitHubApi).pinnedFiles = async (repository, number) => {
+        reads++;
+
+        return {
+          files: (await pullFiles(repository, number)).map((file) => ({
+            ...file,
+            viewedKey: `listed:${reads}:${file.path}`,
+          })),
+          pinned: true,
+        };
+      };
+
+      const since = await diffs.manifest(keyed, 'since-review', '0'.repeat(40));
+
+      expect(since.kind).toBe('unavailable');
+      expect(reads).toBe(1);
+      expect(since.files.every((file) => file.viewedKey?.startsWith('listed:1:'))).toBe(true);
     } finally {
       close();
     }

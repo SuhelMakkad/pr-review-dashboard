@@ -48,15 +48,20 @@ export interface RemoteFile {
   tooLarge?: boolean;
   /**
    * Identifies this very diff for viewed marks, where the forge's viewed state follows the diff
-   * (GitLab). Computed from the same response as `patch`, and only when that response is known to
-   * be the revision asked for, so it names the diff that is rendered.
+   * (GitLab). Computed from the same record as `patch` (see `pinnedFiles`), so it names the diff
+   * that is rendered.
    */
   viewedKey?: string;
+}
+
+/** A PR's files as `pinnedFiles` lists them. */
+export interface PinnedFiles {
+  files: RemoteFile[];
   /**
-   * The forge's viewed state follows each file's diff (GitLab). Without `viewedKey`, which diff
-   * this is could not be confirmed, and the file cannot be marked viewed from it.
+   * True when the files are exactly the revision asked for, from the forge's immutable record of
+   * it, and keyed; false when no such record exists and they come unkeyed from the live diff.
    */
-  keyed?: boolean;
+  pinned: boolean;
 }
 
 export interface CompareResult {
@@ -106,11 +111,18 @@ export interface GitHubApi extends GitHubWrites {
     sources: Source[],
     previous?: PullRequestSnapshot,
   ): Promise<PullRequestSnapshot>;
+  /** Files changed by the PR (base...head) with their patches. */
+  pullFiles(repository: string, number: number): Promise<RemoteFile[]>;
   /**
-   * Files changed by the PR (base...head) with their patches. `head`: the PR head the caller shows;
-   * a forge that keys viewed state by diff keys the files only when they are that revision's.
+   * Where the forge's viewed state follows each file's diff (GitLab): the files of exactly this
+   * revision, keyed for viewed marks (see `PinnedFiles`). Null, or absent, where viewed state is
+   * per file whatever its diff (GitHub).
    */
-  pullFiles(repository: string, number: number, head?: string): Promise<RemoteFile[]>;
+  pinnedFiles?(
+    repository: string,
+    number: number,
+    revision: { headOid: string; baseOid: string | null },
+  ): Promise<PinnedFiles | null>;
   /** Three-dot comparison; null when either commit is unknown to GitHub. */
   compare(repository: string, base: string, head: string): Promise<CompareResult | null>;
   /** PR node ids matching a search (open or closed); used to backfill history. */

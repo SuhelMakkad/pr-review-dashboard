@@ -116,6 +116,9 @@ export interface RawDiff {
 export interface RawVersion {
   id: number;
   head_commit_sha: string;
+  /** The target branch commit the version's diff starts from (a snapshot's base). */
+  start_commit_sha?: string | null;
+  base_commit_sha?: string | null;
   created_at: string;
 }
 
