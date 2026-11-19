@@ -19,4 +19,10 @@ export interface OperationRecord extends Omit<GitHubOperation, 'controls'> {
   pendingReviewBackup?: ReviewReceipt;
   /** Keep approval resolutions in the same order when replaying completed mutation steps. */
   approvalThreadIds?: string[];
+  /**
+   * How the action's writes are split into steps. 2: an automatic approval and its summary are
+   * separate steps where the forge's approval carries no text (GitLab). Absent for rows from
+   * before plans were versioned, which sent both in one `approveReview` step.
+   */
+  plan?: 2;
 }

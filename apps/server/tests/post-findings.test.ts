@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { and, eq } from 'drizzle-orm';
 import { createApp } from '@/app.js';
 import { AutoReviewer } from '@/ai/auto-review.js';
 import { FixtureProvider } from '@/ai/fixture.js';
@@ -1343,6 +1344,160 @@ describe('what an automatic post rests on', () => {
 
     store.setSetting('ai-settings', { postFindings: false });
     expect(runner.settings()).toMatchObject({ approveFindings: false, resolveThreads: false });
+  });
+});
+
+describe('approvals whose summary is a separate write', () => {
+  /** A forge whose approval takes no text, as GitLab's: the summary is a note after it. */
+  const gitlabLike = async () => {
+    const context = await setup();
+
+    context.github.approvalCarriesSummary = false;
+    context.setPosting(true);
+
+    return context;
+  };
+  const stored = ({ store }: Setup, runId: string) =>
+    store.db
+      .select()
+      .from(githubOperations)
+      .where(
+        and(
+          eq(githubOperations.account, 'you'),
+          eq(githubOperations.id, postedReviewOperationId(runId)),
+        ),
+      )
+      .get()!.data;
+
+  it('approves, then posts the summary, each as its own step', async () => {
+    const context = await gitlabLike();
+    const { github, review, posted } = context;
+    const run = await review(2041);
+    const operation = await posted(run.id);
+
+    expect(github.writes.map((write) => write.op)).toEqual([
+      'ResolveThread',
+      'ResolveThread',
+      'ApproveReview',
+      'AddComment',
+    ]);
+    expect(github.writes[2].details.body).toBe('');
+    expect(String(github.writes[3].details.body)).toMatch(
+      new RegExp(`^${postedReviewMarker(run.id)}`),
+    );
+    expect(operation.result?.url).toMatch(/#issuecomment-/);
+    expect(stored(context, run.id)).toMatchObject({ plan: 2 });
+  });
+
+  it('sends only the summary again when the forge refused it after approving', async () => {
+    const { github, queue, review, posted } = await gitlabLike();
+
+    github.failNext = 'AddComment';
+
+    const run = await review();
+    const failed = await posted(run.id, 'needs_attention');
+
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
+
+    await queue.control('you', failed.id, 'retry');
+    await posted(run.id);
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview', 'AddComment']);
+  });
+
+  it.each(['ApproveReview', 'AddComment'])(
+    'confirms a lost %s response from the PR, and sends nothing twice',
+    async (lost) => {
+      const { github, review, posted } = await gitlabLike();
+
+      github.loseResponseNext = lost;
+
+      const run = await review();
+
+      await posted(run.id);
+      expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview', 'AddComment']);
+    },
+  );
+
+  describe('a row from before approvals were split', () => {
+    /** Queues the post, then rewrites it as the old plan saved it: one step for both writes. */
+    const legacy = async (on: { approved: boolean; summary: boolean }, answered: boolean) => {
+      const context = await setup();
+      const { github, queue, pull, store, review, setPosting } = context;
+
+      setPosting(true);
+      await queue.pause();
+
+      const run = await review();
+      const data = stored(context, run.id);
+      const action = data.action as Extract<typeof data.action, { type: 'ai_review' }>;
+      const snapshot = pull(1839).snapshot;
+      const now = new Date().toISOString();
+
+      if (on.approved)
+        snapshot.reviews.push({
+          id: 'approved-earlier',
+          state: 'APPROVED',
+          submittedAt: now,
+          updatedAt: now,
+          commitOid: action.expectedHeadOid,
+          body: '',
+          url: `${snapshot.url}#approved-earlier`,
+        });
+      if (on.summary)
+        commentOn(snapshot, `${postedReviewMarker(run.id)}\nNo blocking findings.`, 'you');
+      snapshot.updatedAt = now;
+
+      const status = answered ? 'queued' : 'checking';
+
+      store.db
+        .update(githubOperations)
+        .set({
+          status,
+          data: {
+            ...data,
+            status,
+            steps: [
+              {
+                method: 'approveReview',
+                args: [data.prId, action.expectedHeadOid, action.body],
+                startedAt: now,
+                completedAt: null,
+                result: null,
+                uncertain: !answered,
+              },
+            ],
+          },
+        })
+        .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
+        .run();
+      github.approvalCarriesSummary = false;
+      queue.resume();
+
+      return { ...context, run };
+    };
+
+    it.each([
+      ['the approval alone went out', { approved: true, summary: false }, ['AddComment']],
+      ['neither went out', { approved: false, summary: false }, ['ApproveReview', 'AddComment']],
+      ['both went out', { approved: true, summary: true }, []],
+    ])('sends what is missing when GitLab refused it and %s', async (_case, on, writes) => {
+      const { github, posted, run } = await legacy(on, true);
+
+      await posted(run.id);
+      expect(github.writes.map((write) => write.op)).toEqual(writes);
+    });
+
+    it('leaves a lost response unconfirmed unless both are on the PR', async () => {
+      const lost = await legacy({ approved: true, summary: false }, false);
+
+      expect((await lost.posted(lost.run.id, 'needs_attention')).error?.code).toBe('UNCONFIRMED');
+      expect(lost.github.writes).toEqual([]);
+
+      const both = await legacy({ approved: true, summary: true }, false);
+
+      await both.posted(both.run.id);
+      expect(both.github.writes).toEqual([]);
+    });
   });
 });
 

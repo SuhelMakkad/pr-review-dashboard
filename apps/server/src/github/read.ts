@@ -352,6 +352,8 @@ export function fingerprintOf(node: RawDetect): string {
 }
 
 export class GitHub implements GitHubApi {
+  readonly approvalCarriesSummary = true;
+
   private readonly writes: GitHubWrites;
 
   async reviewReceipt(id: string): Promise<ReviewReceipt | null> {

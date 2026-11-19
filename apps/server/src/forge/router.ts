@@ -189,6 +189,10 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
     return this.target().blobs(repository, requests);
   }
 
+  get approvalCarriesSummary() {
+    return this.target().approvalCarriesSummary;
+  }
+
   approveReview(prId: string, commitOid: string, body: string) {
     return this.target().approveReview(prId, commitOid, body);
   }

@@ -104,6 +104,12 @@ export interface ReviewReceipt {
  * implements it from an in-memory scenario so the UI and services run without GitHub.
  */
 export interface GitHubApi extends GitHubWrites {
+  /**
+   * True where an approval carries its summary in one write (GitHub's review body). Where it
+   * cannot (GitLab: an approval, then a note), the two are sent and checkpointed as separate
+   * steps, so each has its own receipt.
+   */
+  readonly approvalCarriesSummary: boolean;
   reviewReceipt(id: string): Promise<ReviewReceipt | null>;
   identity(): Promise<Actor>;
   /** Where the forge differs from GitHub; absent means everything is supported. */

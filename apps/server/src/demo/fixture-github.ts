@@ -51,6 +51,8 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
   private sequence = 0;
   /** Every write GitHub would have received, for assertions in tests. */
   readonly writes: FixtureWrite[] = [];
+  /** GitHub's approvals carry their summary; tests turn this off to act as GitLab does. */
+  approvalCarriesSummary = true;
   /** The next write with this op name fails once (failure injection for tests). */
   failNext: string | null = null;
   loseResponseNext: string | null = null;

@@ -164,6 +164,9 @@ function searchFilters(query: string): string | null {
  * GitLab's notes, reviewers and approvals become reviews, requests and verdicts.
  */
 export class GitLab implements GitHubApi {
+  /** An approval takes no text: its summary is a separate note. */
+  readonly approvalCarriesSummary = false;
+
   private readonly writes: GitLabWrites;
 
   constructor(
