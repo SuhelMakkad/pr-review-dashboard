@@ -515,16 +515,17 @@ export class GitLab implements GitHubApi {
 
     for (let pass = 1; ; pass++) {
       const shown = await this.shown(ref, current);
-      const [latest, discussions, reviewers, approvals, versions] = await Promise.all([
+      const [latest, discussions, listedReviewers, approvals, versions] = await Promise.all([
         this.mergeRequest(ref),
         list<RawDiscussion>('discussions', 'discussions'),
+        // Older GitLab has no reviewers endpoint: the merge request read with them names them.
         unlessMissing(
           call<RawReviewer[]>(
             this.transport,
             { path: `${base}/reviewers` },
             'Could not load reviewers',
           ),
-          () => (current.reviewers ?? []).map((user) => ({ user })),
+          () => null,
         ),
         call<RawApprovals>(
           this.transport,
@@ -572,8 +573,12 @@ export class GitLab implements GitHubApi {
           },
         );
 
+      const reviewers = listedReviewers ?? (latest.reviewers ?? []).map((user) => ({ user }));
+
       return {
-        mr: latest,
+        // CI as of the pipeline whose jobs were read: a newer pipeline on the same commit is
+        // shown by the next read.
+        mr: { ...latest, head_pipeline: current.head_pipeline },
         discussions,
         reviewers,
         approvals,

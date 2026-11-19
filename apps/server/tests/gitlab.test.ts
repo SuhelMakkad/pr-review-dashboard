@@ -529,6 +529,34 @@ describe('GitLab merge request snapshots', () => {
     expect(pr.headCommittedAt).toBe(at(6));
   });
 
+  it('names reviewers and shows CI from the reads that go with them', async () => {
+    const { client, fake } = gitlab();
+    const shown = mergeRequest();
+    let reads = 0;
+
+    // An older GitLab without the reviewers endpoint: the merge request names them. While the
+    // diff is read, a reviewer is added and a new pipeline starts on the same commit.
+    fake.routes.delete(`GET ${MR}/reviewers`);
+    fake.on('GET', MR, () =>
+      ++reads === 1
+        ? { data: shown }
+        : {
+            data: {
+              ...shown,
+              reviewers: [...(shown.reviewers ?? []), users.ana],
+              head_pipeline: { id: 56, project_id: 7, status: 'success' },
+            },
+          },
+    );
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(pr.reviewRequests.map((reviewer) => reviewer.login)).toContain('ana');
+    // The jobs read were pipeline 55's, so its status is shown with them.
+    expect(pr.ci).toBe('pending');
+    expect(fake.calls.some((call) => call.path.startsWith('projects/7/pipelines/56'))).toBe(false);
+  });
+
   it('tells a missing target branch from one that could not be read', async () => {
     const missing = gitlab();
 
