@@ -56,19 +56,36 @@ export function publicationFingerprint(
     title: pr.title,
     body: pr.body,
     requests: pr.requestEvents,
-    reviews: pr.reviews.filter((review) => !review.body.startsWith(marker)),
-    verdicts: (pr.verdicts ?? []).filter((verdict) => !isSameUser(verdict.login, account)),
-    conversation: pr.conversation.filter(
-      (comment) => !(isSameUser(comment.author.login, account) && comment.body.startsWith(marker)),
-    ),
+    // What each says, never when it changed: GitLab renews its notes' times when a discussion is
+    // resolved, and reviews and verdicts read from those notes take their times from them.
+    reviews: pr.reviews
+      .filter((review) => !review.body.startsWith(marker))
+      .map((review) => ({
+        id: review.id,
+        state: review.state,
+        commitOid: review.commitOid,
+        body: review.body,
+      })),
+    verdicts: (pr.verdicts ?? [])
+      .filter((verdict) => !isSameUser(verdict.login, account))
+      .map((verdict) => ({
+        login: verdict.login,
+        state: verdict.state,
+        commitOid: verdict.commitOid,
+      })),
+    conversation: pr.conversation
+      .filter(
+        (comment) =>
+          !(isSameUser(comment.author.login, account) && comment.body.startsWith(marker)),
+      )
+      .map((comment) => ({ id: comment.id, author: comment.author.login, body: comment.body })),
     threads: pr.threads.map((thread) => ({
       id: thread.id,
       isResolved: resolved.has(thread.id) && thread.isResolved ? false : thread.isResolved,
       isOutdated: thread.isOutdated,
       path: thread.path,
       line: thread.line,
-      // No timestamps: GitLab touches its notes' when a discussion is resolved, and an edit
-      // changes the body.
+      // No timestamps here either; an edit changes the body.
       comments: thread.comments.map((comment) => ({
         id: comment.id,
         author: comment.author.login,

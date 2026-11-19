@@ -17,6 +17,8 @@ import {
   viewedTarget,
 } from '@/features/review/use-review';
 import { status } from '@test/fixtures';
+import { defaultAiSettings } from '@review-desk/shared/ai';
+import { withSaved } from '@/features/settings/pages/automation';
 
 afterEach(() => {
   cleanup();
@@ -368,4 +370,28 @@ it('takes selected lines only from the patch they were selected in', () => {
   expect(diffView(unpinned)).toBeUndefined();
   expect(linesShown({ path: 'a.ts', view: diffView(unpinned) }, 'a.ts', manifest('a'))).toBe(false);
   expect(linesShown(selected, 'a.ts', unpinned)).toBe(false);
+});
+
+it('shows only the saved switch from a save’s reply, so a late reply cannot undo a later save', () => {
+  const settings = {
+    ...defaultAiSettings(),
+    postFindings: true,
+    approveFindings: true,
+    autoReview: { enabled: false, since: null },
+  };
+  // An automatic-review save sent before approval was turned on, answered after it.
+  const late = {
+    ...defaultAiSettings(),
+    postFindings: true,
+    approveFindings: false,
+    autoReview: { enabled: true, since: '2026-11-20T10:00:00.000Z' },
+  };
+
+  expect(withSaved(settings, late, 'autoReview')).toEqual({
+    ...settings,
+    autoReview: late.autoReview,
+  });
+  expect(withSaved(settings, { ...late, approveFindings: true }, 'approveFindings')).toEqual(
+    settings,
+  );
 });

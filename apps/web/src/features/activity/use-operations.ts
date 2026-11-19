@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
-import { useInfiniteQuery } from '@tanstack/react-query';
-import type { OperationList } from '@review-desk/shared/operations';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import type { GitHubOperation, OperationList } from '@review-desk/shared/operations';
 import { api } from '@/lib/api';
 import { fallbackInterval, useLive } from '@/lib/live';
 
@@ -26,6 +26,22 @@ export function useActivityOpen() {
     },
     () => open,
   );
+}
+
+/** One operation by id, whichever page of Activity it is on; null while there is none. */
+export function useOperation(account: string, id: string | null) {
+  const live = useLive();
+
+  return useQuery({
+    queryKey: ['operations', account, 'one', id],
+    queryFn: () =>
+      api<{ operation: GitHubOperation }>(
+        `/api/operations/${encodeURIComponent(id!)}?account=${encodeURIComponent(account)}`,
+      ).then((response) => response.operation),
+    enabled: Boolean(account && id),
+    staleTime: live.connected ? Infinity : 0,
+    refetchInterval: fallbackInterval(live),
+  });
 }
 
 export function useOperations(account: string) {

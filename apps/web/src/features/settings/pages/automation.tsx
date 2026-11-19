@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { forgeTerms } from '@review-desk/shared/accounts';
+import type { AiSettings } from '@review-desk/shared/ai';
 import { toast } from 'sonner';
 import { Enter } from '@/ui/motion';
 import { Switch } from '@/ui/switch';
@@ -9,6 +10,13 @@ import { useAiOverview, useAutomationSettings } from '@/features/ai/use-ai';
 import { CardSkeleton, SettingRow, SettingsCard } from '@/features/settings/parts';
 
 type AiToggle = 'autoReview' | 'postFindings' | 'approveFindings' | 'resolveThreads';
+
+/** `settings` with only `toggle` taken from a save's reply. */
+export function withSaved(settings: AiSettings, reply: AiSettings, toggle: AiToggle): AiSettings {
+  return toggle === 'autoReview'
+    ? { ...settings, autoReview: reply.autoReview }
+    : { ...settings, [toggle]: reply[toggle] };
+}
 
 export function AutomationSettings({ account }: { account: string }) {
   const client = useQueryClient();
@@ -34,9 +42,11 @@ export function AutomationSettings({ account }: { account: string }) {
     setPending((current) => ({ ...current, [toggle]: enabled }));
     save
       .mutateAsync({ [toggle]: enabled })
+      // Only this switch's saved value: a reply that arrives after a later save of another
+      // switch must not show that one's older value. The refetch after each save brings all.
       .then((next) =>
         client.setQueryData<typeof overview.data>(['ai-overview'], (current) =>
-          current ? { ...current, settings: next } : current,
+          current ? { ...current, settings: withSaved(current.settings, next, toggle) } : current,
         ),
       )
       .catch((error: Error) => toast.error(error.message))

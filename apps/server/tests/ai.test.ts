@@ -1962,6 +1962,45 @@ describe('review inputs', () => {
     expect(other.files.every((file) => file.patch === undefined)).toBe(true);
   });
 
+  it('never reads a file through a symlinked directory or snapshot', async () => {
+    const directory = workspace();
+    const elsewhere = workDir();
+    const nested: CompareResult = {
+      ...comparison(true),
+      files: [remote('a.ts', 'modified'), remote('src/c.ts', 'added')],
+    };
+
+    mkdirSync(join(directory, 'after', 'src'));
+    writeFileSync(join(directory, 'after', 'src', 'c.ts'), 'content');
+    expect(
+      (await observeInputs(directory, pr(), manifest(), nested, 'merge-base')).inputs.complete,
+    ).toBe(true);
+
+    // The directory replaced by a link to one holding the same name.
+    mkdirSync(join(elsewhere, 'src'));
+    writeFileSync(join(elsewhere, 'src', 'c.ts'), 'content');
+    rmSync(join(directory, 'after', 'src'), { recursive: true });
+    symlinkSync(join(elsewhere, 'src'), join(directory, 'after', 'src'));
+
+    expect(
+      (await observeInputs(directory, pr(), manifest(), nested, 'merge-base')).inputs,
+    ).toMatchObject({ complete: false, unreadable: [{ path: 'src/c.ts', side: 'after' }] });
+
+    // The whole snapshot replaced by a link.
+    mkdirSync(join(elsewhere, 'after'));
+    writeFileSync(join(elsewhere, 'after', 'a.ts'), 'content');
+    rmSync(join(directory, 'after'), { recursive: true });
+    symlinkSync(join(elsewhere, 'after'), join(directory, 'after'));
+
+    expect(
+      (await observeInputs(directory, pr(), manifest(), comparison(true), 'merge-base')).inputs
+        .unreadable,
+    ).toEqual([
+      { path: 'a.ts', side: 'after' },
+      { path: 'b.ts', side: 'after' },
+    ]);
+  });
+
   it('is incomplete when the forge counts other files than it lists', async () => {
     expect(
       (await observeInputs(workspace(), pr(3), manifest(), comparison(true), 'merge-base')).inputs,

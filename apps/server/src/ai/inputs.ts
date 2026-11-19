@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { lstat, open } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import type { ReviewInputs } from '@review-desk/shared/ai';
 import type { DiffFile, DiffManifest } from '@review-desk/shared/diff';
@@ -21,11 +21,38 @@ export function filesDigest(files: Pick<DiffFile, 'path' | 'previousPath' | 'sta
 }
 
 /**
- * True when `path` opens for reading as a regular file inside `root`. Forge paths never leave the
- * snapshot, and a symlink is never followed.
+ * Directories along a path, checked once per measurement: each must be a real directory inside
+ * the snapshot, never a symlink to somewhere else.
  */
-async function readable(root: string, path: string): Promise<boolean> {
-  if (!path || isAbsolute(path) || path.split(/[\\/]/).includes('..')) return false;
+type DirectoryCheck = Map<string, Promise<boolean>>;
+
+async function realDirectory(path: string, checked: DirectoryCheck): Promise<boolean> {
+  let result = checked.get(path);
+
+  if (!result) {
+    result = lstat(path).then(
+      (stats) => stats.isDirectory(),
+      () => false,
+    );
+    checked.set(path, result);
+  }
+
+  return result;
+}
+
+/**
+ * True when `path` opens for reading as a regular file inside `root`, reached through real
+ * directories only. Forge paths never leave the snapshot, and no symlink is followed: not the
+ * file, not a directory on the way, not the snapshot root.
+ */
+async function readable(root: string, path: string, checked: DirectoryCheck): Promise<boolean> {
+  const parts = path.split(/[\\/]/);
+
+  if (!path || isAbsolute(path) || parts.includes('..') || parts.includes('')) return false;
+
+  for (let depth = 0; depth < parts.length; depth++) {
+    if (!(await realDirectory(join(root, ...parts.slice(0, depth)), checked))) return false;
+  }
 
   try {
     const file = await open(join(root, path), constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -46,11 +73,12 @@ export async function unreadableFiles(
   files: Pick<RemoteFile, 'path' | 'previousPath' | 'status'>[],
 ): Promise<{ unreadable: ReviewInputs['unreadable']; unreadableCount: number }> {
   const unreadable: ReviewInputs['unreadable'] = [];
+  const checked: DirectoryCheck = new Map();
   let unreadableCount = 0;
 
   for (const file of files) {
     for (const { side, path } of sides(file)) {
-      if (await readable(join(directory, side), path)) continue;
+      if (await readable(join(directory, side), path, checked)) continue;
 
       unreadableCount++;
       if (unreadable.length < LISTED_GAPS) unreadable.push({ path, side });

@@ -895,6 +895,114 @@ describe('what an automatic post rests on', () => {
     },
   );
 
+  it.each([
+    [
+      'someone comments',
+      'Not posted: the PR or its discussion changed after this review. Run it again to review it.',
+      ({ pull }: Setup) => commentOn(pull(1839).snapshot, 'Hold on.'),
+    ],
+    [
+      'new commits arrive',
+      'Not posted: new commits arrived after this review. Run it again to review them.',
+      ({ pull }: Setup) => {
+        pull(1839).snapshot.headOid = 'pushed-during-the-lookup';
+        pull(1839).snapshot.updatedAt = new Date().toISOString();
+      },
+    ],
+  ])(
+    'reads the PR again after the merge base is looked up: %s on the forge meanwhile',
+    async (_change, progress, change) => {
+      const context = await setup();
+      const { github, queue, setPosting, review, posted } = context;
+      const compare = github.compare.bind(github);
+
+      setPosting(true);
+      await queue.pause();
+
+      const run = await review();
+
+      // Only the forge changes; nothing here saves a newer snapshot.
+      vi.spyOn(github, 'compare').mockImplementationOnce(async (...args) => {
+        change(context);
+
+        return compare(...args);
+      });
+      queue.resume();
+
+      expect((await posted(run.id, 'cancelled')).progress).toBe(progress);
+      expect(github.writes).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['already off', false],
+    ['turned off while the lookup fails', true],
+  ])(
+    'stops a post when posting is %s, without waiting to retry a failed lookup',
+    async (_when, duringLookup) => {
+      const { github, queue, setPosting, review, posted } = await setup();
+
+      setPosting(true);
+      await queue.pause();
+
+      const run = await review();
+
+      vi.spyOn(github, 'compare').mockImplementationOnce(async () => {
+        if (duringLookup) setPosting(false);
+
+        throw new GitHubError('GitHub is unavailable.', null, 503, 'unavailable');
+      });
+      if (!duringLookup) setPosting(false);
+      queue.resume();
+
+      expect((await posted(run.id, 'cancelled')).progress).toBe(
+        'Not posted: posting findings was turned off in Settings.',
+      );
+      expect(github.writes).toEqual([]);
+    },
+  );
+
+  it('approves after resolving threads on a forge that renews its notes’ times when resolving', async () => {
+    const { github, pull, sync, idOf, setPosting, review, posted } = await setup();
+    const snapshot = pull(2041).snapshot;
+    const resolve = github.setThreadResolved.bind(github);
+    const earlier = '2026-11-01T10:00:00Z';
+
+    // A review of yours read from notes, as GitLab's are: its time follows theirs.
+    snapshot.reviews.push({
+      id: 'yours-from-notes',
+      state: 'COMMENTED',
+      submittedAt: earlier,
+      updatedAt: earlier,
+      commitOid: snapshot.headOid,
+      body: 'Looked at the retry loop.',
+      url: `${snapshot.url}#note-1`,
+    });
+    snapshot.updatedAt = new Date().toISOString();
+    await sync.refresh(idOf(2041));
+
+    vi.spyOn(github, 'setThreadResolved').mockImplementation(async (...args) => {
+      const result = await resolve(...args);
+      const now = new Date().toISOString();
+
+      for (const thread of snapshot.threads)
+        if (thread.id === args[0]) for (const comment of thread.comments) comment.updatedAt = now;
+      for (const own of snapshot.reviews) own.updatedAt = now;
+
+      return result;
+    });
+    setPosting(true);
+
+    const run = await review(2041);
+
+    await posted(run.id);
+    expect(github.writes.map((write) => write.op)).toEqual([
+      'ResolveThread',
+      'ResolveThread',
+      'ApproveReview',
+    ]);
+  });
+
   it('comments instead of approving when a resumed workspace lost part of its file list', async () => {
     const { providers, runner, github, omit, pull, setPosting, review, settled, posted } =
       await setup();

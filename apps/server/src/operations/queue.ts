@@ -89,6 +89,15 @@ export type PostingSettings = Pick<
   'postFindings' | 'approveFindings' | 'resolveThreads'
 >;
 
+/** An automatic post stopped for `skipped`: as said before anything was sent, and after. */
+function stopped(skipped: string, approving: boolean, code = 'POST_STOPPED'): PostProblem {
+  return {
+    skipped,
+    code,
+    attention: `${skipped.charAt(0).toUpperCase()}${skipped.slice(1)} Nothing more is sent; check the PR${approving ? ', then approve it yourself if it still applies' : ''}.`,
+  };
+}
+
 /** Why an automatic post must not go out now: as skipped before anything was sent, and after. */
 interface PostProblem {
   skipped: string;
@@ -1069,33 +1078,95 @@ export class OperationQueue {
     args: unknown[],
   ): Promise<OperationRecord> {
     const action = row.action as AiReviewAction;
-    const refreshed = (await this.sync.refresh(row.prId, row.account))?.snapshot;
-    // The live merge base of the PR as just read, where its head and target are still the
-    // reviewed ones (otherwise the checks below stop it anyway). A failed lookup is retried.
-    const mergeBase =
-      action.basis &&
-      refreshed?.headOid === action.expectedHeadOid &&
-      refreshed.baseRefName === action.basis.baseRefName
-        ? await this.sync.github
-            .compare(refreshed.repository, refreshed.baseRefName, refreshed.headOid)
-            .then((comparison) => comparison?.mergeBaseOid ?? null)
-        : null;
+    // What Settings allows is known here: a post it no longer allows stops without waiting on
+    // the forge, before the lookup and again when the lookup fails.
+    const allowed = () => {
+      row = this.row(row.account, row.id);
+      if (row.status === 'cancelled') throw new Cancelled();
 
-    // Everything below is read now, with no wait before the step is checkpointed: Settings
-    // changed and snapshots saved during the lookups above count.
+      this.stopFor(row, this.settingsProblem(action, method));
+    };
+
+    allowed();
+
+    let mergeBase: string | null = null;
+
+    // The merge base of the reviewed head on the reviewed target branch, as the forge has it
+    // now. A failed lookup is retried.
+    if (action.basis) {
+      try {
+        mergeBase =
+          (
+            await this.sync.github.compare(
+              row.repository,
+              action.basis.baseRefName,
+              action.expectedHeadOid,
+            )
+          )?.mergeBaseOid ?? null;
+      } catch (error) {
+        allowed();
+
+        throw error;
+      }
+    }
+
+    // The last read of the PR before sending, after every other wait. From here to the step's
+    // checkpoint, everything is synchronous.
+    await this.sync.refresh(row.prId, row.account);
+
     row = this.row(row.account, row.id);
     if (row.status === 'cancelled') throw new Cancelled();
-    if (row.action.type !== 'ai_review') return row;
 
     const stored = this.sync.store.snapshot(row.account, row.prId);
-    const pr = stored?.state === 'OPEN' ? stored : undefined;
-    const compared =
-      pr?.headOid === refreshed?.headOid && pr?.baseRefName === refreshed?.baseRefName
-        ? mergeBase
-        : null;
-    const problem = this.postProblem(row, row.action, pr, compared, method, args);
 
-    if (!problem) return row;
+    this.stopFor(
+      row,
+      this.postProblem(
+        row,
+        action,
+        stored?.state === 'OPEN' ? stored : undefined,
+        mergeBase,
+        method,
+        args,
+      ),
+    );
+
+    return row;
+  }
+
+  /** Why Settings, now or when the review finished, does not allow this step. */
+  private settingsProblem(action: AiReviewAction, method: string): PostProblem | null {
+    const approving = action.event === 'APPROVE';
+    const basis = action.basis;
+    const settings = this.posting();
+
+    if (!settings.postFindings)
+      return stopped('posting findings was turned off in Settings.', approving);
+
+    // Queued before Review Desk checked a review's inputs: comments still go out while posting
+    // is on, but an approval or a resolution is yours to send.
+    if (!basis)
+      return approving || method === 'setThreadResolved'
+        ? {
+            skipped: 'this approval was queued before Review Desk checked what a review read.',
+            code: 'LEGACY_APPROVAL',
+            hold: true,
+            attention:
+              'This automatic approval was queued before Review Desk checked what a review read. Nothing more is sent; check the PR, then approve it yourself if it still applies.',
+          }
+        : null;
+
+    if (approving && (!basis.grants.approve || !settings.approveFindings))
+      return stopped('automatic approval was turned off in Settings.', approving);
+    if (method === 'setThreadResolved' && (!basis.grants.resolve || !settings.resolveThreads))
+      return stopped('resolving threads was turned off in Settings.', approving);
+
+    return null;
+  }
+
+  /** Records why a post stops: skipped when nothing was sent yet, otherwise needing attention. */
+  private stopFor(row: OperationRecord, problem: PostProblem | null): void {
+    if (!problem) return;
 
     if (!problem.hold && !row.steps.some((step) => step.completedAt || step.uncertain)) {
       this.save({
@@ -1110,7 +1181,10 @@ export class OperationQueue {
     throw new ReviewError(problem.code, 409, problem.attention);
   }
 
-  /** Synchronous, so nothing it reads can change before the step it allows is checkpointed. */
+  /**
+   * Synchronous, so nothing it reads can change before the step it allows is checkpointed.
+   * `mergeBase` is the reviewed head's live merge base on the reviewed target branch.
+   */
   private postProblem(
     row: OperationRecord,
     action: AiReviewAction,
@@ -1120,11 +1194,7 @@ export class OperationQueue {
     args: unknown[],
   ): PostProblem | null {
     const approving = action.event === 'APPROVE';
-    const stop = (skipped: string, code = 'POST_STOPPED'): PostProblem => ({
-      skipped,
-      code,
-      attention: `${skipped.charAt(0).toUpperCase()}${skipped.slice(1)} Nothing more is sent; check the PR${approving ? ', then approve it yourself if it still applies' : ''}.`,
-    });
+    const stop = (skipped: string, code?: string) => stopped(skipped, approving, code);
 
     if (!pr) return stop('this PR is no longer tracked.', 'NOT_FOUND');
     if (pr.headOid !== action.expectedHeadOid)
@@ -1133,25 +1203,10 @@ export class OperationQueue {
         'HEAD_MOVED',
       );
 
+    const allowed = this.settingsProblem(action, method);
     const basis = action.basis;
-    const resolving = method === 'setThreadResolved';
-    const settings = this.posting();
 
-    if (!settings.postFindings) return stop('posting findings was turned off in Settings.');
-
-    // Queued before Review Desk checked a review's inputs: comments still go out while posting
-    // is on, but an approval or a resolution is yours to send.
-    if (!basis)
-      return approving || resolving
-        ? {
-            skipped: 'this approval was queued before Review Desk checked what a review read.',
-            code: 'LEGACY_APPROVAL',
-            hold: true,
-            attention:
-              'This automatic approval was queued before Review Desk checked what a review read. Nothing more is sent; check the PR, then approve it yourself if it still applies.',
-          }
-        : null;
-
+    if (allowed || !basis) return allowed;
     if (pr.baseRefName !== basis.baseRefName)
       return stop('the PR now targets another branch.', 'BASE_CHANGED');
     if (mergeBase !== basis.mergeBaseOid)
@@ -1175,17 +1230,13 @@ export class OperationQueue {
       );
 
     if (approving) {
-      if (!basis.grants.approve || !settings.approveFindings)
-        return stop('automatic approval was turned off in Settings.');
       if (pr.isDraft) return stop('the PR was turned into a draft.');
       if (isSameUser(pr.author.login, row.account)) return stop('you cannot approve your own PR.');
     }
 
-    if (resolving) {
+    if (method === 'setThreadResolved') {
       const thread = pr.threads.find((candidate) => candidate.id === String(args[0]));
 
-      if (!basis.grants.resolve || !settings.resolveThreads)
-        return stop('resolving threads was turned off in Settings.');
       if (!basis.threadIds.includes(String(args[0])) || !thread || thread.isResolved)
         return stop(
           'the PR or its discussion changed after this review. Run it again to review it.',
