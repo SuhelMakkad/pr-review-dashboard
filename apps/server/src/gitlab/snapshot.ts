@@ -119,6 +119,8 @@ export interface RawVersion {
   /** The target branch commit the version's diff starts from (a snapshot's base). */
   start_commit_sha?: string | null;
   base_commit_sha?: string | null;
+  /** `collected` while its patches are stored; `without_files` once GitLab cleaned them up. */
+  state?: string;
   created_at: string;
 }
 

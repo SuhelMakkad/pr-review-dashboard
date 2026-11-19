@@ -725,6 +725,41 @@ describe('GitLab merge request snapshots', () => {
     }
   });
 
+  it('shows the live diff, unpinned, when the diff version cannot be read', async () => {
+    const pinned = { headOid: HEAD2, baseOid: START };
+
+    // Its stored patches were cleaned up: GitLab lists none for it.
+    const cleaned = gitlab();
+
+    cleaned.fake.on('GET', `${MR_BY_PATH}/versions/2`, {
+      data: {
+        id: 2,
+        head_commit_sha: HEAD2,
+        start_commit_sha: START,
+        state: 'without_files',
+        diffs: [],
+      },
+    });
+
+    const fromCleaned = await cleaned.client.pinnedFiles('acme/platform/web', 12, pinned);
+
+    expect(fromCleaned.pinned).toBe(false);
+    expect(fromCleaned.files.map((file) => file.path)).toEqual(['src/app.ts', 'src/new.ts']);
+    expect(fromCleaned.files.every((file) => !file.viewedKey)).toBe(true);
+
+    // The version endpoints fail, while the live diff works.
+    for (const failing of [`${MR_BY_PATH}/versions`, `${MR_BY_PATH}/versions/2`]) {
+      const { client, fake } = gitlab();
+
+      fake.on('GET', failing, { status: 503, data: { message: '503 Service Unavailable' } });
+
+      const listed = await client.pinnedFiles('acme/platform/web', 12, pinned);
+
+      expect(listed.pinned).toBe(false);
+      expect(listed.files).toHaveLength(2);
+    }
+  });
+
   it('detects changes per project and asks about running pipelines', async () => {
     const { client, fake } = gitlab();
 

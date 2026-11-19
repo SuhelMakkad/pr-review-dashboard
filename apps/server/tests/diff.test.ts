@@ -274,7 +274,7 @@ describe('diffs that cannot be pinned to the revision shown', () => {
     }
   });
 
-  it('shows the full diff with its own keys when the reviewed commit is gone, read once', async () => {
+  it('shows the full diff as listed when the reviewed commit is gone, read once', async () => {
     const { diffs, github, byNumber, close } = await demo();
 
     try {
@@ -283,23 +283,23 @@ describe('diffs that cannot be pinned to the revision shown', () => {
       const pullFiles = github.pullFiles.bind(github);
       let reads = 0;
 
+      // The first listing cannot be pinned; any later one would be, with keys.
       (github as GitHubApi).pinnedFiles = async (repository, number) => {
         reads++;
 
-        return {
-          files: (await pullFiles(repository, number)).map((file) => ({
-            ...file,
-            viewedKey: `listed:${reads}:${file.path}`,
-          })),
-          pinned: true,
-        };
+        const files = await pullFiles(repository, number);
+
+        return reads === 1
+          ? { files, pinned: false }
+          : { files: files.map((file) => ({ ...file, viewedKey: 'later' })), pinned: true };
       };
 
       const since = await diffs.manifest(keyed, 'since-review', '0'.repeat(40));
 
       expect(since.kind).toBe('unavailable');
       expect(reads).toBe(1);
-      expect(since.files.every((file) => file.viewedKey?.startsWith('listed:1:'))).toBe(true);
+      expect(since.files.length).toBeGreaterThan(0);
+      expect(since.files.every((file) => !file.viewedKey)).toBe(true);
     } finally {
       close();
     }

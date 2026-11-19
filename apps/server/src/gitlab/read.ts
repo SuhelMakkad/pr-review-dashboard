@@ -594,24 +594,34 @@ export class GitLab implements GitHubApi {
     revision: { headOid: string; baseOid: string | null },
   ): Promise<PinnedFiles> {
     const path = `${projectPath(repository)}/merge_requests/${number}`;
+    // The live diff, unkeyed: shown, but not kept and not markable as viewed.
+    const live = async (): Promise<PinnedFiles> => ({
+      files: (await this.diffs(path)).map(remoteFile),
+      pinned: false,
+    });
     const versions = await paginate<RawVersion>(
       this.transport,
       `${path}/versions`,
       'Could not load versions',
-    );
-    const version = versions.find(
+    ).catch(() => null);
+    const version = versions?.find(
       (candidate) =>
         candidate.head_commit_sha === revision.headOid &&
         (candidate.start_commit_sha ?? null) === revision.baseOid,
     );
 
-    if (!version) return { files: (await this.diffs(path)).map(remoteFile), pinned: false };
+    if (!version) return live();
 
     const detail = await call<RawVersion & { diffs?: RawDiff[] }>(
       this.transport,
       { path: `${path}/versions/${version.id}` },
       'Could not load the merge request diff',
-    );
+    ).catch(() => null);
+
+    // GitLab can clean up an old version's stored patches (`without_files`); its list is then
+    // empty although the merge request still has changes, which the live diff rebuilds.
+    if (!detail || detail.state === 'without_files' || !Array.isArray(detail.diffs)) return live();
+
     const key = { head: version.head_commit_sha, start: version.start_commit_sha ?? null };
 
     return {
