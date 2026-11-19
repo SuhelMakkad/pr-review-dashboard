@@ -46,8 +46,15 @@ export function publicationFingerprint(
   runId: string,
   account: string,
   resolved: ReadonlySet<string> = new Set(),
+  /** This post's own approval went out before its summary: its review is left out too. */
+  approved = false,
 ): string {
   const marker = postedReviewMarker(runId);
+  const ownApproval = (review: PullRequestSnapshot['reviews'][number]) =>
+    approved &&
+    review.state === 'APPROVED' &&
+    review.body === '' &&
+    review.commitOid === pr.headOid;
 
   return fingerprint({
     headOid: pr.headOid,
@@ -59,7 +66,7 @@ export function publicationFingerprint(
     // What each says, never when it changed: GitLab renews its notes' times when a discussion is
     // resolved, and reviews and verdicts read from those notes take their times from them.
     reviews: pr.reviews
-      .filter((review) => !review.body.startsWith(marker))
+      .filter((review) => !review.body.startsWith(marker) && !ownApproval(review))
       .map((review) => ({
         id: review.id,
         state: review.state,

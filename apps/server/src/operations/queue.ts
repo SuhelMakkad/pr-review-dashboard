@@ -103,27 +103,52 @@ function nextPostMethod(row: OperationRecord): string {
     : 'addConversationComment';
 }
 
-/** What of an automatic approval is on the PR: your approval of the head, and its summary. */
-function postEffects(row: OperationRecord, pr: PullRequestSnapshot | undefined) {
+/**
+ * Your approval of the head an automatic approval is for, as the PR shows it. Where approvals
+ * carry their text (GitHub), a review is one submission on one commit. Where they are read from
+ * their own notes (GitLab), the approval's commit is the version that was current when its note
+ * was made; a review there groups nearby notes and can take another note's commit, so it never
+ * counts, and an approval without its note says no commit at all.
+ */
+function approvalOf(
+  row: OperationRecord,
+  pr: PullRequestSnapshot | undefined,
+  carries: boolean,
+): { id: string; url: string } | undefined {
   const action = row.action as AiReviewAction;
-  const marker = postedReviewMarker(action.runId);
 
-  return {
-    approved: pr?.reviews.find(
+  if (carries)
+    return pr?.reviews.find(
       (review) => review.state === 'APPROVED' && review.commitOid === action.expectedHeadOid,
-    ),
-    summary: pr?.conversation.find(
-      (comment) => isSameUser(comment.author.login, row.account) && comment.body.startsWith(marker),
-    ),
-  };
+    );
+
+  const verdict = pr?.verdicts?.find(
+    (candidate) =>
+      candidate.id &&
+      isSameUser(candidate.login, row.account) &&
+      candidate.state === 'APPROVED' &&
+      candidate.commitOid === action.expectedHeadOid,
+  );
+
+  return verdict ? { id: verdict.id!, url: row.prUrl } : undefined;
 }
 
 /** An automatic post stopped for `skipped`: as said before anything was sent, and after. */
-function stopped(skipped: string, approving: boolean, code = 'POST_STOPPED'): PostProblem {
+function stopped(
+  skipped: string,
+  approving: boolean,
+  code = 'POST_STOPPED',
+  /** The approval already went out and only its summary is stopped. */
+  summary = false,
+): PostProblem {
+  const reason = `${skipped.charAt(0).toUpperCase()}${skipped.slice(1)}`;
+
   return {
     skipped,
     code,
-    attention: `${skipped.charAt(0).toUpperCase()}${skipped.slice(1)} Nothing more is sent; check the PR${approving ? ', then approve it yourself if it still applies' : ''}.`,
+    attention: summary
+      ? `${reason} The PR was approved, but its summary was not posted; check the PR.`
+      : `${reason} Nothing more is sent; check the PR${approving ? ', then approve it yourself if it still applies' : ''}.`,
   };
 }
 
@@ -633,7 +658,9 @@ export class OperationQueue {
                 ? 'Cancelled before sending. Your draft is preserved.'
                 : uncertain
                   ? 'Stopped. Check GitHub: this review may already be posted.'
-                  : 'Cancelled. Nothing was posted.',
+                  : row.steps.some((step) => step.method === 'approveReview' && step.completedAt)
+                    ? 'Cancelled. The PR was approved; its summary was not posted.'
+                    : 'Cancelled. Nothing was posted.',
         });
         new DraftStore(this.sync.store).unlock(account, row.prId, id);
       });
@@ -759,7 +786,9 @@ export class OperationQueue {
       }
 
       // An automatic post Settings no longer allows stops before anything is read for it, and
-      // when a read fails, rather than waiting ahead of your own actions on the PR.
+      // when a read fails, rather than waiting ahead of your own actions on the PR. A combined
+      // approval the forge refused is first checked for what went out (`planApproval`).
+      const combined = this.refusedCombined(row);
       const allowed = () => {
         if (row.action.type !== 'ai_review') return;
 
@@ -771,7 +800,7 @@ export class OperationQueue {
         );
       };
 
-      allowed();
+      if (!combined) allowed();
 
       const preflight = async () => {
         const identity = await this.sync.github.identity();
@@ -787,11 +816,17 @@ export class OperationQueue {
       };
       const pr = await preflight().catch((error: unknown) => {
         this.coolDown(error);
-        allowed();
+        if (!combined) allowed();
 
         throw error;
       });
       if (this.row(row.account, row.id).status === 'cancelled') return;
+
+      const planned = await this.planApproval(row, pr);
+
+      if (!planned) return;
+      row = planned;
+      if (combined) allowed();
 
       // Posting was automatic, so an outdated review is skipped rather than left needing attention,
       // which would also hold back your own actions on the PR. Once a step may have gone out,
@@ -813,11 +848,6 @@ export class OperationQueue {
       }
 
       if (!pr) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer available.');
-
-      const split = this.planApproval(row, pr);
-
-      if (!split) return;
-      row = split;
 
       const action = row.action;
       if (
@@ -1145,15 +1175,37 @@ export class OperationQueue {
   }
 
   /**
+   * True for a row from before plans were versioned that sent an approval and its summary in one
+   * step, which the forge answered with an error: the approval may have gone out without it.
+   */
+  private refusedCombined(row: OperationRecord): boolean {
+    const action = row.action;
+    const step = row.steps.find((candidate) => candidate.method === 'approveReview');
+
+    return Boolean(
+      action.type === 'ai_review' &&
+      action.event === 'APPROVE' &&
+      !row.plan &&
+      !this.sync.github.approvalCarriesSummary &&
+      step &&
+      !step.completedAt &&
+      !step.uncertain,
+    );
+  }
+
+  /**
    * Where the forge's approval carries no summary (GitLab), an automatic approval is sent as two
    * steps, the approval and then its summary (plan 2). A row from before plans were versioned
-   * sent both in one `approveReview` step. One that GitLab answered (with or without the
-   * summary) is checked on the PR, as it now is: both there means done; the approval alone
-   * means only the summary is left; neither means both are sent. A summary without its approval
-   * waits for you. A step whose response was lost is left to `reconcile`. Null when the row is
-   * settled here.
+   * sent both in one `approveReview` step. One the forge refused is checked on the PR, as it is
+   * now, before anything else decides about it: both there means done; the approval alone means
+   * only the summary is left; neither means both are sent. The summary is looked for through
+   * every page of the conversation, and a summary without its approval waits for you. A step
+   * whose response was lost is left to `reconcile`. Null when the row is settled here.
    */
-  private planApproval(row: OperationRecord, pr: PullRequestSnapshot): OperationRecord | null {
+  private async planApproval(
+    row: OperationRecord,
+    pr: PullRequestSnapshot | undefined,
+  ): Promise<OperationRecord | null> {
     const action = row.action;
 
     if (action.type !== 'ai_review' || action.event !== 'APPROVE' || row.plan === 2) return row;
@@ -1162,12 +1214,22 @@ export class OperationQueue {
     const index = row.steps.findIndex((step) => step.method === 'approveReview');
 
     if (index === -1) return this.save({ ...row, plan: 2 });
+    if (!this.refusedCombined(row)) return row;
+    if (!pr)
+      throw new ReviewError(
+        'UNCONFIRMED',
+        409,
+        'This PR is no longer tracked, so Review Desk cannot tell whether its approval went out. Check the PR.',
+      );
 
     const step = row.steps[index];
-
-    if (step.completedAt || step.uncertain) return row;
-
-    const { approved, summary } = postEffects(row, pr);
+    const approved = approvalOf(row, pr, false);
+    const summary = await this.sync.github.markedComment(
+      row.repository,
+      row.number,
+      row.account,
+      postedReviewMarker(action.runId),
+    );
 
     if (approved && summary) {
       this.complete(row, { url: summary.url });
@@ -1241,8 +1303,7 @@ export class OperationQueue {
     let target: string | null = null;
     let compared: string | null = null;
 
-    // The summary of an approval already given checks only what it says: nothing to look up.
-    if (basis && !isSummary(action, method)) {
+    if (basis) {
       target = await read(() => this.sync.github.branchHead(row.repository, basis.baseRefName));
       compared = target
         ? ((
@@ -1300,10 +1361,12 @@ export class OperationQueue {
     const settings = this.posting();
 
     if (!settings.postFindings)
-      return stopped('posting findings was turned off in Settings.', approving);
-
-    // The approval it summarises already went out: Settings for approving no longer apply.
-    if (basis && isSummary(action, method)) return null;
+      return stopped(
+        'posting findings was turned off in Settings.',
+        approving,
+        undefined,
+        isSummary(action, method),
+      );
 
     // Queued before Review Desk checked a review's inputs: comments still go out while posting
     // is on, but an approval or a resolution is yours to send.
@@ -1318,7 +1381,12 @@ export class OperationQueue {
           }
         : null;
 
-    if (approving && (!basis.grants.approve || !settings.approveFindings))
+    // A summary follows an approval that went out: approving no longer governs it.
+    if (
+      approving &&
+      !isSummary(action, method) &&
+      (!basis.grants.approve || !settings.approveFindings)
+    )
       return stopped('automatic approval was turned off in Settings.', approving);
     if (method === 'setThreadResolved' && (!basis.grants.resolve || !settings.resolveThreads))
       return stopped('resolving threads was turned off in Settings.', approving);
@@ -1364,7 +1432,8 @@ export class OperationQueue {
     args: unknown[],
   ): PostProblem | null {
     const approving = action.event === 'APPROVE';
-    const stop = (skipped: string, code?: string) => stopped(skipped, approving, code);
+    const stop = (skipped: string, code?: string) =>
+      stopped(skipped, approving, code, isSummary(action, method));
 
     if (!pr) return stop('this PR is no longer tracked.', 'NOT_FOUND');
     if (pr.headOid !== action.expectedHeadOid)
@@ -1376,9 +1445,7 @@ export class OperationQueue {
     const allowed = this.settingsProblem(action, method);
     const basis = action.basis;
 
-    // The summary of an approval already given: it describes the reviewed head, which is still
-    // the PR's, and the approval it goes with stands whatever the discussion does now.
-    if (allowed || !basis || isSummary(action, method)) return allowed;
+    if (allowed || !basis) return allowed;
     if (pr.baseRefName !== basis.baseRefName)
       return stop('the PR now targets another branch.', 'BASE_CHANGED');
     if (mergeBase === undefined)
@@ -1402,14 +1469,21 @@ export class OperationQueue {
 
     if (
       [...resolved].some((id) => !pr.threads.find((thread) => thread.id === id)?.isResolved) ||
-      publicationFingerprint(pr, action.runId, row.account, resolved) !== basis.fingerprint
+      publicationFingerprint(
+        pr,
+        action.runId,
+        row.account,
+        resolved,
+        // Before its summary, the approval this post gave is its own, not new discussion.
+        row.steps.some((step) => step.method === 'approveReview' && step.completedAt),
+      ) !== basis.fingerprint
     )
       return stop(
         'the PR or its discussion changed after this review. Run it again to review it.',
         'DISCUSSION_CHANGED',
       );
 
-    if (approving) {
+    if (approving && !isSummary(action, method)) {
       if (pr.isDraft) return stop('the PR was turned into a draft.');
       if (isSameUser(pr.author.login, row.account)) return stop('you cannot approve your own PR.');
     }
@@ -1644,24 +1718,32 @@ export class OperationQueue {
 
         const action = row.action;
         const pr = this.sync.detail(row.prId)?.snapshot;
-        const { approved, summary } = postEffects(row, pr);
-        const carried = pr?.reviews.find(
-          (review) =>
-            review.state === 'APPROVED' &&
-            review.commitOid === action.expectedHeadOid &&
-            review.body === action.body,
-        );
+        const carries = this.sync.github.approvalCarriesSummary;
 
-        // An approval sent alone (plan 2) is confirmed by your approval of the head. One that
-        // carries its summary (GitHub) by that review's text. A step that sent an approval and
-        // a note together (rows from before plan 2) only by both: either alone is inconclusive,
-        // so it stays unconfirmed for you.
-        const receipt =
-          step.args[2] === ''
-            ? approved
-            : this.sync.github.approvalCarriesSummary
-              ? carried
-              : approved && summary;
+        // An approval sent alone (plan 2) is confirmed by your approval of the head (see
+        // `approvalOf`). One that carries its summary (GitHub) by the review with its text. A
+        // step that sent an approval and a note together (rows from before plan 2) only by both,
+        // the note found through every page: either alone is inconclusive, so it stays
+        // unconfirmed for you.
+        let receipt: { id: string; url: string } | null | undefined;
+
+        if (step.args[2] === '') {
+          receipt = approvalOf(row, pr, carries);
+        } else if (carries) {
+          receipt = pr?.reviews.find(
+            (review) =>
+              review.state === 'APPROVED' &&
+              review.commitOid === action.expectedHeadOid &&
+              review.body === action.body,
+          );
+        } else if (approvalOf(row, pr, false)) {
+          receipt = await this.sync.github.markedComment(
+            row.repository,
+            row.number,
+            row.account,
+            postedReviewMarker(action.runId),
+          );
+        }
 
         if (receipt) {
           confirmed = true;

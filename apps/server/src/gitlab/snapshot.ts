@@ -195,6 +195,9 @@ const actor = (user: RawUser | null | undefined): Actor =>
 
 export const noteUrl = (mr: { web_url: string }, noteId: number) => `${mr.web_url}#note_${noteId}`;
 
+/** Starts every automatic AI review post (see `postedReviewMarker`). */
+const AI_REVIEW_MARKER = '<!-- review-desk:ai-review ';
+
 /** `group/sub/project!12` → `group/sub/project`; falls back to the web URL's path. */
 export function repositoryOf(mr: Pick<RawMergeRequest, 'references' | 'web_url'>): string {
   const full = mr.references?.full;
@@ -457,11 +460,18 @@ export function viewerReviews(
   for (const entry of own) {
     const group = groups.at(-1);
     const previous = group?.at(-1);
+    // An automatic AI review's summary belongs to the approval it follows, however long after:
+    // the two are separate writes, and a retry can part them by more than the gap.
+    const summarises =
+      !entry.note.system &&
+      entry.note.body.startsWith(AI_REVIEW_MARKER) &&
+      previous !== undefined &&
+      verdictOf(previous.note) === 'approved';
 
     if (
       group &&
       previous &&
-      time(entry.note.created_at) - time(previous.note.created_at) <= REVIEW_GAP_MS
+      (summarises || time(entry.note.created_at) - time(previous.note.created_at) <= REVIEW_GAP_MS)
     )
       group.push(entry);
     else groups.push([entry]);

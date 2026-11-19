@@ -177,6 +177,10 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
     return this.target().branchHead(repository, branch);
   }
 
+  markedComment(repository: string, number: number, author: string, marker: string) {
+    return this.target().markedComment(repository, number, author, marker);
+  }
+
   searchPullIds(query: string) {
     return this.target().searchPullIds(query);
   }

@@ -1418,9 +1418,180 @@ describe('approvals whose summary is a separate write', () => {
     },
   );
 
+  it.each([
+    [
+      'someone comments',
+      'DISCUSSION_CHANGED',
+      ({ pull }: Setup) => commentOn(pull(1839).snapshot, 'This breaks the retry loop.'),
+    ],
+    [
+      'the PR is retargeted',
+      'BASE_CHANGED',
+      ({ pull }: Setup) => {
+        pull(1839).snapshot.baseRefName = 'release';
+        pull(1839).snapshot.updatedAt = new Date().toISOString();
+      },
+    ],
+  ])(
+    'does not post the summary over a PR that changed after approving: %s',
+    async (_change, code, change) => {
+      const context = await gitlabLike();
+      const { github, queue, review, posted } = context;
+
+      github.failNext = 'AddComment';
+
+      const run = await review();
+      const failed = await posted(run.id, 'needs_attention');
+
+      change(context);
+      await queue.control('you', failed.id, 'retry');
+      await expect
+        .poll(() => queue.get('you', failed.id).error?.code, { timeout: 2500, interval: 20 })
+        .toBe(code);
+
+      expect(queue.get('you', failed.id).error?.message).toContain(
+        'The PR was approved, but its summary was not posted',
+      );
+      expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
+    },
+  );
+
+  it('says the PR was approved when its summary is cancelled', async () => {
+    const { github, queue, review, posted } = await gitlabLike();
+
+    github.failNext = 'AddComment';
+
+    const run = await review();
+    const failed = await posted(run.id, 'needs_attention');
+    const { operation } = await queue.control('you', failed.id, 'cancel');
+
+    expect(operation.progress).toBe('Cancelled. The PR was approved; its summary was not posted.');
+  });
+
+  it('does not take a review that groups other notes for the approval of the head', async () => {
+    const context = await gitlabLike();
+    const { github, queue, store, pull, review, posted } = context;
+
+    await queue.pause();
+
+    const run = await review();
+    const data = stored(context, run.id);
+    const action = data.action as Extract<typeof data.action, { type: 'ai_review' }>;
+    const snapshot = pull(1839).snapshot;
+    const now = new Date().toISOString();
+
+    // Stopped after saving the approval step, before sending it. A review on the head that only
+    // groups notes is on the PR, but no approval of the head is.
+    snapshot.reviews.push({
+      id: 'grouped',
+      state: 'APPROVED',
+      submittedAt: now,
+      updatedAt: now,
+      commitOid: action.expectedHeadOid,
+      body: '',
+      url: `${snapshot.url}#grouped`,
+    });
+    store.db
+      .update(githubOperations)
+      .set({
+        status: 'checking',
+        data: {
+          ...data,
+          plan: 2,
+          status: 'checking',
+          steps: [
+            {
+              method: 'approveReview',
+              args: [data.prId, action.expectedHeadOid, ''],
+              startedAt: now,
+              completedAt: null,
+              result: null,
+              uncertain: true,
+            },
+          ],
+        },
+      })
+      .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
+      .run();
+    queue.resume();
+
+    expect((await posted(run.id, 'needs_attention')).error?.code).toBe('UNCONFIRMED');
+    expect(github.writes).toEqual([]);
+  });
+
+  it.each([
+    ['after the approval', 1, ['AddComment']],
+    ['after the summary', 2, []],
+  ])(
+    'resumes after a restart right %s, sending only what is left',
+    async (_when, receipts, writes) => {
+      const context = await gitlabLike();
+      const { github, queue, sync, store, review, runner } = context;
+
+      await queue.pause();
+
+      const run = await review();
+      const data = stored(context, run.id);
+      const action = data.action as Extract<typeof data.action, { type: 'ai_review' }>;
+      const now = new Date().toISOString();
+      const receipt = (method: string, args: unknown[]) => ({
+        method,
+        args,
+        startedAt: now,
+        completedAt: now,
+        result: { url: `${data.prUrl}#receipt` },
+        uncertain: false,
+        acknowledged: true,
+      });
+
+      // What the forge holds, and the receipts as the outbox saved them, with the process
+      // stopped right after the last.
+      await github.approveReview(data.prId, action.expectedHeadOid, '');
+      if (receipts === 2) await github.addConversationComment(data.prId, action.body);
+      store.db
+        .update(githubOperations)
+        .set({
+          status: 'running',
+          data: {
+            ...data,
+            plan: 2,
+            status: 'running',
+            steps: [
+              receipt('approveReview', [data.prId, action.expectedHeadOid, '']),
+              ...(receipts === 2
+                ? [receipt('addConversationComment', [data.prId, action.body])]
+                : []),
+            ],
+          },
+        })
+        .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
+        .run();
+      github.writes.length = 0;
+      await queue.close();
+
+      const reopened = new OperationQueue(sync, {
+        mutationIntervalMs: 0,
+        retryDelaysMs: [1, 2, 3],
+      });
+
+      reopened.posting = () => runner.settings();
+      cleanups.push(() => reopened.close());
+      reopened.open();
+
+      await expect
+        .poll(() => reopened.get('you', data.id).status, { timeout: 2500, interval: 20 })
+        .toBe('succeeded');
+      expect(github.writes.map((write) => write.op)).toEqual(writes);
+    },
+  );
+
   describe('a row from before approvals were split', () => {
     /** Queues the post, then rewrites it as the old plan saved it: one step for both writes. */
-    const legacy = async (on: { approved: boolean; summary: boolean }, answered: boolean) => {
+    const legacy = async (
+      on: { approved: boolean; summary: boolean },
+      answered: boolean,
+      before?: (context: Setup) => void,
+    ) => {
       const context = await setup();
       const { github, queue, pull, store, review, setPosting } = context;
 
@@ -1433,15 +1604,14 @@ describe('approvals whose summary is a separate write', () => {
       const snapshot = pull(1839).snapshot;
       const now = new Date().toISOString();
 
+      // As GitLab reads it: a verdict from the approval's own note.
       if (on.approved)
-        snapshot.reviews.push({
-          id: 'approved-earlier',
+        snapshot.verdicts.push({
+          id: 'note-approved-earlier',
+          login: 'you',
           state: 'APPROVED',
           submittedAt: now,
-          updatedAt: now,
           commitOid: action.expectedHeadOid,
-          body: '',
-          url: `${snapshot.url}#approved-earlier`,
         });
       if (on.summary)
         commentOn(snapshot, `${postedReviewMarker(run.id)}\nNo blocking findings.`, 'you');
@@ -1471,6 +1641,7 @@ describe('approvals whose summary is a separate write', () => {
         .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
         .run();
       github.approvalCarriesSummary = false;
+      before?.(context);
       queue.resume();
 
       return { ...context, run };
@@ -1485,6 +1656,45 @@ describe('approvals whose summary is a separate write', () => {
 
       await posted(run.id);
       expect(github.writes.map((write) => write.op)).toEqual(writes);
+    });
+
+    it('is checked for what went out before Settings or new commits can stop it', async () => {
+      // Approving was turned off after GitLab took the approval and refused its summary.
+      const off = await legacy({ approved: true, summary: false }, true, (context) =>
+        context.setPosting(true, undefined, { approveFindings: false, resolveThreads: false }),
+      );
+
+      await off.posted(off.run.id);
+      expect(off.github.writes.map((write) => write.op)).toEqual(['AddComment']);
+
+      // New commits arrived meanwhile: the approval stands, and only its summary is held.
+      const moved = await legacy({ approved: true, summary: false }, true, ({ pull }) => {
+        pull(1839).snapshot.headOid = 'pushed-after-approving';
+        pull(1839).snapshot.updatedAt = new Date().toISOString();
+      });
+      const held = await moved.posted(moved.run.id, 'needs_attention');
+
+      expect(held.error?.message).toContain('The PR was approved, but its summary was not posted');
+      expect(moved.github.writes).toEqual([]);
+    });
+
+    it('finds the summary through every page, and never assumes it is missing', async () => {
+      // Pushed out of the snapshot's latest comments, but on the PR.
+      const found = await legacy({ approved: true, summary: false }, true, ({ github }) => {
+        vi.spyOn(github, 'markedComment').mockResolvedValue({ id: 'older', url: 'older-url' });
+      });
+
+      await found.posted(found.run.id);
+      expect(found.github.writes).toEqual([]);
+
+      const unknown = await legacy({ approved: true, summary: false }, true, ({ github }) => {
+        vi.spyOn(github, 'markedComment').mockRejectedValue(
+          new GitHubError('The conversation is too long to check for an earlier post.'),
+        );
+      });
+
+      await unknown.posted(unknown.run.id, 'needs_attention');
+      expect(unknown.github.writes).toEqual([]);
     });
 
     it('leaves a lost response unconfirmed unless both are on the PR', async () => {

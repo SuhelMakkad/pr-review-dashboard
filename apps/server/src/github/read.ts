@@ -13,6 +13,7 @@ import type {
   ThreadComment,
 } from '@review-desk/shared/types';
 import { createHash } from 'node:crypto';
+import { isSameUser } from '@review-desk/shared/accounts';
 import { SNAPSHOT_VERSION } from '@review-desk/shared/snapshot';
 import type {
   BlobText,
@@ -610,6 +611,42 @@ export class GitHub implements GitHubApi {
     }
 
     return files;
+  }
+
+  async markedComment(
+    repository: string,
+    number: number,
+    author: string,
+    marker: string,
+  ): Promise<{ id: string; url: string } | null> {
+    const request = this.requireRequest();
+
+    // Up to 10,000 comments; past that, absence cannot be shown.
+    for (let page = 1; page <= 100; page++) {
+      const response = await request<
+        { id: number; html_url: string; body?: string; user?: { login: string } | null }[]
+      >({ path: `repos/${repository}/issues/${number}/comments?per_page=100&page=${page}` });
+
+      if (response.status >= 400)
+        throw new GitHubError(
+          `Could not read the conversation (HTTP ${response.status}).`,
+          null,
+          response.status,
+        );
+
+      const found = response.data.find(
+        (comment) =>
+          comment.user &&
+          isSameUser(comment.user.login, author) &&
+          comment.body?.startsWith(marker),
+      );
+
+      if (found) return { id: String(found.id), url: found.html_url };
+      if (response.data.length < 100 || !/rel="next"/.test(response.headers.link ?? ''))
+        return null;
+    }
+
+    throw new GitHubError('The conversation is too long to check for an earlier post.');
   }
 
   async branchHead(repository: string, branch: string): Promise<string | null> {

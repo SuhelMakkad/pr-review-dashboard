@@ -8,6 +8,8 @@ import { GitHubError, safeError } from '@/github/errors.js';
 import { GlabAccounts } from '@/gitlab/accounts.js';
 import { commentPosition, locate, parseDiff } from '@/gitlab/positions.js';
 import { GitLab } from '@/gitlab/read.js';
+import { viewerReviews, type RawDiscussion, type RawMergeRequest } from '@/gitlab/snapshot.js';
+import { reviewFingerprint } from '@/ai/freshness.js';
 import {
   baseGlabEnvironment,
   glabCwd,
@@ -555,6 +557,49 @@ describe('GitLab merge request snapshots', () => {
     // The jobs read were pipeline 55's, so its status is shown with them.
     expect(pr.ci).toBe('pending');
     expect(fake.calls.some((call) => call.path.startsWith('projects/7/pipelines/56'))).toBe(false);
+  });
+
+  it('keeps an automatic summary with its approval, however long after it was posted', () => {
+    const mr = { web_url: WEB } as RawMergeRequest;
+    const note = (id: number, body: string, system: boolean, minute: number) => ({
+      id,
+      type: null,
+      body,
+      author: users.rev,
+      created_at: seconds(10 + minute, 0),
+      updated_at: seconds(10 + minute, 0),
+      system,
+    });
+    const summary =
+      '<!-- review-desk:ai-review run=run-1 -->\n**AI review** · No blocking findings';
+    const discussions: RawDiscussion[] = [
+      {
+        id: 'approval',
+        individual_note: true,
+        notes: [note(301, 'approved this merge request', true, 0)],
+      },
+      // Retried after GitLab refused it: five minutes after the approval.
+      { id: 'summary', individual_note: true, notes: [note(302, summary, false, 5)] },
+    ];
+    const versions = [{ id: 2, head_commit_sha: HEAD2, created_at: at(0) }];
+    const reviews = viewerReviews(mr, discussions, versions, 'rev');
+
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({ state: 'APPROVED', body: summary, commitOid: HEAD2 });
+
+    // So the review it came from is not out of date because of it.
+    const pr = {
+      baseOid: START,
+      headOid: HEAD2,
+      title: 'Title',
+      body: '',
+      reviews: [],
+      threads: [],
+      conversation: [],
+      requestEvents: [],
+    } as unknown as Parameters<typeof reviewFingerprint>[0];
+
+    expect(reviewFingerprint({ ...pr, reviews }, 'rev')).toBe(reviewFingerprint(pr, 'rev'));
   });
 
   it('tells a missing target branch from one that could not be read', async () => {

@@ -144,6 +144,17 @@ export interface GitHubApi extends GitHubWrites {
   compare(repository: string, base: string, head: string): Promise<CompareResult | null>;
   /** The commit `branch` points to now; null when there is no such branch. */
   branchHead(repository: string, branch: string): Promise<string | null>;
+  /**
+   * The comment `author` left in the PR's conversation that starts with `marker`, read through
+   * every page (a snapshot keeps only the latest ones). Null when there is none; throws when not
+   * every page could be read, so absence is never assumed.
+   */
+  markedComment(
+    repository: string,
+    number: number,
+    author: string,
+    marker: string,
+  ): Promise<{ id: string; url: string } | null>;
   /** PR node ids matching a search (open or closed); used to backfill history. */
   searchPullIds(query: string): Promise<string[]>;
   /** Light snapshots (requests, your reviews, verdicts) for many PRs, for review history. */
