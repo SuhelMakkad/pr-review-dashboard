@@ -55,6 +55,42 @@ export interface FullReviewResult extends DraftCommentsResult {
   coverage: string[];
 }
 
+/**
+ * What a full review was given to read, as the server observed it in the review workspace; the
+ * model's own `coverage` is what it says it read. Only a complete record lets a review approve.
+ */
+export interface ReviewInputs {
+  v: 1;
+  /** The reviewed commits: the PR's head, the merge base it was compared from, and its target. */
+  headOid: string;
+  mergeBaseOid: string;
+  targetBaseOid: string | null;
+  /**
+   * `verified` when the forge listed every file the reviewed commits change (compared by commit,
+   * or from its whole record of the revision); otherwise which files changed is not known.
+   */
+  inventory: 'verified' | 'unverified';
+  /** Changed files the forge counts for the PR. */
+  changedFiles: number;
+  /** Changed files missing from a reviewed commit's snapshot (the first 50), and how many. */
+  unreadable: { path: string; side: 'before' | 'after' }[];
+  unreadableCount: number;
+  complete: boolean;
+}
+
+/**
+ * Whether a finished full review was posted automatically, decided when it settled: queued in
+ * Activity as an approval or a comment (with why it comments where it could have approved), or
+ * not posted, and why.
+ */
+export type AiPublication =
+  { operationId: string; event: 'APPROVE' | 'COMMENT'; reason?: string } | { skipped: string };
+
+/** How many changed files a review could not read in full, where the changed files are known. */
+export function unreadFiles(inputs: ReviewInputs): number {
+  return new Set(inputs.unreadable.map((file) => file.path)).size;
+}
+
 export function hasBlockingFindings(result: FullReviewResult): boolean {
   return (
     result.assessment === 'changes_requested' ||
@@ -102,6 +138,10 @@ export interface AiRun {
   /** How far the Codex credit balance fell during the run; null when it did not or is unknown. */
   creditsUsed: number | null;
   trigger: AiRunTrigger;
+  /** Full reviews: what the review was given to read, as the server observed it. */
+  inputs?: ReviewInputs | null;
+  /** Full reviews: whether it was posted automatically when it finished, or why not. */
+  publication?: AiPublication | null;
 }
 
 /**
@@ -154,10 +194,17 @@ export interface AiSettings {
   tasks: Record<AiTask, AiTaskSettings>;
   autoReview: AutoReviewSettings;
   /**
-   * Posts each finished full review as you: approves and resolves open threads when there are
-   * no blocking findings, otherwise posts a conversation comment with the findings.
+   * Posts each finished full review as you, as a conversation comment with its findings, or as an
+   * approval where `approveFindings` allows it.
    */
   postFindings: boolean;
+  /**
+   * With `postFindings`, approves a review with no blocking findings that read every changed file,
+   * instead of commenting. Saved settings from before it existed read as on, as posting did then.
+   */
+  approveFindings: boolean;
+  /** Before such an approval, resolves the open threads the review read. */
+  resolveThreads: boolean;
 }
 
 export interface AiProviderStatus {
@@ -218,6 +265,8 @@ export const defaultAiSettings = (): AiSettings => ({
   },
   autoReview: { enabled: false, since: null },
   postFindings: false,
+  approveFindings: false,
+  resolveThreads: false,
 });
 
 /** Codex runs are refused: the plan's limit is used up, or the sign-in would not bill the plan. */

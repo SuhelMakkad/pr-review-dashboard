@@ -32,6 +32,46 @@ export function reviewFingerprint(pr: PullRequestSnapshot, account: string): str
   });
 }
 
+/**
+ * What an automatic post of run `runId` rests on: the reviewed diff and every review, comment and
+ * thread, including other runs' posts. Only this run's own post is left out, and threads it
+ * resolved (with the forge's acknowledgement) count as they were reviewed while they stay
+ * resolved: a thread reopened after that is new discussion. Fields that follow the viewer's
+ * rights (`viewerCan*`), which resolving changes, are left out.
+ */
+export function publicationFingerprint(
+  pr: PullRequestSnapshot,
+  runId: string,
+  resolved: ReadonlySet<string> = new Set(),
+): string {
+  const marker = postedReviewMarker(runId);
+
+  return fingerprint({
+    headOid: pr.headOid,
+    baseOid: pr.baseOid,
+    baseRefName: pr.baseRefName,
+    title: pr.title,
+    body: pr.body,
+    requests: pr.requestEvents,
+    reviews: pr.reviews.filter((review) => !review.body.startsWith(marker)),
+    conversation: pr.conversation.filter((comment) => !comment.body.startsWith(marker)),
+    threads: pr.threads.map((thread) => ({
+      id: thread.id,
+      isResolved: resolved.has(thread.id) && thread.isResolved ? false : thread.isResolved,
+      isOutdated: thread.isOutdated,
+      path: thread.path,
+      line: thread.line,
+      // No timestamps: GitLab touches its notes' when a discussion is resolved, and an edit
+      // changes the body.
+      comments: thread.comments.map((comment) => ({
+        id: comment.id,
+        author: comment.author.login,
+        body: comment.body,
+      })),
+    })),
+  });
+}
+
 export function draftFingerprint(draft: ReviewDraft): string {
   return fingerprint({
     event: draft.event,

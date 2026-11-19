@@ -624,6 +624,8 @@ export class GitHub implements GitHubApi {
       status: response.data.status,
       mergeBaseOid: response.data.merge_base_commit?.sha ?? null,
       files: (response.data.files ?? []).map(restFile),
+      // GitHub lists at most 300 files for a comparison; a response without a list proves none.
+      filesComplete: Array.isArray(response.data.files) && response.data.files.length < 300,
       commits: (response.data.commits ?? []).map((commit) => ({
         oid: commit.sha,
         parents: commit.parents.map((parent) => parent.sha),

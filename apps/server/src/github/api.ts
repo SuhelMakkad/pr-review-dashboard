@@ -62,12 +62,23 @@ export interface PinnedFiles {
    * it, and keyed; false when no such record exists and they come unkeyed from the live diff.
    */
   pinned: boolean;
+  /**
+   * True when `files` is the revision's whole list, not one the forge cut short for its size, and
+   * `mergeBaseOid` is the commit its diffs start from.
+   */
+  complete?: boolean;
+  mergeBaseOid?: string;
 }
 
 export interface CompareResult {
   status: 'ahead' | 'behind' | 'diverged' | 'identical';
   mergeBaseOid: string | null;
   files: RemoteFile[];
+  /**
+   * True when `files` is every file the commits change; absent where the forge may stop listing
+   * them without saying so.
+   */
+  filesComplete?: boolean;
   /** `committedAt` is the committer date, which a rebase or amend renews. */
   commits: { oid: string; parents: string[]; committedAt: string | null }[];
 }

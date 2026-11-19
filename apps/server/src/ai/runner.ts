@@ -19,10 +19,11 @@ import {
   type CodexAccountStatus,
   type DraftCommentsResult,
   type FullReviewResult,
+  type ReviewInputs,
 } from '@review-desk/shared/ai';
 import { commentableLines } from '@review-desk/shared/diff';
 import type { DraftComment, PrepareReviewOptions, ReviewDraft } from '@review-desk/shared/review';
-import type { PullRequestDetail } from '@review-desk/shared/types';
+import type { PullRequestDetail, PullRequestSnapshot } from '@review-desk/shared/types';
 import { aiRuns, type AiRunRow } from '@/db/schema.js';
 import type { DiffService } from '@/diff/service.js';
 import type { EventBus } from '@/events.js';
@@ -39,6 +40,7 @@ import {
   sinceReviewInput,
 } from '@/ai/context.js';
 import { agentExited, agentLockPath, agentRunning, type AgentProvider } from '@/ai/provider.js';
+import { evidence, revalidated, type PreparedContext } from '@/ai/inputs.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
 import { draftChanged, planPreparation, preparationRevision } from '@/ai/preparation.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
@@ -87,6 +89,13 @@ export class AiRunner {
    * the outcome is saved with it. Synchronous; a throw is ignored.
    */
   onSettled?: (row: AiRunRow) => void;
+
+  /**
+   * Called in the same transaction for a done run, with the snapshot it reviewed, to decide and
+   * queue what is posted. A throw rolls the settlement back: the run fails, keeping its checkpoint
+   * where the provider can resume, so nothing is saved done without its decision.
+   */
+  onPublish?: (row: AiRunRow, reviewed: PullRequestSnapshot) => void;
 
   constructor(
     private readonly sync: SyncService,
@@ -180,6 +189,9 @@ export class AiRunner {
       ) as AiSettings['tasks'],
       autoReview: { ...defaults.autoReview, ...saved?.autoReview },
       postFindings: saved?.postFindings ?? defaults.postFindings,
+      // Posting used to approve and resolve threads; a choice saved then keeps doing so.
+      approveFindings: saved?.approveFindings ?? saved?.postFindings ?? defaults.approveFindings,
+      resolveThreads: saved?.resolveThreads ?? saved?.postFindings ?? defaults.resolveThreads,
     };
   }
 
@@ -188,9 +200,14 @@ export class AiRunner {
    * Settings left out keep their saved value.
    */
   saveSettings(
-    settings: Omit<AiSettings, 'autoReview' | 'postFindings'> & {
+    settings: Omit<
+      AiSettings,
+      'autoReview' | 'postFindings' | 'approveFindings' | 'resolveThreads'
+    > & {
       autoReview?: { enabled: boolean };
       postFindings?: boolean;
+      approveFindings?: boolean;
+      resolveThreads?: boolean;
     },
   ): AiSettings {
     const current = this.settings();
@@ -210,6 +227,8 @@ export class AiRunner {
       },
       autoReview: { enabled, since },
       postFindings: settings.postFindings ?? current.postFindings,
+      approveFindings: settings.approveFindings ?? current.approveFindings,
+      resolveThreads: settings.resolveThreads ?? current.resolveThreads,
     });
 
     return this.settings();
@@ -334,6 +353,9 @@ export class AiRunner {
       pauseReason: row.pauseReason,
       creditsUsed: creditsUsed(row.usage),
       trigger: row.trigger,
+      ...(row.task === 'full_review'
+        ? { inputs: row.inputs ?? null, publication: row.publication ?? null }
+        : {}),
     };
   }
 
@@ -409,6 +431,8 @@ export class AiRunner {
         | 'request'
         | 'threadId'
         | 'pauseReason'
+        | 'inputs'
+        | 'publication'
       >
     >,
   ) {
@@ -637,35 +661,44 @@ export class AiRunner {
     try {
       mkdirSync(workDir, { recursive: true, mode: 0o700 });
 
-      let prepared = false;
+      let context: PreparedContext | null = null;
 
       try {
-        const context = JSON.parse(readFileSync(join(workDir, 'review.json'), 'utf8'));
-
-        prepared =
-          context.headOid === row.headOid && context.repository === saved.snapshot.repository;
+        context = JSON.parse(readFileSync(join(workDir, 'review.json'), 'utf8'));
       } catch {
         // A missing or incomplete workspace is rebuilt at the original commits.
       }
 
-      if (row.task === 'full_review' && !prepared) {
-        this.update(id, { progress: 'Preparing review…' });
-        this.emit(row);
+      const prepared =
+        context?.headOid === row.headOid && context.repository === saved.snapshot.repository;
 
-        const snapshot = saved.snapshot;
-        const diff = await this.diffs.manifest(snapshot, 'full', null);
+      if (row.task === 'full_review') {
+        let measured: ReviewInputs | null;
 
-        for (const path of ['before', 'after', 'review.json'])
-          rmSync(join(workDir, path), { recursive: true, force: true });
+        if (prepared && context) {
+          measured = await revalidated(workDir, context, saved.snapshot);
+        } else {
+          this.update(id, { progress: 'Preparing review…' });
+          this.emit(row);
 
-        await prepareReviewWorkspace(
-          this.sync.github,
-          snapshot,
-          diff,
-          workDir,
-          controller.signal,
-          this.exportRepository,
-        );
+          const snapshot = saved.snapshot;
+          const diff = await this.diffs.manifest(snapshot, 'full', null);
+
+          for (const path of ['before', 'after', 'review.json'])
+            rmSync(join(workDir, path), { recursive: true, force: true });
+
+          measured = await prepareReviewWorkspace(
+            this.sync.github,
+            snapshot,
+            diff,
+            workDir,
+            controller.signal,
+            this.exportRepository,
+          );
+        }
+
+        // Saved before the agent's turn, for the answer that turn gives (see `evidence`).
+        this.update(id, { inputs: evidence(this.row(id), measured, saved.snapshot) });
       }
 
       // Stopped or paused while the workspace was prepared: never start the agent.
@@ -709,15 +742,19 @@ export class AiRunner {
           : parsed.data;
       controller.signal.throwIfAborted();
 
-      this.settle(id, {
-        status: 'done',
-        progress: null,
-        model: result.model,
-        result: redact(JSON.stringify(output)),
-        usage: result.usage ? JSON.stringify(result.usage) : null,
-        finishedAt: new Date().toISOString(),
-        request: null,
-      });
+      this.settle(
+        id,
+        {
+          status: 'done',
+          progress: null,
+          model: result.model,
+          result: redact(JSON.stringify(output)),
+          usage: result.usage ? JSON.stringify(result.usage) : null,
+          finishedAt: new Date().toISOString(),
+          request: null,
+        },
+        saved.snapshot,
+      );
     } catch (error) {
       if (this.row(id)?.status !== 'paused')
         this.settle(id, {
@@ -757,8 +794,15 @@ export class AiRunner {
     }
   }
 
-  /** Records how a run ended, together with what `onSettled` saves about a done or failed run. */
-  private settle(id: string, changes: Parameters<AiRunner['update']>[1]): void {
+  /**
+   * Records how a run ended, together with what `onSettled` saves about a done or failed run and,
+   * for a done run, what `onPublish` decides to post about the snapshot it reviewed.
+   */
+  private settle(
+    id: string,
+    changes: Parameters<AiRunner['update']>[1],
+    reviewed?: PullRequestSnapshot,
+  ): void {
     this.sync.store.transaction(() => {
       this.update(id, changes);
 
@@ -771,7 +815,15 @@ export class AiRunner {
       } catch {
         // A listener must never lose the run's outcome.
       }
+
+      // Outside that catch: a decision that cannot be saved takes the outcome back with it.
+      if (row.status === 'done' && reviewed) this.onPublish?.(row, reviewed);
     });
+  }
+
+  /** Saves whether a settling run is posted; called by `onPublish`, inside its transaction. */
+  recordPublication(id: string, publication: NonNullable<AiRunRow['publication']>): void {
+    this.update(id, { publication });
   }
 
   /** Keeps only anchors GitHub would accept; the rest stay as unanchored suggestions. */

@@ -630,6 +630,10 @@ export class GitLab implements GitHubApi {
         viewedKey: diffKey(diff, key),
       })),
       pinned: true,
+      // Any other state (the `overflow` ones) means GitLab stored only part of the list.
+      ...((detail.state === 'collected' || detail.state === 'empty') && detail.base_commit_sha
+        ? { complete: true, mergeBaseOid: detail.base_commit_sha }
+        : {}),
     };
   }
 

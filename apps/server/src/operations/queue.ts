@@ -12,8 +12,9 @@ import {
   type OperationReceipt,
 } from '@review-desk/shared/operations';
 import { forForge, isSameUser } from '@review-desk/shared/accounts';
+import type { AiSettings } from '@review-desk/shared/ai';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
-import { postedReviewMarker } from '@/ai/freshness.js';
+import { postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
 import { githubOperations } from '@/db/schema.js';
 import { DiffService } from '@/diff/service.js';
 import type { GitHubApi } from '@/github/api.js';
@@ -80,6 +81,23 @@ function showsTarget(
 class Suspended extends Error {}
 class Cancelled extends Error {}
 
+type AiReviewAction = Extract<GitHubAction, { type: 'ai_review' }>;
+
+/** What Settings allows automatic AI review posts to do, read again before every send. */
+export type PostingSettings = Pick<
+  AiSettings,
+  'postFindings' | 'approveFindings' | 'resolveThreads'
+>;
+
+/** Why an automatic post must not go out now: as skipped before anything was sent, and after. */
+interface PostProblem {
+  skipped: string;
+  code: string;
+  attention: string;
+  /** Waits for you even when nothing was sent yet. */
+  hold?: true;
+}
+
 export interface QueueOptions {
   mutationIntervalMs?: number;
   retryDelaysMs?: number[];
@@ -97,6 +115,12 @@ export class OperationQueue {
   private readonly refreshes = new Set<Promise<unknown>>();
   private readonly interval: number;
   private readonly retryDelays: number[];
+  /** Set by the app to the AI settings; until then automatic posts are allowed nothing. */
+  posting: () => PostingSettings = () => ({
+    postFindings: false,
+    approveFindings: false,
+    resolveThreads: false,
+  });
 
   constructor(
     private readonly sync: SyncService,
@@ -190,9 +214,19 @@ export class OperationQueue {
     if (['queued', 'waiting', 'running'].includes(row.status) && !started) controls.push('cancel');
     if (row.status !== 'needs_attention') return controls;
 
-    const uncertain = row.steps.some((step) => step.uncertain && !step.completedAt);
-    if (uncertain) controls.push('check');
-    else if (
+    const unsure = row.steps.filter((step) => step.uncertain && !step.completedAt);
+    const uncertain = unsure.length > 0;
+    // An automatic post's lost resolution is never inferred (see `reconcile`): checking cannot
+    // settle it, and you can stop the rest, keeping the resolutions it confirmed.
+    const unresolvable =
+      row.action.type === 'ai_review' &&
+      uncertain &&
+      unsure.every((step) => step.method === 'setThreadResolved');
+
+    if (uncertain && !unresolvable) controls.push('check');
+    else if (uncertain) {
+      // Nothing to retry until you look: the resolution may or may not have reached the forge.
+    } else if (
       ![
         'HEAD_MOVED',
         'STALE_COMMENTS',
@@ -200,6 +234,10 @@ export class OperationQueue {
         'CHECKPOINT_CONFLICT',
         'ALREADY_SUBMITTED',
         'PENDING_REVIEW_CHANGED',
+        // An automatic post stopped on what changed since its review: retrying stops again.
+        'DISCUSSION_CHANGED',
+        'BASE_CHANGED',
+        'LEGACY_APPROVAL',
       ].includes(row.error?.code ?? '')
     )
       controls.push('retry');
@@ -207,7 +245,7 @@ export class OperationQueue {
     // Automatic posting has no local draft to restore; confirmed resolutions can be kept.
     if (
       !started ||
-      (row.action.type === 'ai_review' && !uncertain) ||
+      (row.action.type === 'ai_review' && (!uncertain || unresolvable)) ||
       (uncertain && !this.pendingId(row) && !row.steps.some((step) => step.completedAt))
     )
       controls.push(row.action.type === 'ai_review' ? 'cancel' : 'reopen');
@@ -301,6 +339,36 @@ export class OperationQueue {
     request: unknown = action,
   ): OperationReceipt {
     this.assertAccount(account);
+
+    return this.insert(account, prId, id, action, request, () => this.sync.detail(prId)?.snapshot);
+  }
+
+  /**
+   * Queues a finished AI review's post as the account that ran it, inside the caller's
+   * transaction (the run's settlement), so the run is never saved done without it. Like every
+   * row, it is sent only while that account is selected.
+   */
+  enqueueAutomatic(
+    account: string,
+    prId: string,
+    id: string,
+    action: AiReviewAction,
+  ): OperationReceipt {
+    return this.insert(account, prId, id, action, action, () => {
+      const pr = this.sync.store.snapshot(account, prId);
+
+      return pr?.state === 'OPEN' ? pr : undefined;
+    });
+  }
+
+  private insert(
+    account: string,
+    prId: string,
+    id: string,
+    action: GitHubAction,
+    request: unknown,
+    lookup: () => PullRequestSnapshot | undefined,
+  ): OperationReceipt {
     const requestKey = fingerprint({ prId, request });
     const existing = this.db
       .select({ data: githubOperations.data })
@@ -319,8 +387,8 @@ export class OperationQueue {
       return { operation: this.public(existing) };
     }
 
-    const detail = this.sync.detail(prId);
-    if (!detail) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
+    const pr = lookup();
+    if (!pr) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
 
     const lastCreatedAt = this.db
       .select({ createdAt: githubOperations.createdAt })
@@ -336,11 +404,11 @@ export class OperationQueue {
       id,
       account,
       prId,
-      repository: detail.snapshot.repository,
-      number: detail.snapshot.number,
-      title: detail.snapshot.title,
-      prUrl: detail.snapshot.url,
-      action: structuredClone(withTarget(action, detail.snapshot)),
+      repository: pr.repository,
+      number: pr.number,
+      title: pr.title,
+      prUrl: pr.url,
+      action: structuredClone(withTarget(action, pr)),
       status: 'queued',
       progress: 'Saved. Waiting to send.',
       createdAt: timestamp,
@@ -417,8 +485,11 @@ export class OperationQueue {
         .run();
     });
 
-    this.emit(row);
-    this.wake();
+    // Inside a caller's transaction, nothing is announced or sent before it commits.
+    this.sync.store.afterCommit(() => {
+      this.emit(row);
+      this.wake();
+    });
 
     return { operation: this.public(row) };
   }
@@ -650,8 +721,13 @@ export class OperationQueue {
       if (this.row(row.account, row.id).status === 'cancelled') return;
 
       // Posting was automatic, so an outdated review is skipped rather than left needing attention,
-      // which would also hold back your own actions on the PR.
-      if (row.action.type === 'ai_review' && pr?.headOid !== row.action.expectedHeadOid) {
+      // which would also hold back your own actions on the PR. Once a step may have gone out,
+      // its receipts are replayed or checked first, and the next send stops on its own checks.
+      if (
+        row.action.type === 'ai_review' &&
+        pr?.headOid !== row.action.expectedHeadOid &&
+        !row.steps.some((step) => step.completedAt || step.uncertain)
+      ) {
         this.save({
           ...row,
           status: 'cancelled',
@@ -744,9 +820,11 @@ export class OperationQueue {
       ) {
         row = this.save({
           ...row,
-          approvalThreadIds: pr.threads
-            .filter((thread) => !thread.isResolved)
-            .map((thread) => thread.id),
+          // An automatic approval resolves only the threads its review read open.
+          approvalThreadIds:
+            row.action.type === 'ai_review' && row.action.basis
+              ? row.action.basis.threadIds
+              : pr.threads.filter((thread) => !thread.isResolved).map((thread) => thread.id),
         });
       }
 
@@ -797,37 +875,10 @@ export class OperationQueue {
                 409,
                 'The GitHub account changed before sending. Sign in to the original account before retrying.',
               );
-            // Commits can land after the check before sending, while writes are paced. Every
-            // automatic post checks again right before it goes out.
-            if (row.action.type === 'ai_review') {
-              const expected = row.action.expectedHeadOid;
-
-              const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
-
-              row = this.row(row.account, row.id);
-              if (row.status === 'cancelled') throw new Cancelled();
-
-              if (pr?.headOid !== expected) {
-                // Nothing sent yet: skip the outdated post, as the check before sending does.
-                if (!row.steps.some((step) => step.completedAt || step.uncertain)) {
-                  this.save({
-                    ...row,
-                    status: 'cancelled',
-                    finishedAt: now(),
-                    progress: pr
-                      ? 'Not posted: new commits arrived after this review. Run it again to review them.'
-                      : 'Not posted: this PR is no longer tracked.',
-                  });
-                  throw new Cancelled();
-                }
-
-                throw new ReviewError(
-                  'HEAD_MOVED',
-                  409,
-                  'New commits arrived after this AI review. Run it again before approving.',
-                );
-              }
-            }
+            // Commits, discussion and Settings can change after the check before sending, while
+            // writes are paced. Every automatic post checks again right before it goes out.
+            if (row.action.type === 'ai_review')
+              row = await this.checkAutomaticPost(row, method, args);
 
             // The pacing wait and the account check above take time, and GitHub marks whichever
             // diff is current when the mark arrives: check the diff again right before it goes.
@@ -900,6 +951,7 @@ export class OperationQueue {
                 completedAt: now(),
                 result: result ?? null,
                 uncertain: false,
+                acknowledged: true,
               };
               row = this.save({ ...row, steps });
 
@@ -1004,6 +1056,130 @@ export class OperationQueue {
     } catch (error) {
       this.failed(this.row(row.account, row.id), error);
     }
+  }
+
+  /**
+   * Right before each send of an automatic AI review post: what it does must still be allowed by
+   * Settings, for the diff the PR shows and the discussion the review read. Before anything was
+   * sent, a post that fails a check is skipped with the reason; after, the rest waits for you.
+   */
+  private async checkAutomaticPost(
+    row: OperationRecord,
+    method: string,
+    args: unknown[],
+  ): Promise<OperationRecord> {
+    const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
+
+    row = this.row(row.account, row.id);
+    if (row.status === 'cancelled') throw new Cancelled();
+    if (row.action.type !== 'ai_review') return row;
+
+    const problem = await this.postProblem(row, row.action, pr, method, args);
+
+    if (!problem) return row;
+
+    if (!problem.hold && !row.steps.some((step) => step.completedAt || step.uncertain)) {
+      this.save({
+        ...row,
+        status: 'cancelled',
+        finishedAt: now(),
+        progress: `Not posted: ${problem.skipped}`,
+      });
+      throw new Cancelled();
+    }
+
+    throw new ReviewError(problem.code, 409, problem.attention);
+  }
+
+  private async postProblem(
+    row: OperationRecord,
+    action: AiReviewAction,
+    pr: PullRequestSnapshot | undefined,
+    method: string,
+    args: unknown[],
+  ): Promise<PostProblem | null> {
+    const approving = action.event === 'APPROVE';
+    const stop = (skipped: string, code = 'POST_STOPPED'): PostProblem => ({
+      skipped,
+      code,
+      attention: `${skipped.charAt(0).toUpperCase()}${skipped.slice(1)} Nothing more is sent; check the PR${approving ? ', then approve it yourself if it still applies' : ''}.`,
+    });
+
+    if (!pr) return stop('this PR is no longer tracked.', 'NOT_FOUND');
+    if (pr.headOid !== action.expectedHeadOid)
+      return stop(
+        'new commits arrived after this review. Run it again to review them.',
+        'HEAD_MOVED',
+      );
+
+    const basis = action.basis;
+    const resolving = method === 'setThreadResolved';
+
+    // Queued before Review Desk checked a review's inputs: comments still go out, but an
+    // approval or a resolution is yours to send.
+    if (!basis)
+      return approving || resolving
+        ? {
+            skipped: 'this approval was queued before Review Desk checked what a review read.',
+            code: 'LEGACY_APPROVAL',
+            hold: true,
+            attention:
+              'This automatic approval was queued before Review Desk checked what a review read. Nothing more is sent; check the PR, then approve it yourself if it still applies.',
+          }
+        : null;
+
+    const settings = this.posting();
+
+    if (!settings.postFindings) return stop('posting findings was turned off in Settings.');
+    if (pr.baseRefName !== basis.baseRefName)
+      return stop('the PR now targets another branch.', 'BASE_CHANGED');
+
+    // A failed lookup is retried: the post waits until the diff can be confirmed.
+    const mergeBase = (await this.sync.github.compare(pr.repository, pr.baseRefName, pr.headOid))
+      ?.mergeBaseOid;
+
+    if (mergeBase !== basis.mergeBaseOid)
+      return stop('the PR shows another diff than the one reviewed.', 'BASE_CHANGED');
+
+    const resolved = new Set(
+      row.steps
+        .filter(
+          (step) => step.method === 'setThreadResolved' && step.completedAt && step.acknowledged,
+        )
+        .map((step) => String(step.args[0])),
+    );
+
+    if (
+      [...resolved].some((id) => !pr.threads.find((thread) => thread.id === id)?.isResolved) ||
+      publicationFingerprint(pr, action.runId, resolved) !== basis.fingerprint
+    )
+      return stop(
+        'the PR or its discussion changed after this review. Run it again to review it.',
+        'DISCUSSION_CHANGED',
+      );
+
+    if (approving) {
+      if (!basis.grants.approve || !settings.approveFindings)
+        return stop('automatic approval was turned off in Settings.');
+      if (pr.isDraft) return stop('the PR was turned into a draft.');
+      if (isSameUser(pr.author.login, row.account)) return stop('you cannot approve your own PR.');
+    }
+
+    if (resolving) {
+      const thread = pr.threads.find((candidate) => candidate.id === String(args[0]));
+
+      if (!basis.grants.resolve || !settings.resolveThreads)
+        return stop('resolving threads was turned off in Settings.');
+      if (!basis.threadIds.includes(String(args[0])) || !thread || thread.isResolved)
+        return stop(
+          'the PR or its discussion changed after this review. Run it again to review it.',
+          'DISCUSSION_CHANGED',
+        );
+      if (thread.viewerCanResolve === false)
+        return stop('a thread this review read can no longer be resolved by you.');
+    }
+
+    return null;
   }
 
   private stepLabel(method: string, row: OperationRecord): string {
@@ -1248,6 +1424,10 @@ export class OperationQueue {
           confirmed = true;
           result = { id: posted.id, url: posted.url };
         }
+      } else if (step.method === 'setThreadResolved' && row.action.type === 'ai_review') {
+        // A resolved thread does not say who resolved it: assuming it was this post could
+        // approve over someone else's resolution, and sending it again over their reopening.
+        // It waits for you (`confirmed` stays false).
       } else if (step.method === 'setFileViewed' || step.method === 'setThreadResolved') {
         await this.sync.refresh(row.prId, row.account);
         const pr = this.sync.detail(row.prId)?.snapshot;

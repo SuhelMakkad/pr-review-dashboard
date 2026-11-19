@@ -46,6 +46,8 @@ const schemas = {
         .optional(),
       // Optional so a window opened before the setting existed keeps its saved value.
       postFindings: z.boolean().optional(),
+      approveFindings: z.boolean().optional(),
+      resolveThreads: z.boolean().optional(),
     }),
   }),
   start: z.strictObject({

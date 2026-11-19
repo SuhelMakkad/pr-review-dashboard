@@ -35,7 +35,25 @@ export type GitHubAction =
       body: string;
       /** Older queued operations without an event post a conversation comment. */
       event?: 'APPROVE' | 'COMMENT';
+      /**
+       * What the post rests on, checked again before every send. Posts queued before Review Desk
+       * checked a review's inputs have none, and wait for you before any approval.
+       */
+      basis?: AiPostBasis;
     };
+
+/** The reviewed diff, discussion and permissions an automatic AI review post was decided on. */
+export interface AiPostBasis {
+  /** The reviewed diff is `mergeBaseOid..expectedHeadOid`, for a PR targeting `baseRefName`. */
+  baseRefName: string;
+  mergeBaseOid: string;
+  /** `publicationFingerprint` of the PR the review read. */
+  fingerprint: string;
+  /** The open threads the review read, resolved before approving; never any others. */
+  threadIds: string[];
+  /** What Settings allowed when the review finished. Settings must still allow it when sent. */
+  grants: { approve: boolean; resolve: boolean };
+}
 
 export type OperationControl = 'cancel' | 'retry' | 'check' | 'reopen' | 'dismiss' | 'restore';
 

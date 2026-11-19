@@ -68,19 +68,26 @@ test('automatically approves a review with no blocking findings when posting is 
   await openFresh(page, '/settings/automation');
 
   const post = page.getByRole('switch', { name: 'Post findings to the PR' });
+  const approve = page.getByRole('switch', { name: 'Approve when there are no blocking findings' });
 
   await expect(post).not.toBeChecked();
+  // Approving is its own choice, and only once posting is on.
+  await expect(approve).toBeDisabled();
 
-  // Saved back to back: the second save must not undo the first.
+  // Saved back to back: one save must not undo another.
   await post.check();
+  await approve.check();
   await page.getByRole('switch', { name: 'Review requested PRs automatically' }).check();
   await expect(
-    page.getByText('Findings are posted to the PR when each review finishes.', { exact: false }),
+    page.getByText('Findings are posted to the PR when each review finishes, approving it', {
+      exact: false,
+    }),
   ).toBeVisible();
   await expectAccessible(page);
 
   await page.reload();
   await expect(post).toBeChecked();
+  await expect(approve).toBeChecked();
 
   await page.goto('/inbox/attention');
   await expect(page.getByRole('listbox', { name: /pull requests/i })).toBeVisible();
@@ -114,9 +121,12 @@ test('resolves all open threads before automatically approving a completed revie
 }) => {
   await openFresh(page, '/settings/automation');
   await page.getByRole('switch', { name: 'Post findings to the PR' }).check();
+  await page.getByRole('switch', { name: 'Approve when there are no blocking findings' }).check();
+  await page.getByRole('switch', { name: 'Resolve threads before approving' }).check();
+  await expect(page.getByText(/Resolves the open review threads the review read/)).toBeVisible();
   await expect(
-    page.getByText(/approves the PR and resolves all open review threads/),
-  ).toBeVisible();
+    page.getByRole('switch', { name: 'Resolve threads before approving' }),
+  ).toBeChecked();
   await page.goto('/pr/acme/api/2041');
   await page.getByRole('button', { name: 'Run review', exact: true }).click();
 

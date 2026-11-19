@@ -238,6 +238,16 @@ export function FullReview({
               </p>
             )}
             {posting && <PostingStatus operation={posting} />}
+            {run.publication && 'reason' in run.publication && run.publication.reason && (
+              <p className="text-2xs text-fg-subtle">
+                Commented instead of approving: {run.publication.reason}
+              </p>
+            )}
+            {run.publication && 'skipped' in run.publication && (
+              <p role="status" className="text-xs text-fg-muted">
+                Not posted to the PR: {run.publication.skipped}
+              </p>
+            )}
             {willPost && (
               <p className="text-2xs text-fg-subtle">
                 Its findings will be posted to the PR when this review finishes.

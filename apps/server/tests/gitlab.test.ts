@@ -709,6 +709,44 @@ describe('GitLab merge request snapshots', () => {
     expect(listed.files[0]?.viewedKey).toEqual(expect.any(String));
   });
 
+  it('calls a diff version complete only where GitLab stored its whole list', async () => {
+    const pinned = { headOid: HEAD2, baseOid: START };
+
+    for (const [state, complete] of [
+      ['collected', true],
+      ['overflow_diff_files_limit', false],
+    ] as const) {
+      const { client, fake } = gitlab();
+
+      fake.on('GET', `${MR_BY_PATH}/versions/2`, {
+        data: {
+          id: 2,
+          head_commit_sha: HEAD2,
+          start_commit_sha: START,
+          base_commit_sha: BASE,
+          state,
+          created_at: seconds(4, 30),
+          diffs: [
+            {
+              diff: APP_DIFF,
+              new_path: 'src/app.ts',
+              old_path: 'src/app.ts',
+              new_file: false,
+              renamed_file: false,
+              deleted_file: false,
+            },
+          ],
+        },
+      });
+
+      const listed = await client.pinnedFiles('acme/platform/web', 12, pinned);
+
+      expect(listed.pinned).toBe(true);
+      expect(listed.complete ?? false).toBe(complete);
+      expect(listed.mergeBaseOid).toBe(complete ? BASE : undefined);
+    }
+  });
+
   it('pins nothing for a revision GitLab has no diff version of', async () => {
     const { client } = gitlab();
 

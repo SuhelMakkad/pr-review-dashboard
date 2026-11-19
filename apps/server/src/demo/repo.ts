@@ -117,7 +117,13 @@ export class FixtureRepos {
     if (!this.get(repository, baseOid) || !this.get(repository, headOid)) return null;
 
     if (baseOid === headOid)
-      return { status: 'identical', mergeBaseOid: baseOid, files: [], commits: [] };
+      return {
+        status: 'identical',
+        mergeBaseOid: baseOid,
+        files: [],
+        filesComplete: true,
+        commits: [],
+      };
 
     const headAncestors = this.ancestors(repository, headOid);
     const baseAncestors = new Set(this.ancestors(repository, baseOid));
@@ -137,6 +143,7 @@ export class FixtureRepos {
       status,
       mergeBaseOid: mergeBase,
       files: mergeBase ? this.diff(repository, mergeBase, headOid) : [],
+      filesComplete: true,
       commits,
     };
   }

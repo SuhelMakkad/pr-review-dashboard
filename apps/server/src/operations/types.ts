@@ -8,6 +8,8 @@ export interface MutationStep {
   completedAt: string | null;
   result: unknown;
   uncertain: boolean;
+  /** Completed from the forge's own response, not inferred from its state afterwards. */
+  acknowledged?: boolean;
 }
 
 export interface OperationRecord extends Omit<GitHubOperation, 'controls'> {
