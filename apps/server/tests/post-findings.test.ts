@@ -986,6 +986,31 @@ describe('what an automatic post rests on', () => {
     expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
   });
 
+  it('waits for the forge’s own retry time when the last read is rate limited', async () => {
+    const { sync, queue, setPosting, review, posted, github } = await setup();
+    const refresh = sync.refresh.bind(sync);
+    const retryAt = new Date(Date.now() + 120_000).toISOString();
+    let reads = 0;
+
+    setPosting(true);
+    await queue.pause();
+
+    const run = await review();
+
+    vi.spyOn(sync, 'refresh').mockImplementation(async (...args) => {
+      if (++reads === 2)
+        throw new GitHubError('GitLab rate limit reached.', retryAt, 429, 'rate_limit');
+
+      return refresh(...args);
+    });
+    queue.resume();
+
+    const waiting = await posted(run.id, 'waiting');
+
+    expect(Date.parse(waiting.retryAt!)).toBeGreaterThanOrEqual(Date.parse(retryAt));
+    expect(github.writes).toEqual([]);
+  });
+
   it.each([
     ['already off', false],
     ['turned off while reading the PR fails', true],

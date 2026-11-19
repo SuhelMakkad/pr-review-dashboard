@@ -467,6 +467,19 @@ describe('GitLab merge request snapshots', () => {
     const pr = await unreadable.client.snapshot('MR_7_12', VIEWER, []);
 
     expect('baseTipOid' in pr).toBe(false);
+
+    // A rate limit keeps GitLab's retry time, as glab reports it.
+    const limited = gitlab();
+    const retryAt = new Date(Date.now() + 120_000).toISOString();
+
+    limited.fake.on('GET', 'projects/7/repository/branches/main', () => {
+      throw new GitHubError('GitLab rate limit reached.', retryAt, 429, 'rate_limit');
+    });
+
+    await expect(limited.client.snapshot('MR_7_12', VIEWER, [])).rejects.toMatchObject({
+      outcome: 'rate_limit',
+      retryAt,
+    });
   });
 
   it('maps reviewers, reviews, threads, CI and files onto the pull request model', async () => {

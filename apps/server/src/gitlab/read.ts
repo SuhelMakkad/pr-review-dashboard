@@ -532,7 +532,8 @@ export class GitLab implements GitHubApi {
 
     // Where the target branch is, read last, after everything else this snapshot holds: GitLab
     // keeps a version's diff, which a push to the target does not renew. Null when there is no
-    // such branch; left out (unknown) when it could not be read.
+    // such branch; left out (unknown) when it could not be read. A rate limit fails the read with
+    // GitLab's own retry time, as every other request here does.
     const targetTip = await this.transport
       .request<{ commit?: { id?: string } }>({
         path: `projects/${mr.project_id}/repository/branches/${encodeURIComponent(mr.target_branch)}`,
@@ -544,7 +545,11 @@ export class GitLab implements GitHubApi {
             : response.status < 400
               ? (response.data.commit?.id ?? null)
               : undefined,
-        () => undefined,
+        (error: unknown) => {
+          if (error instanceof GitHubError && error.outcome === 'rate_limit') throw error;
+
+          return undefined;
+        },
       );
 
     return {
