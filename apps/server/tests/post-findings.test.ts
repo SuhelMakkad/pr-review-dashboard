@@ -961,6 +961,31 @@ describe('what an automatic post rests on', () => {
     expect(github.writes).toEqual([]);
   });
 
+  it('tries again, rather than skipping, when the last read cannot say where the target is', async () => {
+    const { github, queue, setPosting, review, posted } = await setup();
+    const snapshot = github.snapshot.bind(github);
+    let reads = 0;
+
+    setPosting(true);
+    await queue.pause();
+
+    const run = await review();
+
+    // The last read before the send could not read the branch.
+    vi.spyOn(github, 'snapshot').mockImplementation(async (...args) => {
+      const read = await snapshot(...args);
+
+      if (++reads === 2) delete read.baseTipOid;
+
+      return read;
+    });
+    queue.resume();
+
+    await posted(run.id);
+    expect(reads).toBeGreaterThan(2);
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
+  });
+
   it.each([
     ['already off', false],
     ['turned off while reading the PR fails', true],

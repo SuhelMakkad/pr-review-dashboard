@@ -175,7 +175,8 @@ export interface PullRequestSnapshot {
   baseOid: string | null;
   /**
    * The commit the target branch pointed to when this snapshot was read, in the same read as the
-   * rest of it; absent where it was not read.
+   * rest of it (last, where a read takes several requests). Null when there is no such branch;
+   * absent where it was not or could not be read.
    */
   baseTipOid?: string | null;
   mergeStateStatus: string | null;

@@ -501,7 +501,7 @@ export class GitLab implements GitHubApi {
       return { mr, discussions, reviewers, approvals, versions: [], submission };
     }
 
-    const [discussions, reviewers, approvals, versions, targetTip] = await Promise.all([
+    const [discussions, reviewers, approvals, versions] = await Promise.all([
       list<RawDiscussion>('discussions', 'discussions'),
       unlessMissing(
         call<RawReviewer[]>(
@@ -513,16 +513,6 @@ export class GitLab implements GitHubApi {
       ),
       call<RawApprovals>(this.transport, { path: `${base}/approvals` }, 'Could not load approvals'),
       list<RawVersion>('versions', 'versions'),
-      // Where the target branch is now, read with the rest: GitLab keeps the diff of a version,
-      // which a push to the target does not renew. Unknown when it cannot be read.
-      this.transport
-        .request<{ commit?: { id?: string } }>({
-          path: `projects/${mr.project_id}/repository/branches/${encodeURIComponent(mr.target_branch)}`,
-        })
-        .then(
-          (response) => (response.status < 400 ? (response.data.commit?.id ?? null) : null),
-          () => null,
-        ),
     ]);
 
     const pipeline = mr.head_pipeline;
@@ -539,6 +529,23 @@ export class GitLab implements GitHubApi {
         : Promise.resolve([]),
       this.committedAt(ref.projectId, mr.sha),
     ]);
+
+    // Where the target branch is, read last, after everything else this snapshot holds: GitLab
+    // keeps a version's diff, which a push to the target does not renew. Null when there is no
+    // such branch; left out (unknown) when it could not be read.
+    const targetTip = await this.transport
+      .request<{ commit?: { id?: string } }>({
+        path: `projects/${mr.project_id}/repository/branches/${encodeURIComponent(mr.target_branch)}`,
+      })
+      .then(
+        (response) =>
+          response.status === 404
+            ? null
+            : response.status < 400
+              ? (response.data.commit?.id ?? null)
+              : undefined,
+        () => undefined,
+      );
 
     return {
       mr,

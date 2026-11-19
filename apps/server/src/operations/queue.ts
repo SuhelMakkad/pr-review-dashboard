@@ -105,6 +105,8 @@ interface PostProblem {
   attention: string;
   /** Waits for you even when nothing was sent yet. */
   hold?: true;
+  /** Not known yet: tried again like a failed read, rather than stopping the post. */
+  retry?: true;
 }
 
 export interface QueueOptions {
@@ -1153,7 +1155,16 @@ export class OperationQueue {
     if (row.status === 'cancelled') throw new Cancelled();
 
     const stored = this.sync.store.snapshot(row.account, row.prId);
-    const mergeBase = target && stored?.baseTipOid === target ? compared : null;
+    // Where the last read could not say where the branch is, the merge base is unknown, not
+    // wrong: the post waits and tries again.
+    const tip = stored?.baseTipOid;
+    const mergeBase = !target
+      ? null
+      : tip === undefined
+        ? undefined
+        : tip === target
+          ? compared
+          : null;
 
     this.stopFor(
       row,
@@ -1211,6 +1222,7 @@ export class OperationQueue {
   /** Records why a post stops: skipped when nothing was sent yet, otherwise needing attention. */
   private stopFor(row: OperationRecord, problem: PostProblem | null): void {
     if (!problem) return;
+    if (problem.retry) throw new GitHubError(problem.attention, null, null, 'unavailable');
 
     if (!problem.hold && !row.steps.some((step) => step.completedAt || step.uncertain)) {
       this.save({
@@ -1227,13 +1239,14 @@ export class OperationQueue {
 
   /**
    * Synchronous, so nothing it reads can change before the step it allows is checkpointed.
-   * `mergeBase` is the reviewed head's live merge base on the reviewed target branch.
+   * `mergeBase` is the reviewed head's live merge base on the reviewed target branch, null where
+   * it is not the one reviewed (or there is no such branch), undefined where it is unknown.
    */
   private postProblem(
     row: OperationRecord,
     action: AiReviewAction,
     pr: PullRequestSnapshot | undefined,
-    mergeBase: string | null,
+    mergeBase: string | null | undefined,
     method: string,
     args: unknown[],
   ): PostProblem | null {
@@ -1253,6 +1266,14 @@ export class OperationQueue {
     if (allowed || !basis) return allowed;
     if (pr.baseRefName !== basis.baseRefName)
       return stop('the PR now targets another branch.', 'BASE_CHANGED');
+    if (mergeBase === undefined)
+      return {
+        skipped: 'Review Desk could not confirm where the target branch is.',
+        code: 'TARGET_UNKNOWN',
+        attention:
+          'Review Desk could not confirm where the target branch is. It tries again; nothing is sent until it can.',
+        retry: true,
+      };
     if (mergeBase !== basis.mergeBaseOid)
       return stop('the PR shows another diff than the one reviewed.', 'BASE_CHANGED');
 

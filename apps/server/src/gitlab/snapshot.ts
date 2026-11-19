@@ -174,7 +174,10 @@ export interface MergeRequestData {
   viewed?: Record<string, string>;
   /** Review Desk's last submission of your review here, if any. */
   submission?: SubmissionEvidence | null;
-  /** The commit the target branch points to, read with the rest; absent from light reads. */
+  /**
+   * The commit the target branch points to, read after the rest; null when there is no such
+   * branch, absent when it was not or could not be read.
+   */
   targetTip?: string | null;
 }
 

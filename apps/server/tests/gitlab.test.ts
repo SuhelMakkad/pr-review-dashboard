@@ -429,14 +429,44 @@ describe('comment positions', () => {
 });
 
 describe('GitLab merge request snapshots', () => {
-  it('reads where the target branch is with the rest of the merge request', async () => {
+  it('reads where the target branch is last, after the rest of the merge request', async () => {
     const { client, fake } = gitlab();
+    const branch = 'projects/7/repository/branches/main';
+    let tip = BASE;
 
-    // Unknown when the branch cannot be read.
-    expect((await client.snapshot('MR_7_12', VIEWER, ['requested'])).baseTipOid).toBeNull();
+    fake.on('GET', branch, () => ({ data: { commit: { id: tip } } }));
 
-    fake.on('GET', 'projects/7/repository/branches/main', { data: { commit: { id: BASE } } });
-    expect((await client.snapshot('MR_7_12', VIEWER, ['requested'])).baseTipOid).toBe(BASE);
+    // The target moves while the snapshot's later requests are still out: the tip read last
+    // sees it.
+    for (const path of [`${MR}/diffs`, `${MR_BY_PATH}/diffs`]) {
+      const listed = fake.routes.get(`GET ${path}`)!;
+
+      fake.on('GET', path, (request) => {
+        tip = HEAD1;
+
+        return listed(request);
+      });
+    }
+
+    expect((await client.snapshot('MR_7_12', VIEWER, ['requested'])).baseTipOid).toBe(HEAD1);
+    expect(fake.calls.at(-1)?.path).toBe(branch);
+  });
+
+  it('tells a missing target branch from one that could not be read', async () => {
+    const missing = gitlab();
+
+    expect((await missing.client.snapshot('MR_7_12', VIEWER, [])).baseTipOid).toBeNull();
+
+    const unreadable = gitlab();
+
+    unreadable.fake.on('GET', 'projects/7/repository/branches/main', {
+      status: 503,
+      data: { message: 'Service unavailable' },
+    });
+
+    const pr = await unreadable.client.snapshot('MR_7_12', VIEWER, []);
+
+    expect('baseTipOid' in pr).toBe(false);
   });
 
   it('maps reviewers, reviews, threads, CI and files onto the pull request model', async () => {
