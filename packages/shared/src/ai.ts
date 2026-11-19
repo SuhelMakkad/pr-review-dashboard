@@ -72,6 +72,8 @@ export interface ReviewInputs {
   inventory: 'verified' | 'unverified';
   /** Changed files the forge counts for the PR. */
   changedFiles: number;
+  /** Identifies the file list the agent was given (`review.json`), checked when it is reused. */
+  digest: string;
   /** Changed files missing from a reviewed commit's snapshot (the first 50), and how many. */
   unreadable: { path: string; side: 'before' | 'after' }[];
   unreadableCount: number;

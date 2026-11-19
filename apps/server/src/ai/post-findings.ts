@@ -106,9 +106,9 @@ export class FindingsPublisher {
       return skip('Review Desk could not tell which commits this review read.');
     if (current.headOid !== row.headOid) return skip('New commits arrived while this review ran.');
 
-    const fingerprint = publicationFingerprint(reviewed, row.id);
+    const fingerprint = publicationFingerprint(reviewed, row.id, row.account);
 
-    if (publicationFingerprint(current, row.id) !== fingerprint)
+    if (publicationFingerprint(current, row.id, row.account) !== fingerprint)
       return skip('The PR or its discussion changed while this review ran.');
 
     const result = JSON.parse(row.result) as FullReviewResult;

@@ -1068,13 +1068,32 @@ export class OperationQueue {
     method: string,
     args: unknown[],
   ): Promise<OperationRecord> {
-    const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
+    const action = row.action as AiReviewAction;
+    const refreshed = (await this.sync.refresh(row.prId, row.account))?.snapshot;
+    // The live merge base of the PR as just read, where its head and target are still the
+    // reviewed ones (otherwise the checks below stop it anyway). A failed lookup is retried.
+    const mergeBase =
+      action.basis &&
+      refreshed?.headOid === action.expectedHeadOid &&
+      refreshed.baseRefName === action.basis.baseRefName
+        ? await this.sync.github
+            .compare(refreshed.repository, refreshed.baseRefName, refreshed.headOid)
+            .then((comparison) => comparison?.mergeBaseOid ?? null)
+        : null;
 
+    // Everything below is read now, with no wait before the step is checkpointed: Settings
+    // changed and snapshots saved during the lookups above count.
     row = this.row(row.account, row.id);
     if (row.status === 'cancelled') throw new Cancelled();
     if (row.action.type !== 'ai_review') return row;
 
-    const problem = await this.postProblem(row, row.action, pr, method, args);
+    const stored = this.sync.store.snapshot(row.account, row.prId);
+    const pr = stored?.state === 'OPEN' ? stored : undefined;
+    const compared =
+      pr?.headOid === refreshed?.headOid && pr?.baseRefName === refreshed?.baseRefName
+        ? mergeBase
+        : null;
+    const problem = this.postProblem(row, row.action, pr, compared, method, args);
 
     if (!problem) return row;
 
@@ -1091,13 +1110,15 @@ export class OperationQueue {
     throw new ReviewError(problem.code, 409, problem.attention);
   }
 
-  private async postProblem(
+  /** Synchronous, so nothing it reads can change before the step it allows is checkpointed. */
+  private postProblem(
     row: OperationRecord,
     action: AiReviewAction,
     pr: PullRequestSnapshot | undefined,
+    mergeBase: string | null,
     method: string,
     args: unknown[],
-  ): Promise<PostProblem | null> {
+  ): PostProblem | null {
     const approving = action.event === 'APPROVE';
     const stop = (skipped: string, code = 'POST_STOPPED'): PostProblem => ({
       skipped,
@@ -1114,9 +1135,12 @@ export class OperationQueue {
 
     const basis = action.basis;
     const resolving = method === 'setThreadResolved';
+    const settings = this.posting();
 
-    // Queued before Review Desk checked a review's inputs: comments still go out, but an
-    // approval or a resolution is yours to send.
+    if (!settings.postFindings) return stop('posting findings was turned off in Settings.');
+
+    // Queued before Review Desk checked a review's inputs: comments still go out while posting
+    // is on, but an approval or a resolution is yours to send.
     if (!basis)
       return approving || resolving
         ? {
@@ -1128,16 +1152,8 @@ export class OperationQueue {
           }
         : null;
 
-    const settings = this.posting();
-
-    if (!settings.postFindings) return stop('posting findings was turned off in Settings.');
     if (pr.baseRefName !== basis.baseRefName)
       return stop('the PR now targets another branch.', 'BASE_CHANGED');
-
-    // A failed lookup is retried: the post waits until the diff can be confirmed.
-    const mergeBase = (await this.sync.github.compare(pr.repository, pr.baseRefName, pr.headOid))
-      ?.mergeBaseOid;
-
     if (mergeBase !== basis.mergeBaseOid)
       return stop('the PR shows another diff than the one reviewed.', 'BASE_CHANGED');
 
@@ -1151,7 +1167,7 @@ export class OperationQueue {
 
     if (
       [...resolved].some((id) => !pr.threads.find((thread) => thread.id === id)?.isResolved) ||
-      publicationFingerprint(pr, action.runId, resolved) !== basis.fingerprint
+      publicationFingerprint(pr, action.runId, row.account, resolved) !== basis.fingerprint
     )
       return stop(
         'the PR or its discussion changed after this review. Run it again to review it.',

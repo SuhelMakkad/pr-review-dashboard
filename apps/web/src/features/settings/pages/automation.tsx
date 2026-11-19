@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { Enter } from '@/ui/motion';
 import { Switch } from '@/ui/switch';
 import { quietMinutes } from '@/features/ai/restart';
-import { useAiOverview, useAiSettings } from '@/features/ai/use-ai';
+import { useAiOverview, useAutomationSettings } from '@/features/ai/use-ai';
 import { CardSkeleton, SettingRow, SettingsCard } from '@/features/settings/parts';
 
 type AiToggle = 'autoReview' | 'postFindings' | 'approveFindings' | 'resolveThreads';
@@ -13,7 +13,7 @@ type AiToggle = 'autoReview' | 'postFindings' | 'approveFindings' | 'resolveThre
 export function AutomationSettings({ account }: { account: string }) {
   const client = useQueryClient();
   const overview = useAiOverview();
-  const save = useAiSettings(account);
+  const save = useAutomationSettings(account);
   // Choices being saved, shown until the server confirms them, so the switches never flicker.
   const [pending, setPending] = useState<Partial<Record<AiToggle, boolean>>>({});
   const saved = overview.data?.settings;
@@ -24,36 +24,23 @@ export function AutomationSettings({ account }: { account: string }) {
   const postFindings = pending.postFindings ?? saved.postFindings;
   const approveFindings = pending.approveFindings ?? saved.approveFindings;
   const resolveThreads = pending.resolveThreads ?? saved.resolveThreads;
-  // Every save carries the toggles still being saved, so one change never undoes another.
-  const settings = {
-    ...saved,
-    autoReview: { ...saved.autoReview, enabled: autoReview },
-    postFindings,
-    approveFindings,
-    resolveThreads,
-  };
+  // One save per switch at a time, so its saves can never arrive out of order.
+  const saving = (toggle: AiToggle) => pending[toggle] !== undefined;
 
   const settle = (toggle: AiToggle) => setPending(({ [toggle]: _settled, ...rest }) => rest);
 
+  // Each save sends only its own switch: one change never undoes another, here or in another tab.
   const setToggle = (toggle: AiToggle, enabled: boolean) => {
     setPending((current) => ({ ...current, [toggle]: enabled }));
-    save.mutate(
-      toggle === 'autoReview'
-        ? { ...settings, autoReview: { ...settings.autoReview, enabled } }
-        : { ...settings, [toggle]: enabled },
-      {
-        onSuccess: (next) => {
-          client.setQueryData<typeof overview.data>(['ai-overview'], (current) =>
-            current ? { ...current, settings: next } : current,
-          );
-          settle(toggle);
-        },
-        onError: (error) => {
-          settle(toggle);
-          toast.error(error.message);
-        },
-      },
-    );
+    save
+      .mutateAsync({ [toggle]: enabled })
+      .then((next) =>
+        client.setQueryData<typeof overview.data>(['ai-overview'], (current) =>
+          current ? { ...current, settings: next } : current,
+        ),
+      )
+      .catch((error: Error) => toast.error(error.message))
+      .finally(() => settle(toggle));
   };
 
   return (
@@ -72,6 +59,7 @@ export function AutomationSettings({ account }: { account: string }) {
           <Switch
             aria-label="Review requested PRs automatically"
             checked={autoReview}
+            disabled={saving('autoReview')}
             onCheckedChange={(enabled) => setToggle('autoReview', enabled)}
           />
         </SettingRow>
@@ -88,6 +76,7 @@ export function AutomationSettings({ account }: { account: string }) {
           <Switch
             aria-label="Post findings to the PR"
             checked={postFindings}
+            disabled={saving('postFindings')}
             onCheckedChange={(enabled) => setToggle('postFindings', enabled)}
           />
         </SettingRow>
@@ -98,7 +87,7 @@ export function AutomationSettings({ account }: { account: string }) {
           <Switch
             aria-label="Approve when there are no blocking findings"
             checked={approveFindings}
-            disabled={!postFindings}
+            disabled={!postFindings || saving('approveFindings')}
             onCheckedChange={(enabled) => setToggle('approveFindings', enabled)}
           />
         </SettingRow>
@@ -109,7 +98,7 @@ export function AutomationSettings({ account }: { account: string }) {
           <Switch
             aria-label="Resolve threads before approving"
             checked={resolveThreads}
-            disabled={!postFindings || !approveFindings}
+            disabled={!postFindings || !approveFindings || saving('resolveThreads')}
             onCheckedChange={(enabled) => setToggle('resolveThreads', enabled)}
           />
         </SettingRow>

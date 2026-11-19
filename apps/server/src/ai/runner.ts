@@ -234,6 +234,24 @@ export class AiRunner {
     return this.settings();
   }
 
+  /** Saves only the automation and posting switches given; the rest keep their saved value. */
+  saveAutomation(changes: {
+    autoReview?: boolean;
+    postFindings?: boolean;
+    approveFindings?: boolean;
+    resolveThreads?: boolean;
+  }): AiSettings {
+    const { autoReview, ...posting } = changes;
+    const { defaultProvider, tasks } = this.settings();
+
+    return this.saveSettings({
+      defaultProvider,
+      tasks,
+      ...posting,
+      ...(autoReview === undefined ? {} : { autoReview: { enabled: autoReview } }),
+    });
+  }
+
   async providerStatuses(): Promise<AiProviderStatus[]> {
     if (this.probes && Date.now() - this.probes.at < PROBE_TTL_MS) return this.probes.statuses;
 
@@ -676,7 +694,12 @@ export class AiRunner {
         let measured: ReviewInputs | null;
 
         if (prepared && context) {
-          measured = await revalidated(workDir, context, saved.snapshot);
+          measured = await revalidated(
+            workDir,
+            context,
+            saved.snapshot,
+            this.row(id)?.inputs ?? null,
+          );
         } else {
           this.update(id, { progress: 'Preparing review…' });
           this.emit(row);

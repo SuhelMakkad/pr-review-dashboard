@@ -50,6 +50,18 @@ const schemas = {
       resolveThreads: z.boolean().optional(),
     }),
   }),
+  // Only the switches you changed: a save never resends, and so never restores, the others.
+  automation: z.strictObject({
+    account,
+    changes: z
+      .strictObject({
+        autoReview: z.boolean().optional(),
+        postFindings: z.boolean().optional(),
+        approveFindings: z.boolean().optional(),
+        resolveThreads: z.boolean().optional(),
+      })
+      .refine((changes) => Object.keys(changes).length > 0, 'Nothing to change.'),
+  }),
   start: z.strictObject({
     account,
     task,
@@ -118,7 +130,22 @@ export function registerAiRoutes(
     return (
       input &&
       handle(reply, () => {
-        const saved = runner.saveSettings(input.settings);
+        // Agents and tasks only. Automation and posting are saved one switch at a time below: a
+        // page with older settings must never turn back on what you turned off elsewhere.
+        const { defaultProvider, tasks } = input.settings;
+
+        return runner.saveSettings({ defaultProvider, tasks });
+      })
+    );
+  });
+
+  app.put('/api/ai/automation', async (request, reply) => {
+    const input = parse(schemas.automation, request.body, reply);
+
+    return (
+      input &&
+      handle(reply, () => {
+        const saved = runner.saveAutomation(input.changes);
 
         autoReviewer.settingsSaved(input.account);
 

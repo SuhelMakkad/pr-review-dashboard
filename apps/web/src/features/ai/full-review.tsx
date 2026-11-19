@@ -238,11 +238,17 @@ export function FullReview({
               </p>
             )}
             {posting && <PostingStatus operation={posting} />}
-            {run.publication && 'reason' in run.publication && run.publication.reason && (
-              <p className="text-2xs text-fg-subtle">
-                Commented instead of approving: {run.publication.reason}
-              </p>
-            )}
+            {run.publication &&
+              'reason' in run.publication &&
+              run.publication.reason &&
+              posting?.status !== 'cancelled' && (
+                <p className="text-2xs text-fg-subtle">
+                  {posting?.status === 'succeeded'
+                    ? 'Commented instead of approving'
+                    : 'Comments instead of approving'}
+                  : {run.publication.reason}
+                </p>
+              )}
             {run.publication && 'skipped' in run.publication && (
               <p role="status" className="text-xs text-fg-muted">
                 Not posted to the PR: {run.publication.skipped}

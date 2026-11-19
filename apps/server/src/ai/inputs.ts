@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
@@ -9,6 +10,15 @@ import type { CompareResult, RemoteFile } from '@/github/api.js';
 
 /** Gaps listed by path; the count covers the rest. */
 const LISTED_GAPS = 50;
+
+/** Identifies a list of changed files by what each is and where it was. */
+export function filesDigest(files: Pick<DiffFile, 'path' | 'previousPath' | 'status'>[]): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify(files.map((file) => [file.path, file.previousPath ?? null, file.status])),
+    )
+    .digest('hex');
+}
 
 /**
  * True when `path` opens for reading as a regular file inside `root`. Forge paths never leave the
@@ -104,6 +114,7 @@ export async function observeInputs(
       targetBaseOid: pr.baseOid ?? null,
       inventory: inventory ? 'verified' : 'unverified',
       changedFiles: pr.changedFiles,
+      digest: filesDigest(files),
       unreadable,
       unreadableCount,
       complete: Boolean(inventory && unreadableCount === 0 && pr.changedFiles === inventory.length),
@@ -119,14 +130,21 @@ export async function observeInputs(
 export function downgraded(saved: ReviewInputs, measured: ReviewInputs): ReviewInputs {
   if (measured.complete) return saved;
 
+  // A file missing from both measurements counts once.
+  const unreadable = [...saved.unreadable, ...measured.unreadable].filter(
+    (file, index, all) =>
+      all.findIndex((other) => other.path === file.path && other.side === file.side) === index,
+  );
+
   return {
     ...saved,
     inventory:
       saved.inventory === 'verified' && measured.inventory === 'verified'
         ? 'verified'
         : 'unverified',
-    unreadable: [...saved.unreadable, ...measured.unreadable].slice(0, LISTED_GAPS),
-    unreadableCount: saved.unreadableCount + measured.unreadableCount,
+    unreadable: unreadable.slice(0, LISTED_GAPS),
+    // The lists stop at 50; past that, the larger count is the best known.
+    unreadableCount: Math.max(saved.unreadableCount, measured.unreadableCount, unreadable.length),
     complete: false,
   };
 }
@@ -142,29 +160,36 @@ export interface PreparedContext {
 }
 
 /**
- * Checks a reused workspace again: files that can no longer be read take its evidence down.
- * A workspace prepared before evidence was recorded names its commits but claims no coverage.
- * Null when it does not say which merge base it holds.
+ * Checks a reused workspace again against the evidence saved for it (`saved`, else what the
+ * workspace recorded): a file list that is missing or not the one measured, another merge base,
+ * or files that can no longer be read take it down. A workspace prepared before evidence was
+ * recorded names its commits but claims no coverage. Null when it does not say which merge base
+ * it holds.
  */
 export async function revalidated(
   directory: string,
   context: PreparedContext,
   pr: PullRequestSnapshot,
+  saved: ReviewInputs | null,
 ): Promise<ReviewInputs | null> {
-  const { unreadable, unreadableCount } = await unreadableFiles(directory, context.files ?? []);
-  const saved: ReviewInputs | null = context.inputs
-    ? context.inputs
-    : context.baseOid
-      ? unverified(pr, context.baseOid)
-      : null;
+  const recorded =
+    saved ?? context.inputs ?? (context.baseOid ? unverified(pr, context.baseOid) : null);
 
-  if (!saved) return null;
+  if (!recorded) return null;
 
-  return downgraded(saved, {
-    ...saved,
+  const files = Array.isArray(context.files) ? context.files : null;
+  const { unreadable, unreadableCount } = await unreadableFiles(directory, files ?? []);
+  const intact =
+    files !== null &&
+    context.baseOid === recorded.mergeBaseOid &&
+    filesDigest(files) === recorded.digest;
+
+  return downgraded(recorded, {
+    ...recorded,
+    inventory: intact ? recorded.inventory : 'unverified',
     unreadable,
     unreadableCount,
-    complete: unreadableCount === 0,
+    complete: intact && unreadableCount === 0,
   });
 }
 
@@ -177,6 +202,7 @@ export function unverified(pr: PullRequestSnapshot, mergeBaseOid: string): Revie
     targetBaseOid: pr.baseOid ?? null,
     inventory: 'unverified',
     changedFiles: pr.changedFiles,
+    digest: '',
     unreadable: [],
     unreadableCount: 0,
     complete: false,

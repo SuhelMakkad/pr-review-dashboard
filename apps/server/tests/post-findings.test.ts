@@ -14,7 +14,7 @@ import {
 } from '@/ai/post-findings.js';
 import { AiRunner } from '@/ai/runner.js';
 import type { RepositoryExporter } from '@/ai/workspace.js';
-import { aiRuns } from '@/db/schema.js';
+import { aiRuns, githubOperations } from '@/db/schema.js';
 import { Store } from '@/db/store.js';
 import { DEMO_SECOND_ACCOUNT, FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
@@ -435,21 +435,32 @@ describe('posting finished reviews', () => {
     expect(queue.get('you', operation.id).status).toBe('cancelled');
   });
 
-  it('keeps older queued automatic posts as conversation comments', async () => {
-    const { queue, review, posted, github } = await setup();
-    const run = await review();
+  it.each([true, false])(
+    'posts older queued automatic posts as comments only while posting is on (%s)',
+    async (posting) => {
+      const { queue, review, posted, github, setPosting } = await setup();
+      const run = await review();
 
-    queue.enqueue('you', run.prId, postedReviewOperationId(run.id), {
-      type: 'ai_review',
-      runId: run.id,
-      expectedHeadOid: run.headOid,
-      body: postedReviewBody(run.id, run.headOid, JSON.parse(run.result!)),
-    });
+      // Turned on after the review finished: that review itself is not posted.
+      setPosting(posting);
+      queue.enqueue('you', run.prId, postedReviewOperationId(run.id), {
+        type: 'ai_review',
+        runId: run.id,
+        expectedHeadOid: run.headOid,
+        body: postedReviewBody(run.id, run.headOid, JSON.parse(run.result!)),
+      });
 
-    await posted(run.id);
-
-    expect(github.writes.map((write) => write.op)).toEqual(['AddComment']);
-  });
+      if (posting) {
+        await posted(run.id);
+        expect(github.writes.map((write) => write.op)).toEqual(['AddComment']);
+      } else {
+        expect((await posted(run.id, 'cancelled')).progress).toBe(
+          'Not posted: posting findings was turned off in Settings.',
+        );
+        expect(github.writes).toEqual([]);
+      }
+    },
+  );
 
   it('still notices other people commenting, even when they copy the marker', async () => {
     const { runner, sync, pull, idOf, setPosting, review, posted } = await setup();
@@ -626,12 +637,13 @@ describe('posting finished reviews', () => {
 function commentOn(
   snapshot: Pick<PullRequestSnapshot, 'conversation' | 'url' | 'updatedAt'>,
   body: string,
+  author = 'someone-else',
 ) {
   const now = new Date().toISOString();
 
   snapshot.conversation.push({
     id: `comment-${snapshot.conversation.length + 1}`,
-    author: { login: 'someone-else' },
+    author: { login: author },
     body,
     createdAt: now,
     updatedAt: now,
@@ -642,11 +654,16 @@ function commentOn(
 
 describe('what an automatic post rests on', () => {
   it('saves the decision with the run: a failed save leaves it unposted and resumable', async () => {
-    const { queue, runner, store, setPosting, review, settled, postings, posted, github } =
+    const { runner, store, sync, setPosting, review, settled, postings, posted, github } =
       await setup();
+    const announced: string[] = [];
 
+    sync.events.subscribe(({ event }) => {
+      if (event.type === 'operation.updated') announced.push(event.type);
+    });
     setPosting(true);
-    vi.spyOn(queue, 'enqueueAutomatic').mockImplementationOnce(() => {
+    // After the outbox row is written, before the decision is: both go, or neither.
+    vi.spyOn(runner, 'recordPublication').mockImplementationOnce(() => {
       throw new Error('The disk is full.');
     });
 
@@ -654,6 +671,8 @@ describe('what an automatic post rests on', () => {
 
     expect(failed).toMatchObject({ status: 'failed', publication: null });
     expect(failed.request).not.toBeNull();
+    expect(store.db.select().from(githubOperations).all()).toEqual([]);
+    expect(announced).toEqual([]);
     expect(postings()).toEqual([]);
 
     await runner.resume('you', failed.id);
@@ -777,6 +796,24 @@ describe('what an automatic post rests on', () => {
         ),
     ],
     [
+      'another reviewer requests changes',
+      'the PR or its discussion changed after this review. Run it again to review it.',
+      ({ pull }: Setup) => {
+        const snapshot = pull(1839).snapshot;
+
+        snapshot.verdicts = [
+          ...(snapshot.verdicts ?? []),
+          {
+            login: 'someone-else',
+            state: 'CHANGES_REQUESTED',
+            submittedAt: new Date().toISOString(),
+            commitOid: snapshot.headOid,
+          },
+        ];
+        snapshot.updatedAt = new Date().toISOString();
+      },
+    ],
+    [
       'posting is turned off',
       'posting findings was turned off in Settings.',
       ({ setPosting }: Setup) => setPosting(false),
@@ -812,11 +849,94 @@ describe('what an automatic post rests on', () => {
 
     const run = await review();
 
-    change(context);
+    await change(context);
     queue.resume();
 
     expect((await posted(run.id, 'cancelled')).progress).toBe(`Not posted: ${reason}`);
     expect(github.writes).toEqual([]);
+  });
+
+  it.each([
+    [
+      'approving is turned off',
+      'Not posted: automatic approval was turned off in Settings.',
+      ({ setPosting }: Setup) =>
+        setPosting(true, undefined, { approveFindings: false, resolveThreads: true }),
+    ],
+    [
+      'a newer snapshot shows new discussion',
+      'Not posted: the PR or its discussion changed after this review. Run it again to review it.',
+      async ({ pull, sync, idOf }: Setup) => {
+        commentOn(pull(1839).snapshot, 'Wait, there is a problem.');
+        await sync.refresh(idOf(1839));
+      },
+    ],
+  ])(
+    'checks again after the merge base is looked up: %s meanwhile stops the approval',
+    async (_change, progress, change) => {
+      const context = await setup();
+      const { github, queue, setPosting, review, posted } = context;
+      const compare = github.compare.bind(github);
+
+      setPosting(true);
+      await queue.pause();
+
+      const run = await review();
+
+      vi.spyOn(github, 'compare').mockImplementationOnce(async (...args) => {
+        await change(context);
+
+        return compare(...args);
+      });
+      queue.resume();
+
+      expect((await posted(run.id, 'cancelled')).progress).toBe(progress);
+      expect(github.writes).toEqual([]);
+    },
+  );
+
+  it('comments instead of approving when a resumed workspace lost part of its file list', async () => {
+    const { providers, runner, github, omit, pull, setPosting, review, settled, posted } =
+      await setup();
+    const { repository, number } = pull(1839).snapshot;
+    const [{ path }] = await github.pullFiles(repository, number);
+    const run = providers.codex.run.bind(providers.codex);
+
+    setPosting(true);
+    vi.spyOn(providers.codex, 'run').mockImplementationOnce(async (request, ...rest) => {
+      // While the run is stopped, the workspace loses a file and its entry in the file list.
+      const file = join(request.workDir, 'review.json');
+      const context = JSON.parse(readFileSync(file, 'utf8'));
+
+      writeFileSync(
+        file,
+        JSON.stringify({
+          ...context,
+          files: context.files.filter((entry: DiffFile) => entry.path !== path),
+        }),
+      );
+      omit.add(path);
+      rmSync(join(request.workDir, 'after', path), { force: true });
+      rmSync(join(request.workDir, 'before', path), { force: true });
+      await run(request, ...rest);
+
+      throw new Error('The agent was stopped.');
+    });
+
+    const failed = await review();
+
+    expect(failed).toMatchObject({ status: 'failed' });
+    expect(failed.inputs).toMatchObject({ complete: true });
+
+    await runner.resume('you', failed.id);
+    await settled();
+    await posted(failed.id);
+
+    expect(runner.runs('you', failed.prId)[0].inputs).toMatchObject({
+      inventory: 'unverified',
+      complete: false,
+    });
+    expect(github.writes.map((write) => write.op)).toEqual(['AddComment']);
   });
 
   it('leaves threads opened after the review alone, and does not approve over them', async () => {
@@ -895,9 +1015,10 @@ describe('what an automatic post rests on', () => {
   });
 
   it('waits for you before an approval queued before inputs were checked', async () => {
-    const { queue, review, posted, github } = await setup();
+    const { queue, review, posted, github, setPosting } = await setup();
     const run = await review();
 
+    setPosting(true);
     queue.enqueue('you', run.prId, postedReviewOperationId(run.id), {
       type: 'ai_review',
       runId: run.id,
@@ -954,29 +1075,52 @@ describe('the publication fingerprint', () => {
 
   it('ignores comment times and this run’s own post, but not edits or other runs’ posts', () => {
     const reviewed = pr();
-    const base = publicationFingerprint(reviewed, 'run-1');
+    const base = publicationFingerprint(reviewed, 'run-1', 'you');
     const touched = structuredClone(reviewed);
 
     for (const thread of touched.threads)
       for (const comment of thread.comments) comment.updatedAt = '2030-01-01T00:00:00Z';
 
-    expect(publicationFingerprint(touched, 'run-1')).toBe(base);
+    expect(publicationFingerprint(touched, 'run-1', 'you')).toBe(base);
 
     const own = structuredClone(reviewed);
 
-    commentOn(own, `${postedReviewMarker('run-1')}\nNo blocking findings.`);
-    expect(publicationFingerprint(own, 'run-1')).toBe(base);
+    commentOn(own, `${postedReviewMarker('run-1')}\nNo blocking findings.`, 'you');
+    expect(publicationFingerprint(own, 'run-1', 'you')).toBe(base);
+
+    // Someone else's comment counts, even when it carries the marker.
+    const copied = structuredClone(reviewed);
+
+    commentOn(copied, `${postedReviewMarker('run-1')}\nI agree.`);
+    expect(publicationFingerprint(copied, 'run-1', 'you')).not.toBe(base);
+
+    // Another reviewer's verdict counts; yours, which an approval changes, does not.
+    const verdict = (login: string) => ({
+      ...structuredClone(reviewed),
+      verdicts: [
+        ...(reviewed.verdicts ?? []),
+        {
+          login,
+          state: 'CHANGES_REQUESTED' as const,
+          submittedAt: '2030-01-01T00:00:00Z',
+          commitOid: reviewed.headOid,
+        },
+      ],
+    });
+
+    expect(publicationFingerprint(verdict('someone-else'), 'run-1', 'you')).not.toBe(base);
+    expect(publicationFingerprint(verdict('you'), 'run-1', 'you')).toBe(base);
 
     const other = structuredClone(reviewed);
 
     commentOn(other, `${postedReviewMarker('run-2')}\nChanges recommended.`);
-    expect(publicationFingerprint(other, 'run-1')).not.toBe(base);
+    expect(publicationFingerprint(other, 'run-1', 'you')).not.toBe(base);
 
     if (reviewed.threads[0]?.comments[0]) {
       const edited = structuredClone(reviewed);
 
       edited.threads[0].comments[0].body += ' (edited)';
-      expect(publicationFingerprint(edited, 'run-1')).not.toBe(base);
+      expect(publicationFingerprint(edited, 'run-1', 'you')).not.toBe(base);
     }
   });
 
@@ -986,12 +1130,12 @@ describe('the publication fingerprint', () => {
 
     if (!thread) return;
 
-    const base = publicationFingerprint(reviewed, 'run-1');
+    const base = publicationFingerprint(reviewed, 'run-1', 'you');
     const resolved = structuredClone(reviewed);
 
     resolved.threads.find((candidate) => candidate.id === thread.id)!.isResolved = true;
-    expect(publicationFingerprint(resolved, 'run-1', new Set([thread.id]))).toBe(base);
-    expect(publicationFingerprint(resolved, 'run-1')).not.toBe(base);
+    expect(publicationFingerprint(resolved, 'run-1', 'you', new Set([thread.id]))).toBe(base);
+    expect(publicationFingerprint(resolved, 'run-1', 'you')).not.toBe(base);
   });
 });
 
@@ -1117,7 +1261,9 @@ describe('posting through the app', () => {
       resolveThreads: false,
     });
 
-    const saved = await app.inject({
+    // Saving agents and tasks never changes a posting switch, so a page holding older settings
+    // cannot turn one back on.
+    const agents = await app.inject({
       method: 'PUT',
       url: '/api/ai/settings',
       headers,
@@ -1127,24 +1273,38 @@ describe('posting through the app', () => {
       },
     });
 
-    expect(saved.statusCode).toBe(200);
-    expect(saved.json()).toMatchObject({ postFindings: true, approveFindings: true });
+    expect(agents.statusCode).toBe(200);
+    expect(agents.json()).toMatchObject({ postFindings: false, approveFindings: false });
 
-    // A window opened before the settings existed does not turn them off.
-    const {
-      postFindings: _left,
-      approveFindings: _approve,
-      resolveThreads: _resolve,
-      ...older
-    } = overview.settings;
-    const resaved = await app.inject({
+    // The switches are saved one at a time; the others keep their value.
+    const posting = await app.inject({
+      method: 'PUT',
+      url: '/api/ai/automation',
+      headers,
+      payload: { account: 'you', changes: { postFindings: true } },
+    });
+    const approving = await app.inject({
+      method: 'PUT',
+      url: '/api/ai/automation',
+      headers,
+      payload: { account: 'you', changes: { approveFindings: true } },
+    });
+
+    expect(posting.statusCode).toBe(200);
+    expect(approving.json()).toMatchObject({
+      postFindings: true,
+      approveFindings: true,
+      resolveThreads: false,
+    });
+
+    const stale = await app.inject({
       method: 'PUT',
       url: '/api/ai/settings',
       headers,
-      payload: { account: 'you', settings: older },
+      payload: { account: 'you', settings: overview.settings },
     });
 
-    expect(resaved.json()).toMatchObject({ postFindings: true, approveFindings: true });
+    expect(stale.json()).toMatchObject({ postFindings: true, approveFindings: true });
 
     const id = sync.list().items.find((item) => item.number === 1839)!.id;
     const started = await app.inject({

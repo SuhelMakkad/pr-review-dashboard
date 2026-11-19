@@ -33,15 +33,18 @@ export function reviewFingerprint(pr: PullRequestSnapshot, account: string): str
 }
 
 /**
- * What an automatic post of run `runId` rests on: the reviewed diff and every review, comment and
- * thread, including other runs' posts. Only this run's own post is left out, and threads it
- * resolved (with the forge's acknowledgement) count as they were reviewed while they stay
- * resolved: a thread reopened after that is new discussion. Fields that follow the viewer's
- * rights (`viewerCan*`), which resolving changes, are left out.
+ * What an automatic post of run `runId` as `account` rests on: the reviewed diff and every
+ * review, verdict, comment and thread, including other runs' posts. Only this run's own post is
+ * left out (a comment of `account`'s carrying its marker; reviews are only ever `account`'s own),
+ * as are `account`'s own verdicts, which its approval changes. Threads it resolved (with the
+ * forge's acknowledgement) count as they were reviewed while they stay resolved: a thread
+ * reopened after that is new discussion. Fields that follow the viewer's rights (`viewerCan*`),
+ * which resolving changes, are left out.
  */
 export function publicationFingerprint(
   pr: PullRequestSnapshot,
   runId: string,
+  account: string,
   resolved: ReadonlySet<string> = new Set(),
 ): string {
   const marker = postedReviewMarker(runId);
@@ -54,7 +57,10 @@ export function publicationFingerprint(
     body: pr.body,
     requests: pr.requestEvents,
     reviews: pr.reviews.filter((review) => !review.body.startsWith(marker)),
-    conversation: pr.conversation.filter((comment) => !comment.body.startsWith(marker)),
+    verdicts: (pr.verdicts ?? []).filter((verdict) => !isSameUser(verdict.login, account)),
+    conversation: pr.conversation.filter(
+      (comment) => !(isSameUser(comment.author.login, account) && comment.body.startsWith(marker)),
+    ),
     threads: pr.threads.map((thread) => ({
       id: thread.id,
       isResolved: resolved.has(thread.id) && thread.isResolved ? false : thread.isResolved,
