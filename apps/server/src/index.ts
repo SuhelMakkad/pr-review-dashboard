@@ -16,7 +16,6 @@ import { GlabAccounts } from '@/gitlab/accounts.js';
 import { GitLab } from '@/gitlab/read.js';
 import { createSessionToken } from '@/http/security.js';
 import { ClaudeProvider } from '@/ai/claude.js';
-import { killAgentProcesses } from '@/ai/provider.js';
 import { CodexProvider } from '@/ai/codex.js';
 import { FixtureProvider } from '@/ai/fixture.js';
 import { KeychainCredentialStore } from '@/linear/credentials.js';
@@ -112,10 +111,6 @@ try {
 }
 
 let stopping = false;
-
-// However the process exits, no agent it started keeps running: a forced exit skips the pauses
-// that end them, and an agent that ignores SIGTERM outlives its five-second grace otherwise.
-process.on('exit', killAgentProcesses);
 
 async function shutdown() {
   // A second Ctrl-C exits at once; interrupted work is checked on the next start.

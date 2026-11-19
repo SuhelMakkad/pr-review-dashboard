@@ -97,6 +97,44 @@ it('rolls back a rejected viewed update without undoing a newer change on anothe
   }
 });
 
+it('sends the diff the page shows with a viewed mark', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const bodies: unknown[] = [];
+
+  vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+    if (path.includes('/viewed')) bodies.push(JSON.parse(String(options?.body)));
+    if (path.startsWith('/api/operations'))
+      return Promise.resolve(response({ items: [], nextCursor: null }));
+
+    return Promise.resolve(response({ operation: { id: 'viewed' } }));
+  });
+  client.setQueryData(queryKeys.detail('pr-one'), {
+    account: 'you',
+    snapshot: {
+      headOid: 'a'.repeat(40),
+      baseOid: 'b'.repeat(40),
+      files: [{ path: 'a.ts', additions: 1, deletions: 0, viewedKey: 'diff-a' }],
+    },
+  });
+
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
+
+  try {
+    act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: true }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toMatchObject({
+      path: 'a.ts',
+      viewed: true,
+      target: { headOid: 'a'.repeat(40), baseOid: 'b'.repeat(40), fileKey: 'diff-a' },
+    });
+  } finally {
+    client.clear();
+  }
+});
+
 it('does not let an older viewed failure roll back a newer choice for the same file', async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const writes: { resolve: (response: Response) => void; reject: (error: Error) => void }[] = [];

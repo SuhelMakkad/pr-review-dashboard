@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DiffManifest } from '@review-desk/shared/diff';
+import type { PullRequestDetail } from '@review-desk/shared/types';
 import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
 import type { OperationReceipt } from '@review-desk/shared/operations';
 import { api, ApiError } from '@/lib/api';
@@ -18,6 +19,19 @@ export interface CommentTarget {
 }
 
 /** Everything the workspace writes, each scoped to one PR and the active account. */
+/**
+ * The diff of `path` as this page shows it, sent with a viewed mark so that the mark is never
+ * applied to a newer diff the server has seen and you have not.
+ */
+function shownDiff(detail: PullRequestDetail | undefined, account: string, path: string) {
+  if (!detail || detail.account !== account) return {};
+
+  const { headOid, baseOid } = detail.snapshot;
+  const fileKey = detail.snapshot.files.find((file) => file.path === path)?.viewedKey;
+
+  return { target: { headOid, baseOid: baseOid ?? null, ...(fileKey ? { fileKey } : {}) } };
+}
+
 export function useReview(prId: string | null, account: string) {
   const client = useQueryClient();
   const enc = encodeURIComponent(prId ?? '');
@@ -128,7 +142,16 @@ export function useReview(prId: string | null, account: string) {
    */
   const setViewed = useMutation({
     mutationFn: ({ path, viewed }: { path: string; viewed: boolean }) =>
-      githubCommand(`/api/pulls/${enc}/viewed`, { account, path, viewed }),
+      githubCommand(`/api/pulls/${enc}/viewed`, {
+        account,
+        path,
+        viewed,
+        ...shownDiff(
+          prId ? client.getQueryData<PullRequestDetail>(queryKeys.detail(prId)) : undefined,
+          account,
+          path,
+        ),
+      }),
     onMutate: ({ path, viewed }) => {
       const versionKey = `${account}:${prId}:${path}`;
       const version = (viewedVersions.get(versionKey) ?? 0) + 1;

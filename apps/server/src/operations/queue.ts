@@ -40,9 +40,12 @@ const now = () => new Date().toISOString();
 const fingerprint = (input: unknown) =>
   createHash('sha256').update(JSON.stringify(input)).digest('hex');
 
-/** A viewed action with the diff it is about, taken from the PR as stored now. */
+/**
+ * A viewed action with the diff it is about: as the page that sent it showed it, else (an older
+ * page) the PR as stored now.
+ */
 function withTarget(action: GitHubAction, pr: PullRequestSnapshot): GitHubAction {
-  if (action.type !== 'viewed') return action;
+  if (action.type !== 'viewed' || action.target) return action;
 
   const fileKey = pr.files.find((file) => file.path === action.path)?.viewedKey;
 
@@ -819,6 +822,34 @@ export class OperationQueue {
                   409,
                   'New commits arrived after this AI review. Run it again before approving.',
                 );
+              }
+            }
+
+            // The pacing wait and the account check above take time, and GitHub marks whichever
+            // diff is current when the mark arrives: check the diff again right before it goes.
+            if (
+              method === 'setFileViewed' &&
+              args[2] === true &&
+              row.action.type === 'viewed' &&
+              row.action.target
+            ) {
+              const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
+
+              row = this.row(row.account, row.id);
+              if (row.status === 'cancelled') throw new Cancelled();
+
+              if (
+                row.action.type === 'viewed' &&
+                row.action.target &&
+                !showsTarget(row.action.target, pr, String(args[1]))
+              ) {
+                this.save({
+                  ...row,
+                  status: 'cancelled',
+                  finishedAt: now(),
+                  progress: `Not marked viewed: ${String(args[1])} changed after you viewed it. Look at the new diff first.`,
+                });
+                throw new Cancelled();
               }
             }
 

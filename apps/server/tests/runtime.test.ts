@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unusedPort } from '@test/fixtures/ai/restart-helper.js';
 import { createApp } from '@/app.js';
 import { AutoReviewer } from '@/ai/auto-review.js';
-import { agentExited, agentRunning, killAgentProcesses, spawnAgentProcess } from '@/ai/provider.js';
+import { agentExited, agentRunning, spawnAgentProcess } from '@/ai/provider.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { DataDirectoryLocked, lockDataDirectory } from '@/db/lock.js';
 import type { AiRunRow } from '@/db/schema.js';
@@ -491,23 +491,34 @@ describe('shutdown order', () => {
     await first.done.catch(() => undefined);
   });
 
-  it('ends agents that are still running when the server exits', async () => {
-    const controller = new AbortController();
-    // An agent that ignores SIGTERM, as a stuck one would.
+  it('ends a helper that holds the agent’s output open, before the run counts as finished', async () => {
+    const workDir = join(temporaryDirectory(), 'run-3');
+    const lines: string[] = [];
+    // The helper shares the agent's output and process group, ignores SIGTERM, and outlives it.
     const agent = spawnAgentProcess(
       process.execPath,
-      ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
-      { cwd: tmpdir(), env: process.env, signal: controller.signal, timeoutMs: 60_000 },
+      [
+        '-e',
+        "const helper = require('child_process').spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\"], { stdio: 'inherit' }); helper.unref(); console.log(helper.pid); setTimeout(() => process.exit(4), 100);",
+      ],
+      {
+        cwd: tmpdir(),
+        env: process.env,
+        signal: new AbortController().signal,
+        timeoutMs: 60_000,
+        lockFor: workDir,
+        onLine: (line) => lines.push(line),
+      },
     );
-    const ended = agent.done.then(
-      () => 'ended',
-      () => 'ended',
-    );
+    const started = Date.now();
+    const result = await agent.done;
+    const helper = Number(lines[0]);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    killAgentProcesses();
-
-    expect(await ended).toBe('ended');
+    // The agent's own exit code, reported by its supervisor, and no wait for the open output.
+    expect(result.code).toBe(4);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(() => process.kill(helper, 0)).toThrow();
+    expect(agentRunning(workDir)).toBe(false);
   });
 
   it('lets history stop after its current window and resume on the next start', async () => {

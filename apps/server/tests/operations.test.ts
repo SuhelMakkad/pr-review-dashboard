@@ -560,8 +560,10 @@ describe('durable GitHub operations', () => {
     const { queue, github, sync, pr } = await setup();
     const refresh = sync.refresh.bind(sync);
     let calls = 0;
+    // The check before sending and the one right before the mark goes out succeed; the refresh
+    // after the confirmed write fails.
     vi.spyOn(sync, 'refresh').mockImplementation(async (...args) => {
-      if (++calls > 1) throw new Error('Refresh unavailable');
+      if (++calls > 2) throw new Error('Refresh unavailable');
       return refresh(...args);
     });
     const { operation } = queue.enqueue('you', pr().id, randomUUID(), {
@@ -874,6 +876,54 @@ describe('durable GitHub operations', () => {
     const cancelled = await completed(queue, operation.id, 'cancelled');
 
     expect(cancelled.progress).toMatch(/^Not marked viewed: /);
+    expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
+  });
+
+  it('checks the diff again right before the mark goes out', async () => {
+    const { queue, github, pr } = await setup();
+    const pull = pr();
+    const identity = github.identity.bind(github);
+    let calls = 0;
+
+    // New commits land after the check before sending, during the account check by the write.
+    vi.spyOn(github, 'identity').mockImplementation(async () => {
+      if (++calls === 3)
+        github.scenario.world.pulls.find(
+          (candidate) => candidate.snapshot.id === pull.id,
+        )!.snapshot.headOid = 'f'.repeat(40);
+
+      return identity();
+    });
+
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'viewed',
+      path: pull.files[0].path,
+      viewed: true,
+    });
+
+    queue.resume();
+    expect((await completed(queue, operation.id, 'cancelled')).progress).toMatch(
+      /^Not marked viewed: /,
+    );
+    expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
+  });
+
+  it('keeps the diff the page showed, even when the server has seen a newer one', async () => {
+    const { queue, github, pr } = await setup();
+    const pull = pr();
+    // The page still showed an earlier head when you marked the file.
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'viewed',
+      path: pull.files[0].path,
+      viewed: true,
+      target: { headOid: 'e'.repeat(40), baseOid: pull.baseOid ?? null },
+    });
+
+    expect(queue.get('you', operation.id).action).toMatchObject({
+      target: { headOid: 'e'.repeat(40) },
+    });
+    queue.resume();
+    await completed(queue, operation.id, 'cancelled');
     expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
   });
 

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import type { Duplex } from 'node:stream';
 import { existsSync, mkdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -123,9 +124,6 @@ export interface AgentProcess {
   stop(): void;
 }
 
-/** Process groups of agents still running, so that exiting the server can end them too. */
-const liveGroups = new Set<number>();
-
 /**
  * Agents run under a small supervisor (`agent-supervisor.ts`) that leads their process group and
  * ends it the moment this server is gone, however it ended. Given a run's workspace, it also holds
@@ -178,23 +176,6 @@ export async function agentExited(workDir: string, timeoutMs: number): Promise<b
 }
 
 /**
- * Ends every agent process group still running, at once and without waiting. For the moment the
- * server exits: a run stopped normally has already ended its agent, but a forced exit must not
- * leave one running against its workspace.
- */
-export function killAgentProcesses(): void {
-  for (const group of liveGroups) {
-    try {
-      process.kill(-group, 'SIGKILL');
-    } catch {
-      // Already gone.
-    }
-  }
-
-  liveGroups.clear();
-}
-
-/**
  * Starts an agent CLI in its own process group. Cancellation, timeouts and {@link AgentProcess.stop}
  * terminate the whole group (SIGTERM, then SIGKILL after five seconds), so no stray children
  * outlive a run. Stdout is delivered line by line and not kept.
@@ -204,8 +185,8 @@ export function spawnAgentProcess(
   args: string[],
   options: ProcessOptions,
 ): AgentProcess {
-  // The supervisor leads the group and keeps the agent from outliving this server; the fourth
-  // pipe is its lifeline, never written to, closed by the system when this process exits.
+  // The supervisor leads the group and is the only process that signals it; the fourth pipe is
+  // its control line (see agent-supervisor.ts), closed by the system when this process exits.
   const child = spawn(
     process.execPath,
     [
@@ -222,46 +203,38 @@ export function spawnAgentProcess(
       stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
     },
   );
-  const group = child.pid;
+  const control = child.stdio[3] as Duplex;
+  let reported: { code: number | null } | null = null;
+  let controlBuffer = '';
 
-  if (group) {
-    liveGroups.add(group);
+  // How the agent itself ended, as the supervisor reports it; the supervisor then ends with the
+  // rest of the group, so its own exit says nothing about the agent.
+  control.on('error', () => {});
+  control.setEncoding('utf8').on('data', (chunk: string) => {
+    controlBuffer += chunk;
 
-    // The agent is gone; anything still in its group is a stray of this run, which ends with it.
-    // The group stays registered until then, so exiting the server never misses one.
-    child.once('close', () => {
-      try {
-        process.kill(-group, 'SIGKILL');
-      } catch {
-        // The group is already empty.
-      }
+    for (const line of controlBuffer.split('\n').slice(0, -1)) {
+      const exit = /^exit (\d+)$/.exec(line.trim());
 
-      liveGroups.delete(group);
-    });
-  }
+      if (exit) reported = { code: Number(exit[1]) };
+      else if (/^signal \w+$/.test(line.trim())) reported = { code: null };
+    }
+
+    controlBuffer = controlBuffer.slice(controlBuffer.lastIndexOf('\n') + 1);
+  });
 
   let stderr = '';
   let buffer = '';
   let reason: 'timeout' | 'cancelled' | 'stopped' | null = null;
 
+  // The supervisor stops the agent (SIGTERM, then SIGKILL after five seconds); this process never
+  // signals the group itself, whose id another process could hold once the supervisor is gone.
   const terminate = (why: 'timeout' | 'cancelled' | 'stopped') => {
     if (reason) return;
 
     reason = why;
 
-    try {
-      process.kill(-child.pid!, 'SIGTERM');
-    } catch {
-      // Already gone.
-    }
-
-    setTimeout(() => {
-      try {
-        process.kill(-child.pid!, 'SIGKILL');
-      } catch {
-        // Already gone.
-      }
-    }, 5000).unref();
+    if (control.writable) control.write('stop\n');
   };
 
   const timer = setTimeout(() => terminate('timeout'), options.timeoutMs);
@@ -311,10 +284,11 @@ export function spawnAgentProcess(
     });
     child.on('close', (code) => {
       finish();
+      control.destroy();
 
       if (reason === 'timeout') reject(new AgentError('The agent took too long and was stopped.'));
       else if (reason === 'cancelled') reject(new AgentError('Cancelled.'));
-      else resolve({ code, stderr });
+      else resolve({ code: reported ? reported.code : code, stderr });
     });
   });
 
