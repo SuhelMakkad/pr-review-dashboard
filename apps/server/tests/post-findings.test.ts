@@ -934,6 +934,56 @@ describe('what an automatic post rests on', () => {
     },
   );
 
+  it('stops when the target branch moves while the PR is read, though its diff looks the same', async () => {
+    const { github, queue, setPosting, review, posted } = await setup();
+    const branchHead = github.branchHead.bind(github);
+    let reads = 0;
+
+    setPosting(true);
+    await queue.pause();
+
+    const run = await review();
+
+    // The target moves between the lookup and the last read; the PR's stored diff does not.
+    vi.spyOn(github, 'branchHead').mockImplementation(async (...args) =>
+      ++reads === 2 ? 'target-moved-on' : branchHead(...args),
+    );
+    queue.resume();
+
+    expect((await posted(run.id, 'cancelled')).progress).toBe(
+      'Not posted: the PR shows another diff than the one reviewed.',
+    );
+    expect(github.writes).toEqual([]);
+  });
+
+  it.each([
+    ['already off', false],
+    ['turned off while reading the PR fails', true],
+  ])(
+    'stops a post when posting is %s before sending, rather than retrying',
+    async (_when, during) => {
+      const { sync, queue, setPosting, review, posted, github } = await setup();
+
+      setPosting(true);
+      await queue.pause();
+
+      const run = await review();
+
+      vi.spyOn(sync, 'refresh').mockImplementationOnce(async () => {
+        if (during) setPosting(false);
+
+        throw new GitHubError('GitHub is unavailable.', null, 503, 'unavailable');
+      });
+      if (!during) setPosting(false);
+      queue.resume();
+
+      expect((await posted(run.id, 'cancelled')).progress).toBe(
+        'Not posted: posting findings was turned off in Settings.',
+      );
+      expect(github.writes).toEqual([]);
+    },
+  );
+
   it.each([
     ['already off', false],
     ['turned off while the lookup fails', true],
@@ -1157,7 +1207,15 @@ describe('what an automatic post rests on', () => {
     queue.resume();
 
     await posted(run.id);
-    expect(compare).toHaveBeenCalledWith(expect.any(String), 'main', run.headOid);
+
+    const { repository } = queue.get('you', postedReviewOperationId(run.id));
+
+    // Compared from the exact commit the target branch points to.
+    expect(compare).toHaveBeenCalledWith(
+      repository,
+      github.scenario.world.repos.refOid(repository, 'main'),
+      run.headOid,
+    );
     expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
   });
 
@@ -1218,6 +1276,24 @@ describe('the publication fingerprint', () => {
 
     expect(publicationFingerprint(verdict('someone-else'), 'run-1', 'you')).not.toBe(base);
     expect(publicationFingerprint(verdict('you'), 'run-1', 'you')).toBe(base);
+
+    // The same reviewer approving the same commit again is a new review: the forge's id says so.
+    const approval = (id: string) => ({
+      ...structuredClone(reviewed),
+      verdicts: [
+        {
+          id,
+          login: 'someone-else',
+          state: 'APPROVED' as const,
+          submittedAt: '2030-01-01T00:00:00Z',
+          commitOid: reviewed.headOid,
+        },
+      ],
+    });
+
+    expect(publicationFingerprint(approval('second'), 'run-1', 'you')).not.toBe(
+      publicationFingerprint(approval('first'), 'run-1', 'you'),
+    );
 
     const other = structuredClone(reviewed);
 

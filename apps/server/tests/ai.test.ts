@@ -2001,6 +2001,20 @@ describe('review inputs', () => {
     ]);
   });
 
+  it('reads a file whose name holds a backslash, as Git allows', async () => {
+    const directory = workspace();
+    const named: CompareResult = {
+      ...comparison(true),
+      files: [remote('a.ts', 'modified'), remote('notes\\draft.md', 'added')],
+    };
+
+    writeFileSync(join(directory, 'after', 'notes\\draft.md'), 'content');
+
+    expect(
+      (await observeInputs(directory, pr(), manifest(), named, 'merge-base')).inputs,
+    ).toMatchObject({ complete: true, unreadableCount: 0 });
+  });
+
   it('is incomplete when the forge counts other files than it lists', async () => {
     expect(
       (await observeInputs(workspace(), pr(3), manifest(), comparison(true), 'merge-base')).inputs,

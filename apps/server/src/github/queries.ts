@@ -51,7 +51,7 @@ export const snapshotQuery = `query Snapshot($id: ID!, $login: String!, $cursor:
     id number title url body author { login avatarUrl } repository { nameWithOwner }
     isDraft state createdAt updatedAt headRefOid baseRefOid baseRefName headRefName additions deletions changedFiles reviewDecision mergeable mergeStateStatus
     ${Object.values(connections).join('\n')}
-    verdicts: latestOpinionatedReviews(first: 50) { nodes { state submittedAt author { login } commit { oid } } }
+    verdicts: latestOpinionatedReviews(first: 50) { nodes { id state submittedAt author { login } commit { oid } } }
     conversation: comments(last: 50) { nodes { id body createdAt updatedAt url author { login avatarUrl } } }
     pending: reviews(first: 1, author: $login, states: [PENDING]) { nodes { id createdAt comments { totalCount } } }
     forcePushes: timelineItems(last: 20, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { id createdAt beforeCommit { oid } afterCommit { oid } actor { login } } } }
@@ -117,7 +117,7 @@ export const historyQuery = `query History($ids: [ID!]!, $login: String!) {
     headRefName baseRefName headRefOid
     timelineItems(first: 100, itemTypes: [REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) { nodes { __typename ... on ReviewRequestedEvent { id createdAt requestedReviewer { ${reviewerFields} } } ... on ReviewRequestRemovedEvent { id createdAt requestedReviewer { ${reviewerFields} } } } }
     reviews(first: 100, author: $login) { nodes { ${reviewFields} } }
-    verdicts: latestOpinionatedReviews(first: 30) { nodes { state submittedAt author { login } commit { oid } } }
+    verdicts: latestOpinionatedReviews(first: 30) { nodes { id state submittedAt author { login } commit { oid } } }
   } }
 }`;
 

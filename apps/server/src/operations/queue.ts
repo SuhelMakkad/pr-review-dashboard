@@ -717,16 +717,41 @@ export class OperationQueue {
         return;
       }
 
-      const identity = await this.sync.github.identity();
-      if (identity.login.toLowerCase() !== row.account.toLowerCase())
-        throw new ReviewError(
-          'ACCOUNT_CHANGED',
-          409,
-          'The GitHub CLI account changed. Sign in to the original account before retrying.',
-        );
+      // An automatic post Settings no longer allows stops before anything is read for it, and
+      // when a read fails, rather than waiting ahead of your own actions on the PR.
+      const allowed = () => {
+        if (row.action.type !== 'ai_review') return;
 
-      // A read started now: an older read still in flight can no longer be saved over it.
-      const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
+        const action = row.action;
+
+        this.stopFor(
+          this.row(row.account, row.id),
+          this.settingsProblem(
+            action,
+            action.event === 'APPROVE' ? 'approveReview' : 'addConversationComment',
+          ),
+        );
+      };
+
+      allowed();
+
+      const preflight = async () => {
+        const identity = await this.sync.github.identity();
+        if (identity.login.toLowerCase() !== row.account.toLowerCase())
+          throw new ReviewError(
+            'ACCOUNT_CHANGED',
+            409,
+            'The GitHub CLI account changed. Sign in to the original account before retrying.',
+          );
+
+        // A read started now: an older read still in flight can no longer be saved over it.
+        return (await this.sync.refresh(row.prId, row.account))?.snapshot;
+      };
+      const pr = await preflight().catch((error: unknown) => {
+        allowed();
+
+        throw error;
+      });
       if (this.row(row.account, row.id).status === 'cancelled') return;
 
       // Posting was automatic, so an outdated review is skipped rather than left needing attention,
@@ -1089,30 +1114,42 @@ export class OperationQueue {
 
     allowed();
 
-    let mergeBase: string | null = null;
-
-    // The merge base of the reviewed head on the reviewed target branch, as the forge has it
-    // now. A failed lookup is retried.
-    if (action.basis) {
+    // A failed read is retried, unless Settings stopped the post meanwhile.
+    const read = async <T>(lookup: () => Promise<T>): Promise<T> => {
       try {
-        mergeBase =
-          (
-            await this.sync.github.compare(
-              row.repository,
-              action.basis.baseRefName,
-              action.expectedHeadOid,
-            )
-          )?.mergeBaseOid ?? null;
+        return await lookup();
       } catch (error) {
         allowed();
 
         throw error;
       }
-    }
+    };
+    const basis = action.basis;
+    let mergeBase: string | null = null;
 
-    // The last read of the PR before sending, after every other wait. From here to the step's
-    // checkpoint, everything is synchronous.
-    await this.sync.refresh(row.prId, row.account);
+    // The merge base of the reviewed head on the commit the target branch points to now, then
+    // the last read of the PR, then the branch again: the merge base counts only if the branch
+    // still points there, so a target that moved during the reads is noticed even where the PR
+    // still shows its earlier diff. From the last read to the step's checkpoint, everything is
+    // synchronous.
+    if (basis) {
+      const target = await read(() =>
+        this.sync.github.branchHead(row.repository, basis.baseRefName),
+      );
+      const compared = target
+        ? await read(() => this.sync.github.compare(row.repository, target, action.expectedHeadOid))
+        : null;
+
+      await read(() => this.sync.refresh(row.prId, row.account));
+
+      const still = await read(() =>
+        this.sync.github.branchHead(row.repository, basis.baseRefName),
+      );
+
+      mergeBase = target && still === target ? (compared?.mergeBaseOid ?? null) : null;
+    } else {
+      await read(() => this.sync.refresh(row.prId, row.account));
+    }
 
     row = this.row(row.account, row.id);
     if (row.status === 'cancelled') throw new Cancelled();

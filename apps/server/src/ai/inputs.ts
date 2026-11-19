@@ -46,7 +46,8 @@ async function realDirectory(path: string, checked: DirectoryCheck): Promise<boo
  * file, not a directory on the way, not the snapshot root.
  */
 async function readable(root: string, path: string, checked: DirectoryCheck): Promise<boolean> {
-  const parts = path.split(/[\\/]/);
+  // Forge paths use `/`; on macOS and Linux a backslash is part of a file's name.
+  const parts = path.split('/');
 
   if (!path || isAbsolute(path) || parts.includes('..') || parts.includes('')) return false;
 
@@ -55,7 +56,7 @@ async function readable(root: string, path: string, checked: DirectoryCheck): Pr
   }
 
   try {
-    const file = await open(join(root, path), constants.O_RDONLY | constants.O_NOFOLLOW);
+    const file = await open(join(root, ...parts), constants.O_RDONLY | constants.O_NOFOLLOW);
 
     try {
       return (await file.stat()).isFile();

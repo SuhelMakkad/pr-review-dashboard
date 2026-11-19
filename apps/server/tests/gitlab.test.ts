@@ -473,8 +473,15 @@ describe('GitLab merge request snapshots', () => {
         url: `${WEB}#note_102`,
       },
     ]);
+    // The approval note identifies its verdict; a request for changes without a note has no id.
     expect(pr.verdicts).toEqual([
-      { login: 'rev', state: 'APPROVED', submittedAt: seconds(3, 20), commitOid: HEAD1 },
+      {
+        id: '104',
+        login: 'rev',
+        state: 'APPROVED',
+        submittedAt: seconds(3, 20),
+        commitOid: HEAD1,
+      },
       { login: 'ana', state: 'CHANGES_REQUESTED', submittedAt: at(1), commitOid: HEAD1 },
     ]);
 

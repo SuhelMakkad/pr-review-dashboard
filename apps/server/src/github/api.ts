@@ -136,6 +136,8 @@ export interface GitHubApi extends GitHubWrites {
   ): Promise<PinnedFiles | null>;
   /** Three-dot comparison; null when either commit is unknown to GitHub. */
   compare(repository: string, base: string, head: string): Promise<CompareResult | null>;
+  /** The commit `branch` points to now; null when there is no such branch. */
+  branchHead(repository: string, branch: string): Promise<string | null>;
   /** PR node ids matching a search (open or closed); used to backfill history. */
   searchPullIds(query: string): Promise<string[]>;
   /** Light snapshots (requests, your reviews, verdicts) for many PRs, for review history. */

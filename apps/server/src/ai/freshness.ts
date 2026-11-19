@@ -68,7 +68,9 @@ export function publicationFingerprint(
       })),
     verdicts: (pr.verdicts ?? [])
       .filter((verdict) => !isSameUser(verdict.login, account))
+      // The forge's id tells a second review with the same verdict apart.
       .map((verdict) => ({
+        id: verdict.id ?? null,
         login: verdict.login,
         state: verdict.state,
         commitOid: verdict.commitOid,

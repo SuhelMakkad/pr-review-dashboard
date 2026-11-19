@@ -637,6 +637,18 @@ export class GitLab implements GitHubApi {
     };
   }
 
+  async branchHead(repository: string, branch: string): Promise<string | null> {
+    const response = await this.transport.request<{ commit?: { id?: string } }>({
+      path: `${projectPath(repository)}/repository/branches/${encodeURIComponent(branch)}`,
+    });
+
+    if (response.status === 404) return null;
+    if (response.status >= 400)
+      throw responseError(response, `Could not read the ${branch} branch`);
+
+    return response.data.commit?.id ?? null;
+  }
+
   async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {
     const project = projectPath(repository);
     const from = encodeURIComponent(base);

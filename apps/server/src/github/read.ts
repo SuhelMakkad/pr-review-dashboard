@@ -103,6 +103,7 @@ interface RawForcePush {
   actor?: { login: string } | null;
 }
 interface RawVerdict {
+  id?: string;
   state: string;
   submittedAt: string | null;
   author: { login: string } | null;
@@ -308,6 +309,7 @@ function historySnapshot(raw: RawHistory): PullRequestSnapshot {
     verdicts: raw.verdicts.nodes
       .filter((verdict) => verdict?.author && verdict.submittedAt)
       .map((verdict) => ({
+        ...(verdict.id ? { id: verdict.id } : {}),
         login: verdict.author!.login,
         state: verdict.state as ReviewState,
         submittedAt: verdict.submittedAt!,
@@ -606,6 +608,23 @@ export class GitHub implements GitHubApi {
     return files;
   }
 
+  async branchHead(repository: string, branch: string): Promise<string | null> {
+    const request = this.requireRequest();
+    const response = await request<{ object?: { sha?: string } }>({
+      path: `repos/${repository}/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`,
+    });
+
+    if (response.status === 404) return null;
+    if (response.status >= 400)
+      throw new GitHubError(
+        `Could not read the ${branch} branch (HTTP ${response.status}).`,
+        null,
+        response.status,
+      );
+
+    return response.data.object?.sha ?? null;
+  }
+
   async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {
     const request = this.requireRequest();
     const response = await request<RawCompare>({
@@ -840,6 +859,7 @@ export class GitHub implements GitHubApi {
       verdicts: (raw.verdicts?.nodes ?? [])
         .filter((verdict) => verdict?.author && verdict.submittedAt)
         .map((verdict) => ({
+          ...(verdict.id ? { id: verdict.id } : {}),
           login: verdict.author!.login,
           state: verdict.state as ReviewState,
           submittedAt: verdict.submittedAt!,

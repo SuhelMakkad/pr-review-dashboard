@@ -49,6 +49,11 @@ export class FixtureRepos {
     this.refs.get(repository)!.set(name, oid);
   }
 
+  /** The commit a ref points to; null when there is none. */
+  refOid(repository: string, name: string): string | null {
+    return this.refs.get(repository)?.get(name) ?? null;
+  }
+
   has(repository: string, oid: string): boolean {
     return Boolean(this.get(repository, oid));
   }

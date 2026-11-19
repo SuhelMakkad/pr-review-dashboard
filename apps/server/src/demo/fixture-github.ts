@@ -233,6 +233,10 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     return this.scenario.world.repos.compare(repository, base, head);
   }
 
+  async branchHead(repository: string, branch: string): Promise<string | null> {
+    return this.scenario.world.repos.refOid(repository, branch);
+  }
+
   async blobs(
     repository: string,
     requests: { oid: string; path: string }[],

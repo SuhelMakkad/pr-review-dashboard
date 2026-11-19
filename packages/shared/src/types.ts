@@ -111,6 +111,8 @@ export interface ForcePush {
 
 /** Latest approve / request-changes per reviewer (any reviewer, not only the viewer). */
 export interface ReviewerVerdict {
+  /** The forge's id for the review or note that gave it, where it has one. */
+  id?: string;
   login: string;
   state: ReviewState;
   submittedAt: string;
