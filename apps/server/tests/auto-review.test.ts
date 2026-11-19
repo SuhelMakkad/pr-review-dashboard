@@ -1493,7 +1493,8 @@ describe('automatic review routes', () => {
       'x-review-desk-session': 'test-session',
     };
     const overview = (await app.inject({ method: 'GET', url: '/api/ai', headers })).json();
-    const saved = await app.inject({
+    // Saving agents and tasks never turns automatic review on, whatever the page sends.
+    const agents = await app.inject({
       method: 'PUT',
       url: '/api/ai/settings',
       headers,
@@ -1506,8 +1507,19 @@ describe('automatic review routes', () => {
       },
     });
 
+    expect(agents.statusCode).toBe(200);
+    expect(agents.json().autoReview).toEqual({ enabled: false, since: null });
+
+    const saved = await app.inject({
+      method: 'PUT',
+      url: '/api/ai/automation',
+      headers,
+      payload: { account: 'you', changes: { autoReview: true } },
+    });
+
     expect(saved.statusCode).toBe(200);
     expect(saved.json().autoReview.enabled).toBe(true);
+    expect(saved.json().autoReview.since).toEqual(expect.any(String));
     expect(saved.json().autoReview.since).not.toBe('1999-01-01T00:00:00.000Z');
 
     const reviews = async () =>

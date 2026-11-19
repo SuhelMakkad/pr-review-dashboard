@@ -48,6 +48,11 @@ export interface DiffManifest {
    * available, so they are its live diff). Readable, but its lines cannot be commented on.
    */
   unpinned?: boolean;
+  /**
+   * Set when the file list is the revision's whole list from the forge's record of it (GitLab), with
+   * the merge base its diffs start from.
+   */
+  listing?: { complete: true; mergeBaseOid: string };
   /** The account whose view this is (viewed state, "since your review"); set by the diff route. */
   account?: string;
   mode: DiffMode;

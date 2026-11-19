@@ -196,6 +196,10 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
       viewerViewedState: viewed?.get(file.path) ?? 'UNVIEWED',
     }));
     snapshot.changedFiles = files.length;
+    snapshot.baseTipOid = this.scenario.world.repos.refOid(
+      snapshot.repository,
+      snapshot.baseRefName,
+    );
     snapshot.additions = files.reduce((sum, file) => sum + file.additions, 0);
     snapshot.deletions = files.reduce((sum, file) => sum + file.deletions, 0);
 
@@ -231,6 +235,10 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
 
   async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {
     return this.scenario.world.repos.compare(repository, base, head);
+  }
+
+  async branchHead(repository: string, branch: string): Promise<string | null> {
+    return this.scenario.world.repos.refOid(repository, branch);
   }
 
   async blobs(

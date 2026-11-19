@@ -174,6 +174,11 @@ export interface MergeRequestData {
   viewed?: Record<string, string>;
   /** Review Desk's last submission of your review here, if any. */
   submission?: SubmissionEvidence | null;
+  /**
+   * The commit the target branch points to, read after the rest; null when there is no such
+   * branch, absent when it was not or could not be read.
+   */
+  targetTip?: string | null;
 }
 
 const DELETED_USER = 'deleted-user';
@@ -530,13 +535,17 @@ function verdicts(
         (note) =>
           note.author && isSameUser(note.author.username, login) && verdictOf(note) === verdict,
       )
-      .at(-1)?.created_at;
+      .at(-1);
+  // The note that gave a verdict identifies it, as a review's id does on GitHub.
+  const id = (note: RawNote | undefined) => (note ? { id: String(note.id) } : {});
   const result: ReviewerVerdict[] = [];
 
   for (const { user } of approvals.approved_by ?? []) {
-    const submittedAt = latest(user.username, 'approved') ?? mr.updated_at;
+    const note = latest(user.username, 'approved');
+    const submittedAt = note?.created_at ?? mr.updated_at;
 
     result.push({
+      ...id(note),
       login: user.username,
       state: 'APPROVED',
       submittedAt,
@@ -547,10 +556,11 @@ function verdicts(
   for (const reviewer of reviewers) {
     if (reviewer.state !== 'requested_changes') continue;
 
-    const submittedAt =
-      latest(reviewer.user.username, 'requested_changes') ?? reviewer.created_at ?? mr.updated_at;
+    const note = latest(reviewer.user.username, 'requested_changes');
+    const submittedAt = note?.created_at ?? reviewer.created_at ?? mr.updated_at;
 
     result.push({
+      ...id(note),
       login: reviewer.user.username,
       state: 'CHANGES_REQUESTED',
       submittedAt,
@@ -758,6 +768,7 @@ export function mergeRequestSnapshot(
           ? now
           : reconstructedHeadTime,
     baseRefName: mr.target_branch,
+    ...(data.targetTip !== undefined ? { baseTipOid: data.targetTip } : {}),
     headRefName: mr.source_branch,
     additions: changedFiles.reduce((sum, file) => sum + file.additions, 0),
     deletions: changedFiles.reduce((sum, file) => sum + file.deletions, 0),

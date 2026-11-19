@@ -2,10 +2,12 @@ import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlit
 import type {
   AiEffort,
   AiProvider,
+  AiPublication,
   AiRunContext,
   AiRunStatus,
   AiRunTrigger,
   AiTask,
+  ReviewInputs,
 } from '@review-desk/shared/ai';
 import type { ActivityKind } from '@review-desk/shared/insights';
 import type { OperationRecord } from '@/operations/types.js';
@@ -173,6 +175,10 @@ export const aiRuns = sqliteTable(
     error: text('error'),
     usage: text('usage'),
     trigger: text('trigger').$type<AiRunTrigger>().notNull().default('manual'),
+    /** What a full review was given to read, saved before the agent starts (`ReviewInputs`). */
+    inputs: text('inputs', { mode: 'json' }).$type<ReviewInputs>(),
+    /** Whether a finished full review was posted, decided when it settled (`AiPublication`). */
+    publication: text('publication', { mode: 'json' }).$type<AiPublication>(),
     createdAt: text('created_at').notNull(),
     finishedAt: text('finished_at'),
   },

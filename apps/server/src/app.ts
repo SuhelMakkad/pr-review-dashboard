@@ -26,7 +26,7 @@ import { FixtureLinear, LinearService, type LinearSource } from '@/linear/servic
 import type { LinearConnector } from '@/linear/oauth.js';
 import { AiRunner } from '@/ai/runner.js';
 import { AutoReviewer } from '@/ai/auto-review.js';
-import { FindingsPoster } from '@/ai/post-findings.js';
+import { FindingsPublisher } from '@/ai/post-findings.js';
 import { downloadRepository, type RepositoryExporter } from '@/ai/workspace.js';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -145,13 +145,12 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
 
   const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);
   const autoReviewer = new AutoReviewer(service, runner, notifier);
-  const poster = new FindingsPoster(service, runner, operations);
+  const publisher = new FindingsPublisher(service, runner, operations);
 
   runner.onSettled = (row) => autoReviewer.settled(row);
-  runner.onFinished = (row) => {
-    poster.finished(row);
-    autoReviewer.finished(row);
-  };
+  runner.onPublish = (row, reviewed) => publisher.publish(row, reviewed);
+  runner.onFinished = (row) => autoReviewer.finished(row);
+  operations.posting = () => runner.settings();
   registerAiRoutes(app, runner, autoReviewer);
 
   const backfill = new Backfill(service, service.events);

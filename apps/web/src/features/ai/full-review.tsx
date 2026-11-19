@@ -20,7 +20,7 @@ import { AiCard } from '@/features/ai/assist-panel';
 import { restartCopy } from '@/features/ai/restart';
 import { useAi, useAiOverview } from '@/features/ai/use-ai';
 import { useInboxNavigation } from '@/features/inbox/inbox-context';
-import { openActivity, useOperations } from '@/features/activity/use-operations';
+import { openActivity, useOperation, useOperations } from '@/features/activity/use-operations';
 
 /** Where this review's automatic approval or comment stands. */
 function PostingStatus({ operation }: { operation: GitHubOperation }) {
@@ -101,10 +101,16 @@ export function FullReview({
   const result = run?.status === 'done' ? (run.result as FullReviewResult | null) : null;
   const operations = useOperations(account);
   const autoPost = overview.data?.settings.postFindings ?? false;
+  // The post this run queued, by the id its decision saved, wherever it is in Activity.
+  const published = useOperation(
+    account,
+    run?.publication && 'operationId' in run.publication ? run.publication.operationId : null,
+  );
   const posting = run
-    ? operations.data?.pages
+    ? (published.data ??
+      operations.data?.pages
         .flatMap((page) => page.items)
-        .find((item) => item.action.type === 'ai_review' && item.action.runId === run.id)
+        .find((item) => item.action.type === 'ai_review' && item.action.runId === run.id))
     : undefined;
   const willPost =
     autoPost && !posting && ['queued', 'running', 'paused'].includes(run?.status ?? '');
@@ -238,6 +244,22 @@ export function FullReview({
               </p>
             )}
             {posting && <PostingStatus operation={posting} />}
+            {run.publication &&
+              'reason' in run.publication &&
+              run.publication.reason &&
+              posting?.status !== 'cancelled' && (
+                <p className="text-2xs text-fg-subtle">
+                  {posting?.status === 'succeeded'
+                    ? 'Commented instead of approving'
+                    : 'Comments instead of approving'}
+                  : {run.publication.reason}
+                </p>
+              )}
+            {run.publication && 'skipped' in run.publication && (
+              <p role="status" className="text-xs text-fg-muted">
+                Not posted to the PR: {run.publication.skipped}
+              </p>
+            )}
             {willPost && (
               <p className="text-2xs text-fg-subtle">
                 Its findings will be posted to the PR when this review finishes.

@@ -92,8 +92,8 @@ function readyCopy(row: AiRunRow): string {
 
 /**
  * Starts a full review when your review is requested. It stops at the finished report, so nothing
- * here can reach GitHub: posting the report is FindingsPoster's job, and only when Settings asks
- * for it. FindingsPoster decides whether the result warrants an approval or a comment.
+ * here can reach GitHub: posting the report is FindingsPublisher's job, and only when Settings asks
+ * for it. FindingsPublisher decides whether the result warrants an approval or a comment.
  *
  * New commits stop an automatic review of an older head, including commits that only show up once
  * it has finished. A fresh review starts once the PR has had no new commits for

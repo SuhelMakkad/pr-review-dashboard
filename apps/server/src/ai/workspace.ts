@@ -5,6 +5,7 @@ import { isAbsolute, join } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { x } from 'tar';
+import type { ReviewInputs } from '@review-desk/shared/ai';
 import type { DiffManifest } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi } from '@/github/api.js';
@@ -13,6 +14,7 @@ import { ghCredentials, scopedAccount } from '@/github/credentials.js';
 import { safeError } from '@/github/errors.js';
 import { baseGlabEnvironment, glabCwd } from '@/gitlab/transport.js';
 import { AgentError } from '@/ai/provider.js';
+import { observeInputs } from '@/ai/inputs.js';
 
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 512 * 1024 * 1024;
@@ -48,7 +50,8 @@ export async function extractRepository(
       const safe = !isAbsolute(path) && !path.split(/[\\/]/).includes('..');
 
       if (!regular || !safe || extracted + entry.size > MAX_EXTRACTED_BYTES) {
-        omitted.push(path);
+        // As extracted: relative to the snapshot's root, like the paths in the PR's diff.
+        omitted.push(path.split(/[\\/]/).slice(1).join('/') || path);
         return false;
       }
 
@@ -180,6 +183,7 @@ export const downloadRepository: RepositoryExporter = async (
   }
 };
 
+/** Prepares the snapshots a full review reads, and returns what they hold of the change. */
 export async function prepareReviewWorkspace(
   github: GitHubApi,
   pr: PullRequestSnapshot,
@@ -187,7 +191,7 @@ export async function prepareReviewWorkspace(
   directory: string,
   signal: AbortSignal,
   exportRepository: RepositoryExporter,
-): Promise<void> {
+): Promise<ReviewInputs> {
   if (!pr.baseOid)
     throw new AgentError('The PR base commit is unavailable. Refresh and try again.');
 
@@ -211,6 +215,9 @@ export async function prepareReviewWorkspace(
   );
 
   signal.throwIfAborted();
+
+  const { inputs, files } = await observeInputs(directory, pr, diff, comparison, mergeBase);
+
   await writeFile(
     join(directory, 'review.json'),
     JSON.stringify(
@@ -221,15 +228,18 @@ export async function prepareReviewWorkspace(
         description: pr.body,
         baseOid: mergeBase,
         headOid: pr.headOid,
-        files: diff.files,
+        files,
         expectedChangedFiles: pr.changedFiles,
         threads: pr.threads,
         reviews: pr.reviews,
         conversation: pr.conversation,
         omittedBefore,
         omittedAfter,
+        inputs,
         notes: [
-          'Compare before/ and after/ for missing or truncated patches. Neither snapshot contains Git credentials.',
+          inputs.inventory === 'verified'
+            ? 'Compare before/ and after/ for missing or truncated patches. Neither snapshot contains Git credentials.'
+            : 'The changed files could not be confirmed for these commits, so no patches are included: read before/ and after/ to see what changed. Neither snapshot contains Git credentials.',
           'Symlinks and submodule contents are unavailable; report any material coverage gaps.',
         ],
       },
@@ -238,4 +248,6 @@ export async function prepareReviewWorkspace(
     ),
     { mode: 0o600 },
   );
+
+  return inputs;
 }

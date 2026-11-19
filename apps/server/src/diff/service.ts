@@ -23,7 +23,7 @@ const statuses: FileStatus[] = [
 ];
 const shortSha = (oid: string) => oid.slice(0, 7);
 
-function toDiffFile(file: RemoteFile, viewed?: DiffFile['viewed']): DiffFile {
+export function toDiffFile(file: RemoteFile, viewed?: DiffFile['viewed']): DiffFile {
   const status = (
     statuses.includes(file.status as FileStatus) ? file.status : 'modified'
   ) as FileStatus;
@@ -145,6 +145,9 @@ export class DiffService {
       fromOid: pr.baseOid ?? pr.baseRefName,
       toOid: pr.headOid,
       ...(keyed ? { keyed: true } : {}),
+      ...(listing?.complete && listing.mergeBaseOid
+        ? { listing: { complete: true as const, mergeBaseOid: listing.mergeBaseOid } }
+        : {}),
       files: files.map((file) => toDiffFile(file)),
     };
 

@@ -429,6 +429,164 @@ describe('comment positions', () => {
 });
 
 describe('GitLab merge request snapshots', () => {
+  it('reads where the target branch is last, after the rest of the merge request', async () => {
+    const { client, fake } = gitlab();
+    const branch = 'projects/7/repository/branches/main';
+    let tip = BASE;
+
+    fake.on('GET', branch, () => ({ data: { commit: { id: tip } } }));
+
+    // The target moves while the snapshot's later requests are still out: the tip read last
+    // sees it.
+    for (const path of [`${MR}/diffs`, `${MR_BY_PATH}/diffs`]) {
+      const listed = fake.routes.get(`GET ${path}`)!;
+
+      fake.on('GET', path, (request) => {
+        tip = HEAD1;
+
+        return listed(request);
+      });
+    }
+
+    expect((await client.snapshot('MR_7_12', VIEWER, ['requested'])).baseTipOid).toBe(HEAD1);
+    expect(fake.calls.at(-1)?.path).toBe(branch);
+  });
+
+  it('reads the discussion after what is only shown, so a comment made meanwhile is seen', async () => {
+    const { client, fake } = gitlab();
+    const listed = fake.routes.get(`GET ${MR}/discussions`)!;
+    let commented = false;
+
+    // Someone comments while the diff is still being read.
+    for (const path of [`${MR}/diffs`, `${MR_BY_PATH}/diffs`]) {
+      const diffs = fake.routes.get(`GET ${path}`)!;
+
+      fake.on('GET', path, (request) => {
+        commented = true;
+
+        return diffs(request);
+      });
+    }
+    fake.on('GET', `${MR}/discussions`, (request) => {
+      const reply = listed(request);
+
+      return commented
+        ? {
+            ...reply,
+            data: [
+              ...(reply.data as unknown[]),
+              {
+                id: 'late',
+                individual_note: true,
+                notes: [
+                  {
+                    id: 999,
+                    type: null,
+                    body: 'Please wait for the security review.',
+                    author: users.ana,
+                    created_at: at(9),
+                    updated_at: at(9),
+                    system: false,
+                    resolvable: false,
+                    resolved: false,
+                  },
+                ],
+              },
+            ],
+          }
+        : reply;
+    });
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(pr.conversation.map((comment) => comment.body)).toContain(
+      'Please wait for the security review.',
+    );
+  });
+
+  it('reads what is shown again when the merge request is pushed to while it is read', async () => {
+    const { client, fake } = gitlab();
+    const reads: string[] = [];
+    let head = HEAD2;
+
+    fake.on('GET', MR, () => ({ data: mergeRequest({ sha: head }) }));
+    fake.on('GET', `projects/7/repository/commits/${HEAD2}`, () => {
+      reads.push(HEAD2);
+      head = HEAD3;
+
+      return { data: { committed_date: at(5) } };
+    });
+    fake.on('GET', `projects/7/repository/commits/${HEAD3}`, () => {
+      reads.push(HEAD3);
+
+      return { data: { committed_date: at(6) } };
+    });
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(reads).toEqual([HEAD2, HEAD3]);
+    expect(pr.headOid).toBe(HEAD3);
+    expect(pr.headCommittedAt).toBe(at(6));
+  });
+
+  it('names reviewers and shows CI from the reads that go with them', async () => {
+    const { client, fake } = gitlab();
+    const shown = mergeRequest();
+    let reads = 0;
+
+    // An older GitLab without the reviewers endpoint: the merge request names them. While the
+    // diff is read, a reviewer is added and a new pipeline starts on the same commit.
+    fake.routes.delete(`GET ${MR}/reviewers`);
+    fake.on('GET', MR, () =>
+      ++reads === 1
+        ? { data: shown }
+        : {
+            data: {
+              ...shown,
+              reviewers: [...(shown.reviewers ?? []), users.ana],
+              head_pipeline: { id: 56, project_id: 7, status: 'success' },
+            },
+          },
+    );
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(pr.reviewRequests.map((reviewer) => reviewer.login)).toContain('ana');
+    // The jobs read were pipeline 55's, so its status is shown with them.
+    expect(pr.ci).toBe('pending');
+    expect(fake.calls.some((call) => call.path.startsWith('projects/7/pipelines/56'))).toBe(false);
+  });
+
+  it('tells a missing target branch from one that could not be read', async () => {
+    const missing = gitlab();
+
+    expect((await missing.client.snapshot('MR_7_12', VIEWER, [])).baseTipOid).toBeNull();
+
+    const unreadable = gitlab();
+
+    unreadable.fake.on('GET', 'projects/7/repository/branches/main', {
+      status: 503,
+      data: { message: 'Service unavailable' },
+    });
+
+    const pr = await unreadable.client.snapshot('MR_7_12', VIEWER, []);
+
+    expect('baseTipOid' in pr).toBe(false);
+
+    // A rate limit keeps GitLab's retry time, as glab reports it.
+    const limited = gitlab();
+    const retryAt = new Date(Date.now() + 120_000).toISOString();
+
+    limited.fake.on('GET', 'projects/7/repository/branches/main', () => {
+      throw new GitHubError('GitLab rate limit reached.', retryAt, 429, 'rate_limit');
+    });
+
+    await expect(limited.client.snapshot('MR_7_12', VIEWER, [])).rejects.toMatchObject({
+      outcome: 'rate_limit',
+      retryAt,
+    });
+  });
+
   it('maps reviewers, reviews, threads, CI and files onto the pull request model', async () => {
     const { client } = gitlab();
     const pr = await client.snapshot('MR_7_12', VIEWER, ['requested']);
@@ -473,8 +631,15 @@ describe('GitLab merge request snapshots', () => {
         url: `${WEB}#note_102`,
       },
     ]);
+    // The approval note identifies its verdict; a request for changes without a note has no id.
     expect(pr.verdicts).toEqual([
-      { login: 'rev', state: 'APPROVED', submittedAt: seconds(3, 20), commitOid: HEAD1 },
+      {
+        id: '104',
+        login: 'rev',
+        state: 'APPROVED',
+        submittedAt: seconds(3, 20),
+        commitOid: HEAD1,
+      },
       { login: 'ana', state: 'CHANGES_REQUESTED', submittedAt: at(1), commitOid: HEAD1 },
     ]);
 
@@ -707,6 +872,44 @@ describe('GitLab merge request snapshots', () => {
       pr.files.map((file) => file.viewedKey),
     );
     expect(listed.files[0]?.viewedKey).toEqual(expect.any(String));
+  });
+
+  it('calls a diff version complete only where GitLab stored its whole list', async () => {
+    const pinned = { headOid: HEAD2, baseOid: START };
+
+    for (const [state, complete] of [
+      ['collected', true],
+      ['overflow_diff_files_limit', false],
+    ] as const) {
+      const { client, fake } = gitlab();
+
+      fake.on('GET', `${MR_BY_PATH}/versions/2`, {
+        data: {
+          id: 2,
+          head_commit_sha: HEAD2,
+          start_commit_sha: START,
+          base_commit_sha: BASE,
+          state,
+          created_at: seconds(4, 30),
+          diffs: [
+            {
+              diff: APP_DIFF,
+              new_path: 'src/app.ts',
+              old_path: 'src/app.ts',
+              new_file: false,
+              renamed_file: false,
+              deleted_file: false,
+            },
+          ],
+        },
+      });
+
+      const listed = await client.pinnedFiles('acme/platform/web', 12, pinned);
+
+      expect(listed.pinned).toBe(true);
+      expect(listed.complete ?? false).toBe(complete);
+      expect(listed.mergeBaseOid).toBe(complete ? BASE : undefined);
+    }
   });
 
   it('pins nothing for a revision GitLab has no diff version of', async () => {

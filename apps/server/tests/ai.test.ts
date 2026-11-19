@@ -34,6 +34,10 @@ import { EventBus } from '@/events.js';
 import { ReviewService } from '@/review/service.js';
 import { ReviewError } from '@/review/errors.js';
 import { SyncService } from '@/sync/index.js';
+import { observeInputs } from '@/ai/inputs.js';
+import type { CompareResult, RemoteFile } from '@/github/api.js';
+import type { DiffManifest } from '@review-desk/shared/diff';
+import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import {
   defaultAiSettings,
   type AiRun,
@@ -1450,7 +1454,8 @@ describe('AI runner', () => {
       ]);
 
       expect(resumed.map((item) => item.id)).toEqual([run.id, run.id]);
-      expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(2);
+      // The reused workspace is checked again before the turn.
+      await vi.waitFor(() => expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(2));
       expect(vi.mocked(providers.codex.run).mock.calls[1][0].threadId).toBe(
         `thread-${join(root, run.id)}`,
       );
@@ -1860,6 +1865,163 @@ describe('AI runner', () => {
   });
 });
 
+describe('review inputs', () => {
+  const pr = (changedFiles = 2) =>
+    ({ headOid: 'head', baseOid: 'target', changedFiles }) as PullRequestSnapshot;
+  const remote = (path: string, status: string): RemoteFile => ({
+    path,
+    status,
+    additions: 1,
+    deletions: 0,
+    patch: '@@ -0,0 +1 @@\n+x\n',
+    sha: null,
+  });
+  const manifest = (changes: Partial<DiffManifest> = {}): DiffManifest => ({
+    prId: 'pr',
+    mode: 'full',
+    kind: 'full',
+    fromOid: 'target',
+    toOid: 'head',
+    files: [
+      { path: 'a.ts', status: 'modified', additions: 1, deletions: 0, patch: 'live' },
+      { path: 'b.ts', status: 'added', additions: 1, deletions: 0, patch: 'live' },
+    ],
+    ...changes,
+  });
+  const comparison = (filesComplete?: boolean): CompareResult => ({
+    status: 'ahead',
+    mergeBaseOid: 'merge-base',
+    files: [remote('a.ts', 'modified'), remote('b.ts', 'added')],
+    commits: [],
+    ...(filesComplete === undefined ? {} : { filesComplete }),
+  });
+  const workspace = () => {
+    const directory = workDir();
+
+    for (const [side, path] of [
+      ['before', 'a.ts'],
+      ['after', 'a.ts'],
+      ['after', 'b.ts'],
+    ]) {
+      mkdirSync(join(directory, side), { recursive: true });
+      writeFileSync(join(directory, side, path), 'content');
+    }
+
+    return directory;
+  };
+
+  it('verifies the changed files by commit and gives the agent their own patches', async () => {
+    const directory = workspace();
+    const { inputs, files } = await observeInputs(
+      directory,
+      pr(),
+      manifest(),
+      comparison(true),
+      'merge-base',
+    );
+
+    expect(inputs).toMatchObject({ inventory: 'verified', complete: true, unreadableCount: 0 });
+    expect(files.map((file) => file.patch)).toEqual(['@@ -0,0 +1 @@\n+x\n', '@@ -0,0 +1 @@\n+x\n']);
+
+    // A file the archive left out, or left as a symlink, cannot be read.
+    rmSync(join(directory, 'after', 'b.ts'));
+    symlinkSync('/etc/hosts', join(directory, 'after', 'b.ts'));
+    rmSync(join(directory, 'before', 'a.ts'));
+
+    expect(
+      (await observeInputs(directory, pr(), manifest(), comparison(true), 'merge-base')).inputs,
+    ).toMatchObject({
+      complete: false,
+      unreadable: [
+        { path: 'a.ts', side: 'before' },
+        { path: 'b.ts', side: 'after' },
+      ],
+      unreadableCount: 2,
+    });
+  });
+
+  it('takes GitLab’s record of the revision only when it starts from the extracted merge base', async () => {
+    const directory = workspace();
+    const listing = (mergeBaseOid: string) =>
+      manifest({ listing: { complete: true, mergeBaseOid } });
+
+    expect(
+      (await observeInputs(directory, pr(), listing('merge-base'), comparison(), 'merge-base'))
+        .inputs,
+    ).toMatchObject({ inventory: 'verified', complete: true });
+
+    const other = await observeInputs(
+      directory,
+      pr(),
+      listing('another-base'),
+      comparison(),
+      'merge-base',
+    );
+
+    expect(other.inputs).toMatchObject({ inventory: 'unverified', complete: false });
+    expect(other.files.every((file) => file.patch === undefined)).toBe(true);
+  });
+
+  it('never reads a file through a symlinked directory or snapshot', async () => {
+    const directory = workspace();
+    const elsewhere = workDir();
+    const nested: CompareResult = {
+      ...comparison(true),
+      files: [remote('a.ts', 'modified'), remote('src/c.ts', 'added')],
+    };
+
+    mkdirSync(join(directory, 'after', 'src'));
+    writeFileSync(join(directory, 'after', 'src', 'c.ts'), 'content');
+    expect(
+      (await observeInputs(directory, pr(), manifest(), nested, 'merge-base')).inputs.complete,
+    ).toBe(true);
+
+    // The directory replaced by a link to one holding the same name.
+    mkdirSync(join(elsewhere, 'src'));
+    writeFileSync(join(elsewhere, 'src', 'c.ts'), 'content');
+    rmSync(join(directory, 'after', 'src'), { recursive: true });
+    symlinkSync(join(elsewhere, 'src'), join(directory, 'after', 'src'));
+
+    expect(
+      (await observeInputs(directory, pr(), manifest(), nested, 'merge-base')).inputs,
+    ).toMatchObject({ complete: false, unreadable: [{ path: 'src/c.ts', side: 'after' }] });
+
+    // The whole snapshot replaced by a link.
+    mkdirSync(join(elsewhere, 'after'));
+    writeFileSync(join(elsewhere, 'after', 'a.ts'), 'content');
+    rmSync(join(directory, 'after'), { recursive: true });
+    symlinkSync(join(elsewhere, 'after'), join(directory, 'after'));
+
+    expect(
+      (await observeInputs(directory, pr(), manifest(), comparison(true), 'merge-base')).inputs
+        .unreadable,
+    ).toEqual([
+      { path: 'a.ts', side: 'after' },
+      { path: 'b.ts', side: 'after' },
+    ]);
+  });
+
+  it('reads a file whose name holds a backslash, as Git allows', async () => {
+    const directory = workspace();
+    const named: CompareResult = {
+      ...comparison(true),
+      files: [remote('a.ts', 'modified'), remote('notes\\draft.md', 'added')],
+    };
+
+    writeFileSync(join(directory, 'after', 'notes\\draft.md'), 'content');
+
+    expect(
+      (await observeInputs(directory, pr(), manifest(), named, 'merge-base')).inputs,
+    ).toMatchObject({ complete: true, unreadableCount: 0 });
+  });
+
+  it('is incomplete when the forge counts other files than it lists', async () => {
+    expect(
+      (await observeInputs(workspace(), pr(3), manifest(), comparison(true), 'merge-base')).inputs,
+    ).toMatchObject({ inventory: 'verified', complete: false, unreadableCount: 0 });
+  });
+});
+
 describe('review archives', () => {
   it('extracts source files while excluding symlinks that could expose files outside the workspace', async () => {
     const directory = workDir();
@@ -1876,6 +2038,7 @@ describe('review archives', () => {
 
     expect(readFileSync(join(destination, 'app.ts'), 'utf8')).toContain('ready = true');
     expect(existsSync(join(destination, 'outside'))).toBe(false);
-    expect(omitted).toContain('repository/outside');
+    // Relative to the snapshot's root, like the paths in the PR's diff.
+    expect(omitted).toContain('outside');
   });
 });

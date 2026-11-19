@@ -50,6 +50,31 @@ export function useAiSettings(account: string) {
   });
 }
 
+/** Automation and posting switches, saved one at a time. */
+export type AutomationChanges = Partial<
+  Record<'autoReview' | 'postFindings' | 'approveFindings' | 'resolveThreads', boolean>
+>;
+
+/**
+ * Saves only the switches given: a page holding older settings never turns back on what was
+ * turned off elsewhere.
+ */
+export function useAutomationSettings(account: string) {
+  const client = useQueryClient();
+
+  return useMutation({
+    mutationFn: (changes: AutomationChanges) =>
+      api<AiSettings>('/api/ai/automation', { method: 'PUT', body: { account, changes } }),
+    // Turning automatic review off drops pending restarts, which lists and panels show.
+    onSuccess: () =>
+      Promise.all([
+        client.invalidateQueries({ queryKey: ['ai-overview'] }),
+        client.invalidateQueries({ queryKey: aiReviewsKey }),
+        client.invalidateQueries({ queryKey: ['ai'] }),
+      ]),
+  });
+}
+
 /** The latest full review of every tracked PR, keyed by PR id, for list badges. */
 export function useAiReviewStatuses(account: string | null | undefined) {
   return useQuery({

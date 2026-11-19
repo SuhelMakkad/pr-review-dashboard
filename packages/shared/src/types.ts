@@ -111,6 +111,8 @@ export interface ForcePush {
 
 /** Latest approve / request-changes per reviewer (any reviewer, not only the viewer). */
 export interface ReviewerVerdict {
+  /** The forge's id for the review or note that gave it, where it has one. */
+  id?: string;
   login: string;
   state: ReviewState;
   submittedAt: string;
@@ -171,6 +173,12 @@ export interface PullRequestSnapshot {
   version?: number;
   /** Fields below arrived with snapshot v2; older cached blobs are normalised on read. */
   baseOid: string | null;
+  /**
+   * The commit the target branch pointed to when this snapshot was read, in the same read as the
+   * rest of it (last, where a read takes several requests). Null when there is no such branch;
+   * absent where it was not or could not be read.
+   */
+  baseTipOid?: string | null;
   mergeStateStatus: string | null;
   conversation: ConversationComment[];
   forcePushes: ForcePush[];

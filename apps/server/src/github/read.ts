@@ -103,6 +103,7 @@ interface RawForcePush {
   actor?: { login: string } | null;
 }
 interface RawVerdict {
+  id?: string;
   state: string;
   submittedAt: string | null;
   author: { login: string } | null;
@@ -137,6 +138,8 @@ interface RawPr {
   updatedAt: string;
   headRefOid: string;
   baseRefOid?: string | null;
+  /** The target branch as it is now: absent from light reads. */
+  baseRef?: { target?: { oid?: string } | null } | null;
   mergeStateStatus?: string | null;
   baseRefName: string;
   headRefName: string;
@@ -308,6 +311,7 @@ function historySnapshot(raw: RawHistory): PullRequestSnapshot {
     verdicts: raw.verdicts.nodes
       .filter((verdict) => verdict?.author && verdict.submittedAt)
       .map((verdict) => ({
+        ...(verdict.id ? { id: verdict.id } : {}),
         login: verdict.author!.login,
         state: verdict.state as ReviewState,
         submittedAt: verdict.submittedAt!,
@@ -606,6 +610,23 @@ export class GitHub implements GitHubApi {
     return files;
   }
 
+  async branchHead(repository: string, branch: string): Promise<string | null> {
+    const request = this.requireRequest();
+    const response = await request<{ object?: { sha?: string } }>({
+      path: `repos/${repository}/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`,
+    });
+
+    if (response.status === 404) return null;
+    if (response.status >= 400)
+      throw new GitHubError(
+        `Could not read the ${branch} branch (HTTP ${response.status}).`,
+        null,
+        response.status,
+      );
+
+    return response.data.object?.sha ?? null;
+  }
+
   async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {
     const request = this.requireRequest();
     const response = await request<RawCompare>({
@@ -624,6 +645,8 @@ export class GitHub implements GitHubApi {
       status: response.data.status,
       mergeBaseOid: response.data.merge_base_commit?.sha ?? null,
       files: (response.data.files ?? []).map(restFile),
+      // GitHub lists at most 300 files for a comparison; a response without a list proves none.
+      filesComplete: Array.isArray(response.data.files) && response.data.files.length < 300,
       commits: (response.data.commits ?? []).map((commit) => ({
         oid: commit.sha,
         parents: commit.parents.map((parent) => parent.sha),
@@ -819,6 +842,7 @@ export class GitHub implements GitHubApi {
       fetchedAt: now,
       version: SNAPSHOT_VERSION,
       baseOid: raw.baseRefOid ?? null,
+      ...(raw.baseRef !== undefined ? { baseTipOid: raw.baseRef?.target?.oid ?? null } : {}),
       mergeStateStatus: raw.mergeStateStatus ?? null,
       conversation: (raw.conversation?.nodes ?? []).filter(Boolean).map((comment) => ({
         ...comment,
@@ -838,6 +862,7 @@ export class GitHub implements GitHubApi {
       verdicts: (raw.verdicts?.nodes ?? [])
         .filter((verdict) => verdict?.author && verdict.submittedAt)
         .map((verdict) => ({
+          ...(verdict.id ? { id: verdict.id } : {}),
           login: verdict.author!.login,
           state: verdict.state as ReviewState,
           submittedAt: verdict.submittedAt!,
