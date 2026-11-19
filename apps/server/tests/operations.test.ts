@@ -770,6 +770,72 @@ describe('durable GitHub operations', () => {
     expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
   });
 
+  it.each([
+    ['sends it again while the PR still shows the diff you marked', false, 'succeeded', 1],
+    [
+      'leaves it unconfirmed once a newer diff replaced the one you marked',
+      true,
+      'needs_attention',
+      0,
+    ],
+  ] as const)(
+    'for an interrupted viewed mark on a file not viewed now, %s',
+    async (_name, pushed, status, marks) => {
+      const { queue, sync, github, store, pr } = await setup();
+      const pull = pr();
+      const path = pull.files[0].path;
+      const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+        type: 'viewed',
+        path,
+        viewed: true,
+      });
+      const row = store.db
+        .select()
+        .from(githubOperations)
+        .where(eq(githubOperations.id, operation.id))
+        .get()!;
+
+      // The server stopped before the mark could be confirmed; the file is still not viewed.
+      expect(row.data.action).toMatchObject({ target: { headOid: pull.headOid } });
+      store.db
+        .update(githubOperations)
+        .set({
+          status: 'running',
+          data: {
+            ...row.data,
+            status: 'running',
+            steps: [
+              {
+                method: 'setFileViewed',
+                args: [pull.id, path, true],
+                startedAt: new Date().toISOString(),
+                completedAt: null,
+                result: null,
+                uncertain: true,
+              },
+            ],
+          },
+        })
+        .where(eq(githubOperations.id, operation.id))
+        .run();
+
+      if (pushed) {
+        github.scenario.world.pulls.find(
+          (candidate) => candidate.snapshot.id === pull.id,
+        )!.snapshot.headOid = 'f'.repeat(40);
+      }
+
+      await queue.close();
+
+      const restarted = new OperationQueue(sync, { mutationIntervalMs: 0 });
+
+      cleanups.push(() => restarted.close());
+      restarted.open();
+      await completed(restarted, operation.id, status);
+      expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toHaveLength(marks);
+    },
+  );
+
   it('returns 202 operation receipts from GitHub command routes and preserves replay IDs', async () => {
     const { queue, sync, pr } = await setup();
     await queue.close();

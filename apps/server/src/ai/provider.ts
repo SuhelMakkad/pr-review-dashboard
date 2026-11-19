@@ -160,6 +160,11 @@ export function useAgentJournal(next: AgentJournal | null): void {
   journal = next;
 }
 
+/** Stops recording in `owned` if it is still the journal in use (its database is closing). */
+export function releaseAgentJournal(owned: AgentJournal): void {
+  if (journal === owned) journal = null;
+}
+
 function persist(): void {
   try {
     journal?.save([...carried, ...recorded]);
@@ -168,96 +173,163 @@ function persist(): void {
   }
 }
 
-/** A process and the environment it was started with, as text to search for a marker. */
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A process and the entries of the environment it was started with (`NAME=value`). */
 export interface ProcessEnvironment {
   pid: number;
-  environment: string;
+  entries: string[];
 }
 
-/** Every process of this user with its environment, or null when they cannot be listed. */
-function listProcessEnvironments(): ProcessEnvironment[] | null {
-  if (process.platform === 'linux') {
-    try {
-      return readdirSync('/proc').flatMap((name) => {
-        if (!/^\d+$/.test(name)) return [];
+/** The environment entries of one process from `ps` on macOS and the BSDs, or null when unknown. */
+function psEntries(withEnvironment: string, plain: string): string[] | null {
+  // `-E` prints the environment after the command line; what follows the plain command line is it.
+  if (!withEnvironment.startsWith(plain)) return null;
 
-        try {
-          const raw = readFileSync(`/proc/${name}/environ`, 'utf8');
+  return withEnvironment.slice(plain.length).trim().split(' ').filter(Boolean);
+}
 
-          return [{ pid: Number(name), environment: ` ${raw.split('\0').join(' ')} ` }];
-        } catch {
-          // Another user's process, or one that just ended.
-          return [];
-        }
-      });
-    } catch {
-      return null;
-    }
-  }
-
-  // macOS and the BSDs print the environment after the command line with -E.
-  const result = spawnSync('ps', ['-A', '-E', '-ww', '-o', 'pid=,command='], {
+function psTable(flags: string[]): Map<number, string> | null {
+  const result = spawnSync('ps', [...flags, '-ww', '-o', 'pid=,command='], {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
   });
 
   if (result.status !== 0 || result.error) return null;
 
-  return result.stdout.split('\n').flatMap((line) => {
+  const table = new Map<number, string>();
+
+  for (const line of result.stdout.split('\n')) {
     const match = /^\s*(\d+)\s(.*)$/.exec(line);
 
-    return match ? [{ pid: Number(match[1]), environment: ` ${match[2]} ` }] : [];
+    if (match) table.set(Number(match[1]), match[2]!);
+  }
+
+  return table;
+}
+
+/** Every process of this user with its environment entries, or null when they cannot be listed. */
+function listProcessEnvironments(): ProcessEnvironment[] | null {
+  if (process.platform === 'linux') {
+    try {
+      return readdirSync('/proc').flatMap((name) => {
+        if (!/^\d+$/.test(name)) return [];
+
+        const entries = environmentOf(Number(name));
+
+        return entries ? [{ pid: Number(name), entries }] : [];
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  const plain = psTable(['-A']);
+  const withEnvironment = psTable(['-A', '-E']);
+
+  if (!plain || !withEnvironment) return null;
+
+  return [...withEnvironment].flatMap(([pid, line]) => {
+    const command = plain.get(pid);
+    const entries = command === undefined ? null : psEntries(line, command);
+
+    return entries ? [{ pid, entries }] : [];
   });
 }
 
+/** One process's environment entries, or null when it is gone or cannot be read. */
+function environmentOf(pid: number): string[] | null {
+  if (process.platform === 'linux') {
+    try {
+      return readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean);
+    } catch {
+      return null;
+    }
+  }
+
+  const plain = psTable(['-p', String(pid)])?.get(pid);
+  const line = psTable(['-E', '-p', String(pid)])?.get(pid);
+
+  return plain === undefined || line === undefined ? null : psEntries(line, plain);
+}
+
 /** How processes are listed; replaceable in tests. */
-export const agentProcesses = { list: listProcessEnvironments };
+export const agentProcesses = { list: listProcessEnvironments, environmentOf };
+
+const entryOf = (marker: string) => `${MARKER_VARIABLE}=${marker}`;
+
+/** Processes whose environment has one of `markers` as an exact entry; null when not listable. */
+function marked(markers: Set<string>): { pid: number; marker: string }[] | null {
+  const processes = agentProcesses.list();
+
+  if (!processes) return null;
+
+  return processes.flatMap(({ pid, entries }) => {
+    const marker = [...markers].find((candidate) => entries.includes(entryOf(candidate)));
+
+    return marker && pid !== process.pid ? [{ pid, marker }] : [];
+  });
+}
+
+/** SIGKILLs `pid` if it still carries `marker`, checked right before: its pid may have moved on. */
+function killMarked(pid: number, marker: string): boolean {
+  if (!agentProcesses.environmentOf(pid)?.includes(entryOf(marker))) return false;
+
+  try {
+    process.kill(pid, 'SIGKILL');
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ends every process carrying one of `markers` and waits until none is left, up to about a
+ * second. True when none is left; false when some survive or processes cannot be listed.
+ */
+async function endMarked(markers: Set<string>): Promise<{ ended: number; gone: boolean }> {
+  let ended = 0;
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const found = marked(markers);
+
+    if (!found) return { ended, gone: false };
+    if (found.length === 0) return { ended, gone: true };
+
+    for (const { pid, marker } of found) if (killMarked(pid, marker)) ended++;
+
+    await sleep(200);
+  }
+
+  return { ended, gone: false };
+}
 
 /**
  * Ends the agents a previous server process left running, as recorded in `source`: every process
- * whose environment carries one of their markers. A server killed outright (SIGKILL, a crash)
- * cannot end its agents, and its successor must not resume a run while an old agent still works
- * on it; so call this once the process owns the data directory, and resume nothing while it
- * returns `verified: false`. Processes without a marker are never touched. When processes cannot
- * be listed, the markers are kept and the next call tries again.
+ * whose environment carries one of their markers as an exact entry. A server killed outright
+ * (SIGKILL, a crash) cannot end its agents, and its successor must not resume a run while an old
+ * agent still works on it; so resume nothing while this returns `verified: false`. Processes
+ * without a marker are never touched. Markers stay on record until no process carries them, so a
+ * later call tries again when processes cannot be listed or one survives.
  */
-export function endLeftoverAgents(source: AgentJournal): { ended: number; verified: boolean } {
-  const markers = [...new Set([...carried, ...source.load()])].filter(
-    (marker) => !recorded.has(marker),
-  );
+export async function endLeftoverAgents(
+  source: AgentJournal,
+): Promise<{ ended: number; verified: boolean }> {
+  const markers = new Set([...carried, ...source.load()].filter((marker) => !recorded.has(marker)));
 
-  if (markers.length === 0) {
+  if (markers.size === 0) {
     carried = [];
 
     return { ended: 0, verified: true };
   }
 
-  const processes = agentProcesses.list();
+  const { ended, gone } = await endMarked(markers);
 
-  if (!processes) {
-    carried = markers;
+  carried = gone ? [] : [...markers];
+  source.save([...carried, ...recorded]);
 
-    return { ended: 0, verified: false };
-  }
-
-  const tags = markers.map((marker) => ` ${MARKER_VARIABLE}=${marker} `);
-  let ended = 0;
-
-  for (const entry of processes) {
-    if (entry.pid === process.pid || !tags.some((tag) => entry.environment.includes(tag))) continue;
-
-    try {
-      process.kill(entry.pid, 'SIGKILL');
-      ended++;
-    } catch {
-      // It ended meanwhile.
-    }
-  }
-
-  carried = [];
-  source.save([...recorded]);
-
-  return { ended, verified: true };
+  return { ended, verified: gone };
 }
 
 /**
@@ -288,11 +360,21 @@ export function spawnAgentProcess(
   options: ProcessOptions,
 ): AgentProcess {
   // Recorded before the agent starts, so that if this server is killed outright at any moment
-  // after, the next one ends the agent before it resumes the run (see `endLeftoverAgents`).
+  // after, the next one ends the agent before it resumes the run (see `endLeftoverAgents`). An
+  // agent that cannot be recorded does not start.
   const marker = randomUUID();
 
   recorded.add(marker);
-  persist();
+
+  try {
+    journal?.save([...carried, ...recorded]);
+  } catch (error) {
+    recorded.delete(marker);
+
+    throw new AgentError(
+      `Could not record the agent before starting it: ${redact(error instanceof Error ? error.message : String(error))}`,
+    );
+  }
 
   const child = spawn(command, args, {
     cwd: options.cwd,
@@ -301,11 +383,20 @@ export function spawnAgentProcess(
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const group = child.pid;
-  const forget = () => {
-    if (recorded.delete(marker)) persist();
+  // Forgotten only once nothing carries the marker any more: a helper the agent started in its
+  // own process group outlives the group kill below, so it is found by its marker and ended too.
+  // If that cannot be confirmed, the marker passes to the next start's check.
+  const settle = async () => {
+    const { gone } = await endMarked(new Set([marker]));
+
+    recorded.delete(marker);
+
+    if (!gone) carried = [...new Set([...carried, marker])];
+
+    persist();
   };
 
-  child.once('error', forget);
+  child.once('error', () => void settle());
 
   if (group) {
     liveGroups.add(group);
@@ -320,7 +411,7 @@ export function spawnAgentProcess(
       }
 
       liveGroups.delete(group);
-      forget();
+      void settle();
     });
   }
 

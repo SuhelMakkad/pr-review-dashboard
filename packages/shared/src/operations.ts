@@ -15,7 +15,17 @@ export type GitHubAction =
   | { type: 'comment'; comment: NewDraftComment; expectedHeadOid: string }
   | { type: 'reply'; threadId: string; body: string }
   | { type: 'resolve'; threadId: string; resolved: boolean }
-  | { type: 'viewed'; path: string; viewed: boolean }
+  | {
+      type: 'viewed';
+      path: string;
+      viewed: boolean;
+      /**
+       * The diff you marked, recorded by the server from the PR as stored when you marked it: its
+       * head and base, and the file's own diff where the forge identifies it. An interrupted mark
+       * is sent again only while the PR still shows that diff. Absent in actions saved before it.
+       */
+      target?: { headOid: string; baseOid: string | null; fileKey?: string };
+    }
   | { type: 'reviewers'; logins: string[] }
   | { type: 'discard'; reviewId: string; restoreOperationId?: string }
   /** A finished full review, posted automatically because Settings asked for it. */

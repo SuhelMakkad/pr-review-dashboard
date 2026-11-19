@@ -1583,6 +1583,11 @@ describe('AI runner', () => {
     restarted.open();
     await restarted.recover('you');
     expect(restarted.runs('you', run.prId)[0]).toMatchObject({ status: 'paused' });
+
+    // Nor does resuming it yourself.
+    await expect(restarted.resume('you', run.id)).rejects.toMatchObject({
+      code: 'AGENT_STILL_RUNNING',
+    });
     expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(1);
 
     // Once it is ruled out, the run resumes.

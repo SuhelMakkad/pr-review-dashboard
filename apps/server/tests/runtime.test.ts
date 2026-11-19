@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -461,7 +461,7 @@ describe('shutdown order', () => {
 
     cleanups.push(() => store.close());
 
-    const { ended, verified } = endLeftoverAgents(settingsJournal(store));
+    const { ended, verified } = await endLeftoverAgents(settingsJournal(store));
 
     // The agent and its helper both carry the agent's marker.
     expect(verified).toBe(true);
@@ -470,12 +470,18 @@ describe('shutdown order', () => {
     expect(settingsJournal(store).load()).toEqual([]);
   });
 
-  it('never touches a process without a recorded agent’s marker', async () => {
-    // Whatever might now have an old agent's pid or process group: it carries no marker.
-    const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-      detached: true,
-      stdio: 'ignore',
-    });
+  it('never touches a process that only mentions a recorded agent’s marker', async () => {
+    const marker = '00000000-0000-4000-8000-000000000000';
+    // In its command line and inside another variable's value, but not as its own entry.
+    const other = spawn(
+      process.execPath,
+      ['-e', `setInterval(() => {}, 1000) // REVIEW_DESK_AGENT=${marker}`],
+      {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, NOTE: `REVIEW_DESK_AGENT=${marker}` },
+      },
+    );
 
     cleanups.push(() => {
       try {
@@ -485,10 +491,11 @@ describe('shutdown order', () => {
       }
     });
 
-    let saved = ['00000000-0000-4000-8000-000000000000'];
+    let saved = [marker];
     const journal = { load: () => saved, save: (markers: string[]) => (saved = markers) };
 
-    expect(endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
     expect(() => process.kill(other.pid!, 0)).not.toThrow();
     expect(saved).toEqual([]);
   });
@@ -498,7 +505,7 @@ describe('shutdown order', () => {
     const journal = { load: () => saved, save: (markers: string[]) => (saved = markers) };
     const listing = vi.spyOn(agentProcesses, 'list').mockReturnValueOnce(null);
 
-    expect(endLeftoverAgents(journal)).toEqual({ ended: 0, verified: false });
+    expect(await endLeftoverAgents(journal)).toEqual({ ended: 0, verified: false });
     expect(saved).toEqual(['00000000-0000-4000-8000-000000000001']);
 
     // Recording a new agent keeps the unchecked one on record.
@@ -519,7 +526,86 @@ describe('shutdown order', () => {
     await agent.done;
 
     listing.mockRestore();
-    expect(endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
+    expect(await endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
+    expect(saved).toEqual([]);
+  });
+
+  it('does not start an agent it cannot record', async () => {
+    useAgentJournal({
+      load: () => [],
+      save: () => {
+        throw new Error('database is locked');
+      },
+    });
+    cleanups.push(() => useAgentJournal(null));
+
+    // The agent would leave a file behind if it ran.
+    const witness = join(temporaryDirectory(), 'started');
+
+    expect(() =>
+      spawnAgentProcess(
+        process.execPath,
+        ['-e', `require('fs').writeFileSync(${JSON.stringify(witness)}, 'ran')`],
+        {
+          cwd: tmpdir(),
+          env: process.env,
+          signal: new AbortController().signal,
+          timeoutMs: 60_000,
+        },
+      ),
+    ).toThrow('Could not record the agent before starting it: database is locked');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(existsSync(witness)).toBe(false);
+  });
+
+  it('ends a marked helper that outlives its agent, and keeps the marker when it cannot tell', async () => {
+    let saved: string[] = [];
+    const journal = { load: () => saved, save: (markers: string[]) => (saved = markers) };
+    const lines: string[] = [];
+
+    useAgentJournal(journal);
+    cleanups.push(() => useAgentJournal(null));
+
+    // A helper in its own process group (the group kill misses it) that ignores SIGTERM.
+    const helperScript =
+      "const helper = require('child_process').spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\"], { stdio: 'ignore', detached: true }); helper.unref(); console.log(helper.pid);";
+    const agent = spawnAgentProcess(process.execPath, ['-e', helperScript], {
+      cwd: tmpdir(),
+      env: process.env,
+      signal: new AbortController().signal,
+      timeoutMs: 60_000,
+      onLine: (line) => lines.push(line),
+    });
+
+    await agent.done;
+
+    const helper = Number(lines[0]);
+    const alive = () => {
+      try {
+        process.kill(helper, 0);
+
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 5_000 });
+    await vi.waitFor(() => expect(saved).toEqual([]));
+
+    // When processes cannot be listed, the marker passes to the next start's check.
+    const listing = vi.spyOn(agentProcesses, 'list').mockReturnValue(null);
+    const quiet = spawnAgentProcess(process.execPath, ['-e', ''], {
+      cwd: tmpdir(),
+      env: process.env,
+      signal: new AbortController().signal,
+      timeoutMs: 60_000,
+    });
+
+    await quiet.done;
+    await vi.waitFor(() => expect(saved).toHaveLength(1));
+    listing.mockRestore();
+    expect(await endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
     expect(saved).toEqual([]);
   });
 

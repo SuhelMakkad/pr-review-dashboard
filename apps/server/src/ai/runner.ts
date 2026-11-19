@@ -40,8 +40,10 @@ import {
 } from '@/ai/context.js';
 import {
   endLeftoverAgents,
+  releaseAgentJournal,
   settingsJournal,
   useAgentJournal,
+  type AgentJournal,
   type AgentProvider,
 } from '@/ai/provider.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
@@ -113,9 +115,8 @@ export class AiRunner {
 
     this.opened = true;
 
-    // Agents a previous server left running (it was killed outright) end before any run resumes;
-    // this process's agents are recorded from now on.
-    endLeftoverAgents(this.journal);
+    // This process's agents are recorded from now on; those a previous server left running (it
+    // was killed outright) are ended before any run resumes (`agentsEnded`).
     useAgentJournal(this.journal);
 
     const unfinished = this.db
@@ -156,8 +157,16 @@ export class AiRunner {
     return this.sync.store.db;
   }
 
-  private get journal() {
-    return settingsJournal(this.sync.store);
+  /** Where this runner records its agents: the settings of its own database. */
+  private ownJournal: AgentJournal | null = null;
+
+  private get journal(): AgentJournal {
+    return (this.ownJournal ??= settingsJournal(this.sync.store));
+  }
+
+  /** True once no agent a previous server left running is still running (see the provider). */
+  private async agentsEnded(): Promise<boolean> {
+    return (await endLeftoverAgents(this.journal)).verified;
   }
 
   settings(): AiSettings {
@@ -607,6 +616,9 @@ export class AiRunner {
     }
 
     await Promise.allSettled(this.executions.values());
+
+    // The database closes after this; agents still settling leave their markers for the next start.
+    if (this.ownJournal) releaseAgentJournal(this.ownJournal);
   }
 
   private async execute(id: string): Promise<void> {
@@ -887,6 +899,14 @@ export class AiRunner {
     // A pause may still be waiting for the old process to flush and exit. Never overlap turns.
     if (this.active.has(id)) await this.executions.get(id);
 
+    // Nor with an agent a previous server left running: every resume, automatic or yours, waits.
+    if (!(await this.agentsEnded()))
+      throw new ReviewError(
+        'AGENT_STILL_RUNNING',
+        409,
+        'An AI agent from before Review Desk restarted may still be running. Try again shortly.',
+      );
+
     await this.sync.refresh(row.prId, row.account);
     const problem = this.resumeProblem(row);
 
@@ -930,7 +950,7 @@ export class AiRunner {
   async recover(account: string): Promise<void> {
     if (this.closing) return;
     // An agent of a previous server may still be running: resume nothing until that is ruled out.
-    if (!endLeftoverAgents(this.journal).verified) return;
+    if (!(await this.agentsEnded())) return;
 
     const rows = this.db
       .select()

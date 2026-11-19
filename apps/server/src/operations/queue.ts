@@ -10,6 +10,7 @@ import {
   type OperationReceipt,
 } from '@review-desk/shared/operations';
 import { forForge, isSameUser } from '@review-desk/shared/accounts';
+import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { postedReviewMarker } from '@/ai/freshness.js';
 import { githubOperations } from '@/db/schema.js';
 import { DiffService } from '@/diff/service.js';
@@ -38,6 +39,36 @@ const TERMINAL = ['succeeded', 'cancelled'] as const;
 const now = () => new Date().toISOString();
 const fingerprint = (input: unknown) =>
   createHash('sha256').update(JSON.stringify(input)).digest('hex');
+
+/** A viewed action with the diff it is about, taken from the PR as stored now. */
+function withTarget(action: GitHubAction, pr: PullRequestSnapshot): GitHubAction {
+  if (action.type !== 'viewed') return action;
+
+  const fileKey = pr.files.find((file) => file.path === action.path)?.viewedKey;
+
+  return {
+    ...action,
+    target: { headOid: pr.headOid, baseOid: pr.baseOid ?? null, ...(fileKey ? { fileKey } : {}) },
+  };
+}
+
+/**
+ * True when `pr` still shows the diff a viewed action is about: the file's own diff where the
+ * forge identifies it, else the same head and base.
+ */
+function showsTarget(
+  target: Extract<GitHubAction, { type: 'viewed' }>['target'],
+  pr: PullRequestSnapshot | undefined,
+  path: string,
+): boolean {
+  const file = pr?.files.find((candidate) => candidate.path === path);
+
+  if (!target || !pr || !file) return false;
+  if (target.fileKey !== undefined || file.viewedKey !== undefined)
+    return target.fileKey !== undefined && target.fileKey === file.viewedKey;
+
+  return target.headOid === pr.headOid && target.baseOid === (pr.baseOid ?? null);
+}
 
 class Suspended extends Error {}
 class Cancelled extends Error {}
@@ -302,7 +333,7 @@ export class OperationQueue {
       number: detail.snapshot.number,
       title: detail.snapshot.title,
       prUrl: detail.snapshot.url,
-      action: structuredClone(action),
+      action: structuredClone(withTarget(action, detail.snapshot)),
       status: 'queued',
       progress: 'Saved. Waiting to send.',
       createdAt: timestamp,
@@ -1163,11 +1194,20 @@ export class OperationQueue {
             ? viewedState === (step.args[2] ? 'VIEWED' : 'UNVIEWED')
             : pr?.threads.find((thread) => thread.id === step.args[0])?.isResolved === step.args[1];
 
-        // A file shown as changed since viewed was viewed and then changed, by this mark or an
-        // earlier one: sending it again could mark a diff nobody has seen, and assuming it was sent
-        // could lose it. It stays unconfirmed for you to check.
+        // A mark is sent again only while the PR still shows the diff you marked and the file is
+        // not viewed: otherwise (changed since viewed, a newer diff, a file no longer there, or an
+        // action from before targets were recorded) it could mark a diff nobody has seen, and
+        // assuming it was sent could lose it. It stays unconfirmed for you to check. An unmark
+        // holds for every diff, so it is always safe to send again.
         const ambiguous =
-          step.method === 'setFileViewed' && step.args[2] && viewedState === 'DISMISSED';
+          step.method === 'setFileViewed' &&
+          step.args[2] === true &&
+          !confirmed &&
+          !(
+            viewedState === 'UNVIEWED' &&
+            row.action.type === 'viewed' &&
+            showsTarget(row.action.target, pr, String(step.args[1]))
+          );
 
         // These desired-state mutations are safe to repeat if GitHub has not reached that state.
         if (!confirmed && !ambiguous) {
