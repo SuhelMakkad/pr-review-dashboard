@@ -45,7 +45,7 @@ import { AssistPanel } from '@/features/ai/assist-panel';
 import { Suggestions } from '@/features/ai/suggestions';
 import { FullReview } from '@/features/ai/full-review';
 import { useAi } from '@/features/ai/use-ai';
-import { useReview, viewedTarget, viewShows } from '@/features/review/use-review';
+import { canMarkViewed, useReview, viewedTarget, viewShows } from '@/features/review/use-review';
 
 const VIEW_KEY = 'review-desk-diff-view';
 
@@ -246,6 +246,12 @@ function Workspace() {
     const file = files.find((candidate) => candidate.path === path);
 
     if (!file) return;
+
+    if (!canMarkViewed(diff.data, path)) {
+      toast.error('This version of the file could not be confirmed. Reload the diff to mark it.');
+
+      return;
+    }
 
     const viewed = file.viewed !== 'VIEWED';
 
@@ -629,6 +635,7 @@ function Workspace() {
               variant={current.viewed === 'VIEWED' ? 'secondary' : 'ghost'}
               onClick={() => toggleViewed(current.path, false)}
               aria-pressed={current.viewed === 'VIEWED'}
+              disabled={!canMarkViewed(diff.data, current.path)}
             >
               {current.viewed === 'VIEWED' ? 'Viewed' : 'Mark viewed'}
             </Button>

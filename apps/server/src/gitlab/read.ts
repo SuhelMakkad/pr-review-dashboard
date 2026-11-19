@@ -575,18 +575,27 @@ export class GitLab implements GitHubApi {
     );
   }
 
-  async pullFiles(repository: string, number: number): Promise<RemoteFile[]> {
+  async pullFiles(repository: string, number: number, head?: string): Promise<RemoteFile[]> {
     const path = `${projectPath(repository)}/merge_requests/${number}`;
-    // Read first, so a diff GitLab leaves out is keyed to a revision no newer than its diff.
-    const mr = await call<RawMergeRequest>(
-      this.transport,
-      { path },
-      'Could not load the merge request',
-    );
+    const read = () =>
+      call<RawMergeRequest>(this.transport, { path }, 'Could not load the merge request');
+    // The diffs are read between two reads of the merge request: they are revision `head`'s only
+    // if both say so. Only then are they keyed for viewed marks.
+    const before = await read();
     const diffs = await this.diffs(path);
-    const revision = { head: mr.sha, start: mr.diff_refs?.start_sha ?? null };
+    const after = await read().catch(() => null);
+    const pinned =
+      after !== null &&
+      before.sha === after.sha &&
+      before.diff_refs?.start_sha === after.diff_refs?.start_sha &&
+      (head === undefined || before.sha === head);
+    const revision = { head: before.sha, start: before.diff_refs?.start_sha ?? null };
 
-    return diffs.map((diff) => ({ ...remoteFile(diff), viewedKey: diffKey(diff, revision) }));
+    return diffs.map((diff) => ({
+      ...remoteFile(diff),
+      keyed: true,
+      ...(pinned ? { viewedKey: diffKey(diff, revision) } : {}),
+    }));
   }
 
   async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {

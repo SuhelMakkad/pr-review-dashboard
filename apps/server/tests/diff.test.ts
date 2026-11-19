@@ -154,7 +154,11 @@ describe('viewed keys in diff manifests', () => {
 
       // The forge keys each file's diff (as GitLab does); the manifest is built and cached for A.
       github.pullFiles = async (...args) =>
-        (await pullFiles(...args)).map((file) => ({ ...file, viewedKey: `rendered:${file.path}` }));
+        (await pullFiles(...args)).map((file) => ({
+          ...file,
+          keyed: true,
+          viewedKey: `rendered:${file.path}`,
+        }));
 
       const first = await diffs.manifest(
         { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: `rendered:${file.path}` })) },
@@ -182,6 +186,66 @@ describe('viewed keys in diff manifests', () => {
 
       expect(file.viewedKey).toBe(`rendered:${path}`);
       expect(file.viewed).toBe('UNVIEWED');
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('diffs whose revision cannot be confirmed', () => {
+  it('shows them without keeping them, and they cannot be marked viewed', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(1839).snapshot;
+      const keyed = { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: 'stored' })) };
+      const pullFiles = github.pullFiles.bind(github);
+      let reads = 0;
+
+      // A forge that keys diffs, but could not pin this listing to the head asked for.
+      github.pullFiles = async (...args) => {
+        reads++;
+
+        return (await pullFiles(...args)).map((file) => ({ ...file, keyed: true }));
+      };
+
+      const first = await diffs.manifest(keyed, 'full', null);
+
+      expect(first.keyed).toBe(true);
+      expect(first.files.every((file) => !file.viewedKey && file.viewed === 'UNVIEWED')).toBe(true);
+
+      await diffs.manifest(keyed, 'full', null);
+      expect(reads).toBe(2);
+    } finally {
+      close();
+    }
+  });
+
+  it('keeps a since-review view when its keys cannot be read, and skips the read when empty', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(2041).snapshot;
+      const keyed = { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: 'stored' })) };
+      let reads = 0;
+
+      github.pullFiles = async () => {
+        reads++;
+        throw new Error('GitLab is unavailable');
+      };
+
+      // Reviewed at the current head: nothing changed, and nothing is read for it.
+      const same = await diffs.manifest(keyed, 'since-review', pr.headOid);
+
+      expect(same.kind).toBe('identical');
+      expect(reads).toBe(0);
+
+      const review = pr.reviews.find((entry) => entry.commitOid && entry.commitOid !== pr.headOid);
+      const since = await diffs.manifest(keyed, 'since-review', review!.commitOid);
+
+      expect(since.files.length).toBeGreaterThan(0);
+      expect(since.keyed).toBe(true);
+      expect(since.files.every((file) => !file.viewedKey)).toBe(true);
     } finally {
       close();
     }

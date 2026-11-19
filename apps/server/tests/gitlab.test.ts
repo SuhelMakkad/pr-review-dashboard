@@ -695,11 +695,41 @@ describe('GitLab merge request snapshots', () => {
 
   it('keys the files it lists like the snapshot does, from the same diffs', async () => {
     const { client } = gitlab();
-    const listed = await client.pullFiles('acme/platform/web', 12);
+    const listed = await client.pullFiles('acme/platform/web', 12, HEAD2);
     const pr = await client.snapshot('MR_7_12', VIEWER, []);
 
     expect(listed.map((file) => file.viewedKey)).toEqual(pr.files.map((file) => file.viewedKey));
     expect(listed[0]?.viewedKey).toEqual(expect.any(String));
+  });
+
+  it('keys the files it lists only when they are the revision asked for', async () => {
+    const { client, fake } = gitlab();
+
+    // Another head than the one shown: listed, but not keyed.
+    expect(
+      (await client.pullFiles('acme/platform/web', 12, HEAD1)).every(
+        (file) => file.keyed && !file.viewedKey,
+      ),
+    ).toBe(true);
+
+    // A push between the reads around the diffs: not keyed either.
+    let reads = 0;
+
+    fake.on('GET', MR_BY_PATH, () => {
+      reads++;
+
+      return reads === 1
+        ? { data: mergeRequest() }
+        : {
+            data: mergeRequest({
+              sha: HEAD3,
+              diff_refs: { base_sha: BASE, start_sha: START, head_sha: HEAD3 },
+            }),
+          };
+    });
+    expect(
+      (await client.pullFiles('acme/platform/web', 12, HEAD2)).every((file) => !file.viewedKey),
+    ).toBe(true);
   });
 
   it('detects changes per project and asks about running pipelines', async () => {

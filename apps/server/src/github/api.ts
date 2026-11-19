@@ -48,9 +48,15 @@ export interface RemoteFile {
   tooLarge?: boolean;
   /**
    * Identifies this very diff for viewed marks, where the forge's viewed state follows the diff
-   * (GitLab). Computed from the same response as `patch`, so it names the diff that is rendered.
+   * (GitLab). Computed from the same response as `patch`, and only when that response is known to
+   * be the revision asked for, so it names the diff that is rendered.
    */
   viewedKey?: string;
+  /**
+   * The forge's viewed state follows each file's diff (GitLab). Without `viewedKey`, which diff
+   * this is could not be confirmed, and the file cannot be marked viewed from it.
+   */
+  keyed?: boolean;
 }
 
 export interface CompareResult {
@@ -100,8 +106,11 @@ export interface GitHubApi extends GitHubWrites {
     sources: Source[],
     previous?: PullRequestSnapshot,
   ): Promise<PullRequestSnapshot>;
-  /** Files changed by the PR (base...head) with their patches. */
-  pullFiles(repository: string, number: number): Promise<RemoteFile[]>;
+  /**
+   * Files changed by the PR (base...head) with their patches. `head`: the PR head the caller shows;
+   * a forge that keys viewed state by diff keys the files only when they are that revision's.
+   */
+  pullFiles(repository: string, number: number, head?: string): Promise<RemoteFile[]>;
   /** Three-dot comparison; null when either commit is unknown to GitHub. */
   compare(repository: string, base: string, head: string): Promise<CompareResult | null>;
   /** PR node ids matching a search (open or closed); used to backfill history. */

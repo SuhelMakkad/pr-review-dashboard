@@ -78,21 +78,30 @@ export class DiffService {
       revision: { headOid: pr.headOid, baseOid: pr.baseOid ?? null },
       files: manifest.files.map((file) => {
         const stored = files.get(file.path);
-        const same = !file.viewedKey || stored?.viewedKey === file.viewedKey;
+        // Keyed by diff: the stored state is shown only where it is about this very diff.
+        const same = manifest.keyed
+          ? file.viewedKey !== undefined && stored?.viewedKey === file.viewedKey
+          : true;
 
         return { ...file, viewed: same ? stored?.viewerViewedState : 'UNVIEWED' };
       }),
     };
   }
 
-  /** Each file's key for viewed marks, from the full diff of the same revision. */
+  /**
+   * Each file's key for viewed marks, from the full diff of the same revision. Without one (the
+   * full diff could not be read, or not as this head's), the view still shows; those files just
+   * cannot be marked viewed from it.
+   */
   private async withKeys(manifest: DiffManifest, pr: PullRequestSnapshot): Promise<DiffManifest> {
-    if (!pr.files.some((file) => file.viewedKey)) return manifest;
+    if (manifest.files.length === 0 || !pr.files.some((file) => file.viewedKey)) return manifest;
 
-    const keys = new Map((await this.full(pr)).files.map((file) => [file.path, file.viewedKey]));
+    const full = await this.full(pr).catch(() => null);
+    const keys = new Map(full?.files.map((file) => [file.path, file.viewedKey]) ?? []);
 
     return {
       ...manifest,
+      keyed: true,
       files: manifest.files.map((file) => {
         const viewedKey = keys.get(file.path);
 
@@ -118,16 +127,23 @@ export class DiffService {
 
     if (cached) return cached;
 
-    const files = await this.github.pullFiles(pr.repository, pr.number);
-
-    return this.remember(key, {
+    const files = await this.github.pullFiles(pr.repository, pr.number, pr.headOid);
+    const keyed = files.some((file) => file.keyed);
+    const manifest: DiffManifest = {
       prId: pr.id,
       mode: 'full',
       kind: 'full',
       fromOid: pr.baseOid ?? pr.baseRefName,
       toOid: pr.headOid,
+      ...(keyed ? { keyed: true } : {}),
       files: files.map((file) => toDiffFile(file)),
-    });
+    };
+
+    // Diffs that could not be confirmed as this head's are shown, not kept: the next view reads
+    // them again, and they cannot be marked viewed meanwhile.
+    if (keyed && files.some((file) => !file.viewedKey)) return manifest;
+
+    return this.remember(key, manifest);
   }
 
   private async sinceReview(pr: PullRequestSnapshot, reviewOid: string): Promise<DiffManifest> {

@@ -9,7 +9,7 @@ import { adoptStatus } from '@/lib/live';
 import { githubCommand } from '@/lib/operation-command';
 import { useSyncNow } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
-import { useReview, viewedTarget } from '@/features/review/use-review';
+import { canMarkViewed, useReview, viewedTarget } from '@/features/review/use-review';
 import { status } from '@test/fixtures';
 
 afterEach(() => {
@@ -307,4 +307,29 @@ it('keeps the new account when a sync reply from before a switch arrives', async
   } finally {
     client.clear();
   }
+});
+
+it('marks a file viewed only where the view can say which diff it shows', () => {
+  const revision = { headOid: 'a'.repeat(40), baseOid: null };
+
+  expect(
+    canMarkViewed({ revision, files: [{ path: 'a.ts' }] } as unknown as DiffManifest, 'a.ts'),
+  ).toBe(true);
+  expect(
+    canMarkViewed(
+      {
+        revision,
+        keyed: true,
+        files: [{ path: 'a.ts', viewedKey: 'diff-a' }],
+      } as unknown as DiffManifest,
+      'a.ts',
+    ),
+  ).toBe(true);
+  expect(
+    canMarkViewed(
+      { revision, keyed: true, files: [{ path: 'a.ts' }] } as unknown as DiffManifest,
+      'a.ts',
+    ),
+  ).toBe(false);
+  expect(canMarkViewed(undefined, 'a.ts')).toBe(false);
 });

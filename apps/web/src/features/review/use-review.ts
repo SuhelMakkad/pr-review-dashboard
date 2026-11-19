@@ -31,6 +31,13 @@ export function viewedTarget(manifest: DiffManifest, path: string): ViewedTarget
   return { ...manifest.revision, ...(file.viewedKey ? { fileKey: file.viewedKey } : {}) };
 }
 
+/** False where the view cannot say which diff of `path` it shows, so it cannot be marked viewed. */
+export function canMarkViewed(manifest: DiffManifest | undefined, path: string): boolean {
+  const file = manifest?.files.find((candidate) => candidate.path === path);
+
+  return Boolean(file) && !(manifest?.keyed && !file?.viewedKey);
+}
+
 /** True when `manifest` renders the diff of `path` that `target` names. */
 export function viewShows(manifest: DiffManifest, path: string, target: ViewedTarget): boolean {
   const file = manifest.files.find((candidate) => candidate.path === path);
