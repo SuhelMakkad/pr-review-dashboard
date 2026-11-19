@@ -116,6 +116,26 @@ export interface AgentProcess {
   stop(): void;
 }
 
+/** Process groups of agents still running, so that exiting the server can end them too. */
+const liveGroups = new Set<number>();
+
+/**
+ * Ends every agent process group still running, at once and without waiting. For the moment the
+ * server exits: a run stopped normally has already ended its agent, but a forced exit must not
+ * leave one running against its workspace.
+ */
+export function killAgentProcesses(): void {
+  for (const group of liveGroups) {
+    try {
+      process.kill(-group, 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
+
+  liveGroups.clear();
+}
+
 /**
  * Starts an agent CLI in its own process group. Cancellation, timeouts and {@link AgentProcess.stop}
  * terminate the whole group (SIGTERM, then SIGKILL after five seconds), so no stray children
@@ -132,6 +152,23 @@ export function spawnAgentProcess(
     detached: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  const group = child.pid;
+
+  if (group) {
+    liveGroups.add(group);
+    // The agent is gone; anything still in its group is a stray of this run, which ends with it.
+    // The group stays registered until then, so exiting the server never misses one.
+    child.once('close', () => {
+      try {
+        process.kill(-group, 'SIGKILL');
+      } catch {
+        // The group is already empty.
+      }
+
+      liveGroups.delete(group);
+    });
+  }
+
   let stderr = '';
   let buffer = '';
   let reason: 'timeout' | 'cancelled' | 'stopped' | null = null;

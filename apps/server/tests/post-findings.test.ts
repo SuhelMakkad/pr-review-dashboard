@@ -63,7 +63,9 @@ async function setup() {
     return [];
   };
   const runner = new AiRunner(sync, diffs, reviews, events, providers, root, exportRepository);
+  runner.open();
   const queue = new OperationQueue(sync, { mutationIntervalMs: 0, retryDelaysMs: [1, 2, 3] });
+  queue.open();
   const poster = new FindingsPoster(sync, runner, queue);
   const autoReviewer = new AutoReviewer(sync, runner, new Notifier(store, events, vi.fn()));
 

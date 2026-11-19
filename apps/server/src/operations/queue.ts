@@ -52,6 +52,7 @@ export class OperationQueue {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private active: Promise<void> | null = null;
   private suspended = false;
+  private opened = false;
   private closed = false;
   private holds = 0;
   private lastMutationAt = 0;
@@ -65,6 +66,17 @@ export class OperationQueue {
   ) {
     this.interval = options.mutationIntervalMs ?? 1000;
     this.retryDelays = options.retryDelaysMs ?? [5000, 15000, 45000];
+  }
+
+  /**
+   * Recovers actions a previous process left mid-send, then starts sending. Called once this
+   * process owns the data directory, never from the constructor: a second launch must not touch
+   * the rows of the process that is still running.
+   */
+  open(): void {
+    if (this.opened || this.closed) return;
+
+    this.opened = true;
 
     for (const { data } of this.db
       .select()
@@ -505,8 +517,10 @@ export class OperationQueue {
     });
   }
 
+  /** Schedules the next send. Nothing is sent before `open()` has recovered interrupted actions. */
   wake(): void {
-    if (this.closed || this.suspended || this.holds > 0 || this.active || this.timer) return;
+    if (!this.opened || this.closed || this.suspended || this.holds > 0) return;
+    if (this.active || this.timer) return;
 
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -775,6 +789,9 @@ export class OperationQueue {
 
             row = this.row(row.account, row.id);
             if (row.status === 'cancelled') throw new Cancelled();
+            // The checks above wait on GitHub; shutdown may have begun meanwhile. Nothing is sent
+            // or checkpointed for this step yet, so it resumes on the next start.
+            if (this.suspended || this.closed) throw new Suspended();
 
             const step: MutationStep = {
               method,

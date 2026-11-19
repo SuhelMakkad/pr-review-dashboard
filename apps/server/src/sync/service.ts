@@ -84,6 +84,7 @@ export class SyncService {
   status: SyncStatus;
   private running: Promise<void> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
   private readonly feedRuns = new Map<string, number>();
   private readonly teamsFetched = new Map<string, number>();
   /** PRs that must be fully refetched on the next run regardless of their fingerprint. */
@@ -109,16 +110,23 @@ export class SyncService {
   }
 
   start(): void {
+    if (this.stopped) return;
+
     void this.sync();
     this.timer = setInterval(() => {
       void this.sync({ scheduled: true });
     }, SYNC_INTERVAL_MS);
   }
 
+  /** Stops the schedule and waits for a sync in progress; no sync starts after this. */
   async stop(): Promise<void> {
+    this.stopped = true;
+
     if (this.timer) clearInterval(this.timer);
 
-    await this.running;
+    this.timer = null;
+
+    await this.running?.catch(() => undefined);
   }
 
   /** Share write cooldowns with reads so a manual/background sync cannot bypass GitHub's limit. */
@@ -152,7 +160,7 @@ export class SyncService {
    */
   sync(options: { scheduled?: boolean } = {}): Promise<void> {
     if (this.running) return this.running;
-    if (this.cooldown()) return Promise.resolve();
+    if (this.stopped || this.cooldown()) return Promise.resolve();
 
     const run = this.perform(Boolean(options.scheduled)).finally(() => {
       if (this.running === run) this.running = null;

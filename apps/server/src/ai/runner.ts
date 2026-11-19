@@ -73,6 +73,7 @@ function creditsUsed(usage: string | null): number | null {
 export class AiRunner {
   private readonly queue: string[] = [];
   private readonly executions = new Map<string, Promise<void>>();
+  private opened = false;
   private closing = false;
   private readonly active = new Map<string, AbortController>();
   private probes: { at: number; statuses: AiProviderStatus[] } | null = null;
@@ -95,12 +96,25 @@ export class AiRunner {
     readonly providers: Record<AiProvider, AgentProvider>,
     private readonly workRoot: string,
     private readonly exportRepository: RepositoryExporter = downloadRepository,
-  ) {
+  ) {}
+
+  /**
+   * Settles runs a previous process left queued or running: resumable ones wait for `recover()`,
+   * the rest are marked interrupted. Called once this process owns the data directory, never from
+   * the constructor, so a second launch cannot rewrite the runs of the process still running.
+   */
+  open(): void {
+    if (this.opened || this.closing) return;
+
+    this.opened = true;
+
     const unfinished = this.db
       .select()
       .from(aiRuns)
       .where(inArray(aiRuns.status, ['queued', 'running']))
-      .all();
+      .all()
+      // Runs queued by this process before it opened are its own, not left over.
+      .filter((row) => !this.queue.includes(row.id));
 
     for (const row of unfinished) {
       const resumable = Boolean(row.request && this.providers[row.provider].supportsResume);
@@ -124,6 +138,8 @@ export class AiRunner {
         .where(eq(aiRuns.id, row.id))
         .run();
     }
+
+    this.pump();
   }
 
   private get db() {
@@ -548,8 +564,9 @@ export class AiRunner {
     return this.toRun(this.row(id)!, head);
   }
 
+  /** Starts queued runs up to the limit; none start before `open()` has settled old ones. */
   private pump(): void {
-    while (!this.closing && this.active.size < MAX_CONCURRENT) {
+    while (this.opened && !this.closing && this.active.size < MAX_CONCURRENT) {
       const id = this.queue.shift();
 
       if (!id) return;

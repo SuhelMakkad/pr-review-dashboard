@@ -69,6 +69,7 @@ async function setup() {
     return [];
   };
   const runner = new AiRunner(sync, diffs, reviews, events, providers, root, exportRepository);
+  runner.open();
   const notifier = new Notifier(
     store,
     events,

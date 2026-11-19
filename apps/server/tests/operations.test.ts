@@ -36,6 +36,7 @@ async function setup(path = ':memory:', fixture?: FixtureGitHub) {
 
   const reviews = new ReviewService(sync, github, new DiffService(github), sync.events);
   const queue = new OperationQueue(sync, { mutationIntervalMs: 0, retryDelaysMs: [1, 2, 3] });
+  queue.open();
   cleanups.push(() => queue.close());
   await queue.pause();
 
@@ -626,8 +627,94 @@ describe('durable GitHub operations', () => {
 
     const restarted = new OperationQueue(sync, { mutationIntervalMs: 0 });
     cleanups.push(() => restarted.close());
+
+    // Constructing a queue changes nothing: a second launch must not rewrite a live owner's rows.
+    restarted.wake();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(restarted.get('you', operation.id).status).toBe('running');
+
+    restarted.open();
     await completed(restarted, operation.id, 'needs_attention');
     expect(github.writes).toEqual([]);
+  });
+
+  it('sends nothing when shutdown begins during the checks before a write', async () => {
+    const { store, queue, github, pr } = await setup();
+    const pull = pr(2041);
+    const identity = github.identity.bind(github);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+
+    // The third identity read (after the preflight's and the review guard's) is the check right
+    // before the write.
+    vi.spyOn(github, 'identity').mockImplementation(async () => {
+      if (++calls === 3) await held;
+
+      return identity();
+    });
+
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'reply',
+      threadId: pull.threads[0].id,
+      body: 'Sent after shutdown?',
+    });
+
+    queue.resume();
+    await vi.waitFor(() => expect(calls).toBe(3));
+
+    const closing = queue.close();
+
+    release();
+    await closing;
+
+    expect(github.writes).toEqual([]);
+    expect(queue.get('you', operation.id)).toMatchObject({ status: 'queued' });
+    // Nothing was checkpointed as sent, so the next start sends it without checking first.
+    expect(
+      store.db.select().from(githubOperations).where(eq(githubOperations.id, operation.id)).get()!
+        .data.steps,
+    ).toEqual([]);
+  });
+
+  it('keeps the receipt of a write already being sent when shutdown begins', async () => {
+    const { store, queue, github, pr } = await setup();
+    const pull = pr(2041);
+    const reply = github.replyToThread.bind(github);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const sending = vi.spyOn(github, 'replyToThread').mockImplementation(async (...args) => {
+      await held;
+
+      return reply(...args);
+    });
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'reply',
+      threadId: pull.threads[0].id,
+      body: 'Already on its way.',
+    });
+
+    queue.resume();
+    await vi.waitFor(() => expect(sending).toHaveBeenCalled());
+
+    const closing = queue.close();
+
+    release();
+    await closing;
+
+    expect(queue.get('you', operation.id)).toMatchObject({ status: 'succeeded' });
+    // The step is saved as done, with GitHub's receipt, so nothing is checked or sent again.
+    expect(
+      store.db.select().from(githubOperations).where(eq(githubOperations.id, operation.id)).get()!
+        .data.steps,
+    ).toEqual([
+      expect.objectContaining({
+        method: 'replyToThread',
+        completedAt: expect.any(String),
+        uncertain: false,
+        result: expect.objectContaining({ id: expect.any(String), url: expect.any(String) }),
+      }),
+    ]);
   });
 
   it('returns 202 operation receipts from GitHub command routes and preserves replay IDs', async () => {

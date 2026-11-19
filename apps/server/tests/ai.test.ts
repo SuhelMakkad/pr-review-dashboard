@@ -447,6 +447,7 @@ async function setup() {
   };
   const root = workDir();
   const runner = new AiRunner(sync, diffs, reviews, events, providers, root, exportRepository);
+  runner.open();
   const pr = (number: number) =>
     [...sync.list().items, ...sync.mine().items].find((item) => item.number === number)!;
   const finished = async (run: AiRun) => {
@@ -1208,6 +1209,7 @@ describe('AI runner', () => {
       root,
       exportRepository,
     );
+    restarted.open();
     const reused = await restarted.prepareReview('you', run.id, [0, 0]);
 
     expect(reused.body).toBe('My edited summary.');
@@ -1410,6 +1412,7 @@ describe('AI runner', () => {
         });
       },
     );
+    runner.open();
     const run = await runner.start('you', pr(1839).id, 'full_review');
 
     await started;
@@ -1511,6 +1514,7 @@ describe('AI runner', () => {
         root,
         exportRepository,
       );
+      runner.open();
 
       return { store, sync, runner };
     };
@@ -1571,6 +1575,7 @@ describe('AI runner', () => {
       root,
       exportRepository,
     );
+    restarted.open();
 
     await restarted.recover('you');
     expect(restarted.runs('you', run.prId)[0]).toMatchObject({
@@ -1783,6 +1788,7 @@ describe('AI runner', () => {
       providers,
       workDir(),
     );
+    runner.open();
 
     providers.codex.delayMs = 10_000;
 
@@ -1799,6 +1805,7 @@ describe('AI runner', () => {
       providers,
       workDir(),
     );
+    restarted.open();
 
     expect(restarted.runs('you', run.prId)[0].status).toBe('interrupted');
     expect(store).toBeDefined();
