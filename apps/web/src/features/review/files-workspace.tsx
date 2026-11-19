@@ -45,7 +45,13 @@ import { AssistPanel } from '@/features/ai/assist-panel';
 import { Suggestions } from '@/features/ai/suggestions';
 import { FullReview } from '@/features/ai/full-review';
 import { useAi } from '@/features/ai/use-ai';
-import { canMarkViewed, useReview, viewedTarget, viewShows } from '@/features/review/use-review';
+import {
+  canMarkViewed,
+  selectionShown,
+  useReview,
+  viewedTarget,
+  viewShows,
+} from '@/features/review/use-review';
 
 const VIEW_KEY = 'review-desk-diff-view';
 
@@ -111,7 +117,10 @@ function Workspace() {
   const [composerError, setComposerError] = useState<string | null>(null);
   /** Text kept from a composer closed because its diff changed, for the next one. */
   const [keptBody, setKeptBody] = useState<string | null>(null);
-  const [selection, setSelection] = useState<LineTarget | null>(null);
+  /** Lines selected for a comment, with the file and diff revision they were selected in. */
+  const [selection, setSelection] = useState<
+    (LineTarget & { path: string; revision?: Revision }) | null
+  >(null);
   const [replying, setReplying] = useState<string | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
   const [recoveredBody, setRecoveredBody] = useState('');
@@ -288,6 +297,14 @@ function Workspace() {
       return;
     }
 
+    // Lines selected before the diff refreshed are other lines now: select them again.
+    if (selection && !selectionShown(selection, current.path, diff.data?.revision)) {
+      setSelection(null);
+      toast.error('The diff changed after you selected those lines. Select them again.');
+
+      return;
+    }
+
     if (selection && diff.data?.unpinned) {
       toast.error(UNPINNED_LINES);
 
@@ -297,11 +314,7 @@ function Workspace() {
     setRecoveredBody(keptBody ?? '');
     setKeptBody(null);
     setComposerError(null);
-    setComposer(
-      selection
-        ? { ...selection, path: current.path, revision: diff.data?.revision }
-        : { path: current.path, line: null, revision: diff.data?.revision },
-    );
+    setComposer(selection ?? { path: current.path, line: null, revision: diff.data?.revision });
   };
 
   // Bring a focused thread into view once its file has rendered.
@@ -575,8 +588,13 @@ function Workspace() {
 
           try {
             await review.commentNow.mutateAsync({
+              // A line belongs to the diff the composer was opened on; a whole file has no lines
+              // to move, so it goes on the head shown now.
               expectedHeadOid:
-                target.revision?.headOid ?? diff.data?.toOid ?? detail.data?.snapshot.headOid ?? '',
+                (target.line !== null ? target.revision?.headOid : undefined) ??
+                diff.data?.toOid ??
+                detail.data?.snapshot.headOid ??
+                '',
               path: target.path,
               line: target.line,
               side: target.line === null ? 'RIGHT' : target.side,
@@ -835,7 +853,13 @@ function Workspace() {
                     setKeptBody(null);
                     setComposer({ path: current.path, line: null, revision: diff.data?.revision });
                   }}
-                  onSelectLines={setSelection}
+                  onSelectLines={(target) =>
+                    setSelection(
+                      target
+                        ? { ...target, path: current.path, revision: diff.data?.revision }
+                        : null,
+                    )
+                  }
                 />
               </Enter>
             )}

@@ -9,7 +9,12 @@ import { adoptStatus } from '@/lib/live';
 import { githubCommand } from '@/lib/operation-command';
 import { useSyncNow } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
-import { canMarkViewed, useReview, viewedTarget } from '@/features/review/use-review';
+import {
+  canMarkViewed,
+  selectionShown,
+  useReview,
+  viewedTarget,
+} from '@/features/review/use-review';
 import { status } from '@test/fixtures';
 
 afterEach(() => {
@@ -332,4 +337,16 @@ it('marks a file viewed only where the view can say which diff it shows', () => 
     ),
   ).toBe(false);
   expect(canMarkViewed(undefined, 'a.ts')).toBe(false);
+});
+
+it('takes selected lines only from the diff they were selected in', () => {
+  const at = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
+  const selected = { path: 'a.ts', revision: at('a') };
+
+  expect(selectionShown(selected, 'a.ts', at('a'))).toBe(true);
+  // The same file, refreshed to the next revision before the composer opened.
+  expect(selectionShown(selected, 'a.ts', at('b'))).toBe(false);
+  // Another file, or a selection made before the view said which revision it shows.
+  expect(selectionShown(selected, 'b.ts', at('a'))).toBe(false);
+  expect(selectionShown({ path: 'a.ts' }, 'a.ts', at('a'))).toBe(false);
 });

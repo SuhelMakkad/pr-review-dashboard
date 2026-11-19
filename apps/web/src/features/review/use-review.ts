@@ -31,6 +31,26 @@ export function viewedTarget(manifest: DiffManifest, path: string): ViewedTarget
   return { ...manifest.revision, ...(file.viewedKey ? { fileKey: file.viewedKey } : {}) };
 }
 
+/** True when two diffs were built from the same PR revision (head and base). */
+export function sameRevision(
+  left: { headOid: string; baseOid: string | null } | undefined,
+  right: { headOid: string; baseOid: string | null } | undefined,
+): boolean {
+  return Boolean(left && right && left.headOid === right.headOid && left.baseOid === right.baseOid);
+}
+
+/**
+ * True when lines selected in `selection.path` at `selection.revision` are still those lines in
+ * the view now showing `path` at `revision`: a refresh in between makes them other lines.
+ */
+export function selectionShown(
+  selection: { path: string; revision?: { headOid: string; baseOid: string | null } },
+  path: string,
+  revision: { headOid: string; baseOid: string | null } | undefined,
+): boolean {
+  return selection.path === path && sameRevision(selection.revision, revision);
+}
+
 /** False where the view cannot say which diff of `path` it shows, so it cannot be marked viewed. */
 export function canMarkViewed(manifest: DiffManifest | undefined, path: string): boolean {
   const file = manifest?.files.find((candidate) => candidate.path === path);
