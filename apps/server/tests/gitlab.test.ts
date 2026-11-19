@@ -452,6 +452,83 @@ describe('GitLab merge request snapshots', () => {
     expect(fake.calls.at(-1)?.path).toBe(branch);
   });
 
+  it('reads the discussion after what is only shown, so a comment made meanwhile is seen', async () => {
+    const { client, fake } = gitlab();
+    const listed = fake.routes.get(`GET ${MR}/discussions`)!;
+    let commented = false;
+
+    // Someone comments while the diff is still being read.
+    for (const path of [`${MR}/diffs`, `${MR_BY_PATH}/diffs`]) {
+      const diffs = fake.routes.get(`GET ${path}`)!;
+
+      fake.on('GET', path, (request) => {
+        commented = true;
+
+        return diffs(request);
+      });
+    }
+    fake.on('GET', `${MR}/discussions`, (request) => {
+      const reply = listed(request);
+
+      return commented
+        ? {
+            ...reply,
+            data: [
+              ...(reply.data as unknown[]),
+              {
+                id: 'late',
+                individual_note: true,
+                notes: [
+                  {
+                    id: 999,
+                    type: null,
+                    body: 'Please wait for the security review.',
+                    author: users.ana,
+                    created_at: at(9),
+                    updated_at: at(9),
+                    system: false,
+                    resolvable: false,
+                    resolved: false,
+                  },
+                ],
+              },
+            ],
+          }
+        : reply;
+    });
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(pr.conversation.map((comment) => comment.body)).toContain(
+      'Please wait for the security review.',
+    );
+  });
+
+  it('reads what is shown again when the merge request is pushed to while it is read', async () => {
+    const { client, fake } = gitlab();
+    const reads: string[] = [];
+    let head = HEAD2;
+
+    fake.on('GET', MR, () => ({ data: mergeRequest({ sha: head }) }));
+    fake.on('GET', `projects/7/repository/commits/${HEAD2}`, () => {
+      reads.push(HEAD2);
+      head = HEAD3;
+
+      return { data: { committed_date: at(5) } };
+    });
+    fake.on('GET', `projects/7/repository/commits/${HEAD3}`, () => {
+      reads.push(HEAD3);
+
+      return { data: { committed_date: at(6) } };
+    });
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(reads).toEqual([HEAD2, HEAD3]);
+    expect(pr.headOid).toBe(HEAD3);
+    expect(pr.headCommittedAt).toBe(at(6));
+  });
+
   it('tells a missing target branch from one that could not be read', async () => {
     const missing = gitlab();
 

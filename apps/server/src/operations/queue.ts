@@ -751,6 +751,7 @@ export class OperationQueue {
         return (await this.sync.refresh(row.prId, row.account))?.snapshot;
       };
       const pr = await preflight().catch((error: unknown) => {
+        this.coolDown(error);
         allowed();
 
         throw error;
@@ -1117,11 +1118,13 @@ export class OperationQueue {
 
     allowed();
 
-    // A failed read is retried, unless Settings stopped the post meanwhile.
+    // A failed read is retried, unless Settings stopped the post meanwhile. A rate limit holds
+    // either way: it is recorded first, so nothing reaches the forge before its time.
     const read = async <T>(lookup: () => Promise<T>): Promise<T> => {
       try {
         return await lookup();
       } catch (error) {
+        this.coolDown(error);
         allowed();
 
         throw error;
@@ -1217,6 +1220,12 @@ export class OperationQueue {
       return stopped('resolving threads was turned off in Settings.', approving);
 
     return null;
+  }
+
+  /** Holds every request to the forge until a rate limit it reported has passed. */
+  private coolDown(error: unknown): void {
+    if (error instanceof GitHubError && error.outcome === 'rate_limit')
+      this.sync.deferUntil(error.retryAt ?? new Date(Date.now() + 60_000).toISOString());
   }
 
   /** Records why a post stops: skipped when nothing was sent yet, otherwise needing attention. */

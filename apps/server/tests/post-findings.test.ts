@@ -1011,6 +1011,34 @@ describe('what an automatic post rests on', () => {
     expect(github.writes).toEqual([]);
   });
 
+  it('keeps the forge’s rate limit even when posting is turned off during the limited read', async () => {
+    const { sync, queue, setPosting, review, posted, github } = await setup();
+    const refresh = sync.refresh.bind(sync);
+    const retryAt = new Date(Date.now() + 120_000).toISOString();
+    let reads = 0;
+
+    setPosting(true);
+    await queue.pause();
+
+    const run = await review();
+
+    vi.spyOn(sync, 'refresh').mockImplementation(async (...args) => {
+      if (++reads === 2) {
+        setPosting(false);
+        throw new GitHubError('GitLab rate limit reached.', retryAt, 429, 'rate_limit');
+      }
+
+      return refresh(...args);
+    });
+    queue.resume();
+
+    expect((await posted(run.id, 'cancelled')).progress).toBe(
+      'Not posted: posting findings was turned off in Settings.',
+    );
+    expect(Date.parse(sync.status.retryAt!)).toBeGreaterThanOrEqual(Date.parse(retryAt));
+    expect(github.writes).toEqual([]);
+  });
+
   it.each([
     ['already off', false],
     ['turned off while reading the PR fails', true],

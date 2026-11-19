@@ -91,6 +91,12 @@ function unlessMissing<T>(work: Promise<T>, fallback: () => T | Promise<T>): Pro
 }
 const SHA = /^[0-9a-f]{40,64}$/i;
 
+/** True when two reads of a merge request show the same diff: its head and where it starts. */
+const sameRevision = (left: RawMergeRequest, right: RawMergeRequest) =>
+  left.sha === right.sha &&
+  (left.diff_refs?.start_sha ?? null) === (right.diff_refs?.start_sha ?? null) &&
+  (left.diff_refs?.base_sha ?? null) === (right.diff_refs?.base_sha ?? null);
+
 /** Runs `work` over `items` with at most `limit` running at once, keeping the order. */
 export async function mapLimit<T, R>(
   items: T[],
@@ -501,24 +507,102 @@ export class GitLab implements GitHubApi {
       return { mr, discussions, reviewers, approvals, versions: [], submission };
     }
 
-    const [discussions, reviewers, approvals, versions] = await Promise.all([
-      list<RawDiscussion>('discussions', 'discussions'),
-      unlessMissing(
-        call<RawReviewer[]>(
-          this.transport,
-          { path: `${base}/reviewers` },
-          'Could not load reviewers',
-        ),
-        () => (mr.reviewers ?? []).map((user) => ({ user })),
-      ),
-      call<RawApprovals>(this.transport, { path: `${base}/approvals` }, 'Could not load approvals'),
-      list<RawVersion>('versions', 'versions'),
-    ]);
+    // What is only shown (diffs, your drafts, CI, the head's commit time) is read first, and what
+    // an automatic post checks last: the merge request itself, its discussion, reviewers,
+    // approvals and versions, then the target branch. A slow diff or CI read never leaves the
+    // discussion older than the check it feeds.
+    let current = mr;
 
+    for (let pass = 1; ; pass++) {
+      const shown = await this.shown(ref, current);
+      const [latest, discussions, reviewers, approvals, versions] = await Promise.all([
+        this.mergeRequest(ref),
+        list<RawDiscussion>('discussions', 'discussions'),
+        unlessMissing(
+          call<RawReviewer[]>(
+            this.transport,
+            { path: `${base}/reviewers` },
+            'Could not load reviewers',
+          ),
+          () => (current.reviewers ?? []).map((user) => ({ user })),
+        ),
+        call<RawApprovals>(
+          this.transport,
+          { path: `${base}/approvals` },
+          'Could not load approvals',
+        ),
+        list<RawVersion>('versions', 'versions'),
+      ]);
+
+      // Pushed to while what is shown was read: that belongs to the earlier head, so it is read
+      // again for the new one. A second push in a row is left for the next read.
+      if (!sameRevision(latest, current)) {
+        if (pass === 1) {
+          current = latest;
+          continue;
+        }
+
+        throw new GitHubError(
+          'The merge request changed while it was read. It is read again shortly.',
+          null,
+          null,
+          'unavailable',
+        );
+      }
+
+      // Where the target branch is, read last, after everything else this snapshot holds:
+      // GitLab keeps a version's diff, which a push to the target does not renew. Null when there
+      // is no such branch; left out (unknown) when it could not be read. A rate limit fails the
+      // read with GitLab's own retry time, as every other request here does.
+      const targetTip = await this.transport
+        .request<{ commit?: { id?: string } }>({
+          path: `projects/${latest.project_id}/repository/branches/${encodeURIComponent(latest.target_branch)}`,
+        })
+        .then(
+          (response) =>
+            response.status === 404
+              ? null
+              : response.status < 400
+                ? (response.data.commit?.id ?? null)
+                : undefined,
+          (error: unknown) => {
+            if (error instanceof GitHubError && error.outcome === 'rate_limit') throw error;
+
+            return undefined;
+          },
+        );
+
+      return {
+        mr: latest,
+        discussions,
+        reviewers,
+        approvals,
+        versions,
+        ...shown,
+        submission,
+        targetTip,
+        viewed: this.viewed(mergeRequestId(ref.projectId, ref.iid)),
+      };
+    }
+  }
+
+  /** What a snapshot only shows, for the merge request's head as `mr` has it. */
+  private async shown(
+    ref: MergeRequestRef,
+    mr: RawMergeRequest,
+  ): Promise<Pick<MergeRequestData, 'diffs' | 'drafts' | 'jobs' | 'headCommittedAt'>> {
+    const base = mergeRequestPath(ref);
     const pipeline = mr.head_pipeline;
     const [diffs, drafts, jobs, headCommittedAt] = await Promise.all([
       this.diffs(ref),
-      unlessMissing(list<RawDraftNote>('draft_notes', 'your pending review'), () => []),
+      unlessMissing(
+        paginate<RawDraftNote>(
+          this.transport,
+          `${base}/draft_notes`,
+          'Could not load your pending review',
+        ),
+        () => [],
+      ),
       pipeline
         ? paginate<RawJob>(
             this.transport,
@@ -530,42 +614,7 @@ export class GitLab implements GitHubApi {
       this.committedAt(ref.projectId, mr.sha),
     ]);
 
-    // Where the target branch is, read last, after everything else this snapshot holds: GitLab
-    // keeps a version's diff, which a push to the target does not renew. Null when there is no
-    // such branch; left out (unknown) when it could not be read. A rate limit fails the read with
-    // GitLab's own retry time, as every other request here does.
-    const targetTip = await this.transport
-      .request<{ commit?: { id?: string } }>({
-        path: `projects/${mr.project_id}/repository/branches/${encodeURIComponent(mr.target_branch)}`,
-      })
-      .then(
-        (response) =>
-          response.status === 404
-            ? null
-            : response.status < 400
-              ? (response.data.commit?.id ?? null)
-              : undefined,
-        (error: unknown) => {
-          if (error instanceof GitHubError && error.outcome === 'rate_limit') throw error;
-
-          return undefined;
-        },
-      );
-
-    return {
-      mr,
-      discussions,
-      reviewers,
-      approvals,
-      versions,
-      diffs,
-      drafts,
-      jobs,
-      headCommittedAt,
-      submission,
-      targetTip,
-      viewed: this.viewed(mergeRequestId(ref.projectId, ref.iid)),
-    };
+    return { diffs, drafts, jobs, headCommittedAt };
   }
 
   private async committedAt(projectId: number, sha: string): Promise<string | null> {
