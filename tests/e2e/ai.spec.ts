@@ -337,6 +337,11 @@ test('judges each of your threads since your review', async ({ page }) => {
 
 test('shows agent failures and drafts a review summary', async ({ page }) => {
   await openFresh(page, '/inbox/attention/acme/api/2050');
+  // `b` belongs to the PR's assist panel, which binds it once the PR has loaded; a key pressed
+  // before that is lost and the injected failure would hit a later test's run instead.
+  await expect(page.getByRole('heading', { level: 2 })).toHaveText(
+    'Rate-limit the public search endpoint',
+  );
   await failNextAi(page, 'Codex is not logged in.');
   await page.keyboard.press('b');
   await expect(
