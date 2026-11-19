@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { DiffManifest } from '@review-desk/shared/diff';
+import type { DiffManifest, DiffMode } from '@review-desk/shared/diff';
 import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
 import {
   showsViewedTarget,
@@ -31,24 +31,55 @@ export function viewedTarget(manifest: DiffManifest, path: string): ViewedTarget
   return { ...manifest.revision, ...(file.viewedKey ? { fileKey: file.viewedKey } : {}) };
 }
 
-/** True when two diffs were built from the same PR revision (head and base). */
-export function sameRevision(
-  left: { headOid: string; baseOid: string | null } | undefined,
-  right: { headOid: string; baseOid: string | null } | undefined,
-): boolean {
-  return Boolean(left && right && left.headOid === right.headOid && left.baseOid === right.baseOid);
+/** The patch a view renders: its comparison, both sides, and the PR revision it was built from. */
+export interface DiffView {
+  mode: DiffMode;
+  fromOid: string;
+  toOid: string;
+  headOid: string;
+  baseOid: string | null;
 }
 
 /**
- * True when lines selected in `selection.path` at `selection.revision` are still those lines in
- * the view now showing `path` at `revision`: a refresh in between makes them other lines.
+ * The patch `manifest` renders, or undefined where it cannot say: without a revision, or with
+ * patches that could not be confirmed as that revision's (unpinned), its line numbers belong to
+ * no known patch.
  */
-export function selectionShown(
-  selection: { path: string; revision?: { headOid: string; baseOid: string | null } },
+export function diffView(manifest: DiffManifest | undefined): DiffView | undefined {
+  if (!manifest?.revision || manifest.unpinned) return undefined;
+
+  return {
+    mode: manifest.mode,
+    fromOid: manifest.fromOid,
+    toOid: manifest.toOid,
+    headOid: manifest.revision.headOid,
+    baseOid: manifest.revision.baseOid,
+  };
+}
+
+/**
+ * True when lines picked in `picked.path` of the patch `picked.view` are still those lines in
+ * `manifest` showing `path`: another file, comparison, or revision makes them other lines, and
+ * lines picked where the view could not say which patch it showed name none.
+ */
+export function linesShown(
+  picked: { path: string; view?: DiffView },
   path: string,
-  revision: { headOid: string; baseOid: string | null } | undefined,
+  manifest: DiffManifest | undefined,
 ): boolean {
-  return selection.path === path && sameRevision(selection.revision, revision);
+  const shown = diffView(manifest);
+  const view = picked.view;
+
+  return Boolean(
+    view &&
+    shown &&
+    picked.path === path &&
+    view.mode === shown.mode &&
+    view.fromOid === shown.fromOid &&
+    view.toOid === shown.toOid &&
+    view.headOid === shown.headOid &&
+    view.baseOid === shown.baseOid,
+  );
 }
 
 /** False where the view cannot say which diff of `path` it shows, so it cannot be marked viewed. */

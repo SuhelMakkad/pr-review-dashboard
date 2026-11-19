@@ -11,7 +11,8 @@ import { useSyncNow } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 import {
   canMarkViewed,
-  selectionShown,
+  diffView,
+  linesShown,
   useReview,
   viewedTarget,
 } from '@/features/review/use-review';
@@ -339,14 +340,32 @@ it('marks a file viewed only where the view can say which diff it shows', () => 
   expect(canMarkViewed(undefined, 'a.ts')).toBe(false);
 });
 
-it('takes selected lines only from the diff they were selected in', () => {
-  const at = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
-  const selected = { path: 'a.ts', revision: at('a') };
+it('takes selected lines only from the patch they were selected in', () => {
+  const manifest = (head: string, changes: Partial<DiffManifest> = {}): DiffManifest => ({
+    prId: 'pr',
+    revision: { headOid: head.repeat(40), baseOid: 'c'.repeat(40) },
+    mode: 'full',
+    kind: 'full',
+    fromOid: 'c'.repeat(40),
+    toOid: head.repeat(40),
+    files: [],
+    ...changes,
+  });
+  const selected = { path: 'a.ts', view: diffView(manifest('a')) };
 
-  expect(selectionShown(selected, 'a.ts', at('a'))).toBe(true);
+  expect(linesShown(selected, 'a.ts', manifest('a'))).toBe(true);
   // The same file, refreshed to the next revision before the composer opened.
-  expect(selectionShown(selected, 'a.ts', at('b'))).toBe(false);
-  // Another file, or a selection made before the view said which revision it shows.
-  expect(selectionShown(selected, 'b.ts', at('a'))).toBe(false);
-  expect(selectionShown({ path: 'a.ts' }, 'a.ts', at('a'))).toBe(false);
+  expect(linesShown(selected, 'a.ts', manifest('b'))).toBe(false);
+  // Another file, or the same revision compared from your last review.
+  expect(linesShown(selected, 'b.ts', manifest('a'))).toBe(false);
+  expect(
+    linesShown(selected, 'a.ts', manifest('a', { mode: 'since-review', fromOid: 'd'.repeat(40) })),
+  ).toBe(false);
+  // The live patch shown while the revision's own could not be confirmed names no patch: lines
+  // selected there are not taken once the confirmed patch for that revision comes back.
+  const unpinned = manifest('a', { unpinned: true });
+
+  expect(diffView(unpinned)).toBeUndefined();
+  expect(linesShown({ path: 'a.ts', view: diffView(unpinned) }, 'a.ts', manifest('a'))).toBe(false);
+  expect(linesShown(selected, 'a.ts', unpinned)).toBe(false);
 });

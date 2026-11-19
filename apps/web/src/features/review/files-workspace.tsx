@@ -47,10 +47,12 @@ import { FullReview } from '@/features/ai/full-review';
 import { useAi } from '@/features/ai/use-ai';
 import {
   canMarkViewed,
-  selectionShown,
+  diffView,
+  linesShown,
   useReview,
   viewedTarget,
   viewShows,
+  type DiffView,
 } from '@/features/review/use-review';
 
 const VIEW_KEY = 'review-desk-diff-view';
@@ -95,12 +97,10 @@ export function FilesWorkspace() {
 }
 
 /** The PR revision a diff was built from, as its manifest names it. */
-type Revision = { headOid: string; baseOid: string | null };
 
-/** What the composer is for, with the revision of the diff it was opened on. */
+/** What the composer is for, with the patch it was opened on. */
 type ComposerState =
-  | (((LineTarget & { path: string }) | { path: string; line: null }) & { revision?: Revision })
-  | null;
+  (((LineTarget & { path: string }) | { path: string; line: null }) & { view?: DiffView }) | null;
 
 function Workspace() {
   const { item } = useCurrentPull();
@@ -117,9 +117,9 @@ function Workspace() {
   const [composerError, setComposerError] = useState<string | null>(null);
   /** Text kept from a composer closed because its diff changed, for the next one. */
   const [keptBody, setKeptBody] = useState<string | null>(null);
-  /** Lines selected for a comment, with the file and diff revision they were selected in. */
+  /** Lines selected for a comment, with the file and patch they were selected in. */
   const [selection, setSelection] = useState<
-    (LineTarget & { path: string; revision?: Revision }) | null
+    (LineTarget & { path: string; view?: DiffView }) | null
   >(null);
   const [replying, setReplying] = useState<string | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
@@ -237,6 +237,9 @@ function Workspace() {
   const setSearch = (next: Partial<FilesSearch>, replace = true) =>
     navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace });
 
+  // Lines selected in one comparison are other lines in the next, which renders without them.
+  useEffect(() => setSelection(null), [mode]);
+
   const selectFile = (path: string, thread?: string) => {
     setComposer(null);
     setSelection(null);
@@ -297,16 +300,16 @@ function Workspace() {
       return;
     }
 
-    // Lines selected before the diff refreshed are other lines now: select them again.
-    if (selection && !selectionShown(selection, current.path, diff.data?.revision)) {
-      setSelection(null);
-      toast.error('The diff changed after you selected those lines. Select them again.');
+    if (selection && diff.data?.unpinned) {
+      toast.error(UNPINNED_LINES);
 
       return;
     }
 
-    if (selection && diff.data?.unpinned) {
-      toast.error(UNPINNED_LINES);
+    // Lines selected in another patch than the one shown now are other lines: select them again.
+    if (selection && !linesShown(selection, current.path, diff.data)) {
+      setSelection(null);
+      toast.error('The diff changed after you selected those lines. Select them again.');
 
       return;
     }
@@ -314,7 +317,7 @@ function Workspace() {
     setRecoveredBody(keptBody ?? '');
     setKeptBody(null);
     setComposerError(null);
-    setComposer(selection ?? { path: current.path, line: null, revision: diff.data?.revision });
+    setComposer(selection ?? { path: current.path, line: null, view: diffView(diff.data) });
   };
 
   // Bring a focused thread into view once its file has rendered.
@@ -529,11 +532,9 @@ function Workspace() {
   // changed while you wrote, the composer closes, keeps your text for the next one, and asks
   // you to pick the line again.
   const lineMoved = (open: NonNullable<ComposerState>, body: string) => {
-    const shown = diff.data?.revision;
-
-    if (open.line === null || !open.revision) return false;
-    if (shown?.headOid === open.revision.headOid && shown.baseOid === open.revision.baseOid)
-      return false;
+    // A comment reopened from Activity names no patch; the server checks its head.
+    if (open.line === null || !open.view) return false;
+    if (linesShown(open, open.path, diff.data)) return false;
 
     setKeptBody(body);
     setComposer(null);
@@ -570,7 +571,9 @@ function Workspace() {
               startLine: target.line === null ? null : target.startLine,
               body,
               // The lines are the diff's the composer was opened on; refused for another revision.
-              ...(target.line !== null && target.revision ? { revision: target.revision } : {}),
+              ...(target.line !== null && target.view
+                ? { revision: { headOid: target.view.headOid, baseOid: target.view.baseOid } }
+                : {}),
             });
             setComposer(null);
             setComposerError(null);
@@ -591,7 +594,7 @@ function Workspace() {
               // A line belongs to the diff the composer was opened on; a whole file has no lines
               // to move, so it goes on the head shown now.
               expectedHeadOid:
-                (target.line !== null ? target.revision?.headOid : undefined) ??
+                (target.line !== null ? target.view?.headOid : undefined) ??
                 diff.data?.toOid ??
                 detail.data?.snapshot.headOid ??
                 '',
@@ -842,7 +845,7 @@ function Workspace() {
                     setRecoveredBody(keptBody ?? '');
                     setKeptBody(null);
                     setComposerError(null);
-                    setComposer({ ...target, path: current.path, revision: diff.data?.revision });
+                    setComposer({ ...target, path: current.path, view: diffView(diff.data) });
                   }}
                   onCommentFile={() => {
                     if (locked) {
@@ -851,13 +854,11 @@ function Workspace() {
                     }
                     setRecoveredBody(keptBody ?? '');
                     setKeptBody(null);
-                    setComposer({ path: current.path, line: null, revision: diff.data?.revision });
+                    setComposer({ path: current.path, line: null, view: diffView(diff.data) });
                   }}
                   onSelectLines={(target) =>
                     setSelection(
-                      target
-                        ? { ...target, path: current.path, revision: diff.data?.revision }
-                        : null,
+                      target ? { ...target, path: current.path, view: diffView(diff.data) } : null,
                     )
                   }
                 />
