@@ -406,6 +406,14 @@ export class SyncService {
           ),
         );
 
+      // A newer read found it merged or closed: nothing to review, and nothing is added.
+      if (outcome.status === 'superseded' && outcome.snapshot?.state !== 'OPEN')
+        throw new ReviewError(
+          'PR_CLOSED',
+          409,
+          `${label} was merged or closed while it was being added, so there is nothing to review.`,
+        );
+
       // A newer read was saved first: keep it, now with the manual source.
       return outcome.status === 'committed'
         ? outcome.snapshot
@@ -557,8 +565,10 @@ export class SyncService {
         }
 
         if (result && result.state !== 'OPEN') {
-          // Closure or merge is confirmed by GitHub, so the PR can leave the list.
-          if (cached) {
+          // Closure or merge is confirmed by GitHub, so the PR can leave the list. Recorded too when
+          // nothing is stored yet, so a read of it still open (a first add) cannot save it; a PR
+          // already stored as closed needs nothing.
+          if (cached || !this.store.snapshot(account.login, id)) {
             const outcome = this.snapshots.commitState(observations.get(id)!, result.state!);
 
             if (outcome.status === 'committed') changed.add(id);
@@ -596,13 +606,14 @@ export class SyncService {
       const worker = async () => {
         while (cursor < fetches.length && !retryAt) {
           const { id, sources, cached, result } = fetches[cursor++];
-          const observation = this.snapshots.observe(account.login, id);
-          const latest = this.store.snapshot(account.login, id) ?? undefined;
-
-          // Removed from the queue since this sync read it: do not bring it back.
-          if (cached && !latest) continue;
 
           try {
+            const observation = this.snapshots.observe(account.login, id);
+            const latest = this.store.snapshot(account.login, id) ?? undefined;
+
+            // Removed from the queue since this sync read it: do not bring it back.
+            if (cached && !latest) continue;
+
             const snapshot = await this.github.snapshot(id, account.login, sources, latest);
             const outcome = this.snapshots.commit(observation, snapshot, {
               fingerprint: result?.fingerprint ?? null,
@@ -626,7 +637,8 @@ export class SyncService {
         }
       };
 
-      await Promise.all(Array.from({ length: Math.min(3, fetches.length) }, worker));
+      // Every worker settles before the sync counts as done, so none still saves after it.
+      await Promise.allSettled(Array.from({ length: Math.min(3, fetches.length) }, worker));
 
       this.sampleQueue(account.login);
 

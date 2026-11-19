@@ -515,19 +515,22 @@ export function createGitLabWriter(
       }
 
       // The diff is read between two reads of the merge request, so it is known which revision
-      // the mark is for; a push in between leaves that unknown.
+      // the mark is for; a push in between leaves that unknown. Every read happens before the mark
+      // is saved, so nothing awaits between saving it and the outbox recording the receipt.
       const before = await context.mergeRequest(ref);
       const file = (await context.diffs(ref)).find((diff) => diffPath(diff) === path);
 
       if (!file) throw rejected(`${path} is no longer part of this merge request.`, 404);
 
-      context.markViewed(prId, path, fingerprint(file.diff));
-
-      // Only says which revision was marked: the mark is saved, so a failure here must not make
-      // the outbox send it again (it could then mark a newer diff). The refresh after it tells.
+      // Only says which revision is marked; failing to read it must not fail the mark.
       const after = await context.mergeRequest(ref).catch(() => null);
+      const key = fingerprint(file.diff);
 
-      return after ? markedRevision(before, after) : null;
+      context.markViewed(prId, path, key);
+
+      const revision = after ? markedRevision(before, after) : null;
+
+      return revision ? { ...revision, fileKey: key } : null;
     },
 
     async addConversationComment(prId, body) {

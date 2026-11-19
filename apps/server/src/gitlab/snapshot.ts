@@ -690,6 +690,7 @@ function files(diffs: RawDiff[], viewed: Record<string, string>): PullFile[] {
           : diff.renamed_file
             ? 'RENAMED'
             : 'MODIFIED',
+      viewedKey: fingerprint(diff.diff),
       // A file viewed before its diff changed shows as changed since viewed, as on GitHub.
       viewerViewedState: !mark
         ? 'UNVIEWED'

@@ -47,11 +47,24 @@ interface ViewedMark {
   since: number;
 }
 
-/** True when the mark is about the diff `snapshot` shows. */
-const covers = (mark: ViewedMark, snapshot: PullRequestSnapshot) =>
-  !mark.revision ||
-  (mark.revision.headOid === snapshot.headOid &&
-    mark.revision.baseOid === (snapshot.baseOid ?? null));
+/**
+ * True when the mark is about the diff `snapshot` shows for `file`. Where the forge identifies the
+ * diff of each file, that decides; otherwise the snapshot's head and base must be the revision.
+ */
+function covers(
+  mark: ViewedMark,
+  snapshot: PullRequestSnapshot,
+  file: PullRequestSnapshot['files'][number],
+): boolean {
+  if (!mark.revision) return true;
+  if (mark.revision.fileKey !== undefined || file.viewedKey !== undefined)
+    return mark.revision.fileKey !== undefined && mark.revision.fileKey === file.viewedKey;
+
+  return (
+    mark.revision.headOid === snapshot.headOid &&
+    mark.revision.baseOid === (snapshot.baseOid ?? null)
+  );
+}
 
 interface Marks {
   /** The newest read saved. */
@@ -148,7 +161,13 @@ export class SnapshotCoordinator {
       const refusal = this.refusal(observation, marks);
 
       if (refusal) return { status: refusal, snapshot: latest };
-      if (!latest) return { status: 'invalidated', snapshot: null };
+
+      // Nothing to close, but reads that started earlier and saw it open are older than this.
+      if (!latest) {
+        this.saved(marks, observation);
+
+        return { status: 'invalidated', snapshot: null };
+      }
 
       const snapshot = { ...latest, state };
 
@@ -209,12 +228,14 @@ export class SnapshotCoordinator {
 
       this.store.afterCommit(() => marks.viewed.push(mark));
 
-      if (!latest || !covers(mark, latest)) return null;
+      const file = latest?.files.find((candidate) => candidate.path === path);
+
+      if (!latest || !file || !covers(mark, latest, file)) return null;
 
       const next = {
         ...latest,
-        files: latest.files.map((file) =>
-          file.path === path ? { ...file, viewerViewedState: mark.state } : file,
+        files: latest.files.map((candidate) =>
+          candidate === file ? { ...candidate, viewerViewedState: mark.state } : candidate,
         ),
       };
 
@@ -255,15 +276,15 @@ export class SnapshotCoordinator {
     const headObservedAt =
       latest?.headOid === snapshot.headOid ? latest.headObservedAt : snapshot.headObservedAt;
     // Viewed marks written after this read started are newer than what it saw, where they are
-    // about the revision it shows.
-    const viewed = marks.viewed.filter(
-      (mark) => mark.since > observation.generation && covers(mark, snapshot),
-    );
+    // about the diff it shows.
+    const viewed = marks.viewed.filter((mark) => mark.since > observation.generation);
     const files =
       viewed.length === 0
         ? snapshot.files
         : snapshot.files.map((file) => {
-            const mark = viewed.findLast((candidate) => candidate.path === file.path);
+            const mark = viewed.findLast(
+              (candidate) => candidate.path === file.path && covers(candidate, snapshot, file),
+            );
 
             return mark ? { ...file, viewerViewedState: mark.state } : file;
           });

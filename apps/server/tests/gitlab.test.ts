@@ -547,15 +547,17 @@ describe('GitLab merge request snapshots', () => {
   it('keeps viewed marks locally until the file changes again', async () => {
     const { client, fake } = gitlab();
 
-    // It says which revision it marked, as a snapshot records it.
-    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toEqual({
-      headOid: HEAD2,
-      baseOid: START,
-    });
+    // It says which revision and which diff of the file it marked, as a snapshot records them.
+    const marked = await client.setFileViewed('MR_7_12', 'src/app.ts', true);
+
+    expect(marked).toEqual({ headOid: HEAD2, baseOid: START, fileKey: expect.any(String) });
 
     let pr = await client.snapshot('MR_7_12', VIEWER, []);
 
-    expect(pr.files.find((file) => file.path === 'src/app.ts')?.viewerViewedState).toBe('VIEWED');
+    expect(pr.files.find((file) => file.path === 'src/app.ts')).toMatchObject({
+      viewerViewedState: 'VIEWED',
+      viewedKey: marked!.fileKey,
+    });
 
     fake.on('GET', `${MR}/diffs`, {
       data: [

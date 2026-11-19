@@ -38,7 +38,12 @@ import {
   fullReviewInput,
   sinceReviewInput,
 } from '@/ai/context.js';
-import type { AgentProvider } from '@/ai/provider.js';
+import {
+  endLeftoverAgentGroups,
+  settingsJournal,
+  useAgentGroupJournal,
+  type AgentProvider,
+} from '@/ai/provider.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
 import { draftChanged, planPreparation, preparationRevision } from '@/ai/preparation.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
@@ -107,6 +112,13 @@ export class AiRunner {
     if (this.opened || this.closing) return;
 
     this.opened = true;
+
+    // Agents a previous server left running (it was killed outright) end before any run resumes
+    // in their workspace; this process's agents are recorded from now on.
+    const journal = settingsJournal(this.sync.store);
+
+    endLeftoverAgentGroups(journal);
+    useAgentGroupJournal(journal);
 
     const unfinished = this.db
       .select()

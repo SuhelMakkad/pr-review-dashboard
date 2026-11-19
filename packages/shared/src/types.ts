@@ -123,6 +123,11 @@ export interface PullFile {
   deletions: number;
   changeType?: string;
   viewerViewedState?: 'VIEWED' | 'UNVIEWED' | 'DISMISSED';
+  /**
+   * Identifies the diff of the file that `viewerViewedState` is about, where the forge's viewed
+   * state follows the diff itself (GitLab: a fingerprint of it); absent where it does not.
+   */
+  viewedKey?: string;
 }
 
 export interface Check {

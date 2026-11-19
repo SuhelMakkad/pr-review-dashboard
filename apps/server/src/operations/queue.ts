@@ -1156,10 +1156,15 @@ export class OperationQueue {
         await this.sync.refresh(row.prId, row.account);
         const pr = this.sync.detail(row.prId)?.snapshot;
 
+        const viewedState = pr?.files.find((file) => file.path === step.args[1])?.viewerViewedState;
+
+        // A file shown as changed since viewed was viewed, then changed: sending the mark again
+        // would mark a diff nobody has seen, so it counts as done.
         confirmed =
           step.method === 'setFileViewed'
-            ? pr?.files.find((file) => file.path === step.args[1])?.viewerViewedState ===
-              (step.args[2] ? 'VIEWED' : 'UNVIEWED')
+            ? step.args[2]
+              ? viewedState === 'VIEWED' || viewedState === 'DISMISSED'
+              : viewedState === 'UNVIEWED'
             : pr?.threads.find((thread) => thread.id === step.args[0])?.isResolved === step.args[1];
 
         // These desired-state mutations are safe to repeat if GitHub has not reached that state.

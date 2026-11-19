@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AiEffort, AiProvider, CodexAccountStatus } from '@review-desk/shared/ai';
@@ -119,6 +119,111 @@ export interface AgentProcess {
 /** Process groups of agents still running, so that exiting the server can end them too. */
 const liveGroups = new Set<number>();
 
+/** An agent process group, as recorded so that a later server process can end it. */
+export interface AgentGroupRecord {
+  /** The process group id, which is the agent's own pid. */
+  group: number;
+  /** When the agent started, as `ps` reports it: tells it apart from a later process given its pid. */
+  startedAt: string;
+}
+
+/** Where agent process groups are recorded, so a server that crashed can end them on its next start. */
+export interface AgentGroupJournal {
+  load(): AgentGroupRecord[];
+  save(records: AgentGroupRecord[]): void;
+}
+
+const JOURNAL_KEY = 'agent-groups';
+
+/** A journal kept in the settings of the data directory's database. */
+export function settingsJournal(store: {
+  getSetting<T>(key: string): T | null;
+  setSetting(key: string, value: unknown): void;
+}): AgentGroupJournal {
+  return {
+    load: () => store.getSetting<AgentGroupRecord[]>(JOURNAL_KEY) ?? [],
+    save: (records) => store.setSetting(JOURNAL_KEY, records),
+  };
+}
+
+let journal: AgentGroupJournal | null = null;
+const recorded = new Map<number, AgentGroupRecord>();
+
+/** Records the agents this process starts from now on in `next` (null stops recording). */
+export function useAgentGroupJournal(next: AgentGroupJournal | null): void {
+  journal = next;
+}
+
+function persist(): void {
+  try {
+    journal?.save([...recorded.values()]);
+  } catch {
+    // The database may already be closed while the process exits; the next start checks anyway.
+  }
+}
+
+const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/;
+
+/** Every process with its group and start time, as `ps` reports them. */
+function processTable(): { pid: number; group: number; startedAt: string }[] {
+  const result = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,lstart='], {
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+  });
+
+  if (result.status !== 0) return [];
+
+  return result.stdout.split('\n').flatMap((line) => {
+    const match = PS_LINE.exec(line);
+
+    return match ? [{ pid: Number(match[1]), group: Number(match[2]), startedAt: match[3]! }] : [];
+  });
+}
+
+/** When `pid` started, as `ps` reports it, or null when it is gone. */
+function startTime(pid: number): string | null {
+  const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' });
+  const text = result.status === 0 ? result.stdout.trim() : '';
+
+  return text || null;
+}
+
+/**
+ * Ends the agent process groups a previous server process left running, as recorded in `source`,
+ * and forgets them. A server killed outright (SIGKILL, a crash) cannot end its agents, and its
+ * successor must not resume a run in a workspace an old agent still writes to; so call this once
+ * the process owns the data directory and before any run resumes. A group whose leader is alive
+ * with another start time belongs to a later process that was given the same pid, and is left
+ * alone. A group whose leader has exited holds only what that agent started: a group id is not
+ * given out again while any member of the group lives. Returns how many groups it ended.
+ */
+export function endLeftoverAgentGroups(source: AgentGroupJournal): number {
+  const records = source.load();
+
+  if (records.length === 0) return 0;
+
+  const table = processTable();
+  let ended = 0;
+
+  for (const record of records) {
+    const members = table.filter((entry) => entry.group === record.group);
+    const leader = members.find((entry) => entry.pid === record.group);
+
+    if (members.length === 0 || (leader && leader.startedAt !== record.startedAt)) continue;
+
+    try {
+      process.kill(-record.group, 'SIGKILL');
+      ended++;
+    } catch {
+      // It ended meanwhile.
+    }
+  }
+
+  source.save([]);
+
+  return ended;
+}
+
 /**
  * Ends every agent process group still running, at once and without waiting. For the moment the
  * server exits: a run stopped normally has already ended its agent, but a forced exit must not
@@ -134,6 +239,8 @@ export function killAgentProcesses(): void {
   }
 
   liveGroups.clear();
+  recorded.clear();
+  persist();
 }
 
 /**
@@ -156,6 +263,16 @@ export function spawnAgentProcess(
 
   if (group) {
     liveGroups.add(group);
+
+    // Recorded in the data directory too, so that if this server is killed outright, the next
+    // one ends the agent before it resumes the run (see `endLeftoverAgentGroups`).
+    const startedAt = journal ? startTime(group) : null;
+
+    if (startedAt) {
+      recorded.set(group, { group, startedAt });
+      persist();
+    }
+
     // The agent is gone; anything still in its group is a stray of this run, which ends with it.
     // The group stays registered until then, so exiting the server never misses one.
     child.once('close', () => {
@@ -166,6 +283,8 @@ export function spawnAgentProcess(
       }
 
       liveGroups.delete(group);
+
+      if (recorded.delete(group)) persist();
     });
   }
 

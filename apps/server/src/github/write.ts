@@ -21,6 +21,11 @@ export interface ThreadInput {
 export interface ViewedRevision {
   headOid: string;
   baseOid: string | null;
+  /**
+   * The `viewedKey` of the file's diff that was marked, where the forge knows it (GitLab). It
+   * decides on its own: a snapshot's head and base and its files are not always read together.
+   */
+  fileKey?: string;
 }
 
 /** GitHub writes used by the review workspace and enabled automations. */

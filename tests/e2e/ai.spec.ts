@@ -337,13 +337,16 @@ test('judges each of your threads since your review', async ({ page }) => {
 
 test('shows agent failures and drafts a review summary', async ({ page }) => {
   await openFresh(page, '/inbox/attention/acme/api/2050');
-  // `b` belongs to the PR's assist panel, which binds it once the PR has loaded; a key pressed
-  // before that is lost and the injected failure would hit a later test's run instead.
-  await expect(page.getByRole('heading', { level: 2 })).toHaveText(
-    'Rate-limit the public search endpoint',
-  );
+  // The brief's own button, which exists once the panel does: a `b` pressed before the panel binds
+  // it is lost, and the armed failure would then hit a later test's run instead.
+  const runBrief = page
+    .getByText('Brief', { exact: true })
+    .locator('..')
+    .getByRole('button', { name: /^Run/ });
+
+  await expect(runBrief).toBeVisible();
   await failNextAi(page, 'Codex is not logged in.');
-  await page.keyboard.press('b');
+  await runBrief.click();
   await expect(
     page.getByRole('alert').filter({ hasText: 'Codex is not logged in.' }),
   ).toBeVisible();

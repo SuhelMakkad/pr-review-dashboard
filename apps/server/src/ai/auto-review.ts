@@ -211,6 +211,8 @@ export class AutoReviewer {
 
     const completion = (async () => {
       if (this.current(row.account) && (await this.verify(row.account, row, true))) return;
+      // Shutdown began during the check, which then could not tell; the next start finishes it.
+      if (this.closed) return;
 
       await this.announce(row);
     })().catch(() => undefined);

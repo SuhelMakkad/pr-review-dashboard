@@ -8,7 +8,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unusedPort } from '@test/fixtures/ai/restart-helper.js';
 import { createApp } from '@/app.js';
 import { AutoReviewer } from '@/ai/auto-review.js';
-import { killAgentProcesses, spawnAgentProcess } from '@/ai/provider.js';
+import {
+  endLeftoverAgentGroups,
+  killAgentProcesses,
+  settingsJournal,
+  spawnAgentProcess,
+} from '@/ai/provider.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { DataDirectoryLocked, lockDataDirectory } from '@/db/lock.js';
 import type { AiRunRow } from '@/db/schema.js';
@@ -50,7 +55,7 @@ function spawnScript(script: string, env: Record<string, string>): ChildProcess 
 }
 
 /** Resolves with everything the process printed once `marker` appears; rejects if it exits. */
-function waitForOutput(child: ChildProcess, marker: string): Promise<string> {
+function waitForOutput(child: ChildProcess, marker: string | RegExp): Promise<string> {
   let output = '';
 
   return new Promise((resolve, reject) => {
@@ -58,7 +63,7 @@ function waitForOutput(child: ChildProcess, marker: string): Promise<string> {
     const collect = (data: Buffer) => {
       output += data.toString();
 
-      if (output.includes(marker)) {
+      if (typeof marker === 'string' ? output.includes(marker) : marker.test(output)) {
         clearTimeout(timeout);
         resolve(output);
       }
@@ -285,6 +290,43 @@ describe('shutdown order', () => {
     await closing;
   });
 
+  it('does not announce a review whose check shutdown cut short', async () => {
+    const { fixture, service } = demoService();
+
+    await service.sync();
+
+    const prId = fixture.scenario.world.pulls[0]!.snapshot.id;
+    const announce = vi.fn(async () => undefined);
+    const runner = {
+      settings: () => ({ autoReview: { enabled: true } }),
+    } as unknown as AiRunner;
+    const reviewer = new AutoReviewer(service, runner, { announce } as unknown as Notifier);
+    const check = gate(async () => false);
+
+    // The check that new commits arrived while it ran, still waiting on GitHub.
+    vi.spyOn(
+      reviewer as unknown as { verify: () => Promise<boolean> },
+      'verify',
+    ).mockImplementation(check.gated);
+
+    reviewer.finished({
+      id: 'run-1',
+      account: 'you',
+      prId,
+      task: 'full_review',
+      trigger: 'auto',
+      status: 'done',
+      result: null,
+    } as unknown as AiRunRow);
+    await vi.waitFor(() => expect(check.counter.calls).toBe(1));
+
+    const closing = reviewer.close();
+
+    check.release();
+    await closing;
+    expect(announce).not.toHaveBeenCalled();
+  });
+
   it('lets the other parts finish draining when one fails to stop, then reports it', async () => {
     const { fixture, service } = demoService();
     const history = gate(fixture.searchPullIds.bind(fixture));
@@ -388,6 +430,61 @@ describe('shutdown order', () => {
 
     expect(helper).toBeGreaterThan(0);
     await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 5_000 });
+  });
+
+  it('ends the agents of a server that was killed outright before runs resume', async () => {
+    const directory = temporaryDirectory();
+    const holder = spawnScript('tests/fixtures/agent-holder.mjs', { REVIEW_AGENT_DATA: directory });
+    const started = await waitForOutput(holder, /helper \d+\n/);
+    const helper = Number(/helper (\d+)/.exec(started)?.[1]);
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    expect(helper).toBeGreaterThan(0);
+
+    // SIGKILL: no exit handler runs, so the agent and its helper outlive the server.
+    holder.kill('SIGKILL');
+    await new Promise((resolve) => holder.once('exit', resolve));
+    expect(alive(helper)).toBe(true);
+
+    // The next server, owning the same data, ends them before anything resumes.
+    const store = new Store(join(directory, 'state.sqlite'));
+
+    cleanups.push(() => store.close());
+    expect(endLeftoverAgentGroups(settingsJournal(store))).toBe(1);
+    await vi.waitFor(() => expect(alive(helper)).toBe(false), { timeout: 5_000 });
+    expect(settingsJournal(store).load()).toEqual([]);
+  });
+
+  it('leaves alone a process that was later given a recorded agent’s pid', async () => {
+    // A process in its own group, standing in for whatever now has the recorded pid.
+    const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+
+    cleanups.push(() => {
+      try {
+        process.kill(-other.pid!, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    });
+
+    let saved = [{ group: other.pid!, startedAt: 'Thu Jan  1 00:00:00 1970' }];
+    const journal = { load: () => saved, save: (records: typeof saved) => (saved = records) };
+
+    expect(endLeftoverAgentGroups(journal)).toBe(0);
+    expect(other.exitCode).toBeNull();
+    expect(() => process.kill(other.pid!, 0)).not.toThrow();
+    expect(saved).toEqual([]);
   });
 
   it('ends agents that are still running when the server exits', async () => {

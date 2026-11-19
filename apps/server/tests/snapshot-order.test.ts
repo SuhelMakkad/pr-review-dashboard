@@ -26,6 +26,8 @@ function setup(feeds: Partial<Record<FeedSource, string[]>> = { requested: ['pr-
     viewed: 'VIEWED' | 'UNVIEWED' | 'DISMISSED';
     ci: CiState;
     fingerprint: string;
+    /** Set to make the forge identify each file's diff, as GitLab does. */
+    fileKey?: string;
   } = {
     headOid: 'head-1',
     baseOid: 'base-1',
@@ -63,7 +65,15 @@ function setup(feeds: Partial<Record<FeedSource, string[]>> = { requested: ['pr-
       headObservedAt: new Date().toISOString(),
       state: seen.state,
       ci: seen.ci,
-      files: [{ path: 'src/app.ts', additions: 1, deletions: 0, viewerViewedState: seen.viewed }],
+      files: [
+        {
+          path: 'src/app.ts',
+          additions: 1,
+          deletions: 0,
+          viewerViewedState: seen.viewed,
+          ...(seen.fileKey ? { viewedKey: seen.fileKey } : {}),
+        },
+      ],
       reviews: [],
       reviewDecision: 'REVIEW_REQUIRED',
     });
@@ -240,6 +250,96 @@ describe('saving PR snapshots in order', () => {
     await service.refresh('pr-2');
     expect(service.markViewed('me', 'pr-2', 'src/app.ts', false, null)).toBe(true);
     expect(viewed()).toBe('UNVIEWED');
+  });
+
+  it('matches a mark to the file’s own diff where the forge identifies it', async () => {
+    const { store, service, remote, holdNextRead, readsStarted } = setup();
+
+    remote.fileKey = 'diff-a';
+    await service.sync();
+
+    // The file changes under the same head and base (GitLab reads them apart from the diffs).
+    remote.fileKey = 'diff-b';
+    remote.viewed = 'DISMISSED';
+
+    const release = holdNextRead();
+    const refreshing = service.refresh('pr-2');
+
+    await readsStarted(2);
+    // The mark is for diff A, which is what is stored.
+    expect(
+      service.markViewed('me', 'pr-2', 'src/app.ts', true, { ...revision1, fileKey: 'diff-a' }),
+    ).toBe(true);
+    expect(store.snapshot('me', 'pr-2')?.files[0].viewerViewedState).toBe('VIEWED');
+
+    release();
+    await refreshing;
+
+    // The read shows diff B, which nobody has seen: the forge's own state stays.
+    expect(store.snapshot('me', 'pr-2')?.files[0]).toMatchObject({
+      viewedKey: 'diff-b',
+      viewerViewedState: 'DISMISSED',
+    });
+  });
+
+  it('refuses to add a PR that a sync saw merged while it was being added', async () => {
+    const feeds: Partial<Record<FeedSource, string[]>> = {};
+    const { store, service, remote, holdNextRead, readsStarted } = setup(feeds);
+
+    await service.sync();
+
+    const release = holdNextRead();
+    const adding = service.track('me', 'acme/repo', 2);
+
+    await readsStarted(1);
+    // Meanwhile a review request makes the sync find it, already merged.
+    feeds.requested = ['pr-2'];
+    remote.state = 'MERGED';
+    await service.sync();
+    release();
+
+    await expect(adding).rejects.toMatchObject({ code: 'PR_CLOSED' });
+    expect(store.manualAddedAt('me', 'pr-2')).toBeNull();
+    expect(store.snapshot('me', 'pr-2')).toBeNull();
+  });
+
+  it('waits for every PR of a sync, even when saving one of them fails', async () => {
+    const { github, store, service, remote, holdNextRead } = setup({
+      requested: ['pr-2', 'pr-3'],
+    });
+
+    await service.sync();
+    remote.fingerprint = 'v2';
+
+    const reads = vi.mocked(github.snapshot).mock.calls.length;
+    const lookup = store.snapshot.bind(store);
+    let failing = true;
+
+    // pr-2's read is held; reading pr-3's stored row fails once.
+    const release = holdNextRead();
+
+    vi.spyOn(store, 'snapshot').mockImplementation((account, id) => {
+      if (id === 'pr-3' && failing) {
+        failing = false;
+        throw new Error('disk read failed');
+      }
+
+      return lookup(account, id);
+    });
+
+    let finished = false;
+    const syncing = service.sync().then(() => (finished = true));
+
+    await vi.waitFor(() => expect(vi.mocked(github.snapshot).mock.calls.length).toBe(reads + 1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(finished).toBe(false);
+
+    remote.headOid = 'head-2';
+    release();
+    await syncing;
+
+    expect(service.status.warnings.join()).toContain('disk read failed');
+    expect(store.snapshot('me', 'pr-2')?.headOid).toBe('head-1');
   });
 
   it('polls running CI by what is saved, never by a read that was not', async () => {
