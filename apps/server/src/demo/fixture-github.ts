@@ -196,6 +196,10 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
       viewerViewedState: viewed?.get(file.path) ?? 'UNVIEWED',
     }));
     snapshot.changedFiles = files.length;
+    snapshot.baseTipOid = this.scenario.world.repos.refOid(
+      snapshot.repository,
+      snapshot.baseRefName,
+    );
     snapshot.additions = files.reduce((sum, file) => sum + file.additions, 0);
     snapshot.deletions = files.reduce((sum, file) => sum + file.deletions, 0);
 

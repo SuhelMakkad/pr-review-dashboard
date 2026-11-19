@@ -729,6 +729,7 @@ export class OperationQueue {
           this.settingsProblem(
             action,
             action.event === 'APPROVE' ? 'approveReview' : 'addConversationComment',
+            false,
           ),
         );
       };
@@ -1125,36 +1126,34 @@ export class OperationQueue {
       }
     };
     const basis = action.basis;
-    let mergeBase: string | null = null;
 
     // The merge base of the reviewed head on the commit the target branch points to now, then
-    // the last read of the PR, then the branch again: the merge base counts only if the branch
-    // still points there, so a target that moved during the reads is noticed even where the PR
-    // still shows its earlier diff. From the last read to the step's checkpoint, everything is
+    // the last read of the PR, which reads the target branch with the rest: the merge base
+    // counts only if the branch still points there, so a target that moved is noticed even where
+    // the PR still shows its earlier diff. A merge base of two commits never changes, so nothing
+    // needs reading after the PR. From that read to the step's checkpoint, everything is
     // synchronous.
+    let target: string | null = null;
+    let compared: string | null = null;
+
     if (basis) {
-      const target = await read(() =>
-        this.sync.github.branchHead(row.repository, basis.baseRefName),
-      );
-      const compared = target
-        ? await read(() => this.sync.github.compare(row.repository, target, action.expectedHeadOid))
+      target = await read(() => this.sync.github.branchHead(row.repository, basis.baseRefName));
+      compared = target
+        ? ((
+            await read(() =>
+              this.sync.github.compare(row.repository, target!, action.expectedHeadOid),
+            )
+          )?.mergeBaseOid ?? null)
         : null;
-
-      await read(() => this.sync.refresh(row.prId, row.account));
-
-      const still = await read(() =>
-        this.sync.github.branchHead(row.repository, basis.baseRefName),
-      );
-
-      mergeBase = target && still === target ? (compared?.mergeBaseOid ?? null) : null;
-    } else {
-      await read(() => this.sync.refresh(row.prId, row.account));
     }
+
+    await read(() => this.sync.refresh(row.prId, row.account));
 
     row = this.row(row.account, row.id);
     if (row.status === 'cancelled') throw new Cancelled();
 
     const stored = this.sync.store.snapshot(row.account, row.prId);
+    const mergeBase = target && stored?.baseTipOid === target ? compared : null;
 
     this.stopFor(
       row,
@@ -1171,8 +1170,16 @@ export class OperationQueue {
     return row;
   }
 
-  /** Why Settings, now or when the review finished, does not allow this step. */
-  private settingsProblem(action: AiReviewAction, method: string): PostProblem | null {
+  /**
+   * Why Settings, now or when the review finished, does not allow this step. `legacy: false`
+   * leaves out the hold on approvals queued before inputs were checked, which waits for the
+   * checks that skip an outdated post.
+   */
+  private settingsProblem(
+    action: AiReviewAction,
+    method: string,
+    legacy = true,
+  ): PostProblem | null {
     const approving = action.event === 'APPROVE';
     const basis = action.basis;
     const settings = this.posting();
@@ -1183,7 +1190,7 @@ export class OperationQueue {
     // Queued before Review Desk checked a review's inputs: comments still go out while posting
     // is on, but an approval or a resolution is yours to send.
     if (!basis)
-      return approving || method === 'setThreadResolved'
+      return legacy && (approving || method === 'setThreadResolved')
         ? {
             skipped: 'this approval was queued before Review Desk checked what a review read.',
             code: 'LEGACY_APPROVAL',

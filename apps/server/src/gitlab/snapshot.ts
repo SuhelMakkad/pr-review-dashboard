@@ -174,6 +174,8 @@ export interface MergeRequestData {
   viewed?: Record<string, string>;
   /** Review Desk's last submission of your review here, if any. */
   submission?: SubmissionEvidence | null;
+  /** The commit the target branch points to, read with the rest; absent from light reads. */
+  targetTip?: string | null;
 }
 
 const DELETED_USER = 'deleted-user';
@@ -763,6 +765,7 @@ export function mergeRequestSnapshot(
           ? now
           : reconstructedHeadTime,
     baseRefName: mr.target_branch,
+    ...(data.targetTip !== undefined ? { baseTipOid: data.targetTip } : {}),
     headRefName: mr.source_branch,
     additions: changedFiles.reduce((sum, file) => sum + file.additions, 0),
     deletions: changedFiles.reduce((sum, file) => sum + file.deletions, 0),

@@ -429,6 +429,16 @@ describe('comment positions', () => {
 });
 
 describe('GitLab merge request snapshots', () => {
+  it('reads where the target branch is with the rest of the merge request', async () => {
+    const { client, fake } = gitlab();
+
+    // Unknown when the branch cannot be read.
+    expect((await client.snapshot('MR_7_12', VIEWER, ['requested'])).baseTipOid).toBeNull();
+
+    fake.on('GET', 'projects/7/repository/branches/main', { data: { commit: { id: BASE } } });
+    expect((await client.snapshot('MR_7_12', VIEWER, ['requested'])).baseTipOid).toBe(BASE);
+  });
+
   it('maps reviewers, reviews, threads, CI and files onto the pull request model', async () => {
     const { client } = gitlab();
     const pr = await client.snapshot('MR_7_12', VIEWER, ['requested']);

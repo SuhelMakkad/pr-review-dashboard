@@ -934,9 +934,10 @@ describe('what an automatic post rests on', () => {
     },
   );
 
-  it('stops when the target branch moves while the PR is read, though its diff looks the same', async () => {
-    const { github, queue, setPosting, review, posted } = await setup();
-    const branchHead = github.branchHead.bind(github);
+  it('stops when the target branch moves before the last read, though the diff looks the same', async () => {
+    const { github, sync, pull, queue, setPosting, review, posted } = await setup();
+    const refresh = sync.refresh.bind(sync);
+    const { repository, baseRefName } = pull(1839).snapshot;
     let reads = 0;
 
     setPosting(true);
@@ -944,10 +945,14 @@ describe('what an automatic post rests on', () => {
 
     const run = await review();
 
-    // The target moves between the lookup and the last read; the PR's stored diff does not.
-    vi.spyOn(github, 'branchHead').mockImplementation(async (...args) =>
-      ++reads === 2 ? 'target-moved-on' : branchHead(...args),
-    );
+    // The target moves after the merge base was looked up: the last read of the PR sees the new
+    // commit on the branch, while the PR's diff stays as it was.
+    vi.spyOn(sync, 'refresh').mockImplementation(async (...args) => {
+      if (++reads === 2)
+        github.scenario.world.repos.ref(repository, baseRefName, 'target-moved-on');
+
+      return refresh(...args);
+    });
     queue.resume();
 
     expect((await posted(run.id, 'cancelled')).progress).toBe(
@@ -1170,6 +1175,39 @@ describe('what an automatic post rests on', () => {
 
     await posted(run.id);
     expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
+  });
+
+  it('skips an outdated approval queued before inputs were checked, and sends your own action', async () => {
+    const { queue, pull, idOf, review, posted, github, setPosting } = await setup();
+    const run = await review();
+
+    setPosting(true);
+    await queue.pause();
+    queue.enqueue('you', run.prId, postedReviewOperationId(run.id), {
+      type: 'ai_review',
+      runId: run.id,
+      expectedHeadOid: run.headOid,
+      event: 'APPROVE',
+      body: postedReviewBody(run.id, run.headOid, JSON.parse(run.result!)),
+    });
+    pull(1839).snapshot.headOid = 'pushed-after-the-review';
+    pull(1839).snapshot.updatedAt = new Date().toISOString();
+
+    const { operation: viewed } = queue.enqueue('you', idOf(1839), 'viewed-behind-it', {
+      type: 'viewed',
+      path: 'src/reminders.ts',
+      viewed: false,
+    });
+
+    queue.resume();
+
+    expect((await posted(run.id, 'cancelled')).progress).toBe(
+      'Not posted: new commits arrived after this review. Run it again to review them.',
+    );
+    await expect
+      .poll(() => queue.get('you', viewed.id).status, { timeout: 2500, interval: 20 })
+      .toBe('succeeded');
+    expect(github.writes.map((write) => write.op)).not.toContain('ApproveReview');
   });
 
   it('waits for you before an approval queued before inputs were checked', async () => {

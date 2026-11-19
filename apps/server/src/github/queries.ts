@@ -50,6 +50,7 @@ export const snapshotQuery = `query Snapshot($id: ID!, $login: String!, $cursor:
   node(id: $id) { ... on PullRequest {
     id number title url body author { login avatarUrl } repository { nameWithOwner }
     isDraft state createdAt updatedAt headRefOid baseRefOid baseRefName headRefName additions deletions changedFiles reviewDecision mergeable mergeStateStatus
+    baseRef { target { oid } }
     ${Object.values(connections).join('\n')}
     verdicts: latestOpinionatedReviews(first: 50) { nodes { id state submittedAt author { login } commit { oid } } }
     conversation: comments(last: 50) { nodes { id body createdAt updatedAt url author { login avatarUrl } } }

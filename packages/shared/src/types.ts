@@ -173,6 +173,11 @@ export interface PullRequestSnapshot {
   version?: number;
   /** Fields below arrived with snapshot v2; older cached blobs are normalised on read. */
   baseOid: string | null;
+  /**
+   * The commit the target branch pointed to when this snapshot was read, in the same read as the
+   * rest of it; absent where it was not read.
+   */
+  baseTipOid?: string | null;
   mergeStateStatus: string | null;
   conversation: ConversationComment[];
   forcePushes: ForcePush[];

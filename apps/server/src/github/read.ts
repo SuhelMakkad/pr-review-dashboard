@@ -138,6 +138,8 @@ interface RawPr {
   updatedAt: string;
   headRefOid: string;
   baseRefOid?: string | null;
+  /** The target branch as it is now: absent from light reads. */
+  baseRef?: { target?: { oid?: string } | null } | null;
   mergeStateStatus?: string | null;
   baseRefName: string;
   headRefName: string;
@@ -840,6 +842,7 @@ export class GitHub implements GitHubApi {
       fetchedAt: now,
       version: SNAPSHOT_VERSION,
       baseOid: raw.baseRefOid ?? null,
+      ...(raw.baseRef !== undefined ? { baseTipOid: raw.baseRef?.target?.oid ?? null } : {}),
       mergeStateStatus: raw.mergeStateStatus ?? null,
       conversation: (raw.conversation?.nodes ?? []).filter(Boolean).map((comment) => ({
         ...comment,
