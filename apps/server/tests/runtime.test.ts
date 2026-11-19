@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -33,6 +33,22 @@ function temporaryDirectory() {
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
 
   return directory;
+}
+
+/**
+ * True once `pid` no longer runs: gone, or a zombie its new parent has not reaped yet (which
+ * `kill(pid, 0)` still finds on Linux).
+ */
+function ended(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return true;
+  }
+
+  const state = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+
+  return state.stdout.trim() === '' || state.stdout.trim().startsWith('Z');
 }
 
 /** Runs a server-side script with tsx, the way the restart tests do. */
@@ -517,7 +533,7 @@ describe('shutdown order', () => {
     // The agent's own exit code, reported by its supervisor, and no wait for the open output.
     expect(result.code).toBe(4);
     expect(Date.now() - started).toBeLessThan(1_500);
-    expect(() => process.kill(helper, 0)).toThrow();
+    expect(ended(helper)).toBe(true);
     expect(agentRunning(workDir)).toBe(false);
   });
 

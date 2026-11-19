@@ -65,11 +65,16 @@ export class DiffService {
   }
 
   private withViewed(manifest: DiffManifest, pr: PullRequestSnapshot): DiffManifest {
-    const viewed = new Map(pr.files.map((file) => [file.path, file.viewerViewedState]));
+    const files = new Map(pr.files.map((file) => [file.path, file]));
 
     return {
       ...manifest,
-      files: manifest.files.map((file) => ({ ...file, viewed: viewed.get(file.path) })),
+      revision: { headOid: pr.headOid, baseOid: pr.baseOid ?? null },
+      files: manifest.files.map((file) => ({
+        ...file,
+        viewed: files.get(file.path)?.viewerViewedState,
+        ...(files.get(file.path)?.viewedKey ? { viewedKey: files.get(file.path)!.viewedKey } : {}),
+      })),
     };
   }
 

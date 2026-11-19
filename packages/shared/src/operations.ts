@@ -20,11 +20,10 @@ export type GitHubAction =
       path: string;
       viewed: boolean;
       /**
-       * The diff you marked, recorded by the server from the PR as stored when you marked it: its
-       * head and base, and the file's own diff where the forge identifies it. An interrupted mark
-       * is sent again only while the PR still shows that diff. Absent in actions saved before it.
+       * The diff you marked, as the page showed it (else the PR as the server had it). It is not
+       * marked once the PR shows another diff. Absent in actions saved before it existed.
        */
-      target?: { headOid: string; baseOid: string | null; fileKey?: string };
+      target?: ViewedTarget;
     }
   | { type: 'reviewers'; logins: string[] }
   | { type: 'discard'; reviewId: string; restoreOperationId?: string }
@@ -90,3 +89,26 @@ export const operationInProgress = (status: OperationStatus) =>
 
 export const operationUnsettled = (status: OperationStatus) =>
   operationInProgress(status) || status === 'needs_attention';
+
+/** A diff of one file, as a viewed mark names it: the PR's head and base, and the file's own key. */
+export interface ViewedTarget {
+  headOid: string;
+  baseOid: string | null;
+  /** The file's `viewedKey`, where the forge identifies each file's diff (GitLab). */
+  fileKey?: string;
+}
+
+/**
+ * True when a view of the PR at `revision`, whose file has `fileKey`, shows the diff `target`
+ * names: by the file's own key where either side has one, else by the same head and base.
+ */
+export function showsViewedTarget(
+  target: ViewedTarget,
+  revision: { headOid: string; baseOid: string | null },
+  fileKey: string | undefined,
+): boolean {
+  if (target.fileKey !== undefined || fileKey !== undefined)
+    return target.fileKey !== undefined && target.fileKey === fileKey;
+
+  return target.headOid === revision.headOid && target.baseOid === revision.baseOid;
+}

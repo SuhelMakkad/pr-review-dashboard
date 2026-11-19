@@ -45,7 +45,7 @@ import { AssistPanel } from '@/features/ai/assist-panel';
 import { Suggestions } from '@/features/ai/suggestions';
 import { FullReview } from '@/features/ai/full-review';
 import { useAi } from '@/features/ai/use-ai';
-import { useReview } from '@/features/review/use-review';
+import { useReview, viewedTarget, viewShows } from '@/features/review/use-review';
 
 const VIEW_KEY = 'review-desk-diff-view';
 
@@ -163,12 +163,16 @@ function Workspace() {
     () =>
       [...(diff.data?.files ?? [])]
         .map((file) => {
+          // A mark still being sent shows only on the diff it names (older ones name none).
           const pending = review.operations
             .filter(
               (operation) =>
                 operation.action.type === 'viewed' &&
                 operation.action.path === file.path &&
-                operationInProgress(operation.status),
+                operationInProgress(operation.status) &&
+                (!operation.action.target ||
+                  !diff.data ||
+                  viewShows(diff.data, file.path, operation.action.target)),
             )
             .at(-1);
 
@@ -246,7 +250,7 @@ function Workspace() {
     const viewed = file.viewed !== 'VIEWED';
 
     review.setViewed.mutate(
-      { path, viewed },
+      { path, viewed, target: diff.data ? viewedTarget(diff.data, path) : undefined },
       { onError: (error) => toast.error(`Could not update viewed state: ${error.message}`) },
     );
 

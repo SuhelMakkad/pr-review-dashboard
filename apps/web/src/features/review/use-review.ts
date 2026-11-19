@@ -1,8 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DiffManifest } from '@review-desk/shared/diff';
-import type { PullRequestDetail } from '@review-desk/shared/types';
 import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
-import type { OperationReceipt } from '@review-desk/shared/operations';
+import {
+  showsViewedTarget,
+  type OperationReceipt,
+  type ViewedTarget,
+} from '@review-desk/shared/operations';
 import { api, ApiError } from '@/lib/api';
 import { cacheBelongsTo } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
@@ -19,17 +22,22 @@ export interface CommentTarget {
 }
 
 /** Everything the workspace writes, each scoped to one PR and the active account. */
-/**
- * The diff of `path` as this page shows it, sent with a viewed mark so that the mark is never
- * applied to a newer diff the server has seen and you have not.
- */
-function shownDiff(detail: PullRequestDetail | undefined, account: string, path: string) {
-  if (!detail || detail.account !== account) return {};
+/** The diff of `path` that `manifest` renders, as a viewed mark made there names it. */
+export function viewedTarget(manifest: DiffManifest, path: string): ViewedTarget | undefined {
+  const file = manifest.files.find((candidate) => candidate.path === path);
 
-  const { headOid, baseOid } = detail.snapshot;
-  const fileKey = detail.snapshot.files.find((file) => file.path === path)?.viewedKey;
+  if (!manifest.revision || !file) return undefined;
 
-  return { target: { headOid, baseOid: baseOid ?? null, ...(fileKey ? { fileKey } : {}) } };
+  return { ...manifest.revision, ...(file.viewedKey ? { fileKey: file.viewedKey } : {}) };
+}
+
+/** True when `manifest` renders the diff of `path` that `target` names. */
+export function viewShows(manifest: DiffManifest, path: string, target: ViewedTarget): boolean {
+  const file = manifest.files.find((candidate) => candidate.path === path);
+
+  return Boolean(
+    manifest.revision && file && showsViewedTarget(target, manifest.revision, file.viewedKey),
+  );
 }
 
 export function useReview(prId: string | null, account: string) {
@@ -141,25 +149,31 @@ export function useReview(prId: string | null, account: string) {
    * viewed state under keys both accounts share, so nothing is written once another account shows.
    */
   const setViewed = useMutation({
-    mutationFn: ({ path, viewed }: { path: string; viewed: boolean }) =>
+    mutationFn: ({
+      path,
+      viewed,
+      target,
+    }: {
+      path: string;
+      viewed: boolean;
+      target?: ViewedTarget;
+    }) =>
       githubCommand(`/api/pulls/${enc}/viewed`, {
         account,
         path,
         viewed,
-        ...shownDiff(
-          prId ? client.getQueryData<PullRequestDetail>(queryKeys.detail(prId)) : undefined,
-          account,
-          path,
-        ),
+        ...(target ? { target } : {}),
       }),
-    onMutate: ({ path, viewed }) => {
+    onMutate: ({ path, viewed, target }) => {
       const versionKey = `${account}:${prId}:${path}`;
       const version = (viewedVersions.get(versionKey) ?? 0) + 1;
       viewedVersions.set(versionKey, version);
 
+      // Only views of the diff the mark names show it early; a newer diff is not marked.
       const snapshots = client
         .getQueriesData<DiffManifest>({ queryKey: ['diff', prId] })
-        .filter(([key]) => cacheBelongsTo(client, account, key));
+        .filter(([key]) => cacheBelongsTo(client, account, key))
+        .filter(([, manifest]) => !target || !manifest || viewShows(manifest, path, target));
 
       for (const [key, manifest] of snapshots) {
         if (!manifest) continue;

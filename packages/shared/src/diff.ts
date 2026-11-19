@@ -30,10 +30,14 @@ export interface DiffFile {
   /** Lockfiles, build output, snapshots: collapsed by default. */
   generated?: boolean;
   viewed?: 'VIEWED' | 'UNVIEWED' | 'DISMISSED';
+  /** Identifies this file's diff where the forge does (GitLab); a viewed mark names it. */
+  viewedKey?: string;
 }
 
 export interface DiffManifest {
   prId: string;
+  /** The PR's head and base this view was built from; a viewed mark made here names them. */
+  revision?: { headOid: string; baseOid: string | null };
   /** The account whose view this is (viewed state, "since your review"); set by the diff route. */
   account?: string;
   mode: DiffMode;

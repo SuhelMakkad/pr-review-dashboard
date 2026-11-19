@@ -3,6 +3,8 @@ import { and, asc, desc, eq, inArray, lt, or } from 'drizzle-orm';
 import {
   operationInProgress,
   operationUnsettled,
+  showsViewedTarget,
+  type ViewedTarget,
   type GitHubAction,
   type GitHubOperation,
   type OperationControl,
@@ -60,17 +62,19 @@ function withTarget(action: GitHubAction, pr: PullRequestSnapshot): GitHubAction
  * forge identifies it, else the same head and base.
  */
 function showsTarget(
-  target: Extract<GitHubAction, { type: 'viewed' }>['target'],
+  target: ViewedTarget | undefined,
   pr: PullRequestSnapshot | undefined,
   path: string,
 ): boolean {
   const file = pr?.files.find((candidate) => candidate.path === path);
 
   if (!target || !pr || !file) return false;
-  if (target.fileKey !== undefined || file.viewedKey !== undefined)
-    return target.fileKey !== undefined && target.fileKey === file.viewedKey;
 
-  return target.headOid === pr.headOid && target.baseOid === (pr.baseOid ?? null);
+  return showsViewedTarget(
+    target,
+    { headOid: pr.headOid, baseOid: pr.baseOid ?? null },
+    file.viewedKey,
+  );
 }
 
 class Suspended extends Error {}

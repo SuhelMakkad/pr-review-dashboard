@@ -9,7 +9,7 @@ import { adoptStatus } from '@/lib/live';
 import { githubCommand } from '@/lib/operation-command';
 import { useSyncNow } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
-import { useReview } from '@/features/review/use-review';
+import { useReview, viewedTarget } from '@/features/review/use-review';
 import { status } from '@test/fixtures';
 
 afterEach(() => {
@@ -97,7 +97,7 @@ it('rolls back a rejected viewed update without undoing a newer change on anothe
   }
 });
 
-it('sends the diff the page shows with a viewed mark', async () => {
+it('names the diff the workspace renders, even when the PR detail is a revision ahead', async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const bodies: unknown[] = [];
 
@@ -108,13 +108,23 @@ it('sends the diff the page shows with a viewed mark', async () => {
 
     return Promise.resolve(response({ operation: { id: 'viewed' } }));
   });
+
+  // The detail already has revision B; the rendered diff is still A, and another view shows B.
+  const shown = ['diff', 'pr-one', 'full'];
+  const newer = ['diff', 'pr-one', 'since'];
+  const revision = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
+
   client.setQueryData(queryKeys.detail('pr-one'), {
     account: 'you',
-    snapshot: {
-      headOid: 'a'.repeat(40),
-      baseOid: 'b'.repeat(40),
-      files: [{ path: 'a.ts', additions: 1, deletions: 0, viewedKey: 'diff-a' }],
-    },
+    snapshot: { ...revision('b'), files: [{ path: 'a.ts', viewedKey: 'diff-b' }] },
+  });
+  client.setQueryData(shown, {
+    revision: revision('a'),
+    files: [{ path: 'a.ts', viewed: 'UNVIEWED', viewedKey: 'diff-a' }],
+  });
+  client.setQueryData(newer, {
+    revision: revision('b'),
+    files: [{ path: 'a.ts', viewed: 'UNVIEWED', viewedKey: 'diff-b' }],
   });
 
   const wrapper = ({ children }: { children: ReactNode }) => (
@@ -123,13 +133,19 @@ it('sends the diff the page shows with a viewed mark', async () => {
   const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
 
   try {
-    act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: true }));
+    const target = viewedTarget(client.getQueryData<DiffManifest>(shown)!, 'a.ts');
+
+    act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: true, target }));
     await waitFor(() => expect(bodies).toHaveLength(1));
     expect(bodies[0]).toMatchObject({
       path: 'a.ts',
       viewed: true,
-      target: { headOid: 'a'.repeat(40), baseOid: 'b'.repeat(40), fileKey: 'diff-a' },
+      target: { headOid: 'a'.repeat(40), baseOid: 'c'.repeat(40), fileKey: 'diff-a' },
     });
+
+    // Shown as viewed only where that diff is rendered.
+    expect(client.getQueryData<DiffManifest>(shown)?.files[0].viewed).toBe('VIEWED');
+    expect(client.getQueryData<DiffManifest>(newer)?.files[0].viewed).toBe('UNVIEWED');
   } finally {
     client.clear();
   }
