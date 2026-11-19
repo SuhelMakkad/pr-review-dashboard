@@ -26,6 +26,13 @@ const newComment = z
     startSide: side.nullable().optional(),
     body,
     origin: z.enum(['user', 'ai']).optional(),
+    revision: z
+      .object({
+        headOid: z.string().min(7).max(64),
+        baseOid: z.string().min(7).max(64).nullable(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -55,7 +62,21 @@ const schemas = {
     .object({ account, prId: z.string().min(1), resolved: z.boolean(), operationId })
     .strict(),
   viewed: z
-    .object({ account, path: z.string().min(1).max(1000), viewed: z.boolean(), operationId })
+    .object({
+      account,
+      path: z.string().min(1).max(1000),
+      viewed: z.boolean(),
+      /** The diff the page showed when you marked the file: its PR head and base, and file key. */
+      target: z
+        .object({
+          headOid: z.string().min(7).max(64),
+          baseOid: z.string().min(7).max(64).nullable(),
+          fileKey: z.string().min(1).max(200).optional(),
+        })
+        .strict()
+        .optional(),
+      operationId,
+    })
     .strict(),
   reviewers: z
     .object({
@@ -271,17 +292,20 @@ export function registerReviewRoutes(
     return (
       input &&
       handle(reply, async () =>
-        reply
-          .code(202)
-          .send(
-            queue.enqueue(
-              input.account,
-              request.params.id,
-              input.operationId,
-              { type: 'viewed', path: input.path, viewed: input.viewed },
-              input,
-            ),
+        reply.code(202).send(
+          queue.enqueue(
+            input.account,
+            request.params.id,
+            input.operationId,
+            {
+              type: 'viewed',
+              path: input.path,
+              viewed: input.viewed,
+              ...(input.target ? { target: input.target } : {}),
+            },
+            input,
           ),
+        ),
       )
     );
   });

@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import type { Duplex } from 'node:stream';
+import { existsSync, mkdirSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import type { AiEffort, AiProvider, CodexAccountStatus } from '@review-desk/shared/ai';
 import { redact } from '@/github/errors.js';
 
@@ -102,6 +105,11 @@ const PIPE_GRACE_MS = 2_000;
 
 export interface ProcessOptions {
   cwd: string;
+  /**
+   * The run workspace the agent works in, when it belongs to a run: the agent then holds that
+   * run's lock while it runs (see `agentRunning`), and a second agent for the run cannot start.
+   */
+  lockFor?: string;
   env: NodeJS.ProcessEnv;
   signal: AbortSignal;
   timeoutMs: number;
@@ -117,6 +125,57 @@ export interface AgentProcess {
 }
 
 /**
+ * Agents run under a small supervisor (`agent-supervisor.ts`) that leads their process group and
+ * ends it the moment this server is gone, however it ended. Given a run's workspace, it also holds
+ * that run's lock for as long as it lives, so a busy lock means the run's agent is still running.
+ */
+const SUPERVISOR = fileURLToPath(
+  new URL(
+    import.meta.url.endsWith('.ts') ? './agent-supervisor.ts' : './agent-supervisor.js',
+    import.meta.url,
+  ),
+);
+
+/** The lock a run's agent holds while it runs, next to the run's workspace. */
+export function agentLockPath(workDir: string): string {
+  return join(dirname(workDir), '.locks', `${basename(workDir)}.lock`);
+}
+
+/** True while an agent for the run in `workDir` is running, in this server or a previous one. */
+export function agentRunning(workDir: string): boolean {
+  const path = agentLockPath(workDir);
+
+  if (!existsSync(path)) return false;
+
+  let probe: DatabaseSync | null = null;
+
+  try {
+    probe = new DatabaseSync(path, { timeout: 0 });
+    probe.exec('BEGIN EXCLUSIVE');
+    probe.exec('ROLLBACK');
+
+    return false;
+  } catch {
+    return true;
+  } finally {
+    probe?.close();
+  }
+}
+
+/** Waits up to `timeoutMs` for the run's agent to have exited; true once it has. */
+export async function agentExited(workDir: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (agentRunning(workDir)) {
+    if (Date.now() >= deadline) return false;
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  return true;
+}
+
+/**
  * Starts an agent CLI in its own process group. Cancellation, timeouts and {@link AgentProcess.stop}
  * terminate the whole group (SIGTERM, then SIGKILL after five seconds), so no stray children
  * outlive a run. Stdout is delivered line by line and not kept.
@@ -126,34 +185,56 @@ export function spawnAgentProcess(
   args: string[],
   options: ProcessOptions,
 ): AgentProcess {
-  const child = spawn(command, args, {
-    cwd: options.cwd,
-    env: options.env,
-    detached: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
+  // The supervisor leads the group and is the only process that signals it; the fourth pipe is
+  // its control line (see agent-supervisor.ts), closed by the system when this process exits.
+  const child = spawn(
+    process.execPath,
+    [
+      '--no-warnings',
+      SUPERVISOR,
+      options.lockFor ? agentLockPath(options.lockFor) : '-',
+      command,
+      ...args,
+    ],
+    {
+      cwd: options.cwd,
+      env: options.env,
+      detached: true,
+      stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+    },
+  );
+  const control = child.stdio[3] as Duplex;
+  let reported: { code: number | null } | null = null;
+  let controlBuffer = '';
+
+  // How the agent itself ended, as the supervisor reports it; the supervisor then ends with the
+  // rest of the group, so its own exit says nothing about the agent.
+  control.on('error', () => {});
+  control.setEncoding('utf8').on('data', (chunk: string) => {
+    controlBuffer += chunk;
+
+    for (const line of controlBuffer.split('\n').slice(0, -1)) {
+      const exit = /^exit (\d+)$/.exec(line.trim());
+
+      if (exit) reported = { code: Number(exit[1]) };
+      else if (/^signal \w+$/.test(line.trim())) reported = { code: null };
+    }
+
+    controlBuffer = controlBuffer.slice(controlBuffer.lastIndexOf('\n') + 1);
   });
+
   let stderr = '';
   let buffer = '';
   let reason: 'timeout' | 'cancelled' | 'stopped' | null = null;
 
+  // The supervisor stops the agent (SIGTERM, then SIGKILL after five seconds); this process never
+  // signals the group itself, whose id another process could hold once the supervisor is gone.
   const terminate = (why: 'timeout' | 'cancelled' | 'stopped') => {
     if (reason) return;
 
     reason = why;
 
-    try {
-      process.kill(-child.pid!, 'SIGTERM');
-    } catch {
-      // Already gone.
-    }
-
-    setTimeout(() => {
-      try {
-        process.kill(-child.pid!, 'SIGKILL');
-      } catch {
-        // Already gone.
-      }
-    }, 5000).unref();
+    if (control.writable) control.write('stop\n');
   };
 
   const timer = setTimeout(() => terminate('timeout'), options.timeoutMs);
@@ -203,10 +284,11 @@ export function spawnAgentProcess(
     });
     child.on('close', (code) => {
       finish();
+      control.destroy();
 
       if (reason === 'timeout') reject(new AgentError('The agent took too long and was stopped.'));
       else if (reason === 'cancelled') reject(new AgentError('Cancelled.'));
-      else resolve({ code, stderr });
+      else resolve({ code: reported ? reported.code : code, stderr });
     });
   });
 

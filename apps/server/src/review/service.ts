@@ -181,6 +181,15 @@ export class ReviewService {
     if (input.line === null) return;
 
     const full = await this.diffs.manifest(pr, 'full', null);
+
+    // Its lines might be another revision's: a comment's line numbers would then land elsewhere.
+    if (full.unpinned)
+      throw new ReviewError(
+        'DIFF_UNCONFIRMED',
+        409,
+        'This version of the diff could not be confirmed, so comments can only go on whole files until it reloads.',
+      );
+
     const file = full.files.find((candidate) => candidate.path === input.path);
     const lines = commentableLines(file?.patch);
     const visible = (input.side ?? 'RIGHT') === 'LEFT' ? lines.left : lines.right;
@@ -199,6 +208,18 @@ export class ReviewService {
     await this.guard(input.account);
 
     const pr = this.snapshot(prId);
+
+    // The line was picked in the diff of another revision than the PR has now.
+    if (
+      input.line !== null &&
+      input.revision &&
+      (input.revision.headOid !== pr.headOid || input.revision.baseOid !== (pr.baseOid ?? null))
+    )
+      throw new ReviewError(
+        'HEAD_MOVED',
+        409,
+        'The PR changed while you were commenting. Reload the diff, then comment again.',
+      );
 
     await this.assertCommentable(pr, input);
 
@@ -366,7 +387,7 @@ export class ReviewService {
 
     const refreshed = this.execution
       ? null
-      : await this.sync.refresh(prId).catch((error: unknown) => {
+      : await this.sync.refresh(prId, request.account).catch((error: unknown) => {
           throw new ReviewError(
             'GITHUB_ERROR',
             502,
@@ -554,26 +575,28 @@ export class ReviewService {
     if (!this.execution) await this.refreshQuietly(prId);
   }
 
-  async setViewed(account: string, prId: string, path: string, viewed: boolean): Promise<void> {
+  async setViewed(
+    account: string,
+    prId: string,
+    path: string,
+    viewed: boolean,
+    expected?: { fileKey: string },
+  ): Promise<void> {
     await this.guard(account, true);
 
     // Fails with NOT_FOUND before writing when the PR is not tracked.
     this.snapshot(prId);
 
-    await this.write(() => this.github.setFileViewed(prId, path, viewed));
+    // Called with exactly the arguments it needs, so checkpoints of older actions still match.
+    const revision = await this.write(() =>
+      expected
+        ? this.github.setFileViewed(prId, path, viewed, expected)
+        : this.github.setFileViewed(prId, path, viewed),
+    );
 
-    // Reread after the write: the PR may have been refreshed, or removed from the queue, meanwhile.
-    const pr = this.sync.store.snapshot(account, prId);
-
-    if (!pr) return;
-
-    // Update the cached snapshot directly; viewed state does not change the PR's fingerprint.
-    this.sync.store.saveSnapshot(account, {
-      ...pr,
-      files: pr.files.map((file) =>
-        file.path === path ? { ...file, viewerViewedState: viewed ? 'VIEWED' : 'UNVIEWED' } : file,
-      ),
-    });
-    this.events.emit({ type: 'pulls.changed', ids: [prId] });
+    // Onto the latest stored PR and the reads that started before the write, where they show the
+    // revision the forge marked. Elsewhere the forge's own state stands; the refresh that follows
+    // every confirmed action brings it in.
+    this.sync.markViewed(account, prId, path, viewed, revision ?? null);
   }
 }

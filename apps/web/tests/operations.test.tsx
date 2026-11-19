@@ -9,7 +9,13 @@ import { adoptStatus } from '@/lib/live';
 import { githubCommand } from '@/lib/operation-command';
 import { useSyncNow } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
-import { useReview } from '@/features/review/use-review';
+import {
+  canMarkViewed,
+  diffView,
+  linesShown,
+  useReview,
+  viewedTarget,
+} from '@/features/review/use-review';
 import { status } from '@test/fixtures';
 
 afterEach(() => {
@@ -92,6 +98,104 @@ it('rolls back a rejected viewed update without undoing a newer change on anothe
         'VIEWED',
       ]),
     );
+  } finally {
+    client.clear();
+  }
+});
+
+it('names the diff the workspace renders, even when the PR detail is a revision ahead', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const bodies: unknown[] = [];
+
+  vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+    if (path.includes('/viewed')) bodies.push(JSON.parse(String(options?.body)));
+    if (path.startsWith('/api/operations'))
+      return Promise.resolve(response({ items: [], nextCursor: null }));
+
+    return Promise.resolve(response({ operation: { id: 'viewed' } }));
+  });
+
+  // The detail already has revision B; the rendered diff is still A, and another view shows B.
+  const shown = ['diff', 'pr-one', 'full'];
+  const newer = ['diff', 'pr-one', 'since'];
+  const revision = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
+
+  client.setQueryData(queryKeys.detail('pr-one'), {
+    account: 'you',
+    snapshot: { ...revision('b'), files: [{ path: 'a.ts', viewedKey: 'diff-b' }] },
+  });
+  client.setQueryData(shown, {
+    revision: revision('a'),
+    files: [{ path: 'a.ts', viewed: 'UNVIEWED', viewedKey: 'diff-a' }],
+  });
+  client.setQueryData(newer, {
+    revision: revision('b'),
+    files: [{ path: 'a.ts', viewed: 'UNVIEWED', viewedKey: 'diff-b' }],
+  });
+
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
+
+  try {
+    const target = viewedTarget(client.getQueryData<DiffManifest>(shown)!, 'a.ts');
+
+    act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: true, target }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toMatchObject({
+      path: 'a.ts',
+      viewed: true,
+      target: { headOid: 'a'.repeat(40), baseOid: 'c'.repeat(40), fileKey: 'diff-a' },
+    });
+
+    // Shown as viewed only where that diff is rendered.
+    expect(client.getQueryData<DiffManifest>(shown)?.files[0].viewed).toBe('VIEWED');
+    expect(client.getQueryData<DiffManifest>(newer)?.files[0].viewed).toBe('UNVIEWED');
+  } finally {
+    client.clear();
+  }
+});
+
+it('leaves a view refreshed to a newer diff alone when an older mark fails', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  let reject!: (error: Error) => void;
+
+  vi.stubGlobal('fetch', (path: string) => {
+    if (path.includes('/viewed')) return new Promise<Response>((_, fail) => (reject = fail));
+    if (path.startsWith('/api/operations'))
+      return Promise.resolve(response({ items: [], nextCursor: null }));
+
+    return Promise.resolve(response({ operation: { id: 'viewed' } }));
+  });
+
+  const key = ['diff', 'pr-one', 'full'];
+  const revision = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
+
+  client.setQueryData(key, {
+    revision: revision('a'),
+    files: [{ path: 'a.ts', viewed: 'VIEWED', viewedKey: 'diff-a' }],
+  });
+
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
+
+  try {
+    const target = viewedTarget(client.getQueryData<DiffManifest>(key)!, 'a.ts');
+
+    act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: false, target }));
+    await waitFor(() => expect(reject).toBeTypeOf('function'));
+
+    // The view refreshes to the next revision, where the file changed since you viewed it.
+    client.setQueryData(key, {
+      revision: revision('b'),
+      files: [{ path: 'a.ts', viewed: 'DISMISSED', viewedKey: 'diff-b' }],
+    });
+    await act(async () => reject(new Error('Unmark rejected')));
+
+    expect(client.getQueryData<DiffManifest>(key)?.files[0].viewed).toBe('DISMISSED');
   } finally {
     client.clear();
   }
@@ -209,4 +313,59 @@ it('keeps the new account when a sync reply from before a switch arrives', async
   } finally {
     client.clear();
   }
+});
+
+it('marks a file viewed only where the view can say which diff it shows', () => {
+  const revision = { headOid: 'a'.repeat(40), baseOid: null };
+
+  expect(
+    canMarkViewed({ revision, files: [{ path: 'a.ts' }] } as unknown as DiffManifest, 'a.ts'),
+  ).toBe(true);
+  expect(
+    canMarkViewed(
+      {
+        revision,
+        keyed: true,
+        files: [{ path: 'a.ts', viewedKey: 'diff-a' }],
+      } as unknown as DiffManifest,
+      'a.ts',
+    ),
+  ).toBe(true);
+  expect(
+    canMarkViewed(
+      { revision, keyed: true, files: [{ path: 'a.ts' }] } as unknown as DiffManifest,
+      'a.ts',
+    ),
+  ).toBe(false);
+  expect(canMarkViewed(undefined, 'a.ts')).toBe(false);
+});
+
+it('takes selected lines only from the patch they were selected in', () => {
+  const manifest = (head: string, changes: Partial<DiffManifest> = {}): DiffManifest => ({
+    prId: 'pr',
+    revision: { headOid: head.repeat(40), baseOid: 'c'.repeat(40) },
+    mode: 'full',
+    kind: 'full',
+    fromOid: 'c'.repeat(40),
+    toOid: head.repeat(40),
+    files: [],
+    ...changes,
+  });
+  const selected = { path: 'a.ts', view: diffView(manifest('a')) };
+
+  expect(linesShown(selected, 'a.ts', manifest('a'))).toBe(true);
+  // The same file, refreshed to the next revision before the composer opened.
+  expect(linesShown(selected, 'a.ts', manifest('b'))).toBe(false);
+  // Another file, or the same revision compared from your last review.
+  expect(linesShown(selected, 'b.ts', manifest('a'))).toBe(false);
+  expect(
+    linesShown(selected, 'a.ts', manifest('a', { mode: 'since-review', fromOid: 'd'.repeat(40) })),
+  ).toBe(false);
+  // The live patch shown while the revision's own could not be confirmed names no patch: lines
+  // selected there are not taken once the confirmed patch for that revision comes back.
+  const unpinned = manifest('a', { unpinned: true });
+
+  expect(diffView(unpinned)).toBeUndefined();
+  expect(linesShown({ path: 'a.ts', view: diffView(unpinned) }, 'a.ts', manifest('a'))).toBe(false);
+  expect(linesShown(selected, 'a.ts', unpinned)).toBe(false);
 });

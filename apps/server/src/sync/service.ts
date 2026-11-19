@@ -26,8 +26,9 @@ import type { DetectResult, GitHubApi } from '@/github/api.js';
 import { asAccount, type GitHubAccounts } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { GitHub } from '@/github/read.js';
-import { extractActivity } from '@/insights/extract.js';
+import type { ViewedRevision } from '@/github/write.js';
 import { ReviewError } from '@/review/errors.js';
+import { SnapshotCoordinator } from '@/sync/snapshots.js';
 
 const signInCommand = (account: string) => {
   const { forge, host } = parseAccount(account);
@@ -61,8 +62,6 @@ const FEED_INTERVAL_MS: Record<FeedSource, number> = {
 };
 
 const SYNC_INTERVAL_MS = 60_000;
-const RECONCILE_MS = 30 * 60_000;
-const RECONCILE_JITTER_MS = 5 * 60_000;
 const TEAMS_REFRESH_MS = 30 * 60_000;
 const QUEUE_SAMPLE_MS = 60 * 60_000;
 const MENTION_WINDOW_MS = 14 * 24 * 60 * 60_000;
@@ -84,12 +83,15 @@ export class SyncService {
   status: SyncStatus;
   private running: Promise<void> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
   private readonly feedRuns = new Map<string, number>();
   private readonly teamsFetched = new Map<string, number>();
   /** PRs that must be fully refetched on the next run regardless of their fingerprint. */
   private readonly forced = new Set<string>();
   /** Runs after every sync with the active login (used for notifications). */
   afterSync: ((login: string) => Promise<unknown>) | null = null;
+  /** Every write of a cached PR goes through here, so reads are saved in order. */
+  private readonly snapshots: SnapshotCoordinator;
 
   constructor(
     readonly store: Store,
@@ -104,21 +106,29 @@ export class SyncService {
     this.status =
       (lastAccount && store.getSetting<SyncStatus>(`status:${lastAccount}`)) || initialStatus();
     this.status.syncing = false;
+    this.snapshots = new SnapshotCoordinator(store, (account) => this.teamsOf(account));
 
     if (selected) accounts?.select(selected);
   }
 
   start(): void {
+    if (this.stopped) return;
+
     void this.sync();
     this.timer = setInterval(() => {
       void this.sync({ scheduled: true });
     }, SYNC_INTERVAL_MS);
   }
 
+  /** Stops the schedule and waits for a sync in progress; no sync starts after this. */
   async stop(): Promise<void> {
+    this.stopped = true;
+
     if (this.timer) clearInterval(this.timer);
 
-    await this.running;
+    this.timer = null;
+
+    await this.running?.catch(() => undefined);
   }
 
   /** Share write cooldowns with reads so a manual/background sync cannot bypass GitHub's limit. */
@@ -152,7 +162,7 @@ export class SyncService {
    */
   sync(options: { scheduled?: boolean } = {}): Promise<void> {
     if (this.running) return this.running;
-    if (this.cooldown()) return Promise.resolve();
+    if (this.stopped || this.cooldown()) return Promise.resolve();
 
     const run = this.perform(Boolean(options.scheduled)).finally(() => {
       if (this.running === run) this.running = null;
@@ -262,28 +272,49 @@ export class SyncService {
     return login;
   }
 
-  /** Refetches one PR immediately (after opening it or after a write), bypassing detection. */
-  async refresh(id: string): Promise<PullRequestDetail | null> {
+  /**
+   * Refetches one PR immediately (after opening it, or before and after a write), bypassing
+   * detection. Every call starts its own read, so the result was fetched after the call began:
+   * either this read, or a read that started later and was saved first. Null when the PR is not
+   * tracked, or no longer open.
+   */
+  async refresh(
+    id: string,
+    account: string | null = this.status.account?.login ?? null,
+  ): Promise<PullRequestDetail | null> {
     this.assertNotCoolingDown();
 
-    const account = this.status.account?.login;
-    const cached = account ? this.store.snapshot(account, id) : null;
+    if (!account) return null;
 
-    if (!account || !cached) return null;
+    // A read is refused when the PR is removed or reduced after it started; the row left behind
+    // can be older than the read, so read again rather than return it.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const observation = this.snapshots.observe(account, id);
+      const cached = this.store.snapshot(account, id);
 
-    const snapshot = await asAccount(account, () =>
-      this.github.snapshot(id, account, cached.sources, cached),
+      if (!cached) return null;
+
+      const fetched = await asAccount(account, () =>
+        this.github.snapshot(id, account, cached.sources, cached),
+      );
+      // Keep the stored sources: a PR may have been added or removed by hand during the fetch.
+      const outcome = this.snapshots.commit(observation, fetched, {
+        fingerprint: null,
+        requireStored: true,
+        sources: (latest) => latest?.sources ?? fetched.sources,
+      });
+
+      if (outcome.status === 'invalidated' && outcome.snapshot) continue;
+      if (outcome.status === 'committed') this.events.emit({ type: 'pulls.changed', ids: [id] });
+
+      return outcome.snapshot ? this.detailOf(account, outcome.snapshot) : null;
+    }
+
+    throw new ReviewError(
+      'QUEUE_CHANGED',
+      409,
+      this.worded('This PR kept changing in your queue while it was refreshed. Try again.'),
     );
-    const current = this.store.snapshot(account, id);
-
-    // Removed from the queue while it was being fetched: do not bring it back.
-    if (!current) return null;
-
-    // Keep the stored sources: a PR may have been added or removed by hand during the fetch.
-    this.commitSnapshot(account, { ...snapshot, sources: current.sources }, null);
-    this.events.emit({ type: 'pulls.changed', ids: [id] });
-
-    return this.detail(id);
   }
 
   /**
@@ -351,21 +382,50 @@ export class SyncService {
         `${label} is ${resolved.state === 'MERGED' ? 'merged' : 'closed'}, so there is nothing to review.`,
       );
 
+    const observation = this.snapshots.observe(login, resolved.id);
     const cached = this.store.snapshot(login, resolved.id) ?? undefined;
     const feeds = this.store.membership(login).get(resolved.id) ?? [];
 
     // Fetch before writing anything, so a failure leaves the queue as it was.
-    const snapshot = await asAccount(login, () =>
+    const fetched = await asAccount(login, () =>
       this.github.snapshot(resolved.id, login, ordered([...feeds, 'manual']), cached),
     );
+    const sources = () => ordered(this.store.membership(login).get(resolved.id) ?? []);
+    const snapshot = this.store.transaction(() => {
+      this.store.addManual(login, resolved.id, new Date().toISOString());
 
-    this.store.transaction(() => {
-      this.store.addManual(login, snapshot.id, new Date().toISOString());
-      this.commitSnapshot(login, snapshot, null);
+      const outcome = this.snapshots.commit(observation, fetched, { fingerprint: null, sources });
+
+      // Removed while it was being added: the removal came later, so it stands.
+      if (outcome.status === 'invalidated')
+        throw new ReviewError(
+          'QUEUE_CHANGED',
+          409,
+          this.worded(
+            'This PR was removed from your queue while it was being added. Add it again.',
+          ),
+        );
+
+      // A newer read found it merged or closed: nothing to review, and nothing is added.
+      if (outcome.snapshot?.state !== 'OPEN')
+        throw new ReviewError(
+          'PR_CLOSED',
+          409,
+          `${label} was merged or closed while it was being added, so there is nothing to review.`,
+        );
+
+      // A newer read was saved first: keep it, now with the manual source.
+      return outcome.status === 'committed'
+        ? outcome.snapshot
+        : this.snapshots.update(login, resolved.id, (latest) => ({
+            ...latest,
+            sources: sources(),
+          }));
     });
-    this.events.emit({ type: 'pulls.changed', ids: [snapshot.id] });
 
-    const detail = this.detail(snapshot.id);
+    this.events.emit({ type: 'pulls.changed', ids: [resolved.id] });
+
+    const detail = snapshot ? this.detailOf(login, snapshot) : null;
 
     if (!detail)
       throw new ReviewError(
@@ -411,8 +471,11 @@ export class SyncService {
 
     this.store.transaction(() => {
       this.store.removeManual(login, id);
+      // Reads that started before the removal must not bring the PR or its old sources back.
+      this.snapshots.invalidate(login, id);
 
-      if (remaining.length > 0) this.store.saveSnapshot(login, { ...cached, sources: remaining });
+      if (remaining.length > 0)
+        this.snapshots.update(login, id, (latest) => ({ ...latest, sources: remaining }));
       else this.store.forgetPull(login, id);
     });
     this.forced.delete(id);
@@ -469,7 +532,15 @@ export class SyncService {
           .map((pr) => [pr.id, pr]),
       );
       const ids = [...new Set([...membership.keys(), ...previous.keys()])];
-      const detected = await this.detect(ids);
+      // Change detection reads every PR's state, so it starts a read of each before asking.
+      const observations = new Map(
+        ids.map((id) => [id, this.snapshots.observe(account.login, id)]),
+      );
+      // CI that is still running, as saved: a read that was not saved cannot change what is polled.
+      const ciPending = new Set(
+        [...previous.values()].filter((pr) => pr.ci === 'pending').map((pr) => pr.id),
+      );
+      const detected = await this.detect(ids, ciPending);
 
       if (detected.retryAt) retryAt = detected.retryAt;
 
@@ -494,17 +565,12 @@ export class SyncService {
         }
 
         if (result && result.state !== 'OPEN') {
-          // Closure or merge is confirmed by GitHub, so the PR can leave the list.
-          if (cached) {
-            const closed = { ...cached, state: result.state! };
+          // Closure or merge is confirmed by GitHub, so the PR can leave the list. Recorded also
+          // when nothing is stored yet or the row is newer than this sync's list of open PRs (a
+          // first add that finished meanwhile), so neither keeps it open.
+          const outcome = this.snapshots.commitState(observations.get(id)!, result.state!);
 
-            this.store.saveSnapshot(account.login, closed);
-            this.store.recordActivity(
-              account.login,
-              extractActivity(closed, account.login, this.status.teams),
-            );
-            changed.add(id);
-          }
+          if (outcome.status === 'committed') changed.add(id);
 
           continue;
         }
@@ -523,8 +589,14 @@ export class SyncService {
         if (needsSnapshot) {
           fetches.push({ id, sources, cached, result });
         } else if (cached && sources.join() !== cached.sources.join()) {
-          this.store.saveSnapshot(account.login, { ...cached, sources });
-          changed.add(id);
+          // Onto the latest row, which a refresh may have replaced since this sync read it, and
+          // with the manual source as it is now.
+          const saved = this.snapshots.update(account.login, id, (latest) => ({
+            ...latest,
+            sources: this.withManual(account.login, id, sources),
+          }));
+
+          if (saved) changed.add(id);
         }
       }
 
@@ -534,17 +606,25 @@ export class SyncService {
           const { id, sources, cached, result } = fetches[cursor++];
 
           try {
-            const snapshot = await this.github.snapshot(id, account.login, sources, cached);
+            const observation = this.snapshots.observe(account.login, id);
+            const latest = this.store.snapshot(account.login, id) ?? undefined;
 
-            // Removed from the queue while it was being fetched: do not bring it back.
-            if (cached && !this.store.snapshot(account.login, id)) continue;
+            // Removed from the queue since this sync read it: do not bring it back.
+            if (cached && !latest) continue;
 
-            // Added or removed by hand during the fetch: keep that change.
-            this.commitSnapshot(
-              account.login,
-              { ...snapshot, sources: this.withManual(account.login, id, snapshot.sources) },
-              result?.fingerprint ?? null,
-            );
+            const snapshot = await this.github.snapshot(id, account.login, sources, latest);
+            const outcome = this.snapshots.commit(observation, snapshot, {
+              fingerprint: result?.fingerprint ?? null,
+              // Removed from the queue while it was being fetched: do not bring it back.
+              requireStored: Boolean(cached),
+              // Added or removed by hand during the fetch: keep that change.
+              sources: () => this.withManual(account.login, id, snapshot.sources),
+            });
+
+            // A read that started later (such as a refresh) was saved first, or the PR was
+            // removed: either way this read is older than what is stored.
+            if (outcome.status !== 'committed') continue;
+
             this.forced.delete(id);
             changed.add(id);
           } catch (error) {
@@ -555,7 +635,8 @@ export class SyncService {
         }
       };
 
-      await Promise.all(Array.from({ length: Math.min(3, fetches.length) }, worker));
+      // Every worker settles before the sync counts as done, so none still saves after it.
+      await Promise.allSettled(Array.from({ length: Math.min(3, fetches.length) }, worker));
 
       this.sampleQueue(account.login);
 
@@ -651,7 +732,10 @@ export class SyncService {
   }
 
   /** Fingerprints every candidate PR in a few cheap requests. A failure falls back to full fetches. */
-  private async detect(ids: string[]): Promise<{
+  private async detect(
+    ids: string[],
+    ciPending: ReadonlySet<string>,
+  ): Promise<{
     results: Map<string, DetectResult> | null;
     lowBudget: boolean;
     retryAt: string | null;
@@ -659,7 +743,7 @@ export class SyncService {
     if (ids.length === 0) return { results: new Map(), lowBudget: false, retryAt: null };
 
     try {
-      const { results, budget } = await this.github.detect(ids);
+      const { results, budget } = await this.github.detect(ids, { ciPending });
 
       return {
         results: new Map(results.map((result) => [result.id, result])),
@@ -678,38 +762,6 @@ export class SyncService {
       );
 
       return { results: null, lowBudget: false, retryAt: null };
-    }
-  }
-
-  /** Saves a fresh snapshot with its sync bookkeeping, wake-ups and activity history. */
-  private commitSnapshot(
-    login: string,
-    snapshot: PullRequestSnapshot,
-    fingerprint: string | null,
-  ): void {
-    const now = Date.now();
-    const jitter = Math.floor(Math.random() * RECONCILE_JITTER_MS);
-
-    this.store.saveSnapshot(login, snapshot);
-    this.store.saveSyncState(login, snapshot.id, {
-      fingerprint,
-      lastFullAt: new Date(now).toISOString(),
-      nextFullAt: new Date(now + RECONCILE_MS + jitter).toISOString(),
-    });
-    this.store.recordActivity(login, extractActivity(snapshot, login, this.status.teams));
-
-    const triage = this.store.triage(login, snapshot.id);
-    const item = deriveItem(snapshot, triage, login, this.status.teams);
-    const wokeFromSnooze = Boolean(triage.snoozedUntil && !item.snoozedUntil);
-    const wokeFromDone = Boolean(triage.doneAt && !item.doneAt && !item.snoozedUntil);
-
-    // New activity permanently ends a snooze or a "done" mark, even if it is later reviewed.
-    if (wokeFromSnooze || wokeFromDone) {
-      this.store.saveTriage(login, snapshot.id, {
-        ...triage,
-        ...(wokeFromSnooze ? { snoozedUntil: null, snoozedActivityKeys: [] } : {}),
-        ...(wokeFromDone ? { doneAt: null, doneActivityKeys: [] } : {}),
-      });
     }
   }
 
@@ -799,16 +851,49 @@ export class SyncService {
     const account = this.status.account?.login;
     const snapshot = account ? this.store.snapshot(account, id) : null;
 
-    if (!account || !snapshot || snapshot.state !== 'OPEN') return null;
+    return account && snapshot ? this.detailOf(account, snapshot) : null;
+  }
 
-    const triage = this.store.triage(account, id);
+  /** A stored snapshot with its triage, or null when the PR is no longer open. */
+  private detailOf(account: string, snapshot: PullRequestSnapshot): PullRequestDetail | null {
+    if (snapshot.state !== 'OPEN') return null;
+
+    const triage = this.store.triage(account, snapshot.id);
 
     return {
       account,
       snapshot,
       triage,
-      item: deriveItem(snapshot, triage, account, this.status.teams),
+      item: deriveItem(snapshot, triage, account, this.teamsOf(account)),
     };
+  }
+
+  /**
+   * The teams of `account`: as last synced for the account in use, else as saved with its last
+   * status. A read started as one account can finish after a switch to another.
+   */
+  private teamsOf(account: string): string[] {
+    if (sameAccount(account, this.status.account?.login ?? '')) return this.status.teams;
+
+    return this.store.getSetting<SyncStatus>(`status:${account}`)?.teams ?? [];
+  }
+
+  /**
+   * Records a viewed mark after the forge accepted it, on the stored PR and on reads of it still in
+   * flight. Viewed state does not change the PR's fingerprint, so no refetch is needed.
+   */
+  markViewed(
+    account: string,
+    id: string,
+    path: string,
+    viewed: boolean,
+    revision: ViewedRevision | null,
+  ): boolean {
+    const saved = this.snapshots.markViewed(account, id, path, viewed, revision);
+
+    if (saved) this.events.emit({ type: 'pulls.changed', ids: [id] });
+
+    return Boolean(saved);
   }
 
   update(id: string, update: TriageUpdate): PullRequestDetail | null {

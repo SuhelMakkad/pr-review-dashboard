@@ -24,6 +24,7 @@ const BASE = 'b'.repeat(40);
 const START = 's'.repeat(40).replace(/s/g, 'c');
 const HEAD1 = '1'.repeat(40);
 const HEAD2 = '2'.repeat(40);
+const HEAD3 = '3'.repeat(40);
 const WEB = `https://${HOST}/acme/platform/web/-/merge_requests/12`;
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 10, 10, 9, minutes)).toISOString();
@@ -184,8 +185,31 @@ class FakeGitLab implements GitLabTransport {
 }
 
 const MR = 'projects/7/merge_requests/12';
+const MR_BY_PATH = 'projects/acme%2Fplatform%2Fweb/merge_requests/12';
 
 function gitlab(overrides: { mr?: Record<string, unknown>; diffs?: unknown[] } = {}) {
+  const versions = [
+    { id: 2, head_commit_sha: HEAD2, start_commit_sha: START, created_at: seconds(4, 30) },
+    { id: 1, head_commit_sha: HEAD1, start_commit_sha: START, created_at: at(0) },
+  ];
+  const diffs = overrides.diffs ?? [
+    {
+      diff: APP_DIFF,
+      new_path: 'src/app.ts',
+      old_path: 'src/app.ts',
+      new_file: false,
+      renamed_file: false,
+      deleted_file: false,
+    },
+    {
+      diff: '@@ -0,0 +1,2 @@\n+a\n+b\n',
+      new_path: 'src/new.ts',
+      old_path: 'src/new.ts',
+      new_file: true,
+      renamed_file: false,
+      deleted_file: false,
+    },
+  ];
   const fake = new FakeGitLab()
     .on('GET', 'user', { data: users.rev })
     .on('GET', MR, { data: mergeRequest(overrides.mr) })
@@ -199,32 +223,13 @@ function gitlab(overrides: { mr?: Record<string, unknown>; diffs?: unknown[] } =
     .on('GET', `${MR}/approvals`, {
       data: { approved: false, user_has_approved: false, approved_by: [{ user: users.rev }] },
     })
-    .on('GET', `${MR}/versions`, {
-      data: [
-        { id: 2, head_commit_sha: HEAD2, created_at: seconds(4, 30) },
-        { id: 1, head_commit_sha: HEAD1, created_at: at(0) },
-      ],
-    })
-    .on('GET', `${MR}/diffs`, {
-      data: overrides.diffs ?? [
-        {
-          diff: APP_DIFF,
-          new_path: 'src/app.ts',
-          old_path: 'src/app.ts',
-          new_file: false,
-          renamed_file: false,
-          deleted_file: false,
-        },
-        {
-          diff: '@@ -0,0 +1,2 @@\n+a\n+b\n',
-          new_path: 'src/new.ts',
-          old_path: 'src/new.ts',
-          new_file: true,
-          renamed_file: false,
-          deleted_file: false,
-        },
-      ],
-    })
+    .on('GET', `${MR}/versions`, { data: versions })
+    .on('GET', `${MR_BY_PATH}/versions`, { data: versions })
+    .on('GET', `${MR_BY_PATH}/versions/2`, { data: { ...versions[0], diffs } })
+    .on('GET', `${MR}/diffs`, { data: diffs })
+    // The same merge request by its project path, as listing its files reads it.
+    .on('GET', MR_BY_PATH, { data: mergeRequest(overrides.mr) })
+    .on('GET', `${MR_BY_PATH}/diffs`, { data: diffs })
     .on('GET', `${MR}/draft_notes`, {
       data: [
         {
@@ -546,11 +551,17 @@ describe('GitLab merge request snapshots', () => {
   it('keeps viewed marks locally until the file changes again', async () => {
     const { client, fake } = gitlab();
 
-    await client.setFileViewed('MR_7_12', 'src/app.ts', true);
+    // It says which revision and which diff of the file it marked, as a snapshot records them.
+    const marked = await client.setFileViewed('MR_7_12', 'src/app.ts', true);
+
+    expect(marked).toEqual({ headOid: HEAD2, baseOid: START, fileKey: expect.any(String) });
 
     let pr = await client.snapshot('MR_7_12', VIEWER, []);
 
-    expect(pr.files.find((file) => file.path === 'src/app.ts')?.viewerViewedState).toBe('VIEWED');
+    expect(pr.files.find((file) => file.path === 'src/app.ts')).toMatchObject({
+      viewerViewedState: 'VIEWED',
+      viewedKey: marked!.fileKey,
+    });
 
     fake.on('GET', `${MR}/diffs`, {
       data: [
@@ -575,6 +586,180 @@ describe('GitLab merge request snapshots', () => {
     expect(fake.writes()).toEqual([]);
   });
 
+  it('says only which diff it marked viewed when commits land during the write', async () => {
+    const { client, fake } = gitlab();
+    let reads = 0;
+
+    fake.on('GET', MR, () => {
+      reads++;
+
+      return reads === 1
+        ? { data: mergeRequest() }
+        : {
+            data: mergeRequest({
+              sha: HEAD3,
+              diff_refs: { base_sha: BASE, start_sha: START, head_sha: HEAD3 },
+            }),
+          };
+    });
+
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toEqual({
+      headOid: HEAD2,
+      baseOid: null,
+      fileKey: expect.any(String),
+    });
+    expect(reads).toBe(2);
+  });
+
+  it('keeps a viewed mark that was saved when the revision cannot be read afterwards', async () => {
+    const { client, fake } = gitlab();
+    let reads = 0;
+
+    fake.on('GET', MR, () => {
+      reads++;
+
+      return reads === 2
+        ? { status: 503, data: { message: '503 Service Unavailable' } }
+        : { data: mergeRequest() };
+    });
+
+    // Succeeds, so the outbox never sends it again; the diff it marked is still known.
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toMatchObject({
+      baseOid: null,
+      fileKey: expect.any(String),
+    });
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(pr.files.find((file) => file.path === 'src/app.ts')?.viewerViewedState).toBe('VIEWED');
+  });
+
+  it('says only which diff it marked viewed while GitLab has no diff refs yet', async () => {
+    const { client } = gitlab({ mr: { diff_refs: null } });
+
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toMatchObject({
+      baseOid: null,
+      fileKey: expect.any(String),
+    });
+  });
+
+  it('refuses to mark a file viewed whose diff changed since you viewed it', async () => {
+    const { client, fake } = gitlab();
+    const viewed = await client.setFileViewed('MR_7_12', 'src/app.ts', false);
+
+    expect(viewed).toBeNull();
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+    const key = pr.files.find((file) => file.path === 'src/app.ts')!.viewedKey!;
+
+    fake.on('GET', `${MR}/diffs`, {
+      data: [
+        {
+          diff: `${APP_DIFF}+changed\n`,
+          new_path: 'src/app.ts',
+          old_path: 'src/app.ts',
+          new_file: false,
+          renamed_file: false,
+          deleted_file: false,
+        },
+      ],
+    });
+
+    await expect(
+      client.setFileViewed('MR_7_12', 'src/app.ts', true, { fileKey: key }),
+    ).rejects.toThrow('changed after you viewed it');
+    expect((await client.snapshot('MR_7_12', VIEWER, [])).files[0].viewerViewedState).toBe(
+      'UNVIEWED',
+    );
+  });
+
+  it('keys a diff GitLab leaves out to its revision, so a mark on it never outlasts a push', async () => {
+    const binary = {
+      diff: 'Binary files a/logo.png and b/logo.png differ\n',
+      new_path: 'logo.png',
+      old_path: 'logo.png',
+      new_file: false,
+      renamed_file: false,
+      deleted_file: false,
+    };
+    const first = gitlab({ diffs: [binary] });
+    const before = (await first.client.snapshot('MR_7_12', VIEWER, [])).files[0]!.viewedKey;
+    const second = gitlab({
+      diffs: [binary],
+      mr: { sha: HEAD3, diff_refs: { base_sha: BASE, start_sha: START, head_sha: HEAD3 } },
+    });
+    const after = (await second.client.snapshot('MR_7_12', VIEWER, [])).files[0]!.viewedKey;
+
+    expect(before).toBeDefined();
+    expect(after).not.toBe(before);
+  });
+
+  it('lists the files of exactly the revision shown, from its diff version', async () => {
+    const { client } = gitlab();
+    const listed = await client.pinnedFiles('acme/platform/web', 12, {
+      headOid: HEAD2,
+      baseOid: START,
+    });
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(listed.pinned).toBe(true);
+    expect(listed.files.map((file) => file.viewedKey)).toEqual(
+      pr.files.map((file) => file.viewedKey),
+    );
+    expect(listed.files[0]?.viewedKey).toEqual(expect.any(String));
+  });
+
+  it('pins nothing for a revision GitLab has no diff version of', async () => {
+    const { client } = gitlab();
+
+    // An older head than the version on record, and the same head retargeted onto another base.
+    for (const revision of [
+      { headOid: HEAD3, baseOid: START },
+      { headOid: HEAD2, baseOid: BASE },
+    ]) {
+      const listed = await client.pinnedFiles('acme/platform/web', 12, revision);
+
+      expect(listed.pinned).toBe(false);
+      expect(listed.files.length).toBeGreaterThan(0);
+      expect(listed.files.every((file) => !file.viewedKey)).toBe(true);
+    }
+  });
+
+  it('shows the live diff, unpinned, when the diff version cannot be read', async () => {
+    const pinned = { headOid: HEAD2, baseOid: START };
+
+    // Its stored patches were cleaned up: GitLab lists none for it.
+    const cleaned = gitlab();
+
+    cleaned.fake.on('GET', `${MR_BY_PATH}/versions/2`, {
+      data: {
+        id: 2,
+        head_commit_sha: HEAD2,
+        start_commit_sha: START,
+        state: 'without_files',
+        diffs: [],
+      },
+    });
+
+    const fromCleaned = await cleaned.client.pinnedFiles('acme/platform/web', 12, pinned);
+
+    expect(fromCleaned.pinned).toBe(false);
+    expect(fromCleaned.files.map((file) => file.path)).toEqual(['src/app.ts', 'src/new.ts']);
+    expect(fromCleaned.files.every((file) => !file.viewedKey)).toBe(true);
+
+    // The version endpoints fail, while the live diff works.
+    for (const failing of [`${MR_BY_PATH}/versions`, `${MR_BY_PATH}/versions/2`]) {
+      const { client, fake } = gitlab();
+
+      fake.on('GET', failing, { status: 503, data: { message: '503 Service Unavailable' } });
+
+      const listed = await client.pinnedFiles('acme/platform/web', 12, pinned);
+
+      expect(listed.pinned).toBe(false);
+      expect(listed.files).toHaveLength(2);
+    }
+  });
+
   it('detects changes per project and asks about running pipelines', async () => {
     const { client, fake } = gitlab();
 
@@ -589,15 +774,19 @@ describe('GitLab merge request snapshots', () => {
       { id: 'MR_7_99', state: null, fingerprint: null },
     ]);
 
-    // A snapshot with a running pipeline makes detection read its status too.
-    await client.snapshot('MR_7_12', VIEWER, []);
+    // A stored snapshot with CI still running makes detection read its pipeline too.
     fake.on('GET', MR, {
       data: mergeRequest({ head_pipeline: { id: 55, project_id: 7, status: 'failed' } }),
     });
 
-    const second = await client.detect(['MR_7_12']);
+    const second = await client.detect(['MR_7_12'], { ciPending: new Set(['MR_7_12']) });
 
     expect(second.results[0].fingerprint).not.toBe(first.results[0].fingerprint);
+
+    // Without it, detection reads no pipeline: what is polled follows saved snapshots alone.
+    const third = await client.detect(['MR_7_12']);
+
+    expect(third.results[0].fingerprint).toBe(first.results[0].fingerprint);
   });
 
   it('compares commits through the merge base', async () => {

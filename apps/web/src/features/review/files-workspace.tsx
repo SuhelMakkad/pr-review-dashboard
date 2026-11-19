@@ -45,7 +45,15 @@ import { AssistPanel } from '@/features/ai/assist-panel';
 import { Suggestions } from '@/features/ai/suggestions';
 import { FullReview } from '@/features/ai/full-review';
 import { useAi } from '@/features/ai/use-ai';
-import { useReview } from '@/features/review/use-review';
+import {
+  canMarkViewed,
+  diffView,
+  linesShown,
+  useReview,
+  viewedTarget,
+  viewShows,
+  type DiffView,
+} from '@/features/review/use-review';
 
 const VIEW_KEY = 'review-desk-diff-view';
 
@@ -65,6 +73,10 @@ const resolvedTheme = (theme: string) =>
     : (theme as 'light' | 'dark');
 
 /** The review workspace: file tree, one file's diff with threads and drafts, threads rail, finish. */
+/** Why a line cannot be commented on in a diff whose revision could not be confirmed. */
+const UNPINNED_LINES =
+  'This version of the diff could not be confirmed. Reload it to comment on lines; whole-file comments still work.';
+
 export function FilesWorkspace() {
   const { item } = useCurrentPull();
   const pulls = usePulls();
@@ -84,7 +96,11 @@ export function FilesWorkspace() {
   );
 }
 
-type ComposerState = (LineTarget & { path: string }) | { path: string; line: null } | null;
+/** The PR revision a diff was built from, as its manifest names it. */
+
+/** What the composer is for, with the patch it was opened on. */
+type ComposerState =
+  (((LineTarget & { path: string }) | { path: string; line: null }) & { view?: DiffView }) | null;
 
 function Workspace() {
   const { item } = useCurrentPull();
@@ -99,7 +115,12 @@ function Workspace() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [composer, setComposer] = useState<ComposerState>(null);
   const [composerError, setComposerError] = useState<string | null>(null);
-  const [selection, setSelection] = useState<LineTarget | null>(null);
+  /** Text kept from a composer closed because its diff changed, for the next one. */
+  const [keptBody, setKeptBody] = useState<string | null>(null);
+  /** Lines selected for a comment, with the file and patch they were selected in. */
+  const [selection, setSelection] = useState<
+    (LineTarget & { path: string; view?: DiffView }) | null
+  >(null);
   const [replying, setReplying] = useState<string | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
   const [recoveredBody, setRecoveredBody] = useState('');
@@ -163,12 +184,16 @@ function Workspace() {
     () =>
       [...(diff.data?.files ?? [])]
         .map((file) => {
+          // A mark still being sent shows only on the diff it names (older ones name none).
           const pending = review.operations
             .filter(
               (operation) =>
                 operation.action.type === 'viewed' &&
                 operation.action.path === file.path &&
-                operationInProgress(operation.status),
+                operationInProgress(operation.status) &&
+                (!operation.action.target ||
+                  !diff.data ||
+                  viewShows(diff.data, file.path, operation.action.target)),
             )
             .at(-1);
 
@@ -212,6 +237,9 @@ function Workspace() {
   const setSearch = (next: Partial<FilesSearch>, replace = true) =>
     navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace });
 
+  // Lines selected in one comparison are other lines in the next, which renders without them.
+  useEffect(() => setSelection(null), [mode]);
+
   const selectFile = (path: string, thread?: string) => {
     setComposer(null);
     setSelection(null);
@@ -243,10 +271,16 @@ function Workspace() {
 
     if (!file) return;
 
+    if (!canMarkViewed(diff.data, path)) {
+      toast.error('This version of the file could not be confirmed. Reload the diff to mark it.');
+
+      return;
+    }
+
     const viewed = file.viewed !== 'VIEWED';
 
     review.setViewed.mutate(
-      { path, viewed },
+      { path, viewed, target: diff.data ? viewedTarget(diff.data, path) : undefined },
       { onError: (error) => toast.error(`Could not update viewed state: ${error.message}`) },
     );
 
@@ -266,11 +300,24 @@ function Workspace() {
       return;
     }
 
-    setRecoveredBody('');
+    if (selection && diff.data?.unpinned) {
+      toast.error(UNPINNED_LINES);
+
+      return;
+    }
+
+    // Lines selected in another patch than the one shown now are other lines: select them again.
+    if (selection && !linesShown(selection, current.path, diff.data)) {
+      setSelection(null);
+      toast.error('The diff changed after you selected those lines. Select them again.');
+
+      return;
+    }
+
+    setRecoveredBody(keptBody ?? '');
+    setKeptBody(null);
     setComposerError(null);
-    setComposer(
-      selection ? { ...selection, path: current.path } : { path: current.path, line: null },
-    );
+    setComposer(selection ?? { path: current.path, line: null, view: diffView(diff.data) });
   };
 
   // Bring a focused thread into view once its file has rendered.
@@ -481,6 +528,24 @@ function Workspace() {
     />
   );
 
+  // A line picked in one revision of the diff means another line in the next: when the diff
+  // changed while you wrote, the composer closes, keeps your text for the next one, and asks
+  // you to pick the line again.
+  const lineMoved = (open: NonNullable<ComposerState>, body: string) => {
+    // A comment reopened from Activity names no patch; the server checks its head.
+    if (open.line === null || !open.view) return false;
+    if (linesShown(open, open.path, diff.data)) return false;
+
+    setKeptBody(body);
+    setComposer(null);
+    setComposerError(null);
+    toast.error(
+      'The diff changed while you were writing. Select the line again; your text is kept.',
+    );
+
+    return true;
+  };
+
   const composerFor = (target: NonNullable<ComposerState>) => (
     <Composer
       label={target.line === null ? `Comment on ${target.path}` : `Comment on line ${target.line}`}
@@ -496,6 +561,8 @@ function Workspace() {
         keys: '$mod+Enter',
         variant: 'primary',
         run: async (body) => {
+          if (lineMoved(target, body)) return;
+
           try {
             await review.addComment.mutateAsync({
               path: target.path,
@@ -503,6 +570,10 @@ function Workspace() {
               side: target.line === null ? 'RIGHT' : target.side,
               startLine: target.line === null ? null : target.startLine,
               body,
+              // The lines are the diff's the composer was opened on; refused for another revision.
+              ...(target.line !== null && target.view
+                ? { revision: { headOid: target.view.headOid, baseOid: target.view.baseOid } }
+                : {}),
             });
             setComposer(null);
             setComposerError(null);
@@ -516,9 +587,17 @@ function Workspace() {
         keys: '$mod+Alt+Enter',
         variant: 'secondary',
         run: async (body) => {
+          if (lineMoved(target, body)) return;
+
           try {
             await review.commentNow.mutateAsync({
-              expectedHeadOid: diff.data?.toOid ?? detail.data?.snapshot.headOid ?? '',
+              // A line belongs to the diff the composer was opened on; a whole file has no lines
+              // to move, so it goes on the head shown now.
+              expectedHeadOid:
+                (target.line !== null ? target.view?.headOid : undefined) ??
+                diff.data?.toOid ??
+                detail.data?.snapshot.headOid ??
+                '',
               path: target.path,
               line: target.line,
               side: target.line === null ? 'RIGHT' : target.side,
@@ -625,6 +704,7 @@ function Workspace() {
               variant={current.viewed === 'VIEWED' ? 'secondary' : 'ghost'}
               onClick={() => toggleViewed(current.path, false)}
               aria-pressed={current.viewed === 'VIEWED'}
+              disabled={!canMarkViewed(diff.data, current.path)}
             >
               {current.viewed === 'VIEWED' ? 'Viewed' : 'Mark viewed'}
             </Button>
@@ -757,19 +837,30 @@ function Workspace() {
                       return;
                     }
 
-                    setRecoveredBody('');
+                    if (diff.data?.unpinned) {
+                      toast.error(UNPINNED_LINES);
+                      return;
+                    }
+
+                    setRecoveredBody(keptBody ?? '');
+                    setKeptBody(null);
                     setComposerError(null);
-                    setComposer({ ...target, path: current.path });
+                    setComposer({ ...target, path: current.path, view: diffView(diff.data) });
                   }}
                   onCommentFile={() => {
                     if (locked) {
                       openActivity();
                       return;
                     }
-                    setRecoveredBody('');
-                    setComposer({ path: current.path, line: null });
+                    setRecoveredBody(keptBody ?? '');
+                    setKeptBody(null);
+                    setComposer({ path: current.path, line: null, view: diffView(diff.data) });
                   }}
-                  onSelectLines={setSelection}
+                  onSelectLines={(target) =>
+                    setSelection(
+                      target ? { ...target, path: current.path, view: diffView(diff.data) } : null,
+                    )
+                  }
                 />
               </Enter>
             )}

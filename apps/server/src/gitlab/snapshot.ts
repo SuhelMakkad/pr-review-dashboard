@@ -14,7 +14,7 @@ import type {
 import { accountHandle, isSameUser } from '@review-desk/shared/accounts';
 import { SNAPSHOT_VERSION } from '@review-desk/shared/snapshot';
 import type { RemoteFile } from '@/github/api.js';
-import { fingerprint } from '@/gitlab/fingerprint.js';
+import { diffKey } from '@/gitlab/fingerprint.js';
 import {
   discussionId,
   mergeRequestId,
@@ -116,6 +116,11 @@ export interface RawDiff {
 export interface RawVersion {
   id: number;
   head_commit_sha: string;
+  /** The target branch commit the version's diff starts from (a snapshot's base). */
+  start_commit_sha?: string | null;
+  base_commit_sha?: string | null;
+  /** `collected` while its patches are stored; `without_files` once GitLab cleaned them up. */
+  state?: string;
   created_at: string;
 }
 
@@ -674,10 +679,15 @@ export function remoteFile(diff: RawDiff): RemoteFile {
   };
 }
 
-function files(diffs: RawDiff[], viewed: Record<string, string>): PullFile[] {
+function files(
+  diffs: RawDiff[],
+  viewed: Record<string, string>,
+  revision: { head: string; start: string | null },
+): PullFile[] {
   return diffs.map((diff) => {
     const file = remoteFile(diff);
     const mark = viewed[file.path];
+    const key = diffKey(diff, revision);
 
     return {
       path: file.path,
@@ -690,12 +700,9 @@ function files(diffs: RawDiff[], viewed: Record<string, string>): PullFile[] {
           : diff.renamed_file
             ? 'RENAMED'
             : 'MODIFIED',
+      viewedKey: key,
       // A file viewed before its diff changed shows as changed since viewed, as on GitHub.
-      viewerViewedState: !mark
-        ? 'UNVIEWED'
-        : mark === fingerprint(diff.diff)
-          ? 'VIEWED'
-          : 'DISMISSED',
+      viewerViewedState: !mark ? 'UNVIEWED' : mark === key ? 'VIEWED' : 'DISMISSED',
     };
   });
 }
@@ -714,7 +721,12 @@ export function mergeRequestSnapshot(
     .sort((a, b) => time(a.created_at) - time(b.created_at));
   const events = requestEvents(notes, reviewers);
   const reviews = viewerReviews(mr, discussions, versions, viewer, data.submission);
-  const changedFiles = data.diffs ? files(data.diffs, data.viewed ?? {}) : [];
+  const changedFiles = data.diffs
+    ? files(data.diffs, data.viewed ?? {}, {
+        head: mr.sha,
+        start: mr.diff_refs?.start_sha ?? null,
+      })
+    : [];
   const now = new Date().toISOString();
   const headCommittedAt = data.headCommittedAt ?? mr.updated_at;
   const lastReview = reviews.at(-1);

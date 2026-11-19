@@ -15,8 +15,10 @@ import { scopedAccount } from '@/github/credentials.js';
 import type {
   BlobText,
   CompareResult,
+  DetectOptions,
   DetectResult,
   GitHubApi,
+  PinnedFiles,
   RateBudget,
   RemoteFile,
   ResolvedPull,
@@ -25,7 +27,7 @@ import type {
 import { GitHubError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
 import type { ReviewEvent } from '@review-desk/shared/review';
-import { fingerprint } from '@/gitlab/fingerprint.js';
+import { diffKey, fingerprint } from '@/gitlab/fingerprint.js';
 import {
   isPendingReviewId,
   mergeRequestId,
@@ -157,8 +159,6 @@ function searchFilters(query: string): string | null {
  */
 export class GitLab implements GitHubApi {
   private readonly writes: GitLabWrites;
-  /** Merge requests whose pipeline is still running; detection asks about their CI each time. */
-  private readonly pendingCi = new Set<string>();
 
   constructor(
     readonly transport: GitLabTransport,
@@ -257,8 +257,8 @@ export class GitLab implements GitHubApi {
     return this.writes.setThreadResolved(threadId, resolved);
   }
 
-  setFileViewed(prId: string, path: string, viewed: boolean) {
-    return this.writes.setFileViewed(prId, path, viewed);
+  setFileViewed(prId: string, path: string, viewed: boolean, expected?: { fileKey: string }) {
+    return this.writes.setFileViewed(prId, path, viewed, expected);
   }
 
   addConversationComment(prId: string, body: string) {
@@ -374,10 +374,13 @@ export class GitLab implements GitHubApi {
 
   /**
    * Change detection: one list request per project for every tracked merge request, plus the head
-   * pipeline of merge requests whose CI is still running (pipeline results do not touch a merge
-   * request's `updated_at`; new notes, approvals and review requests do).
+   * pipeline of merge requests whose stored CI is still running (pipeline results do not touch a
+   * merge request's `updated_at`; new notes, approvals and review requests do).
    */
-  async detect(ids: string[]): Promise<{ results: DetectResult[]; budget: RateBudget | null }> {
+  async detect(
+    ids: string[],
+    options: DetectOptions = {},
+  ): Promise<{ results: DetectResult[]; budget: RateBudget | null }> {
     const byProject = new Map<number, number[]>();
 
     for (const id of ids) {
@@ -402,7 +405,7 @@ export class GitLab implements GitHubApi {
 
         for (const mr of response.data) {
           const id = mergeRequestId(mr.project_id, mr.iid);
-          const pipeline = this.pendingCi.has(id)
+          const pipeline = options.ciPending?.has(id)
             ? await this.headPipeline({ projectId, iid: mr.iid })
             : null;
 
@@ -457,12 +460,7 @@ export class GitLab implements GitHubApi {
     if (response.status >= 400) throw responseError(response, 'Could not load the merge request');
 
     const data = await this.collect(ref, response.data, false, login);
-    const snapshot = mergeRequestSnapshot(data, login, sources, previous);
-
-    if (snapshot.ci === 'pending') this.pendingCi.add(snapshot.id);
-    else this.pendingCi.delete(snapshot.id);
-
-    return snapshot;
+    return mergeRequestSnapshot(data, login, sources, previous);
   }
 
   /** Reads everything a snapshot needs. Light reads (history) skip files, drafts and CI. */
@@ -582,6 +580,57 @@ export class GitLab implements GitHubApi {
     const diffs = await this.diffs(`${projectPath(repository)}/merge_requests/${number}`);
 
     return diffs.map(remoteFile);
+  }
+
+  /**
+   * The files of the merge request diff version for exactly `revision` (its head and start, the
+   * snapshot's head and base). GitLab keeps every version's diffs and never changes them, so the
+   * files, their patches and their keys are that revision's however the merge request moves
+   * meanwhile. Without such a version (it moved on, or was retargeted), the live diff, unkeyed.
+   */
+  async pinnedFiles(
+    repository: string,
+    number: number,
+    revision: { headOid: string; baseOid: string | null },
+  ): Promise<PinnedFiles> {
+    const path = `${projectPath(repository)}/merge_requests/${number}`;
+    // The live diff, unkeyed: shown, but not kept and not markable as viewed.
+    const live = async (): Promise<PinnedFiles> => ({
+      files: (await this.diffs(path)).map(remoteFile),
+      pinned: false,
+    });
+    const versions = await paginate<RawVersion>(
+      this.transport,
+      `${path}/versions`,
+      'Could not load versions',
+    ).catch(() => null);
+    const version = versions?.find(
+      (candidate) =>
+        candidate.head_commit_sha === revision.headOid &&
+        (candidate.start_commit_sha ?? null) === revision.baseOid,
+    );
+
+    if (!version) return live();
+
+    const detail = await call<RawVersion & { diffs?: RawDiff[] }>(
+      this.transport,
+      { path: `${path}/versions/${version.id}` },
+      'Could not load the merge request diff',
+    ).catch(() => null);
+
+    // GitLab can clean up an old version's stored patches (`without_files`); its list is then
+    // empty although the merge request still has changes, which the live diff rebuilds.
+    if (!detail || detail.state === 'without_files' || !Array.isArray(detail.diffs)) return live();
+
+    const key = { head: version.head_commit_sha, start: version.start_commit_sha ?? null };
+
+    return {
+      files: (detail.diffs ?? []).map((diff) => ({
+        ...remoteFile(diff),
+        viewedKey: diffKey(diff, key),
+      })),
+      pinned: true,
+    };
   }
 
   async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {

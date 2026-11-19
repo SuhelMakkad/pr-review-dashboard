@@ -63,7 +63,9 @@ async function setup() {
     return [];
   };
   const runner = new AiRunner(sync, diffs, reviews, events, providers, root, exportRepository);
+  runner.open();
   const queue = new OperationQueue(sync, { mutationIntervalMs: 0, retryDelaysMs: [1, 2, 3] });
+  queue.open();
   const poster = new FindingsPoster(sync, runner, queue);
   const autoReviewer = new AutoReviewer(sync, runner, new Notifier(store, events, vi.fn()));
 
@@ -457,10 +459,11 @@ describe('posting finished reviews', () => {
     );
     expect(comments()).toEqual([]);
 
+    // An unmark holds for every diff, so it goes out even though the PR changed.
     const { operation: viewed } = queue.enqueue('you', idOf(1839), 'viewed-after-skip', {
       type: 'viewed',
       path: 'src/reminders.ts',
-      viewed: true,
+      viewed: false,
     });
 
     await expect

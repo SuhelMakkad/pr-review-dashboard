@@ -57,6 +57,8 @@ export interface NewDraftComment {
   startSide?: Side | null;
   body: string;
   origin?: 'user' | 'ai';
+  /** The PR revision of the diff the line was picked in; refused when the PR is another now. */
+  revision?: { headOid: string; baseOid: string | null };
 }
 
 export interface SubmitReviewRequest {

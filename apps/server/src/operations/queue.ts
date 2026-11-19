@@ -3,6 +3,8 @@ import { and, asc, desc, eq, inArray, lt, or } from 'drizzle-orm';
 import {
   operationInProgress,
   operationUnsettled,
+  showsViewedTarget,
+  type ViewedTarget,
   type GitHubAction,
   type GitHubOperation,
   type OperationControl,
@@ -10,6 +12,7 @@ import {
   type OperationReceipt,
 } from '@review-desk/shared/operations';
 import { forForge, isSameUser } from '@review-desk/shared/accounts';
+import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { postedReviewMarker } from '@/ai/freshness.js';
 import { githubOperations } from '@/db/schema.js';
 import { DiffService } from '@/diff/service.js';
@@ -39,6 +42,41 @@ const now = () => new Date().toISOString();
 const fingerprint = (input: unknown) =>
   createHash('sha256').update(JSON.stringify(input)).digest('hex');
 
+/**
+ * A viewed action with the diff it is about: as the page that sent it showed it, else (an older
+ * page) the PR as stored now.
+ */
+function withTarget(action: GitHubAction, pr: PullRequestSnapshot): GitHubAction {
+  if (action.type !== 'viewed' || action.target) return action;
+
+  const fileKey = pr.files.find((file) => file.path === action.path)?.viewedKey;
+
+  return {
+    ...action,
+    target: { headOid: pr.headOid, baseOid: pr.baseOid ?? null, ...(fileKey ? { fileKey } : {}) },
+  };
+}
+
+/**
+ * True when `pr` still shows the diff a viewed action is about: the file's own diff where the
+ * forge identifies it, else the same head and base.
+ */
+function showsTarget(
+  target: ViewedTarget | undefined,
+  pr: PullRequestSnapshot | undefined,
+  path: string,
+): boolean {
+  const file = pr?.files.find((candidate) => candidate.path === path);
+
+  if (!target || !pr || !file) return false;
+
+  return showsViewedTarget(
+    target,
+    { headOid: pr.headOid, baseOid: pr.baseOid ?? null },
+    file.viewedKey,
+  );
+}
+
 class Suspended extends Error {}
 class Cancelled extends Error {}
 
@@ -52,6 +90,7 @@ export class OperationQueue {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private active: Promise<void> | null = null;
   private suspended = false;
+  private opened = false;
   private closed = false;
   private holds = 0;
   private lastMutationAt = 0;
@@ -65,6 +104,17 @@ export class OperationQueue {
   ) {
     this.interval = options.mutationIntervalMs ?? 1000;
     this.retryDelays = options.retryDelaysMs ?? [5000, 15000, 45000];
+  }
+
+  /**
+   * Recovers actions a previous process left mid-send, then starts sending. Called once this
+   * process owns the data directory, never from the constructor: a second launch must not touch
+   * the rows of the process that is still running.
+   */
+  open(): void {
+    if (this.opened || this.closed) return;
+
+    this.opened = true;
 
     for (const { data } of this.db
       .select()
@@ -290,7 +340,7 @@ export class OperationQueue {
       number: detail.snapshot.number,
       title: detail.snapshot.title,
       prUrl: detail.snapshot.url,
-      action: structuredClone(action),
+      action: structuredClone(withTarget(action, detail.snapshot)),
       status: 'queued',
       progress: 'Saved. Waiting to send.',
       createdAt: timestamp,
@@ -505,8 +555,10 @@ export class OperationQueue {
     });
   }
 
+  /** Schedules the next send. Nothing is sent before `open()` has recovered interrupted actions. */
   wake(): void {
-    if (this.closed || this.suspended || this.holds > 0 || this.active || this.timer) return;
+    if (!this.opened || this.closed || this.suspended || this.holds > 0) return;
+    if (this.active || this.timer) return;
 
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -593,8 +645,8 @@ export class OperationQueue {
           'The GitHub CLI account changed. Sign in to the original account before retrying.',
         );
 
-      // The refresh's own result: a slower refresh started earlier may save an older head after it.
-      const pr = (await this.sync.refresh(row.prId))?.snapshot;
+      // A read started now: an older read still in flight can no longer be saved over it.
+      const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
       if (this.row(row.account, row.id).status === 'cancelled') return;
 
       // Posting was automatic, so an outdated review is skipped rather than left needing attention,
@@ -619,6 +671,27 @@ export class OperationQueue {
         pr.threads.find((thread) => thread.id === action.threadId)?.isResolved === action.resolved
       ) {
         this.complete(row, null);
+        return;
+      }
+
+      // A mark is for the diff you viewed; once the PR shows another, sending it would mark a diff
+      // you have not seen. (GitLab also refuses it at the moment of the write.)
+      if (
+        action.type === 'viewed' &&
+        action.viewed &&
+        action.target &&
+        !showsTarget(action.target, pr, action.path)
+      ) {
+        const gone = !pr.files.some((file) => file.path === action.path);
+
+        this.save({
+          ...row,
+          status: 'cancelled',
+          finishedAt: now(),
+          progress: gone
+            ? `Not marked viewed: ${action.path} is no longer part of this PR.`
+            : `Not marked viewed: ${action.path} changed after you viewed it. Look at the new diff first.`,
+        });
         return;
       }
 
@@ -729,7 +802,7 @@ export class OperationQueue {
             if (row.action.type === 'ai_review') {
               const expected = row.action.expectedHeadOid;
 
-              const pr = (await this.sync.refresh(row.prId))?.snapshot;
+              const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
 
               row = this.row(row.account, row.id);
               if (row.status === 'cancelled') throw new Cancelled();
@@ -756,11 +829,39 @@ export class OperationQueue {
               }
             }
 
+            // The pacing wait and the account check above take time, and GitHub marks whichever
+            // diff is current when the mark arrives: check the diff again right before it goes.
+            if (
+              method === 'setFileViewed' &&
+              args[2] === true &&
+              row.action.type === 'viewed' &&
+              row.action.target
+            ) {
+              const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
+
+              row = this.row(row.account, row.id);
+              if (row.status === 'cancelled') throw new Cancelled();
+
+              if (
+                row.action.type === 'viewed' &&
+                row.action.target &&
+                !showsTarget(row.action.target, pr, String(args[1]))
+              ) {
+                this.save({
+                  ...row,
+                  status: 'cancelled',
+                  finishedAt: now(),
+                  progress: `Not marked viewed: ${String(args[1])} changed after you viewed it. Look at the new diff first.`,
+                });
+                throw new Cancelled();
+              }
+            }
+
             if (
               method === 'submitReview' &&
               (row.action.type === 'review' || row.action.type === 'comment')
             ) {
-              await this.sync.refresh(row.prId);
+              await this.sync.refresh(row.prId, row.account);
               const expected =
                 row.action.type === 'review'
                   ? row.action.review.expectedHeadOid
@@ -775,6 +876,9 @@ export class OperationQueue {
 
             row = this.row(row.account, row.id);
             if (row.status === 'cancelled') throw new Cancelled();
+            // The checks above wait on GitHub; shutdown may have begun meanwhile. Nothing is sent
+            // or checkpointed for this step yet, so it resumes on the next start.
+            if (this.suspended || this.closed) throw new Suspended();
 
             const step: MutationStep = {
               method,
@@ -846,9 +950,18 @@ export class OperationQueue {
         case 'resolve':
           await reviews.resolve(row.account, row.prId, row.action.threadId, row.action.resolved);
           break;
-        case 'viewed':
-          await reviews.setViewed(row.account, row.prId, row.action.path, row.action.viewed);
+        case 'viewed': {
+          const fileKey = row.action.viewed ? row.action.target?.fileKey : undefined;
+
+          await reviews.setViewed(
+            row.account,
+            row.prId,
+            row.action.path,
+            row.action.viewed,
+            ...(fileKey ? [{ fileKey }] : []),
+          );
           break;
+        }
         case 'reviewers':
           await reviews.requestReviewers(row.account, row.prId, row.action.logins);
           break;
@@ -976,7 +1089,7 @@ export class OperationQueue {
 
     // Cache refresh is independent of the confirmed write and cannot turn it into a failure.
     const refresh = this.sync
-      .refresh(row.prId)
+      .refresh(row.prId, row.account)
       .catch(() => {})
       .finally(() => this.refreshes.delete(refresh));
     this.refreshes.add(refresh);
@@ -1102,7 +1215,7 @@ export class OperationQueue {
       } else if (step.method === 'deleteReview') {
         confirmed = (await this.sync.github.reviewReceipt(String(step.args[0]))) === null;
       } else if (step.method === 'approveReview' && row.action.type === 'ai_review') {
-        await this.sync.refresh(row.prId);
+        await this.sync.refresh(row.prId, row.account);
 
         const action = row.action;
         const approved = this.sync
@@ -1123,7 +1236,7 @@ export class OperationQueue {
         // list it yet, so an unfound comment stays unconfirmed rather than being sent again.
         const marker = postedReviewMarker(row.action.runId);
 
-        await this.sync.refresh(row.prId);
+        await this.sync.refresh(row.prId, row.account);
         const posted = this.sync
           .detail(row.prId)
           ?.snapshot.conversation.find(
@@ -1136,17 +1249,34 @@ export class OperationQueue {
           result = { id: posted.id, url: posted.url };
         }
       } else if (step.method === 'setFileViewed' || step.method === 'setThreadResolved') {
-        await this.sync.refresh(row.prId);
+        await this.sync.refresh(row.prId, row.account);
         const pr = this.sync.detail(row.prId)?.snapshot;
+
+        const viewedState = pr?.files.find((file) => file.path === step.args[1])?.viewerViewedState;
 
         confirmed =
           step.method === 'setFileViewed'
-            ? pr?.files.find((file) => file.path === step.args[1])?.viewerViewedState ===
-              (step.args[2] ? 'VIEWED' : 'UNVIEWED')
+            ? viewedState === (step.args[2] ? 'VIEWED' : 'UNVIEWED')
             : pr?.threads.find((thread) => thread.id === step.args[0])?.isResolved === step.args[1];
 
+        // A mark is sent again only where the forge itself refuses it for another diff (GitLab,
+        // given the file's diff), the PR still shows the diff you marked, and the file is not
+        // viewed. Otherwise (GitHub, which marks whatever the file is now; changed since viewed;
+        // a newer diff; a file no longer there; an action from before targets were recorded) it
+        // could mark a diff nobody has seen, and assuming it was sent could lose it, so it stays
+        // unconfirmed for you to check. An unmark holds for every diff: always safe to repeat.
+        const bound =
+          row.action.type === 'viewed' &&
+          row.action.target?.fileKey !== undefined &&
+          showsTarget(row.action.target, pr, String(step.args[1]));
+        const ambiguous =
+          step.method === 'setFileViewed' &&
+          step.args[2] === true &&
+          !confirmed &&
+          !(viewedState === 'UNVIEWED' && bound);
+
         // These desired-state mutations are safe to repeat if GitHub has not reached that state.
-        if (!confirmed) {
+        if (!confirmed && !ambiguous) {
           step.uncertain = false;
           this.save({ ...row, status: 'queued', error: null });
           return;

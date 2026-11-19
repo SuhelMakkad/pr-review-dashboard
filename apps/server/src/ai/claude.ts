@@ -68,6 +68,7 @@ export class ClaudeProvider implements AgentProvider {
 
     const result = await runAgentProcess(this.command, args, {
       cwd: request.workDir,
+      lockFor: request.workDir,
       input: request.input,
       signal,
       timeoutMs: request.timeoutMs,

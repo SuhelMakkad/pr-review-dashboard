@@ -21,6 +21,16 @@ export interface DetectResult {
   fingerprint: string | null;
 }
 
+/** What change detection may use from the stored snapshots. */
+export interface DetectOptions {
+  /**
+   * PRs whose stored snapshot has CI still running. A forge whose change detection does not see CI
+   * results (GitLab) reads their pipelines too. Taken from saved snapshots, never from reads that
+   * might not be saved.
+   */
+  ciPending?: ReadonlySet<string>;
+}
+
 export interface ResolvedPull {
   id: string;
   state: PullRequestSnapshot['state'];
@@ -36,6 +46,22 @@ export interface RemoteFile {
   sha: string | null;
   /** The forge left the patch out for its size (GitLab says so; GitHub only omits it). */
   tooLarge?: boolean;
+  /**
+   * Identifies this very diff for viewed marks, where the forge's viewed state follows the diff
+   * (GitLab). Computed from the same record as `patch` (see `pinnedFiles`), so it names the diff
+   * that is rendered.
+   */
+  viewedKey?: string;
+}
+
+/** A PR's files as `pinnedFiles` lists them. */
+export interface PinnedFiles {
+  files: RemoteFile[];
+  /**
+   * True when the files are exactly the revision asked for, from the forge's immutable record of
+   * it, and keyed; false when no such record exists and they come unkeyed from the live diff.
+   */
+  pinned: boolean;
 }
 
 export interface CompareResult {
@@ -75,7 +101,10 @@ export interface GitHubApi extends GitHubWrites {
   discover(login: string, source: FeedSource): Promise<string[]>;
   /** Finds a PR by repository and number; null when it does not exist or cannot be seen. */
   resolvePull(repository: string, number: number): Promise<ResolvedPull | null>;
-  detect(ids: string[]): Promise<{ results: DetectResult[]; budget: RateBudget | null }>;
+  detect(
+    ids: string[],
+    options?: DetectOptions,
+  ): Promise<{ results: DetectResult[]; budget: RateBudget | null }>;
   snapshot(
     id: string,
     login: string,
@@ -84,6 +113,16 @@ export interface GitHubApi extends GitHubWrites {
   ): Promise<PullRequestSnapshot>;
   /** Files changed by the PR (base...head) with their patches. */
   pullFiles(repository: string, number: number): Promise<RemoteFile[]>;
+  /**
+   * Where the forge's viewed state follows each file's diff (GitLab): the files of exactly this
+   * revision, keyed for viewed marks (see `PinnedFiles`). Null, or absent, where viewed state is
+   * per file whatever its diff (GitHub).
+   */
+  pinnedFiles?(
+    repository: string,
+    number: number,
+    revision: { headOid: string; baseOid: string | null },
+  ): Promise<PinnedFiles | null>;
   /** Three-dot comparison; null when either commit is unknown to GitHub. */
   compare(repository: string, base: string, head: string): Promise<CompareResult | null>;
   /** PR node ids matching a search (open or closed); used to backfill history. */

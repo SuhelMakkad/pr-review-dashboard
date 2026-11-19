@@ -10,13 +10,14 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { c } from 'tar';
 import { ClaudeProvider, claudeProgress } from '@/ai/claude.js';
 import { CodexProvider, codexProgress, withDefault } from '@/ai/codex.js';
 import { mergeSnapshot, summariseUsage, type RateLimitSnapshot } from '@/ai/codex-usage.js';
 import { annotatePatch } from '@/ai/context.js';
 import { FixtureProvider } from '@/ai/fixture.js';
-import { spawnAgentProcess } from '@/ai/provider.js';
+import { agentLockPath, spawnAgentProcess } from '@/ai/provider.js';
 import { AiRunner } from '@/ai/runner.js';
 import { preparedCommentFingerprint } from '@/ai/preparation.js';
 import { jsonSchemaFor } from '@/ai/tasks.js';
@@ -447,6 +448,7 @@ async function setup() {
   };
   const root = workDir();
   const runner = new AiRunner(sync, diffs, reviews, events, providers, root, exportRepository);
+  runner.open();
   const pr = (number: number) =>
     [...sync.list().items, ...sync.mine().items].find((item) => item.number === number)!;
   const finished = async (run: AiRun) => {
@@ -1208,6 +1210,7 @@ describe('AI runner', () => {
       root,
       exportRepository,
     );
+    restarted.open();
     const reused = await restarted.prepareReview('you', run.id, [0, 0]);
 
     expect(reused.body).toBe('My edited summary.');
@@ -1410,6 +1413,7 @@ describe('AI runner', () => {
         });
       },
     );
+    runner.open();
     const run = await runner.start('you', pr(1839).id, 'full_review');
 
     await started;
@@ -1511,6 +1515,7 @@ describe('AI runner', () => {
         root,
         exportRepository,
       );
+      runner.open();
 
       return { store, sync, runner };
     };
@@ -1554,6 +1559,53 @@ describe('AI runner', () => {
     }
   });
 
+  it('resumes nothing while the run’s previous agent is still running', async () => {
+    const { runner, providers, pr, sync, diffs, reviews, root, exportRepository } = await setup();
+    const controls = holdRuns(providers.codex);
+    const run = await runner.start('you', pr(1839).id, 'full_review');
+
+    await vi.waitFor(() => expect(controls.size).toBe(1));
+    await runner.close();
+
+    // The run's lock is held, as by an agent a previous server left that has not ended yet.
+    const lockPath = agentLockPath(join(root, run.id));
+
+    mkdirSync(dirname(lockPath), { recursive: true });
+
+    const held = new DatabaseSync(lockPath, { timeout: 0 });
+
+    held.exec('PRAGMA locking_mode = EXCLUSIVE');
+    held.exec('BEGIN EXCLUSIVE');
+
+    const restarted = new AiRunner(
+      sync,
+      diffs,
+      reviews,
+      sync.events,
+      providers,
+      root,
+      exportRepository,
+    );
+
+    restarted.agentExitWaitMs = 100;
+    restarted.open();
+    await restarted.recover('you');
+    expect(restarted.runs('you', run.prId)[0]).toMatchObject({ status: 'paused' });
+
+    // Nor does resuming it yourself.
+    await expect(restarted.resume('you', run.id)).rejects.toMatchObject({
+      code: 'AGENT_STILL_RUNNING',
+    });
+    expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(1);
+
+    // Once it has exited, the run resumes.
+    held.close();
+    await restarted.recover('you');
+    await vi.waitFor(() => expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(2));
+    for (const control of controls.values()) control.complete();
+    await restarted.close();
+  });
+
   it('leaves user-paused reviews paused after restarting while recovering other runs', async () => {
     const { runner, providers, pr, sync, diffs, reviews, root, exportRepository } = await setup();
     const controls = holdRuns(providers.codex);
@@ -1571,6 +1623,7 @@ describe('AI runner', () => {
       root,
       exportRepository,
     );
+    restarted.open();
 
     await restarted.recover('you');
     expect(restarted.runs('you', run.prId)[0]).toMatchObject({
@@ -1783,6 +1836,7 @@ describe('AI runner', () => {
       providers,
       workDir(),
     );
+    runner.open();
 
     providers.codex.delayMs = 10_000;
 
@@ -1799,6 +1853,7 @@ describe('AI runner', () => {
       providers,
       workDir(),
     );
+    restarted.open();
 
     expect(restarted.runs('you', run.prId)[0].status).toBe('interrupted');
     expect(store).toBeDefined();

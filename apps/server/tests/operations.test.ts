@@ -36,6 +36,7 @@ async function setup(path = ':memory:', fixture?: FixtureGitHub) {
 
   const reviews = new ReviewService(sync, github, new DiffService(github), sync.events);
   const queue = new OperationQueue(sync, { mutationIntervalMs: 0, retryDelaysMs: [1, 2, 3] });
+  queue.open();
   cleanups.push(() => queue.close());
   await queue.pause();
 
@@ -559,8 +560,10 @@ describe('durable GitHub operations', () => {
     const { queue, github, sync, pr } = await setup();
     const refresh = sync.refresh.bind(sync);
     let calls = 0;
+    // The check before sending and the one right before the mark goes out succeed; the refresh
+    // after the confirmed write fails.
     vi.spyOn(sync, 'refresh').mockImplementation(async (...args) => {
-      if (++calls > 1) throw new Error('Refresh unavailable');
+      if (++calls > 2) throw new Error('Refresh unavailable');
       return refresh(...args);
     });
     const { operation } = queue.enqueue('you', pr().id, randomUUID(), {
@@ -626,8 +629,302 @@ describe('durable GitHub operations', () => {
 
     const restarted = new OperationQueue(sync, { mutationIntervalMs: 0 });
     cleanups.push(() => restarted.close());
+
+    // Constructing a queue changes nothing: a second launch must not rewrite a live owner's rows.
+    restarted.wake();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(restarted.get('you', operation.id).status).toBe('running');
+
+    restarted.open();
     await completed(restarted, operation.id, 'needs_attention');
     expect(github.writes).toEqual([]);
+  });
+
+  it('sends nothing when shutdown begins during the checks before a write', async () => {
+    const { store, queue, github, pr } = await setup();
+    const pull = pr(2041);
+    const identity = github.identity.bind(github);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+
+    // The third identity read (after the preflight's and the review guard's) is the check right
+    // before the write.
+    vi.spyOn(github, 'identity').mockImplementation(async () => {
+      if (++calls === 3) await held;
+
+      return identity();
+    });
+
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'reply',
+      threadId: pull.threads[0].id,
+      body: 'Sent after shutdown?',
+    });
+
+    queue.resume();
+    await vi.waitFor(() => expect(calls).toBe(3));
+
+    const closing = queue.close();
+
+    release();
+    await closing;
+
+    expect(github.writes).toEqual([]);
+    expect(queue.get('you', operation.id)).toMatchObject({ status: 'queued' });
+    // Nothing was checkpointed as sent, so the next start sends it without checking first.
+    expect(
+      store.db.select().from(githubOperations).where(eq(githubOperations.id, operation.id)).get()!
+        .data.steps,
+    ).toEqual([]);
+  });
+
+  it('keeps the receipt of a write already being sent when shutdown begins', async () => {
+    const { store, queue, github, pr } = await setup();
+    const pull = pr(2041);
+    const reply = github.replyToThread.bind(github);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const sending = vi.spyOn(github, 'replyToThread').mockImplementation(async (...args) => {
+      await held;
+
+      return reply(...args);
+    });
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'reply',
+      threadId: pull.threads[0].id,
+      body: 'Already on its way.',
+    });
+
+    queue.resume();
+    await vi.waitFor(() => expect(sending).toHaveBeenCalled());
+
+    const closing = queue.close();
+
+    release();
+    await closing;
+
+    expect(queue.get('you', operation.id)).toMatchObject({ status: 'succeeded' });
+    // The step is saved as done, with GitHub's receipt, so nothing is checked or sent again.
+    expect(
+      store.db.select().from(githubOperations).where(eq(githubOperations.id, operation.id)).get()!
+        .data.steps,
+    ).toEqual([
+      expect.objectContaining({
+        method: 'replyToThread',
+        completedAt: expect.any(String),
+        uncertain: false,
+        result: expect.objectContaining({ id: expect.any(String), url: expect.any(String) }),
+      }),
+    ]);
+  });
+
+  it('leaves an interrupted viewed mark unconfirmed when the file changed since', async () => {
+    const { queue, sync, github, store, pr } = await setup();
+    const pull = pr();
+    const path = pull.files[0].path;
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'viewed',
+      path,
+      viewed: true,
+    });
+    const row = store.db
+      .select()
+      .from(githubOperations)
+      .where(eq(githubOperations.id, operation.id))
+      .get()!;
+
+    // The server stopped with the mark possibly sent, and the file now shows as changed since
+    // viewed: by this mark or an earlier one, nothing can tell.
+    store.db
+      .update(githubOperations)
+      .set({
+        status: 'running',
+        data: {
+          ...row.data,
+          status: 'running',
+          steps: [
+            {
+              method: 'setFileViewed',
+              args: [pull.id, path, true],
+              startedAt: new Date().toISOString(),
+              completedAt: null,
+              result: null,
+              uncertain: true,
+            },
+          ],
+        },
+      })
+      .where(eq(githubOperations.id, operation.id))
+      .run();
+    github.scenario.world.viewed.set(pull.id, new Map([[path, 'DISMISSED']]));
+    await queue.close();
+
+    const restarted = new OperationQueue(sync, { mutationIntervalMs: 0 });
+
+    cleanups.push(() => restarted.close());
+    restarted.open();
+
+    // Neither sent again (it could mark a diff nobody has seen) nor taken as done (it could be lost).
+    const recovered = await completed(restarted, operation.id, 'needs_attention');
+
+    expect(recovered.error?.code).toBe('UNCONFIRMED');
+    expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
+  });
+
+  it.each([
+    [
+      'leaves it unconfirmed where the forge cannot bind a mark to a diff',
+      false,
+      false,
+      'needs_attention',
+      0,
+    ],
+    ['sends it again where the forge binds it to the diff you marked', true, false, 'succeeded', 1],
+    [
+      'leaves it unconfirmed once a newer diff replaced the one you marked',
+      true,
+      true,
+      'needs_attention',
+      0,
+    ],
+  ] as const)(
+    'for an interrupted viewed mark on a file not viewed now, %s',
+    async (_name, bound, changed, status, marks) => {
+      const { queue, sync, github, store, pr } = await setup();
+      const pull = pr();
+      const path = pull.files[0].path;
+      let fileKey = 'diff-a';
+
+      // A forge that identifies each file's diff (as GitLab does) and so can bind a mark to it.
+      if (bound) {
+        const snapshot = github.snapshot.bind(github);
+
+        vi.spyOn(github, 'snapshot').mockImplementation(async (...args) => {
+          const read = await snapshot(...args);
+
+          return { ...read, files: read.files.map((file) => ({ ...file, viewedKey: fileKey })) };
+        });
+        await sync.refresh(pull.id);
+      }
+
+      const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+        type: 'viewed',
+        path,
+        viewed: true,
+      });
+      const row = store.db
+        .select()
+        .from(githubOperations)
+        .where(eq(githubOperations.id, operation.id))
+        .get()!;
+
+      // The server stopped before the mark could be confirmed; the file is still not viewed.
+      expect(row.data.action).toMatchObject({
+        target: { headOid: pull.headOid, ...(bound ? { fileKey: 'diff-a' } : {}) },
+      });
+      store.db
+        .update(githubOperations)
+        .set({
+          status: 'running',
+          data: {
+            ...row.data,
+            status: 'running',
+            steps: [
+              {
+                method: 'setFileViewed',
+                args: [pull.id, path, true, ...(bound ? [{ fileKey: 'diff-a' }] : [])],
+                startedAt: new Date().toISOString(),
+                completedAt: null,
+                result: null,
+                uncertain: true,
+              },
+            ],
+          },
+        })
+        .where(eq(githubOperations.id, operation.id))
+        .run();
+
+      if (changed) fileKey = 'diff-b';
+
+      await queue.close();
+
+      const restarted = new OperationQueue(sync, { mutationIntervalMs: 0 });
+
+      cleanups.push(() => restarted.close());
+      restarted.open();
+      await completed(restarted, operation.id, status);
+      expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toHaveLength(marks);
+    },
+  );
+
+  it('does not mark a file viewed once its diff changed before the mark was sent', async () => {
+    const { queue, github, pr } = await setup();
+    const pull = pr();
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'viewed',
+      path: pull.files[0].path,
+      viewed: true,
+    });
+
+    // New commits arrive before the outbox sends it.
+    github.scenario.world.pulls.find(
+      (candidate) => candidate.snapshot.id === pull.id,
+    )!.snapshot.headOid = 'f'.repeat(40);
+    queue.resume();
+
+    const cancelled = await completed(queue, operation.id, 'cancelled');
+
+    expect(cancelled.progress).toMatch(/^Not marked viewed: /);
+    expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
+  });
+
+  it('checks the diff again right before the mark goes out', async () => {
+    const { queue, github, pr } = await setup();
+    const pull = pr();
+    const identity = github.identity.bind(github);
+    let calls = 0;
+
+    // New commits land after the check before sending, during the account check by the write.
+    vi.spyOn(github, 'identity').mockImplementation(async () => {
+      if (++calls === 3)
+        github.scenario.world.pulls.find(
+          (candidate) => candidate.snapshot.id === pull.id,
+        )!.snapshot.headOid = 'f'.repeat(40);
+
+      return identity();
+    });
+
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'viewed',
+      path: pull.files[0].path,
+      viewed: true,
+    });
+
+    queue.resume();
+    expect((await completed(queue, operation.id, 'cancelled')).progress).toMatch(
+      /^Not marked viewed: /,
+    );
+    expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
+  });
+
+  it('keeps the diff the page showed, even when the server has seen a newer one', async () => {
+    const { queue, github, pr } = await setup();
+    const pull = pr();
+    // The page still showed an earlier head when you marked the file.
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'viewed',
+      path: pull.files[0].path,
+      viewed: true,
+      target: { headOid: 'e'.repeat(40), baseOid: pull.baseOid ?? null },
+    });
+
+    expect(queue.get('you', operation.id).action).toMatchObject({
+      target: { headOid: 'e'.repeat(40) },
+    });
+    queue.resume();
+    await completed(queue, operation.id, 'cancelled');
+    expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
   });
 
   it('returns 202 operation receipts from GitHub command routes and preserves replay IDs', async () => {

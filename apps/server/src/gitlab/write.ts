@@ -1,7 +1,7 @@
 import type { ReviewEvent } from '@review-desk/shared/review';
 import { GitHubError, safeError } from '@/github/errors.js';
 import type { GitHubWrites, ThreadInput } from '@/github/write.js';
-import { fingerprint } from '@/gitlab/fingerprint.js';
+import { diffKey } from '@/gitlab/fingerprint.js';
 import {
   discussionId,
   mergeRequestPath,
@@ -94,6 +94,26 @@ const lineOf = (end: unknown) => {
  * arrived. Each write reads what it needs before sending, so a failed read never follows a write
  * that took effect.
  */
+/**
+ * The revision a viewed mark is for, when both reads of the merge request around the diff agree
+ * on complete diff refs whose head is the merge request's head; else unknown. GitLab fills diff
+ * refs in asynchronously, so missing ones identify nothing.
+ */
+function markedRevision(
+  before: RawMergeRequest,
+  after: RawMergeRequest,
+): { headOid: string; baseOid: string } | null {
+  const complete = (mr: RawMergeRequest) =>
+    mr.diff_refs?.head_sha && mr.diff_refs.start_sha && mr.diff_refs.base_sha ? mr.diff_refs : null;
+  const [first, second] = [complete(before), complete(after)];
+
+  if (!first || !second || first.head_sha !== after.sha || before.sha !== after.sha) return null;
+  if (first.head_sha !== second.head_sha || first.start_sha !== second.start_sha) return null;
+  if (first.base_sha !== second.base_sha) return null;
+
+  return { headOid: after.sha, baseOid: second.start_sha };
+}
+
 export function createGitLabWriter(
   transport: GitLabTransport,
   context: WriterContext,
@@ -486,19 +506,42 @@ export function createGitLabWriter(
       );
     },
 
-    async setFileViewed(prId, path, viewed) {
+    async setFileViewed(prId, path, viewed, expected) {
       const ref = parseMergeRequestId(prId);
 
       if (!viewed) {
         context.markViewed(prId, path, null);
-        return;
+        return null;
       }
 
+      // The diff is read between two reads of the merge request, so it is known which revision
+      // the mark is for; a push in between leaves that unknown. Every read happens before the mark
+      // is saved, so nothing awaits between saving it and the outbox recording the receipt.
+      const before = await context.mergeRequest(ref);
       const file = (await context.diffs(ref)).find((diff) => diffPath(diff) === path);
 
       if (!file) throw rejected(`${path} is no longer part of this merge request.`, 404);
 
-      context.markViewed(prId, path, fingerprint(file.diff));
+      // Only says which revision is marked; failing to read it must not fail the mark.
+      const after = await context.mergeRequest(ref).catch(() => null);
+      const key = diffKey(file, { head: before.sha, start: before.diff_refs?.start_sha ?? null });
+
+      // The mark is for the diff you viewed: a newer one, which you have not seen, is not marked.
+      if (expected && expected.fileKey !== key)
+        throw rejected(
+          `${path} changed after you viewed it, so it was not marked viewed. Look at the new diff first.`,
+          409,
+        );
+
+      context.markViewed(prId, path, key);
+
+      // The diff it marked is known either way; the head and base only when both reads agree.
+      const revision = (after ? markedRevision(before, after) : null) ?? {
+        headOid: before.sha,
+        baseOid: null,
+      };
+
+      return { ...revision, fileKey: key };
     },
 
     async addConversationComment(prId, body) {

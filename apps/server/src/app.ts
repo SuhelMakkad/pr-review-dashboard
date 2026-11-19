@@ -131,8 +131,6 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   registerOperationRoutes(app, operations);
   registerAccountRoutes(app, service, operations);
   registerReviewRoutes(app, reviews, operations);
-  app.addHook('onClose', () => operations.close());
-  app.addHook('onClose', () => runner.close());
   const linearSource = options.linear ?? new FixtureLinear(false);
   const linear = new LinearService(
     linearSource,
@@ -155,7 +153,6 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     autoReviewer.finished(row);
   };
   registerAiRoutes(app, runner, autoReviewer);
-  app.addHook('onClose', () => autoReviewer.close());
 
   const backfill = new Backfill(service, service.events);
 
@@ -172,6 +169,45 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   };
   registerNotifyRoutes(app, service, notifier);
   registerInsightsRoutes(app, service, backfill);
+
+  // Recovery runs before the first request is served (Fastify finishes `ready` before it listens
+  // or injects), and only in the process that owns the data directory: `index.ts` takes the lock
+  // before the store is opened.
+  app.addHook('onReady', async () => {
+    runner.open();
+    operations.open();
+  });
+
+  // One shutdown. Every part stops taking new work in the same tick, before anything is awaited,
+  // so work finishing in one part (a sync's follow-ups, a run's completion) cannot start more in
+  // another. That happens in preClose, before Fastify waits for requests in flight: a request
+  // still waiting on GitHub must not let the outbox start another write meanwhile. Then the parts
+  // drain together: the sync in progress ends, the action being sent finishes its step, AI runs
+  // pause at a checkpoint (their agents are signalled at once) and automatic-review and history
+  // work completes. onClose waits for that; the caller closes the store after it.
+  // Settled rather than all-or-nothing: one part failing to stop must not cut short the others'
+  // drain, and nothing rejects before onClose is there to report it.
+  let draining: Promise<PromiseSettledResult<unknown>[]> | null = null;
+  const stopWork = () =>
+    (draining ??= Promise.allSettled([
+      service.stop(),
+      autoReviewer.close(),
+      backfill.close(),
+      operations.close(),
+      runner.close(),
+    ]));
+
+  app.addHook('preClose', async () => {
+    void stopWork();
+  });
+  app.addHook('onClose', async () => {
+    const failures = (await stopWork()).flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [],
+    );
+
+    if (failures.length > 0)
+      throw new AggregateError(failures, 'Some work could not stop cleanly.');
+  });
 
   if (options.fixture)
     registerDevRoutes(app, service, options.fixture, runner, notifier, linear, operations);

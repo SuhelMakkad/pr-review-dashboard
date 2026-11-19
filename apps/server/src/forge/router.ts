@@ -1,7 +1,7 @@
 import type { PullRequestSnapshot, FeedSource, Source } from '@review-desk/shared/types';
 import { parseAccount } from '@review-desk/shared/accounts';
 import type { ReviewEvent } from '@review-desk/shared/review';
-import type { GitHubApi } from '@/github/api.js';
+import type { DetectOptions, GitHubApi } from '@/github/api.js';
 import { scopedAccount, type CliAccount, type GitHubAccounts } from '@/github/credentials.js';
 import { GitHubError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
@@ -149,8 +149,8 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
     return this.target().resolvePull(repository, number);
   }
 
-  detect(ids: string[]) {
-    return this.target().detect(ids);
+  detect(ids: string[], options?: DetectOptions) {
+    return this.target().detect(ids, options);
   }
 
   snapshot(id: string, login: string, sources: Source[], previous?: PullRequestSnapshot) {
@@ -159,6 +159,14 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
 
   pullFiles(repository: string, number: number) {
     return this.target().pullFiles(repository, number);
+  }
+
+  async pinnedFiles(
+    repository: string,
+    number: number,
+    revision: { headOid: string; baseOid: string | null },
+  ) {
+    return (await this.target().pinnedFiles?.(repository, number, revision)) ?? null;
   }
 
   compare(repository: string, base: string, head: string) {
@@ -209,8 +217,10 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
     return this.target().setThreadResolved(threadId, resolved);
   }
 
-  setFileViewed(prId: string, path: string, viewed: boolean) {
-    return this.target().setFileViewed(prId, path, viewed);
+  setFileViewed(prId: string, path: string, viewed: boolean, expected?: { fileKey: string }) {
+    return expected
+      ? this.target().setFileViewed(prId, path, viewed, expected)
+      : this.target().setFileViewed(prId, path, viewed);
   }
 
   addConversationComment(prId: string, body: string) {

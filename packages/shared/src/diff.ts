@@ -30,10 +30,24 @@ export interface DiffFile {
   /** Lockfiles, build output, snapshots: collapsed by default. */
   generated?: boolean;
   viewed?: 'VIEWED' | 'UNVIEWED' | 'DISMISSED';
+  /** Identifies this file's diff where the forge does (GitLab); a viewed mark names it. */
+  viewedKey?: string;
 }
 
 export interface DiffManifest {
   prId: string;
+  /** The PR's head and base this view was built from; a viewed mark made here names them. */
+  revision?: { headOid: string; baseOid: string | null };
+  /**
+   * The forge's viewed state follows each file's diff (GitLab): a file without `viewedKey` here
+   * could not be confirmed as the diff shown, and cannot be marked viewed from this view.
+   */
+  keyed?: boolean;
+  /**
+   * The patches shown could not be confirmed as `revision`'s (the forge's record of it was not
+   * available, so they are its live diff). Readable, but its lines cannot be commented on.
+   */
+  unpinned?: boolean;
   /** The account whose view this is (viewed state, "since your review"); set by the diff route. */
   account?: string;
   mode: DiffMode;

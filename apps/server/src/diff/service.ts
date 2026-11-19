@@ -43,6 +43,7 @@ function toDiffFile(file: RemoteFile, viewed?: DiffFile['viewed']): DiffFile {
     tooLarge: file.tooLarge || (!file.patch && changedLines > 0) ? true : undefined,
     generated: isGeneratedPath(file.path) || undefined,
     viewed,
+    ...(file.viewedKey ? { viewedKey: file.viewedKey } : {}),
   };
 }
 
@@ -64,12 +65,51 @@ export class DiffService {
     return manifest;
   }
 
+  /**
+   * The manifest with the PR's viewed state, for the revision it was built for (its cache key holds
+   * the same head and base). Where the forge keys each file's diff, a file's key comes from the
+   * diff the manifest renders, and the PR's viewed state shows only where it is about that diff.
+   */
   private withViewed(manifest: DiffManifest, pr: PullRequestSnapshot): DiffManifest {
-    const viewed = new Map(pr.files.map((file) => [file.path, file.viewerViewedState]));
+    const files = new Map(pr.files.map((file) => [file.path, file]));
 
     return {
       ...manifest,
-      files: manifest.files.map((file) => ({ ...file, viewed: viewed.get(file.path) })),
+      revision: { headOid: pr.headOid, baseOid: pr.baseOid ?? null },
+      files: manifest.files.map((file) => {
+        const stored = files.get(file.path);
+        // Keyed by diff: the stored state is shown only where it is about this very diff.
+        const same = manifest.keyed
+          ? file.viewedKey !== undefined && stored?.viewedKey === file.viewedKey
+          : true;
+
+        return { ...file, viewed: same ? stored?.viewerViewedState : 'UNVIEWED' };
+      }),
+    };
+  }
+
+  /**
+   * Each file's key for viewed marks, from the full diff of the same revision. Without one (the
+   * full diff could not be read, or not as this head's), the view still shows; those files just
+   * cannot be marked viewed from it.
+   */
+  private async withKeys(manifest: DiffManifest, pr: PullRequestSnapshot): Promise<DiffManifest> {
+    // Nothing to key; or the full diff itself, shown because the reviewed commit is gone, whose
+    // keys (or their absence) are its own.
+    if (manifest.files.length === 0 || manifest.kind === 'unavailable') return manifest;
+    if (!pr.files.some((file) => file.viewedKey)) return manifest;
+
+    const full = await this.full(pr).catch(() => null);
+    const keys = new Map(full?.files.map((file) => [file.path, file.viewedKey]) ?? []);
+
+    return {
+      ...manifest,
+      keyed: true,
+      files: manifest.files.map((file) => {
+        const viewedKey = keys.get(file.path);
+
+        return viewedKey ? { ...file, viewedKey } : file;
+      }),
     };
   }
 
@@ -80,7 +120,8 @@ export class DiffService {
   ): Promise<DiffManifest> {
     if (mode === 'full' || !reviewOid) return this.withViewed(await this.full(pr), pr);
 
-    return this.withViewed(await this.sinceReview(pr, reviewOid), pr);
+    // A mark from this view is about the file's whole diff, so its key is the full diff's.
+    return this.withViewed(await this.withKeys(await this.sinceReview(pr, reviewOid), pr), pr);
   }
 
   private async full(pr: PullRequestSnapshot): Promise<DiffManifest> {
@@ -89,16 +130,30 @@ export class DiffService {
 
     if (cached) return cached;
 
-    const files = await this.github.pullFiles(pr.repository, pr.number);
-
-    return this.remember(key, {
+    // Where viewed state follows each diff, the files of exactly this revision, keyed.
+    const listing =
+      (await this.github.pinnedFiles?.(pr.repository, pr.number, {
+        headOid: pr.headOid,
+        baseOid: pr.baseOid ?? null,
+      })) ?? null;
+    const files = listing ? listing.files : await this.github.pullFiles(pr.repository, pr.number);
+    const keyed = listing !== null;
+    const manifest: DiffManifest = {
       prId: pr.id,
       mode: 'full',
       kind: 'full',
       fromOid: pr.baseOid ?? pr.baseRefName,
       toOid: pr.headOid,
+      ...(keyed ? { keyed: true } : {}),
       files: files.map((file) => toDiffFile(file)),
-    });
+    };
+
+    // Diffs that could not be pinned to this revision are shown, not kept: the next view reads
+    // them again, and meanwhile they cannot be marked viewed or commented on by line. This holds
+    // for an empty list too.
+    if (listing && !listing.pinned) return { ...manifest, unpinned: true };
+
+    return this.remember(key, manifest);
   }
 
   private async sinceReview(pr: PullRequestSnapshot, reviewOid: string): Promise<DiffManifest> {

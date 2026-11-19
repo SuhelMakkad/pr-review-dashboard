@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   codexBlocked,
@@ -38,7 +38,7 @@ import {
   fullReviewInput,
   sinceReviewInput,
 } from '@/ai/context.js';
-import type { AgentProvider } from '@/ai/provider.js';
+import { agentExited, agentLockPath, agentRunning, type AgentProvider } from '@/ai/provider.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
 import { draftChanged, planPreparation, preparationRevision } from '@/ai/preparation.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
@@ -73,6 +73,7 @@ function creditsUsed(usage: string | null): number | null {
 export class AiRunner {
   private readonly queue: string[] = [];
   private readonly executions = new Map<string, Promise<void>>();
+  private opened = false;
   private closing = false;
   private readonly active = new Map<string, AbortController>();
   private probes: { at: number; statuses: AiProviderStatus[] } | null = null;
@@ -95,12 +96,26 @@ export class AiRunner {
     readonly providers: Record<AiProvider, AgentProvider>,
     private readonly workRoot: string,
     private readonly exportRepository: RepositoryExporter = downloadRepository,
-  ) {
+  ) {}
+
+  /**
+   * Settles runs a previous process left queued or running: resumable ones wait for `recover()`,
+   * the rest are marked interrupted. Called once this process owns the data directory, never from
+   * the constructor, so a second launch cannot rewrite the runs of the process still running.
+   */
+  open(): void {
+    if (this.opened || this.closing) return;
+
+    this.opened = true;
+    this.pruneAgentLocks();
+
     const unfinished = this.db
       .select()
       .from(aiRuns)
       .where(inArray(aiRuns.status, ['queued', 'running']))
-      .all();
+      .all()
+      // Runs queued by this process before it opened are its own, not left over.
+      .filter((row) => !this.queue.includes(row.id));
 
     for (const row of unfinished) {
       const resumable = Boolean(row.request && this.providers[row.provider].supportsResume);
@@ -124,10 +139,31 @@ export class AiRunner {
         .where(eq(aiRuns.id, row.id))
         .run();
     }
+
+    this.pump();
   }
 
   private get db() {
     return this.sync.store.db;
+  }
+
+  /** How long a resume waits for the run's previous agent to have exited before refusing. */
+  agentExitWaitMs = 6_000;
+
+  /** Removes the agent locks of runs whose workspace is gone and whose agent is not running. */
+  private pruneAgentLocks(): void {
+    const directory = dirname(agentLockPath(join(this.workRoot, 'run')));
+
+    if (!existsSync(directory)) return;
+
+    for (const name of readdirSync(directory)) {
+      if (!name.endsWith('.lock')) continue;
+
+      const workDir = join(this.workRoot, name.slice(0, -'.lock'.length));
+
+      if (!existsSync(workDir) && !agentRunning(workDir))
+        rmSync(join(directory, name), { force: true });
+    }
   }
 
   settings(): AiSettings {
@@ -402,7 +438,7 @@ export class AiRunner {
   ): Promise<AiRun> {
     this.detail(account, prId);
 
-    if (task === 'full_review' || task === 'draft_summary') await this.sync.refresh(prId);
+    if (task === 'full_review' || task === 'draft_summary') await this.sync.refresh(prId, account);
 
     const detail = this.detail(account, prId);
     const settings = this.settings();
@@ -430,7 +466,7 @@ export class AiRunner {
     const head = detail.snapshot.headOid;
 
     if (task === 'full_review') {
-      await this.sync.refresh(prId);
+      await this.sync.refresh(prId, account);
 
       const latest = this.detail(account, prId).snapshot;
 
@@ -548,8 +584,9 @@ export class AiRunner {
     return this.toRun(this.row(id)!, head);
   }
 
+  /** Starts queued runs up to the limit; none start before `open()` has settled old ones. */
   private pump(): void {
-    while (!this.closing && this.active.size < MAX_CONCURRENT) {
+    while (this.opened && !this.closing && this.active.size < MAX_CONCURRENT) {
       const id = this.queue.shift();
 
       if (!id) return;
@@ -856,7 +893,16 @@ export class AiRunner {
     // A pause may still be waiting for the old process to flush and exit. Never overlap turns.
     if (this.active.has(id)) await this.executions.get(id);
 
-    await this.sync.refresh(row.prId);
+    // Nor with the run's previous agent, which a stop has signalled but which may not have exited
+    // yet, or which a server that was killed outright left behind: its lock says until it has.
+    if (!(await agentExited(join(this.workRoot, id), this.agentExitWaitMs)))
+      throw new ReviewError(
+        'AGENT_STILL_RUNNING',
+        409,
+        'The previous AI agent for this review is still stopping. Try again shortly.',
+      );
+
+    await this.sync.refresh(row.prId, row.account);
     const problem = this.resumeProblem(row);
 
     if (problem) throw new ReviewError('STALE_REVIEW', 409, problem);
@@ -913,6 +959,10 @@ export class AiRunner {
       .all();
 
     for (const row of rows) {
+      // Its previous agent is still running (a server killed outright left it, and it has not
+      // ended yet): left paused, and the next sync tries again.
+      if (agentRunning(join(this.workRoot, row.id))) continue;
+
       try {
         await this.resume(account, row.id);
       } catch (error) {
@@ -1034,7 +1084,7 @@ export class AiRunner {
 
     const initialRevision = preparationRevision(this.reviews.draft(account, row.prId));
 
-    await this.sync.refresh(row.prId);
+    await this.sync.refresh(row.prId, row.account);
 
     const staleReason = this.staleReason(row);
 
@@ -1151,7 +1201,7 @@ export class AiRunner {
 
     this.detail(account, row.prId);
     this.reviews.drafts.assertEditable(account, row.prId);
-    await this.sync.refresh(row.prId);
+    await this.sync.refresh(row.prId, row.account);
     this.detail(account, row.prId);
 
     const reason = this.staleReason(row);

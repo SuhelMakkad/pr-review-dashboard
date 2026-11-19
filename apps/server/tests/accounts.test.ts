@@ -237,6 +237,7 @@ describe('GitHub actions across a switch', () => {
     await service.sync();
 
     const queue = new OperationQueue(service, { mutationIntervalMs: 0, retryDelaysMs: [1] });
+    queue.open();
 
     cleanups.push(() => queue.close());
     await queue.pause();

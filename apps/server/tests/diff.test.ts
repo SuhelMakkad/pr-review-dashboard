@@ -6,6 +6,7 @@ import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { SyncService } from '@/sync/index.js';
+import type { GitHubApi } from '@/github/api.js';
 
 async function demo() {
   const store = new Store(':memory:');
@@ -140,5 +141,167 @@ describe('review diffs', () => {
     expect(pr.changedFiles).toBe(pr.files.length);
     expect(pr.additions).toBe(pr.files.reduce((sum, file) => sum + file.additions, 0));
     close();
+  });
+});
+
+describe('viewed keys in diff manifests', () => {
+  it('names the diff the manifest renders, and shows viewed state only for that diff', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(1839).snapshot;
+      const path = pr.files[0]!.path;
+      const pullFiles = github.pullFiles.bind(github);
+
+      // The forge keys each file's diff (as GitLab does); the manifest is built and cached for A.
+      (github as GitHubApi).pinnedFiles = async (repository, number) => ({
+        files: (await pullFiles(repository, number)).map((file) => ({
+          ...file,
+          viewedKey: `rendered:${file.path}`,
+        })),
+        pinned: true,
+      });
+
+      const first = await diffs.manifest(
+        { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: `rendered:${file.path}` })) },
+        'full',
+        null,
+      );
+
+      expect(first.revision).toEqual({ headOid: pr.headOid, baseOid: pr.baseOid ?? null });
+      expect(first.files.find((file) => file.path === path)?.viewedKey).toBe(`rendered:${path}`);
+
+      // The stored PR now carries another diff's key and its viewed state, under the same head.
+      const later = await diffs.manifest(
+        {
+          ...pr,
+          files: pr.files.map((file) => ({
+            ...file,
+            viewedKey: `newer:${file.path}`,
+            viewerViewedState: 'VIEWED' as const,
+          })),
+        },
+        'full',
+        null,
+      );
+      const file = later.files.find((candidate) => candidate.path === path)!;
+
+      expect(file.viewedKey).toBe(`rendered:${path}`);
+      expect(file.viewed).toBe('UNVIEWED');
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('diffs that cannot be pinned to the revision shown', () => {
+  it('shows them without keeping them, and they cannot be marked viewed', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(1839).snapshot;
+      const keyed = { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: 'stored' })) };
+      const pullFiles = github.pullFiles.bind(github);
+      let reads = 0;
+
+      // A forge that keys diffs, but has no record of this revision.
+      (github as GitHubApi).pinnedFiles = async (repository, number) => {
+        reads++;
+
+        return { files: await pullFiles(repository, number), pinned: false };
+      };
+
+      const first = await diffs.manifest(keyed, 'full', null);
+
+      expect(first.keyed).toBe(true);
+      expect(first.files.every((file) => !file.viewedKey && file.viewed === 'UNVIEWED')).toBe(true);
+
+      await diffs.manifest(keyed, 'full', null);
+      expect(reads).toBe(2);
+    } finally {
+      close();
+    }
+  });
+
+  it('keeps no empty list it could not pin either', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(1839).snapshot;
+      let reads = 0;
+
+      (github as GitHubApi).pinnedFiles = async () => {
+        reads++;
+
+        return { files: [], pinned: false };
+      };
+
+      expect((await diffs.manifest(pr, 'full', null)).files).toEqual([]);
+      await diffs.manifest(pr, 'full', null);
+      expect(reads).toBe(2);
+    } finally {
+      close();
+    }
+  });
+
+  it('keeps a since-review view when its keys cannot be read, and skips the read when empty', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(2041).snapshot;
+      const keyed = { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: 'stored' })) };
+      let reads = 0;
+
+      (github as GitHubApi).pinnedFiles = async () => {
+        reads++;
+        throw new Error('GitLab is unavailable');
+      };
+
+      // Reviewed at the current head: nothing changed, and nothing is read for it.
+      const same = await diffs.manifest(keyed, 'since-review', pr.headOid);
+
+      expect(same.kind).toBe('identical');
+      expect(reads).toBe(0);
+
+      const review = pr.reviews.find((entry) => entry.commitOid && entry.commitOid !== pr.headOid);
+      const since = await diffs.manifest(keyed, 'since-review', review!.commitOid);
+
+      expect(since.files.length).toBeGreaterThan(0);
+      expect(since.keyed).toBe(true);
+      expect(since.files.every((file) => !file.viewedKey)).toBe(true);
+    } finally {
+      close();
+    }
+  });
+
+  it('shows the full diff as listed when the reviewed commit is gone, read once', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(2041).snapshot;
+      const keyed = { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: 'stored' })) };
+      const pullFiles = github.pullFiles.bind(github);
+      let reads = 0;
+
+      // The first listing cannot be pinned; any later one would be, with keys.
+      (github as GitHubApi).pinnedFiles = async (repository, number) => {
+        reads++;
+
+        const files = await pullFiles(repository, number);
+
+        return reads === 1
+          ? { files, pinned: false }
+          : { files: files.map((file) => ({ ...file, viewedKey: 'later' })), pinned: true };
+      };
+
+      const since = await diffs.manifest(keyed, 'since-review', '0'.repeat(40));
+
+      expect(since.kind).toBe('unavailable');
+      expect(reads).toBe(1);
+      expect(since.files.length).toBeGreaterThan(0);
+      expect(since.files.every((file) => !file.viewedKey)).toBe(true);
+    } finally {
+      close();
+    }
   });
 });

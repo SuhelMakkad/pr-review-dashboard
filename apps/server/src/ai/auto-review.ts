@@ -106,6 +106,8 @@ export class AutoReviewer {
   private closed = false;
   /** Finished runs being checked against GitHub right now; passes leave them alone. */
   private readonly verifying = new Set<string>();
+  /** Work started when a run finishes (its check and announcement), which shutdown waits for. */
+  private readonly completions = new Set<Promise<void>>();
 
   constructor(
     private readonly sync: SyncService,
@@ -117,8 +119,16 @@ export class AutoReviewer {
     return this.sync.store.db;
   }
 
-  close(): void {
+  /**
+   * Starts no further passes or completion work, and waits for what is in progress, so none of it
+   * outlives shutdown. A run that finishes from now on is checked on the next start: `settled`
+   * saved that check with its outcome.
+   */
+  async close(): Promise<void> {
     this.closed = true;
+    this.pending = null;
+
+    await Promise.all([this.running, ...this.completions]);
   }
 
   /**
@@ -195,14 +205,20 @@ export class AutoReviewer {
    * fresh review follows, and announcing the outdated one would only be noise.
    */
   finished(row: AiRunRow): void {
+    if (this.closed) return;
     if (row.trigger !== 'auto' || row.task !== 'full_review') return;
     if (row.status !== 'done' && row.status !== 'failed') return;
 
-    void (async () => {
+    const completion = (async () => {
       if (this.current(row.account) && (await this.verify(row.account, row, true))) return;
+      // Shutdown began during the check, which then could not tell; the next start finishes it.
+      if (this.closed) return;
 
-      this.announce(row);
+      await this.announce(row);
     })().catch(() => undefined);
+
+    this.completions.add(completion);
+    void completion.finally(() => this.completions.delete(completion));
   }
 
   /**
@@ -235,7 +251,7 @@ export class AutoReviewer {
     return restarts;
   }
 
-  private announce(row: AiRunRow): void {
+  private async announce(row: AiRunRow): Promise<void> {
     const pr = this.sync.detail(row.prId)?.snapshot;
 
     if (!pr) return;
@@ -249,7 +265,7 @@ export class AutoReviewer {
       path: pullPath('inbox/attention', pr),
     };
 
-    void this.notifier.announce(row.account, [notification]).catch(() => undefined);
+    await this.notifier.announce(row.account, [notification]).catch(() => undefined);
   }
 
   /**
@@ -525,8 +541,8 @@ export class AutoReviewer {
     this.verifying.add(run.id);
 
     try {
-      // Its own result: a slower refresh started earlier may save an older head after it.
-      const pr = (await this.sync.refresh(run.prId))?.snapshot ?? null;
+      // A read started now: an older read still in flight can no longer be saved over it.
+      const pr = (await this.sync.refresh(run.prId, account))?.snapshot ?? null;
       const outdated = pr ? await this.changedWhileRunning(account, run, pr, asItFinished) : false;
 
       if (!this.current(account)) return false;

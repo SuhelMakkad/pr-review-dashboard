@@ -25,6 +25,7 @@ const day = (time: number) => new Date(time).toISOString().slice(0, 10);
  */
 export class Backfill {
   private running: Promise<void> | null = null;
+  private closed = false;
 
   constructor(
     private readonly sync: SyncService,
@@ -49,6 +50,7 @@ export class Backfill {
   /** Starts (or joins) a run; returns immediately. `force` re-reads every window. */
   start(login: string, options: { force?: boolean } = {}): Promise<void> {
     if (this.running) return this.running;
+    if (this.closed) return Promise.resolve();
 
     // History is read as this account even if you switch accounts while it runs.
     this.running = asAccount(login, () => this.run(login, Boolean(options.force))).finally(() => {
@@ -57,6 +59,16 @@ export class Backfill {
     });
 
     return this.running;
+  }
+
+  /**
+   * Starts no further runs and lets the one in progress stop after its current window. Saved
+   * windows are kept, so the next start resumes where this one stopped.
+   */
+  async close(): Promise<void> {
+    this.closed = true;
+
+    await this.running?.catch(() => undefined);
   }
 
   private async run(login: string, force: boolean): Promise<void> {
@@ -84,6 +96,9 @@ export class Backfill {
       for (let end = now; end > now - SPAN_DAYS * DAY; end -= WINDOW_DAYS * DAY) {
         const start = Math.max(now - SPAN_DAYS * DAY, end - WINDOW_DAYS * DAY);
         const window = `${day(start)}..${day(end)}`;
+
+        // Shutting down: what is saved so far resumes on the next start.
+        if (this.closed) return;
 
         // The newest window is always re-read: it is still filling up.
         if (done.has(window) && end !== now) continue;
