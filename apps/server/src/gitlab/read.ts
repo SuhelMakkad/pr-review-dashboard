@@ -256,8 +256,8 @@ export class GitLab implements GitHubApi {
     return this.writes.setThreadResolved(threadId, resolved);
   }
 
-  setFileViewed(prId: string, path: string, viewed: boolean) {
-    return this.writes.setFileViewed(prId, path, viewed);
+  setFileViewed(prId: string, path: string, viewed: boolean, expected?: { fileKey: string }) {
+    return this.writes.setFileViewed(prId, path, viewed, expected);
   }
 
   addConversationComment(prId: string, body: string) {

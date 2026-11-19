@@ -208,6 +208,8 @@ export class CodexProvider implements AgentProvider {
     try {
       server = await CodexAppServer.open(this.command, {
         cwd: request.workDir,
+        // Holds the run's lock while it runs, so no second agent works on the run meanwhile.
+        lockFor: request.workDir,
         signal: controller.signal,
         timeoutMs: request.timeoutMs,
       });

@@ -771,19 +771,41 @@ describe('durable GitHub operations', () => {
   });
 
   it.each([
-    ['sends it again while the PR still shows the diff you marked', false, 'succeeded', 1],
+    [
+      'leaves it unconfirmed where the forge cannot bind a mark to a diff',
+      false,
+      false,
+      'needs_attention',
+      0,
+    ],
+    ['sends it again where the forge binds it to the diff you marked', true, false, 'succeeded', 1],
     [
       'leaves it unconfirmed once a newer diff replaced the one you marked',
+      true,
       true,
       'needs_attention',
       0,
     ],
   ] as const)(
     'for an interrupted viewed mark on a file not viewed now, %s',
-    async (_name, pushed, status, marks) => {
+    async (_name, bound, changed, status, marks) => {
       const { queue, sync, github, store, pr } = await setup();
       const pull = pr();
       const path = pull.files[0].path;
+      let fileKey = 'diff-a';
+
+      // A forge that identifies each file's diff (as GitLab does) and so can bind a mark to it.
+      if (bound) {
+        const snapshot = github.snapshot.bind(github);
+
+        vi.spyOn(github, 'snapshot').mockImplementation(async (...args) => {
+          const read = await snapshot(...args);
+
+          return { ...read, files: read.files.map((file) => ({ ...file, viewedKey: fileKey })) };
+        });
+        await sync.refresh(pull.id);
+      }
+
       const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
         type: 'viewed',
         path,
@@ -796,7 +818,9 @@ describe('durable GitHub operations', () => {
         .get()!;
 
       // The server stopped before the mark could be confirmed; the file is still not viewed.
-      expect(row.data.action).toMatchObject({ target: { headOid: pull.headOid } });
+      expect(row.data.action).toMatchObject({
+        target: { headOid: pull.headOid, ...(bound ? { fileKey: 'diff-a' } : {}) },
+      });
       store.db
         .update(githubOperations)
         .set({
@@ -807,7 +831,7 @@ describe('durable GitHub operations', () => {
             steps: [
               {
                 method: 'setFileViewed',
-                args: [pull.id, path, true],
+                args: [pull.id, path, true, ...(bound ? [{ fileKey: 'diff-a' }] : [])],
                 startedAt: new Date().toISOString(),
                 completedAt: null,
                 result: null,
@@ -819,11 +843,7 @@ describe('durable GitHub operations', () => {
         .where(eq(githubOperations.id, operation.id))
         .run();
 
-      if (pushed) {
-        github.scenario.world.pulls.find(
-          (candidate) => candidate.snapshot.id === pull.id,
-        )!.snapshot.headOid = 'f'.repeat(40);
-      }
+      if (changed) fileKey = 'diff-b';
 
       await queue.close();
 
@@ -835,6 +855,27 @@ describe('durable GitHub operations', () => {
       expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toHaveLength(marks);
     },
   );
+
+  it('does not mark a file viewed once its diff changed before the mark was sent', async () => {
+    const { queue, github, pr } = await setup();
+    const pull = pr();
+    const { operation } = queue.enqueue('you', pull.id, randomUUID(), {
+      type: 'viewed',
+      path: pull.files[0].path,
+      viewed: true,
+    });
+
+    // New commits arrive before the outbox sends it.
+    github.scenario.world.pulls.find(
+      (candidate) => candidate.snapshot.id === pull.id,
+    )!.snapshot.headOid = 'f'.repeat(40);
+    queue.resume();
+
+    const cancelled = await completed(queue, operation.id, 'cancelled');
+
+    expect(cancelled.progress).toMatch(/^Not marked viewed: /);
+    expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
+  });
 
   it('returns 202 operation receipts from GitHub command routes and preserves replay IDs', async () => {
     const { queue, sync, pr } = await setup();

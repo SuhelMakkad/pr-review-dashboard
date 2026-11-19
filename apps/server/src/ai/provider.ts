@@ -1,7 +1,8 @@
-import { spawn, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import type { AiEffort, AiProvider, CodexAccountStatus } from '@review-desk/shared/ai';
 import { redact } from '@/github/errors.js';
 
@@ -103,6 +104,11 @@ const PIPE_GRACE_MS = 2_000;
 
 export interface ProcessOptions {
   cwd: string;
+  /**
+   * The run workspace the agent works in, when it belongs to a run: the agent then holds that
+   * run's lock while it runs (see `agentRunning`), and a second agent for the run cannot start.
+   */
+  lockFor?: string;
   env: NodeJS.ProcessEnv;
   signal: AbortSignal;
   timeoutMs: number;
@@ -121,215 +127,54 @@ export interface AgentProcess {
 const liveGroups = new Set<number>();
 
 /**
- * Every agent gets a random marker in its environment, which the processes it starts inherit. A
- * marker identifies those processes beyond doubt, where a pid or process group id can belong to
- * an unrelated process once the agent is gone.
+ * Agents run under a small supervisor (`agent-supervisor.ts`) that leads their process group and
+ * ends it the moment this server is gone, however it ended. Given a run's workspace, it also holds
+ * that run's lock for as long as it lives, so a busy lock means the run's agent is still running.
  */
-const MARKER_VARIABLE = 'REVIEW_DESK_AGENT';
+const SUPERVISOR = fileURLToPath(
+  new URL(
+    import.meta.url.endsWith('.ts') ? './agent-supervisor.ts' : './agent-supervisor.js',
+    import.meta.url,
+  ),
+);
 
-/**
- * The markers of agents that may still be running, kept in the data directory, so a server that
- * was killed outright lets its successor end them.
- */
-export interface AgentJournal {
-  load(): string[];
-  save(markers: string[]): void;
+/** The lock a run's agent holds while it runs, next to the run's workspace. */
+export function agentLockPath(workDir: string): string {
+  return join(dirname(workDir), '.locks', `${basename(workDir)}.lock`);
 }
 
-const JOURNAL_KEY = 'agent-markers';
+/** True while an agent for the run in `workDir` is running, in this server or a previous one. */
+export function agentRunning(workDir: string): boolean {
+  const path = agentLockPath(workDir);
 
-/** A journal kept in the settings of the data directory's database. */
-export function settingsJournal(store: {
-  getSetting<T>(key: string): T | null;
-  setSetting(key: string, value: unknown): void;
-}): AgentJournal {
-  return {
-    load: () => store.getSetting<string[]>(JOURNAL_KEY) ?? [],
-    save: (markers) => store.setSetting(JOURNAL_KEY, markers),
-  };
-}
+  if (!existsSync(path)) return false;
 
-let journal: AgentJournal | null = null;
-/** Markers of this process's agents that are still running. */
-const recorded = new Set<string>();
-/** Markers of a previous process's agents that could not be checked yet; kept until they are. */
-let carried: string[] = [];
-
-/** Records the agents this process starts from now on in `next` (null stops recording). */
-export function useAgentJournal(next: AgentJournal | null): void {
-  journal = next;
-}
-
-/** Stops recording in `owned` if it is still the journal in use (its database is closing). */
-export function releaseAgentJournal(owned: AgentJournal): void {
-  if (journal === owned) journal = null;
-}
-
-function persist(): void {
-  try {
-    journal?.save([...carried, ...recorded]);
-  } catch {
-    // The database may already be closed while the process exits; the next start checks anyway.
-  }
-}
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** A process and the entries of the environment it was started with (`NAME=value`). */
-export interface ProcessEnvironment {
-  pid: number;
-  entries: string[];
-}
-
-/** The environment entries of one process from `ps` on macOS and the BSDs, or null when unknown. */
-function psEntries(withEnvironment: string, plain: string): string[] | null {
-  // `-E` prints the environment after the command line; what follows the plain command line is it.
-  if (!withEnvironment.startsWith(plain)) return null;
-
-  return withEnvironment.slice(plain.length).trim().split(' ').filter(Boolean);
-}
-
-function psTable(flags: string[]): Map<number, string> | null {
-  const result = spawnSync('ps', [...flags, '-ww', '-o', 'pid=,command='], {
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-
-  if (result.status !== 0 || result.error) return null;
-
-  const table = new Map<number, string>();
-
-  for (const line of result.stdout.split('\n')) {
-    const match = /^\s*(\d+)\s(.*)$/.exec(line);
-
-    if (match) table.set(Number(match[1]), match[2]!);
-  }
-
-  return table;
-}
-
-/** Every process of this user with its environment entries, or null when they cannot be listed. */
-function listProcessEnvironments(): ProcessEnvironment[] | null {
-  if (process.platform === 'linux') {
-    try {
-      return readdirSync('/proc').flatMap((name) => {
-        if (!/^\d+$/.test(name)) return [];
-
-        const entries = environmentOf(Number(name));
-
-        return entries ? [{ pid: Number(name), entries }] : [];
-      });
-    } catch {
-      return null;
-    }
-  }
-
-  const plain = psTable(['-A']);
-  const withEnvironment = psTable(['-A', '-E']);
-
-  if (!plain || !withEnvironment) return null;
-
-  return [...withEnvironment].flatMap(([pid, line]) => {
-    const command = plain.get(pid);
-    const entries = command === undefined ? null : psEntries(line, command);
-
-    return entries ? [{ pid, entries }] : [];
-  });
-}
-
-/** One process's environment entries, or null when it is gone or cannot be read. */
-function environmentOf(pid: number): string[] | null {
-  if (process.platform === 'linux') {
-    try {
-      return readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean);
-    } catch {
-      return null;
-    }
-  }
-
-  const plain = psTable(['-p', String(pid)])?.get(pid);
-  const line = psTable(['-E', '-p', String(pid)])?.get(pid);
-
-  return plain === undefined || line === undefined ? null : psEntries(line, plain);
-}
-
-/** How processes are listed; replaceable in tests. */
-export const agentProcesses = { list: listProcessEnvironments, environmentOf };
-
-const entryOf = (marker: string) => `${MARKER_VARIABLE}=${marker}`;
-
-/** Processes whose environment has one of `markers` as an exact entry; null when not listable. */
-function marked(markers: Set<string>): { pid: number; marker: string }[] | null {
-  const processes = agentProcesses.list();
-
-  if (!processes) return null;
-
-  return processes.flatMap(({ pid, entries }) => {
-    const marker = [...markers].find((candidate) => entries.includes(entryOf(candidate)));
-
-    return marker && pid !== process.pid ? [{ pid, marker }] : [];
-  });
-}
-
-/** SIGKILLs `pid` if it still carries `marker`, checked right before: its pid may have moved on. */
-function killMarked(pid: number, marker: string): boolean {
-  if (!agentProcesses.environmentOf(pid)?.includes(entryOf(marker))) return false;
+  let probe: DatabaseSync | null = null;
 
   try {
-    process.kill(pid, 'SIGKILL');
+    probe = new DatabaseSync(path, { timeout: 0 });
+    probe.exec('BEGIN EXCLUSIVE');
+    probe.exec('ROLLBACK');
 
-    return true;
-  } catch {
     return false;
+  } catch {
+    return true;
+  } finally {
+    probe?.close();
   }
 }
 
-/**
- * Ends every process carrying one of `markers` and waits until none is left, up to about a
- * second. True when none is left; false when some survive or processes cannot be listed.
- */
-async function endMarked(markers: Set<string>): Promise<{ ended: number; gone: boolean }> {
-  let ended = 0;
+/** Waits up to `timeoutMs` for the run's agent to have exited; true once it has. */
+export async function agentExited(workDir: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
 
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const found = marked(markers);
+  while (agentRunning(workDir)) {
+    if (Date.now() >= deadline) return false;
 
-    if (!found) return { ended, gone: false };
-    if (found.length === 0) return { ended, gone: true };
-
-    for (const { pid, marker } of found) if (killMarked(pid, marker)) ended++;
-
-    await sleep(200);
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
-  return { ended, gone: false };
-}
-
-/**
- * Ends the agents a previous server process left running, as recorded in `source`: every process
- * whose environment carries one of their markers as an exact entry. A server killed outright
- * (SIGKILL, a crash) cannot end its agents, and its successor must not resume a run while an old
- * agent still works on it; so resume nothing while this returns `verified: false`. Processes
- * without a marker are never touched. Markers stay on record until no process carries them, so a
- * later call tries again when processes cannot be listed or one survives.
- */
-export async function endLeftoverAgents(
-  source: AgentJournal,
-): Promise<{ ended: number; verified: boolean }> {
-  const markers = new Set([...carried, ...source.load()].filter((marker) => !recorded.has(marker)));
-
-  if (markers.size === 0) {
-    carried = [];
-
-    return { ended: 0, verified: true };
-  }
-
-  const { ended, gone } = await endMarked(markers);
-
-  carried = gone ? [] : [...markers];
-  source.save([...carried, ...recorded]);
-
-  return { ended, verified: gone };
+  return true;
 }
 
 /**
@@ -359,44 +204,25 @@ export function spawnAgentProcess(
   args: string[],
   options: ProcessOptions,
 ): AgentProcess {
-  // Recorded before the agent starts, so that if this server is killed outright at any moment
-  // after, the next one ends the agent before it resumes the run (see `endLeftoverAgents`). An
-  // agent that cannot be recorded does not start.
-  const marker = randomUUID();
-
-  recorded.add(marker);
-
-  try {
-    journal?.save([...carried, ...recorded]);
-  } catch (error) {
-    recorded.delete(marker);
-
-    throw new AgentError(
-      `Could not record the agent before starting it: ${redact(error instanceof Error ? error.message : String(error))}`,
-    );
-  }
-
-  const child = spawn(command, args, {
-    cwd: options.cwd,
-    env: { ...options.env, [MARKER_VARIABLE]: marker },
-    detached: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  // The supervisor leads the group and keeps the agent from outliving this server; the fourth
+  // pipe is its lifeline, never written to, closed by the system when this process exits.
+  const child = spawn(
+    process.execPath,
+    [
+      '--no-warnings',
+      SUPERVISOR,
+      options.lockFor ? agentLockPath(options.lockFor) : '-',
+      command,
+      ...args,
+    ],
+    {
+      cwd: options.cwd,
+      env: options.env,
+      detached: true,
+      stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+    },
+  );
   const group = child.pid;
-  // Forgotten only once nothing carries the marker any more: a helper the agent started in its
-  // own process group outlives the group kill below, so it is found by its marker and ended too.
-  // If that cannot be confirmed, the marker passes to the next start's check.
-  const settle = async () => {
-    const { gone } = await endMarked(new Set([marker]));
-
-    recorded.delete(marker);
-
-    if (!gone) carried = [...new Set([...carried, marker])];
-
-    persist();
-  };
-
-  child.once('error', () => void settle());
 
   if (group) {
     liveGroups.add(group);
@@ -411,7 +237,6 @@ export function spawnAgentProcess(
       }
 
       liveGroups.delete(group);
-      void settle();
     });
   }
 

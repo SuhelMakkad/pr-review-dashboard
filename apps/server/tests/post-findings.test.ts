@@ -459,10 +459,11 @@ describe('posting finished reviews', () => {
     );
     expect(comments()).toEqual([]);
 
+    // An unmark holds for every diff, so it goes out even though the PR changed.
     const { operation: viewed } = queue.enqueue('you', idOf(1839), 'viewed-after-skip', {
       type: 'viewed',
       path: 'src/reminders.ts',
-      viewed: true,
+      viewed: false,
     });
 
     await expect

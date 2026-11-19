@@ -667,6 +667,27 @@ export class OperationQueue {
         return;
       }
 
+      // A mark is for the diff you viewed; once the PR shows another, sending it would mark a diff
+      // you have not seen. (GitLab also refuses it at the moment of the write.)
+      if (
+        action.type === 'viewed' &&
+        action.viewed &&
+        action.target &&
+        !showsTarget(action.target, pr, action.path)
+      ) {
+        const gone = !pr.files.some((file) => file.path === action.path);
+
+        this.save({
+          ...row,
+          status: 'cancelled',
+          finishedAt: now(),
+          progress: gone
+            ? `Not marked viewed: ${action.path} is no longer part of this PR.`
+            : `Not marked viewed: ${action.path} changed after you viewed it. Look at the new diff first.`,
+        });
+        return;
+      }
+
       if (row.action.type === 'comment' && pr.headOid !== row.action.expectedHeadOid)
         throw new ReviewError(
           'HEAD_MOVED',
@@ -894,9 +915,18 @@ export class OperationQueue {
         case 'resolve':
           await reviews.resolve(row.account, row.prId, row.action.threadId, row.action.resolved);
           break;
-        case 'viewed':
-          await reviews.setViewed(row.account, row.prId, row.action.path, row.action.viewed);
+        case 'viewed': {
+          const fileKey = row.action.viewed ? row.action.target?.fileKey : undefined;
+
+          await reviews.setViewed(
+            row.account,
+            row.prId,
+            row.action.path,
+            row.action.viewed,
+            ...(fileKey ? [{ fileKey }] : []),
+          );
           break;
+        }
         case 'reviewers':
           await reviews.requestReviewers(row.account, row.prId, row.action.logins);
           break;
@@ -1194,20 +1224,21 @@ export class OperationQueue {
             ? viewedState === (step.args[2] ? 'VIEWED' : 'UNVIEWED')
             : pr?.threads.find((thread) => thread.id === step.args[0])?.isResolved === step.args[1];
 
-        // A mark is sent again only while the PR still shows the diff you marked and the file is
-        // not viewed: otherwise (changed since viewed, a newer diff, a file no longer there, or an
-        // action from before targets were recorded) it could mark a diff nobody has seen, and
-        // assuming it was sent could lose it. It stays unconfirmed for you to check. An unmark
-        // holds for every diff, so it is always safe to send again.
+        // A mark is sent again only where the forge itself refuses it for another diff (GitLab,
+        // given the file's diff), the PR still shows the diff you marked, and the file is not
+        // viewed. Otherwise (GitHub, which marks whatever the file is now; changed since viewed;
+        // a newer diff; a file no longer there; an action from before targets were recorded) it
+        // could mark a diff nobody has seen, and assuming it was sent could lose it, so it stays
+        // unconfirmed for you to check. An unmark holds for every diff: always safe to repeat.
+        const bound =
+          row.action.type === 'viewed' &&
+          row.action.target?.fileKey !== undefined &&
+          showsTarget(row.action.target, pr, String(step.args[1]));
         const ambiguous =
           step.method === 'setFileViewed' &&
           step.args[2] === true &&
           !confirmed &&
-          !(
-            viewedState === 'UNVIEWED' &&
-            row.action.type === 'viewed' &&
-            showsTarget(row.action.target, pr, String(step.args[1]))
-          );
+          !(viewedState === 'UNVIEWED' && bound);
 
         // These desired-state mutations are safe to repeat if GitHub has not reached that state.
         if (!confirmed && !ambiguous) {

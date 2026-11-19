@@ -209,8 +209,10 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
     return this.target().setThreadResolved(threadId, resolved);
   }
 
-  setFileViewed(prId: string, path: string, viewed: boolean) {
-    return this.target().setFileViewed(prId, path, viewed);
+  setFileViewed(prId: string, path: string, viewed: boolean, expected?: { fileKey: string }) {
+    return expected
+      ? this.target().setFileViewed(prId, path, viewed, expected)
+      : this.target().setFileViewed(prId, path, viewed);
   }
 
   addConversationComment(prId: string, body: string) {

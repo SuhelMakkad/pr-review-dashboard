@@ -1,7 +1,7 @@
 import type { ReviewEvent } from '@review-desk/shared/review';
 import { GitHubError, safeError } from '@/github/errors.js';
 import type { GitHubWrites, ThreadInput } from '@/github/write.js';
-import { fingerprint } from '@/gitlab/fingerprint.js';
+import { diffKey } from '@/gitlab/fingerprint.js';
 import {
   discussionId,
   mergeRequestPath,
@@ -506,7 +506,7 @@ export function createGitLabWriter(
       );
     },
 
-    async setFileViewed(prId, path, viewed) {
+    async setFileViewed(prId, path, viewed, expected) {
       const ref = parseMergeRequestId(prId);
 
       if (!viewed) {
@@ -524,7 +524,14 @@ export function createGitLabWriter(
 
       // Only says which revision is marked; failing to read it must not fail the mark.
       const after = await context.mergeRequest(ref).catch(() => null);
-      const key = fingerprint(file.diff);
+      const key = diffKey(file, { head: before.sha, start: before.diff_refs?.start_sha ?? null });
+
+      // The mark is for the diff you viewed: a newer one, which you have not seen, is not marked.
+      if (expected && expected.fileKey !== key)
+        throw rejected(
+          `${path} changed after you viewed it, so it was not marked viewed. Look at the new diff first.`,
+          409,
+        );
 
       context.markViewed(prId, path, key);
 

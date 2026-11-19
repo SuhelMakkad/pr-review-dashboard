@@ -10,13 +10,14 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { c } from 'tar';
 import { ClaudeProvider, claudeProgress } from '@/ai/claude.js';
 import { CodexProvider, codexProgress, withDefault } from '@/ai/codex.js';
 import { mergeSnapshot, summariseUsage, type RateLimitSnapshot } from '@/ai/codex-usage.js';
 import { annotatePatch } from '@/ai/context.js';
 import { FixtureProvider } from '@/ai/fixture.js';
-import { agentProcesses, settingsJournal, spawnAgentProcess } from '@/ai/provider.js';
+import { agentLockPath, spawnAgentProcess } from '@/ai/provider.js';
 import { AiRunner } from '@/ai/runner.js';
 import { preparedCommentFingerprint } from '@/ai/preparation.js';
 import { jsonSchemaFor } from '@/ai/tasks.js';
@@ -1558,7 +1559,7 @@ describe('AI runner', () => {
     }
   });
 
-  it('resumes nothing while an agent of a previous server cannot be ruled out', async () => {
+  it('resumes nothing while the run’s previous agent is still running', async () => {
     const { runner, providers, pr, sync, diffs, reviews, root, exportRepository } = await setup();
     const controls = holdRuns(providers.codex);
     const run = await runner.start('you', pr(1839).id, 'full_review');
@@ -1566,10 +1567,16 @@ describe('AI runner', () => {
     await vi.waitFor(() => expect(controls.size).toBe(1));
     await runner.close();
 
-    // A previous server's agent is on record, and processes cannot be listed right now.
-    settingsJournal(sync.store).save(['00000000-0000-4000-8000-0000000000aa']);
+    // The run's lock is held, as by an agent a previous server left that has not ended yet.
+    const lockPath = agentLockPath(join(root, run.id));
 
-    const listing = vi.spyOn(agentProcesses, 'list').mockReturnValue(null);
+    mkdirSync(dirname(lockPath), { recursive: true });
+
+    const held = new DatabaseSync(lockPath, { timeout: 0 });
+
+    held.exec('PRAGMA locking_mode = EXCLUSIVE');
+    held.exec('BEGIN EXCLUSIVE');
+
     const restarted = new AiRunner(
       sync,
       diffs,
@@ -1580,6 +1587,7 @@ describe('AI runner', () => {
       exportRepository,
     );
 
+    restarted.agentExitWaitMs = 100;
     restarted.open();
     await restarted.recover('you');
     expect(restarted.runs('you', run.prId)[0]).toMatchObject({ status: 'paused' });
@@ -1590,8 +1598,8 @@ describe('AI runner', () => {
     });
     expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(1);
 
-    // Once it is ruled out, the run resumes.
-    listing.mockRestore();
+    // Once it has exited, the run resumes.
+    held.close();
     await restarted.recover('you');
     await vi.waitFor(() => expect(vi.mocked(providers.codex.run).mock.calls).toHaveLength(2));
     for (const control of controls.values()) control.complete();

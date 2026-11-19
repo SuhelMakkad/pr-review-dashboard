@@ -554,13 +554,24 @@ export class ReviewService {
     if (!this.execution) await this.refreshQuietly(prId);
   }
 
-  async setViewed(account: string, prId: string, path: string, viewed: boolean): Promise<void> {
+  async setViewed(
+    account: string,
+    prId: string,
+    path: string,
+    viewed: boolean,
+    expected?: { fileKey: string },
+  ): Promise<void> {
     await this.guard(account, true);
 
     // Fails with NOT_FOUND before writing when the PR is not tracked.
     this.snapshot(prId);
 
-    const revision = await this.write(() => this.github.setFileViewed(prId, path, viewed));
+    // Called with exactly the arguments it needs, so checkpoints of older actions still match.
+    const revision = await this.write(() =>
+      expected
+        ? this.github.setFileViewed(prId, path, viewed, expected)
+        : this.github.setFileViewed(prId, path, viewed),
+    );
 
     // Onto the latest stored PR and the reads that started before the write, where they show the
     // revision the forge marked. Elsewhere the forge's own state stands; the refresh that follows

@@ -69,7 +69,7 @@ export class CodexAppServer {
 
   static async open(
     command: string,
-    options: { cwd: string; signal: AbortSignal; timeoutMs: number },
+    options: { cwd: string; signal: AbortSignal; timeoutMs: number; lockFor?: string },
   ): Promise<CodexAppServer> {
     const server = new CodexAppServer();
 

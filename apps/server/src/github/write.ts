@@ -53,7 +53,17 @@ export interface GitHubWrites {
     body: string,
   ): Promise<{ id: string; url: string; pending: boolean }>;
   setThreadResolved(threadId: string, resolved: boolean): Promise<void>;
-  setFileViewed(prId: string, path: string, viewed: boolean): Promise<ViewedRevision | null>;
+  /**
+   * `expected`: the file's diff the mark is for (its `viewedKey`). A forge that can check it
+   * refuses the mark when the file's diff is another one now (GitLab); GitHub cannot, and ignores
+   * it.
+   */
+  setFileViewed(
+    prId: string,
+    path: string,
+    viewed: boolean,
+    expected?: { fileKey: string },
+  ): Promise<ViewedRevision | null>;
   addConversationComment(prId: string, body: string): Promise<{ id: string; url: string }>;
   /** Adds (never removes) requested reviewers; re-requesting someone asks them again. */
   requestReviews(prId: string, logins: string[]): Promise<void>;

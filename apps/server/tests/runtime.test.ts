@@ -8,14 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unusedPort } from '@test/fixtures/ai/restart-helper.js';
 import { createApp } from '@/app.js';
 import { AutoReviewer } from '@/ai/auto-review.js';
-import {
-  agentProcesses,
-  endLeftoverAgents,
-  killAgentProcesses,
-  settingsJournal,
-  spawnAgentProcess,
-  useAgentJournal,
-} from '@/ai/provider.js';
+import { agentExited, agentRunning, killAgentProcesses, spawnAgentProcess } from '@/ai/provider.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { DataDirectoryLocked, lockDataDirectory } from '@/db/lock.js';
 import type { AiRunRow } from '@/db/schema.js';
@@ -434,9 +427,13 @@ describe('shutdown order', () => {
     await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 5_000 });
   });
 
-  it('ends the agents of a server that was killed outright before runs resume', async () => {
+  it('ends the agents of a server that was killed outright, with no help from the next one', async () => {
     const directory = temporaryDirectory();
-    const holder = spawnScript('tests/fixtures/agent-holder.mjs', { REVIEW_AGENT_DATA: directory });
+    const workDir = join(directory, 'ai-runs', 'run-1');
+    const holder = spawnScript('tests/fixtures/agent-holder.mjs', {
+      REVIEW_AGENT_DATA: directory,
+      REVIEW_AGENT_WORKDIR: workDir,
+    });
     const started = await waitForOutput(holder, /helper \d+\n/);
     const helper = Number(/helper (\d+)/.exec(started)?.[1]);
     const alive = (pid: number) => {
@@ -450,163 +447,48 @@ describe('shutdown order', () => {
     };
 
     expect(helper).toBeGreaterThan(0);
+    expect(agentRunning(workDir)).toBe(true);
 
-    // SIGKILL: no exit handler runs, so the agent and its helper outlive the server.
+    // SIGKILL: no exit handler runs. The agent's supervisor sees its lifeline close and ends the
+    // agent and the helper, which ignores SIGTERM, and with them the run's lock.
     holder.kill('SIGKILL');
     await new Promise((resolve) => holder.once('exit', resolve));
-    expect(alive(helper)).toBe(true);
-
-    // The next server, owning the same data, ends them before anything resumes.
-    const store = new Store(join(directory, 'state.sqlite'));
-
-    cleanups.push(() => store.close());
-
-    const { ended, verified } = await endLeftoverAgents(settingsJournal(store));
-
-    // The agent and its helper both carry the agent's marker.
-    expect(verified).toBe(true);
-    expect(ended).toBeGreaterThanOrEqual(2);
     await vi.waitFor(() => expect(alive(helper)).toBe(false), { timeout: 5_000 });
-    expect(settingsJournal(store).load()).toEqual([]);
+    expect(await agentExited(workDir, 5_000)).toBe(true);
   });
 
-  it('never touches a process that only mentions a recorded agent’s marker', async () => {
-    const marker = '00000000-0000-4000-8000-000000000000';
-    // In its command line and inside another variable's value, but not as its own entry.
-    const other = spawn(
+  it('says a run’s agent is running until it has exited, and never starts a second one', async () => {
+    const workDir = join(temporaryDirectory(), 'run-2');
+    const options = {
+      cwd: tmpdir(),
+      env: process.env,
+      signal: new AbortController().signal,
+      timeoutMs: 60_000,
+      lockFor: workDir,
+    };
+    // Ignores SIGTERM for a while, as an agent finishing its turn would.
+    const first = spawnAgentProcess(
       process.execPath,
-      ['-e', `setInterval(() => {}, 1000) // REVIEW_DESK_AGENT=${marker}`],
-      {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, NOTE: `REVIEW_DESK_AGENT=${marker}` },
-      },
+      [
+        '-e',
+        "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 700)); setInterval(() => {}, 1000)",
+      ],
+      options,
     );
 
-    cleanups.push(() => {
-      try {
-        process.kill(-other.pid!, 'SIGKILL');
-      } catch {
-        // Already gone.
-      }
-    });
+    await vi.waitFor(() => expect(agentRunning(workDir)).toBe(true));
 
-    let saved = [marker];
-    const journal = { load: () => saved, save: (markers: string[]) => (saved = markers) };
+    // A second agent for the same run refuses to start while the first holds the lock.
+    const second = spawnAgentProcess(process.execPath, ['-e', ''], options);
+    const refused = await second.done;
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(await endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
-    expect(() => process.kill(other.pid!, 0)).not.toThrow();
-    expect(saved).toEqual([]);
-  });
+    expect(refused.code).toBe(75);
+    expect(refused.stderr).toContain('An agent for this run is still running.');
 
-  it('keeps old agents on record, and says so, when processes cannot be listed', async () => {
-    let saved = ['00000000-0000-4000-8000-000000000001'];
-    const journal = { load: () => saved, save: (markers: string[]) => (saved = markers) };
-    const listing = vi.spyOn(agentProcesses, 'list').mockReturnValueOnce(null);
-
-    expect(await endLeftoverAgents(journal)).toEqual({ ended: 0, verified: false });
-    expect(saved).toEqual(['00000000-0000-4000-8000-000000000001']);
-
-    // Recording a new agent keeps the unchecked one on record.
-    const controller = new AbortController();
-
-    useAgentJournal(journal);
-    cleanups.push(() => useAgentJournal(null));
-
-    const agent = spawnAgentProcess(process.execPath, ['-e', ''], {
-      cwd: tmpdir(),
-      env: process.env,
-      signal: controller.signal,
-      timeoutMs: 60_000,
-    });
-
-    // Recorded before it starts.
-    expect(saved).toHaveLength(2);
-    await agent.done;
-
-    listing.mockRestore();
-    expect(await endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
-    expect(saved).toEqual([]);
-  });
-
-  it('does not start an agent it cannot record', async () => {
-    useAgentJournal({
-      load: () => [],
-      save: () => {
-        throw new Error('database is locked');
-      },
-    });
-    cleanups.push(() => useAgentJournal(null));
-
-    // The agent would leave a file behind if it ran.
-    const witness = join(temporaryDirectory(), 'started');
-
-    expect(() =>
-      spawnAgentProcess(
-        process.execPath,
-        ['-e', `require('fs').writeFileSync(${JSON.stringify(witness)}, 'ran')`],
-        {
-          cwd: tmpdir(),
-          env: process.env,
-          signal: new AbortController().signal,
-          timeoutMs: 60_000,
-        },
-      ),
-    ).toThrow('Could not record the agent before starting it: database is locked');
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(existsSync(witness)).toBe(false);
-  });
-
-  it('ends a marked helper that outlives its agent, and keeps the marker when it cannot tell', async () => {
-    let saved: string[] = [];
-    const journal = { load: () => saved, save: (markers: string[]) => (saved = markers) };
-    const lines: string[] = [];
-
-    useAgentJournal(journal);
-    cleanups.push(() => useAgentJournal(null));
-
-    // A helper in its own process group (the group kill misses it) that ignores SIGTERM.
-    const helperScript =
-      "const helper = require('child_process').spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\"], { stdio: 'ignore', detached: true }); helper.unref(); console.log(helper.pid);";
-    const agent = spawnAgentProcess(process.execPath, ['-e', helperScript], {
-      cwd: tmpdir(),
-      env: process.env,
-      signal: new AbortController().signal,
-      timeoutMs: 60_000,
-      onLine: (line) => lines.push(line),
-    });
-
-    await agent.done;
-
-    const helper = Number(lines[0]);
-    const alive = () => {
-      try {
-        process.kill(helper, 0);
-
-        return true;
-      } catch {
-        return false;
-      }
-    };
-
-    await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 5_000 });
-    await vi.waitFor(() => expect(saved).toEqual([]));
-
-    // When processes cannot be listed, the marker passes to the next start's check.
-    const listing = vi.spyOn(agentProcesses, 'list').mockReturnValue(null);
-    const quiet = spawnAgentProcess(process.execPath, ['-e', ''], {
-      cwd: tmpdir(),
-      env: process.env,
-      signal: new AbortController().signal,
-      timeoutMs: 60_000,
-    });
-
-    await quiet.done;
-    await vi.waitFor(() => expect(saved).toHaveLength(1));
-    listing.mockRestore();
-    expect(await endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
-    expect(saved).toEqual([]);
+    first.stop();
+    expect(agentRunning(workDir)).toBe(true);
+    expect(await agentExited(workDir, 5_000)).toBe(true);
+    await first.done.catch(() => undefined);
   });
 
   it('ends agents that are still running when the server exits', async () => {

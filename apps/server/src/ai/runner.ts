@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   codexBlocked,
@@ -38,14 +38,7 @@ import {
   fullReviewInput,
   sinceReviewInput,
 } from '@/ai/context.js';
-import {
-  endLeftoverAgents,
-  releaseAgentJournal,
-  settingsJournal,
-  useAgentJournal,
-  type AgentJournal,
-  type AgentProvider,
-} from '@/ai/provider.js';
+import { agentExited, agentLockPath, agentRunning, type AgentProvider } from '@/ai/provider.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
 import { draftChanged, planPreparation, preparationRevision } from '@/ai/preparation.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
@@ -114,10 +107,7 @@ export class AiRunner {
     if (this.opened || this.closing) return;
 
     this.opened = true;
-
-    // This process's agents are recorded from now on; those a previous server left running (it
-    // was killed outright) are ended before any run resumes (`agentsEnded`).
-    useAgentJournal(this.journal);
+    this.pruneAgentLocks();
 
     const unfinished = this.db
       .select()
@@ -157,16 +147,23 @@ export class AiRunner {
     return this.sync.store.db;
   }
 
-  /** Where this runner records its agents: the settings of its own database. */
-  private ownJournal: AgentJournal | null = null;
+  /** How long a resume waits for the run's previous agent to have exited before refusing. */
+  agentExitWaitMs = 6_000;
 
-  private get journal(): AgentJournal {
-    return (this.ownJournal ??= settingsJournal(this.sync.store));
-  }
+  /** Removes the agent locks of runs whose workspace is gone and whose agent is not running. */
+  private pruneAgentLocks(): void {
+    const directory = dirname(agentLockPath(join(this.workRoot, 'run')));
 
-  /** True once no agent a previous server left running is still running (see the provider). */
-  private async agentsEnded(): Promise<boolean> {
-    return (await endLeftoverAgents(this.journal)).verified;
+    if (!existsSync(directory)) return;
+
+    for (const name of readdirSync(directory)) {
+      if (!name.endsWith('.lock')) continue;
+
+      const workDir = join(this.workRoot, name.slice(0, -'.lock'.length));
+
+      if (!existsSync(workDir) && !agentRunning(workDir))
+        rmSync(join(directory, name), { force: true });
+    }
   }
 
   settings(): AiSettings {
@@ -616,9 +613,6 @@ export class AiRunner {
     }
 
     await Promise.allSettled(this.executions.values());
-
-    // The database closes after this; agents still settling leave their markers for the next start.
-    if (this.ownJournal) releaseAgentJournal(this.ownJournal);
   }
 
   private async execute(id: string): Promise<void> {
@@ -899,12 +893,13 @@ export class AiRunner {
     // A pause may still be waiting for the old process to flush and exit. Never overlap turns.
     if (this.active.has(id)) await this.executions.get(id);
 
-    // Nor with an agent a previous server left running: every resume, automatic or yours, waits.
-    if (!(await this.agentsEnded()))
+    // Nor with the run's previous agent, which a stop has signalled but which may not have exited
+    // yet, or which a server that was killed outright left behind: its lock says until it has.
+    if (!(await agentExited(join(this.workRoot, id), this.agentExitWaitMs)))
       throw new ReviewError(
         'AGENT_STILL_RUNNING',
         409,
-        'An AI agent from before Review Desk restarted may still be running. Try again shortly.',
+        'The previous AI agent for this review is still stopping. Try again shortly.',
       );
 
     await this.sync.refresh(row.prId, row.account);
@@ -949,8 +944,6 @@ export class AiRunner {
 
   async recover(account: string): Promise<void> {
     if (this.closing) return;
-    // An agent of a previous server may still be running: resume nothing until that is ruled out.
-    if (!(await this.agentsEnded())) return;
 
     const rows = this.db
       .select()
@@ -966,6 +959,10 @@ export class AiRunner {
       .all();
 
     for (const row of rows) {
+      // Its previous agent is still running (a server killed outright left it, and it has not
+      // ended yet): left paused, and the next sync tries again.
+      if (agentRunning(join(this.workRoot, row.id))) continue;
+
       try {
         await this.resume(account, row.id);
       } catch (error) {

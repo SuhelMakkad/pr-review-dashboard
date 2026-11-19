@@ -639,6 +639,57 @@ describe('GitLab merge request snapshots', () => {
     });
   });
 
+  it('refuses to mark a file viewed whose diff changed since you viewed it', async () => {
+    const { client, fake } = gitlab();
+    const viewed = await client.setFileViewed('MR_7_12', 'src/app.ts', false);
+
+    expect(viewed).toBeNull();
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+    const key = pr.files.find((file) => file.path === 'src/app.ts')!.viewedKey!;
+
+    fake.on('GET', `${MR}/diffs`, {
+      data: [
+        {
+          diff: `${APP_DIFF}+changed\n`,
+          new_path: 'src/app.ts',
+          old_path: 'src/app.ts',
+          new_file: false,
+          renamed_file: false,
+          deleted_file: false,
+        },
+      ],
+    });
+
+    await expect(
+      client.setFileViewed('MR_7_12', 'src/app.ts', true, { fileKey: key }),
+    ).rejects.toThrow('changed after you viewed it');
+    expect((await client.snapshot('MR_7_12', VIEWER, [])).files[0].viewerViewedState).toBe(
+      'UNVIEWED',
+    );
+  });
+
+  it('keys a diff GitLab leaves out to its revision, so a mark on it never outlasts a push', async () => {
+    const binary = {
+      diff: 'Binary files a/logo.png and b/logo.png differ\n',
+      new_path: 'logo.png',
+      old_path: 'logo.png',
+      new_file: false,
+      renamed_file: false,
+      deleted_file: false,
+    };
+    const first = gitlab({ diffs: [binary] });
+    const before = (await first.client.snapshot('MR_7_12', VIEWER, [])).files[0]!.viewedKey;
+    const second = gitlab({
+      diffs: [binary],
+      mr: { sha: HEAD3, diff_refs: { base_sha: BASE, start_sha: START, head_sha: HEAD3 } },
+    });
+    const after = (await second.client.snapshot('MR_7_12', VIEWER, [])).files[0]!.viewedKey;
+
+    expect(before).toBeDefined();
+    expect(after).not.toBe(before);
+  });
+
   it('detects changes per project and asks about running pipelines', async () => {
     const { client, fake } = gitlab();
 
