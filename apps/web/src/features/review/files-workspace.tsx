@@ -88,7 +88,13 @@ export function FilesWorkspace() {
   );
 }
 
-type ComposerState = (LineTarget & { path: string }) | { path: string; line: null } | null;
+/** The PR revision a diff was built from, as its manifest names it. */
+type Revision = { headOid: string; baseOid: string | null };
+
+/** What the composer is for, with the revision of the diff it was opened on. */
+type ComposerState =
+  | (((LineTarget & { path: string }) | { path: string; line: null }) & { revision?: Revision })
+  | null;
 
 function Workspace() {
   const { item } = useCurrentPull();
@@ -103,6 +109,8 @@ function Workspace() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [composer, setComposer] = useState<ComposerState>(null);
   const [composerError, setComposerError] = useState<string | null>(null);
+  /** Text kept from a composer closed because its diff changed, for the next one. */
+  const [keptBody, setKeptBody] = useState<string | null>(null);
   const [selection, setSelection] = useState<LineTarget | null>(null);
   const [replying, setReplying] = useState<string | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
@@ -286,10 +294,13 @@ function Workspace() {
       return;
     }
 
-    setRecoveredBody('');
+    setRecoveredBody(keptBody ?? '');
+    setKeptBody(null);
     setComposerError(null);
     setComposer(
-      selection ? { ...selection, path: current.path } : { path: current.path, line: null },
+      selection
+        ? { ...selection, path: current.path, revision: diff.data?.revision }
+        : { path: current.path, line: null, revision: diff.data?.revision },
     );
   };
 
@@ -501,6 +512,26 @@ function Workspace() {
     />
   );
 
+  // A line picked in one revision of the diff means another line in the next: when the diff
+  // changed while you wrote, the composer closes, keeps your text for the next one, and asks
+  // you to pick the line again.
+  const lineMoved = (open: NonNullable<ComposerState>, body: string) => {
+    const shown = diff.data?.revision;
+
+    if (open.line === null || !open.revision) return false;
+    if (shown?.headOid === open.revision.headOid && shown.baseOid === open.revision.baseOid)
+      return false;
+
+    setKeptBody(body);
+    setComposer(null);
+    setComposerError(null);
+    toast.error(
+      'The diff changed while you were writing. Select the line again; your text is kept.',
+    );
+
+    return true;
+  };
+
   const composerFor = (target: NonNullable<ComposerState>) => (
     <Composer
       label={target.line === null ? `Comment on ${target.path}` : `Comment on line ${target.line}`}
@@ -516,6 +547,8 @@ function Workspace() {
         keys: '$mod+Enter',
         variant: 'primary',
         run: async (body) => {
+          if (lineMoved(target, body)) return;
+
           try {
             await review.addComment.mutateAsync({
               path: target.path,
@@ -523,10 +556,8 @@ function Workspace() {
               side: target.line === null ? 'RIGHT' : target.side,
               startLine: target.line === null ? null : target.startLine,
               body,
-              // The lines are this diff's; the server refuses them for another revision.
-              ...(target.line !== null && diff.data?.revision
-                ? { revision: diff.data.revision }
-                : {}),
+              // The lines are the diff's the composer was opened on; refused for another revision.
+              ...(target.line !== null && target.revision ? { revision: target.revision } : {}),
             });
             setComposer(null);
             setComposerError(null);
@@ -540,9 +571,12 @@ function Workspace() {
         keys: '$mod+Alt+Enter',
         variant: 'secondary',
         run: async (body) => {
+          if (lineMoved(target, body)) return;
+
           try {
             await review.commentNow.mutateAsync({
-              expectedHeadOid: diff.data?.toOid ?? detail.data?.snapshot.headOid ?? '',
+              expectedHeadOid:
+                target.revision?.headOid ?? diff.data?.toOid ?? detail.data?.snapshot.headOid ?? '',
               path: target.path,
               line: target.line,
               side: target.line === null ? 'RIGHT' : target.side,
@@ -787,17 +821,19 @@ function Workspace() {
                       return;
                     }
 
-                    setRecoveredBody('');
+                    setRecoveredBody(keptBody ?? '');
+                    setKeptBody(null);
                     setComposerError(null);
-                    setComposer({ ...target, path: current.path });
+                    setComposer({ ...target, path: current.path, revision: diff.data?.revision });
                   }}
                   onCommentFile={() => {
                     if (locked) {
                       openActivity();
                       return;
                     }
-                    setRecoveredBody('');
-                    setComposer({ path: current.path, line: null });
+                    setRecoveredBody(keptBody ?? '');
+                    setKeptBody(null);
+                    setComposer({ path: current.path, line: null, revision: diff.data?.revision });
                   }}
                   onSelectLines={setSelection}
                 />
