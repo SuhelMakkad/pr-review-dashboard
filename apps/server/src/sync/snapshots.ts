@@ -24,7 +24,9 @@ export type CommitOutcome =
    * The PR was removed or dropped locally after this read started, so nothing was saved and the
    * stored `snapshot` (if any) can be older than this read.
    */
-  | { status: 'invalidated'; snapshot: PullRequestSnapshot | null };
+  | { status: 'invalidated'; snapshot: PullRequestSnapshot | null }
+  /** A state read found the stored PR already in that state; nothing needed saving. */
+  | { status: 'unchanged'; snapshot: PullRequestSnapshot };
 
 export interface CommitOptions {
   /** The change-detection fingerprint the read answers, or null to have the next sync check. */
@@ -67,8 +69,14 @@ function covers(
 }
 
 interface Marks {
-  /** The newest read saved. */
+  /** The newest full read saved. */
   committed: number;
+  /**
+   * The newest state saved (open, closed or merged), from a full read or from change detection.
+   * State is ordered apart from the rest: a full read that started before a closure was seen still
+   * brings its details (a final approval, say), but never its older state.
+   */
+  state: { generation: number; value: PullRequestSnapshot['state'] } | null;
   /** Reads that started before this may not be saved: the PR was removed or reduced since. */
   floor: number;
   /** Viewed marks newer than some read still in flight. */
@@ -108,7 +116,7 @@ export class SnapshotCoordinator {
     let marks = this.marks.get(key);
 
     if (!marks) {
-      marks = { committed: 0, floor: 0, viewed: [] };
+      marks = { committed: 0, state: null, floor: 0, viewed: [] };
       this.marks.set(key, marks);
     }
 
@@ -145,13 +153,18 @@ export class SnapshotCoordinator {
       });
 
       this.save(account, snapshot, options.fingerprint);
-      this.saved(marks, observation);
+      this.saved(marks, observation, snapshot.state);
 
       return { status: 'committed', snapshot };
     });
   }
 
-  /** Saves a closure or merge seen by change detection onto the latest stored row. */
+  /**
+   * Saves a state seen by change detection (closed or merged) onto the latest stored row, unless a
+   * read that started later saw the PR since. Recorded even when nothing is stored or the stored
+   * row already has that state: a full read that started earlier, such as a first add still in
+   * flight, then saves its details with this state rather than the one it saw.
+   */
   commitState(observation: Observation, state: PullRequestSnapshot['state']): CommitOutcome {
     const { account, id } = observation;
 
@@ -161,19 +174,18 @@ export class SnapshotCoordinator {
       const refusal = this.refusal(observation, marks);
 
       if (refusal) return { status: refusal, snapshot: latest };
+      if ((marks.state?.generation ?? 0) > observation.generation)
+        return { status: 'superseded', snapshot: latest };
 
-      // Nothing to close, but reads that started earlier and saw it open are older than this.
-      if (!latest) {
-        this.saved(marks, observation);
+      this.savedState(marks, observation, state);
 
-        return { status: 'invalidated', snapshot: null };
-      }
+      if (!latest) return { status: 'invalidated', snapshot: null };
+      if (latest.state === state) return { status: 'unchanged', snapshot: latest };
 
       const snapshot = { ...latest, state };
 
       this.store.saveSnapshot(account, snapshot);
       this.store.recordActivity(account, extractActivity(snapshot, account, this.teams(account)));
-      this.saved(marks, observation);
 
       return { status: 'committed', snapshot };
     });
@@ -257,12 +269,26 @@ export class SnapshotCoordinator {
   }
 
   /** Once the save commits: newer than any read started before it, and older marks are in it. */
-  private saved(marks: Marks, observation: Observation): void {
+  private saved(marks: Marks, observation: Observation, state: PullRequestSnapshot['state']): void {
     const { generation } = observation;
 
     this.store.afterCommit(() => {
       marks.committed = Math.max(marks.committed, generation);
       marks.viewed = marks.viewed.filter((mark) => mark.since > generation);
+    });
+    this.savedState(marks, observation, state);
+  }
+
+  /** Once the save commits: the PR's state as of this read, unless a newer one is known. */
+  private savedState(
+    marks: Marks,
+    observation: Observation,
+    value: PullRequestSnapshot['state'],
+  ): void {
+    const { generation } = observation;
+
+    this.store.afterCommit(() => {
+      if ((marks.state?.generation ?? 0) < generation) marks.state = { generation, value };
     });
   }
 
@@ -289,7 +315,13 @@ export class SnapshotCoordinator {
             return mark ? { ...file, viewerViewedState: mark.state } : file;
           });
 
-    return { ...snapshot, headObservedAt, files };
+    // A state seen after this read started (a closure found by change detection) is newer.
+    const state =
+      marks.state && marks.state.generation > observation.generation
+        ? marks.state.value
+        : snapshot.state;
+
+    return { ...snapshot, state, headObservedAt, files };
   }
 
   /** The snapshot with its sync bookkeeping, activity history and triage wake-ups. */

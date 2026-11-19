@@ -9,10 +9,12 @@ import { unusedPort } from '@test/fixtures/ai/restart-helper.js';
 import { createApp } from '@/app.js';
 import { AutoReviewer } from '@/ai/auto-review.js';
 import {
-  endLeftoverAgentGroups,
+  agentProcesses,
+  endLeftoverAgents,
   killAgentProcesses,
   settingsJournal,
   spawnAgentProcess,
+  useAgentJournal,
 } from '@/ai/provider.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { DataDirectoryLocked, lockDataDirectory } from '@/db/lock.js';
@@ -458,13 +460,18 @@ describe('shutdown order', () => {
     const store = new Store(join(directory, 'state.sqlite'));
 
     cleanups.push(() => store.close());
-    expect(endLeftoverAgentGroups(settingsJournal(store))).toBe(1);
+
+    const { ended, verified } = endLeftoverAgents(settingsJournal(store));
+
+    // The agent and its helper both carry the agent's marker.
+    expect(verified).toBe(true);
+    expect(ended).toBeGreaterThanOrEqual(2);
     await vi.waitFor(() => expect(alive(helper)).toBe(false), { timeout: 5_000 });
     expect(settingsJournal(store).load()).toEqual([]);
   });
 
-  it('leaves alone a process that was later given a recorded agent’s pid', async () => {
-    // A process in its own group, standing in for whatever now has the recorded pid.
+  it('never touches a process without a recorded agent’s marker', async () => {
+    // Whatever might now have an old agent's pid or process group: it carries no marker.
     const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
       detached: true,
       stdio: 'ignore',
@@ -478,12 +485,41 @@ describe('shutdown order', () => {
       }
     });
 
-    let saved = [{ group: other.pid!, startedAt: 'Thu Jan  1 00:00:00 1970' }];
-    const journal = { load: () => saved, save: (records: typeof saved) => (saved = records) };
+    let saved = ['00000000-0000-4000-8000-000000000000'];
+    const journal = { load: () => saved, save: (markers: string[]) => (saved = markers) };
 
-    expect(endLeftoverAgentGroups(journal)).toBe(0);
-    expect(other.exitCode).toBeNull();
+    expect(endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
     expect(() => process.kill(other.pid!, 0)).not.toThrow();
+    expect(saved).toEqual([]);
+  });
+
+  it('keeps old agents on record, and says so, when processes cannot be listed', async () => {
+    let saved = ['00000000-0000-4000-8000-000000000001'];
+    const journal = { load: () => saved, save: (markers: string[]) => (saved = markers) };
+    const listing = vi.spyOn(agentProcesses, 'list').mockReturnValueOnce(null);
+
+    expect(endLeftoverAgents(journal)).toEqual({ ended: 0, verified: false });
+    expect(saved).toEqual(['00000000-0000-4000-8000-000000000001']);
+
+    // Recording a new agent keeps the unchecked one on record.
+    const controller = new AbortController();
+
+    useAgentJournal(journal);
+    cleanups.push(() => useAgentJournal(null));
+
+    const agent = spawnAgentProcess(process.execPath, ['-e', ''], {
+      cwd: tmpdir(),
+      env: process.env,
+      signal: controller.signal,
+      timeoutMs: 60_000,
+    });
+
+    // Recorded before it starts.
+    expect(saved).toHaveLength(2);
+    await agent.done;
+
+    listing.mockRestore();
+    expect(endLeftoverAgents(journal)).toEqual({ ended: 0, verified: true });
     expect(saved).toEqual([]);
   });
 

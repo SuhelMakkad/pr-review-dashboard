@@ -1158,17 +1158,19 @@ export class OperationQueue {
 
         const viewedState = pr?.files.find((file) => file.path === step.args[1])?.viewerViewedState;
 
-        // A file shown as changed since viewed was viewed, then changed: sending the mark again
-        // would mark a diff nobody has seen, so it counts as done.
         confirmed =
           step.method === 'setFileViewed'
-            ? step.args[2]
-              ? viewedState === 'VIEWED' || viewedState === 'DISMISSED'
-              : viewedState === 'UNVIEWED'
+            ? viewedState === (step.args[2] ? 'VIEWED' : 'UNVIEWED')
             : pr?.threads.find((thread) => thread.id === step.args[0])?.isResolved === step.args[1];
 
+        // A file shown as changed since viewed was viewed and then changed, by this mark or an
+        // earlier one: sending it again could mark a diff nobody has seen, and assuming it was sent
+        // could lose it. It stays unconfirmed for you to check.
+        const ambiguous =
+          step.method === 'setFileViewed' && step.args[2] && viewedState === 'DISMISSED';
+
         // These desired-state mutations are safe to repeat if GitHub has not reached that state.
-        if (!confirmed) {
+        if (!confirmed && !ambiguous) {
           step.uncertain = false;
           this.save({ ...row, status: 'queued', error: null });
           return;

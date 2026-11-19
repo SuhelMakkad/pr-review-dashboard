@@ -582,7 +582,7 @@ describe('GitLab merge request snapshots', () => {
     expect(fake.writes()).toEqual([]);
   });
 
-  it('cannot say which revision it marked viewed when commits land during the write', async () => {
+  it('says only which diff it marked viewed when commits land during the write', async () => {
     const { client, fake } = gitlab();
     let reads = 0;
 
@@ -599,7 +599,11 @@ describe('GitLab merge request snapshots', () => {
           };
     });
 
-    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toBeNull();
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toEqual({
+      headOid: HEAD2,
+      baseOid: null,
+      fileKey: expect.any(String),
+    });
     expect(reads).toBe(2);
   });
 
@@ -615,18 +619,24 @@ describe('GitLab merge request snapshots', () => {
         : { data: mergeRequest() };
     });
 
-    // Succeeds, so the outbox never sends it again; only the revision is unknown.
-    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toBeNull();
+    // Succeeds, so the outbox never sends it again; the diff it marked is still known.
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toMatchObject({
+      baseOid: null,
+      fileKey: expect.any(String),
+    });
 
     const pr = await client.snapshot('MR_7_12', VIEWER, []);
 
     expect(pr.files.find((file) => file.path === 'src/app.ts')?.viewerViewedState).toBe('VIEWED');
   });
 
-  it('cannot say which revision it marked viewed while GitLab has no diff refs yet', async () => {
+  it('says only which diff it marked viewed while GitLab has no diff refs yet', async () => {
     const { client } = gitlab({ mr: { diff_refs: null } });
 
-    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toBeNull();
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toMatchObject({
+      baseOid: null,
+      fileKey: expect.any(String),
+    });
   });
 
   it('detects changes per project and asks about running pipelines', async () => {

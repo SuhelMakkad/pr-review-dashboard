@@ -28,6 +28,8 @@ function setup(feeds: Partial<Record<FeedSource, string[]>> = { requested: ['pr-
     fingerprint: string;
     /** Set to make the forge identify each file's diff, as GitLab does. */
     fileKey?: string;
+    /** Stands for the PR's details (reviews, description and so on). */
+    title?: string;
   } = {
     headOid: 'head-1',
     baseOid: 'base-1',
@@ -60,6 +62,7 @@ function setup(feeds: Partial<Record<FeedSource, string[]>> = { requested: ['pr-
       number: 2,
       url: 'https://github.com/acme/repo/pull/2',
       sources,
+      ...(seen.title ? { title: seen.title } : {}),
       headOid: seen.headOid,
       baseOid: seen.baseOid,
       headObservedAt: new Date().toISOString(),
@@ -301,6 +304,87 @@ describe('saving PR snapshots in order', () => {
     await expect(adding).rejects.toMatchObject({ code: 'PR_CLOSED' });
     expect(store.manualAddedAt('me', 'pr-2')).toBeNull();
     expect(store.snapshot('me', 'pr-2')).toBeNull();
+  });
+
+  it('closes a PR whose first add was saved while change detection was in flight', async () => {
+    const feeds: Partial<Record<FeedSource, string[]>> = {};
+    const { github, store, service, remote, holdNextRead, readsStarted } = setup(feeds);
+
+    await service.sync();
+
+    const release = holdNextRead();
+    const adding = service.track('me', 'acme/repo', 2);
+
+    await readsStarted(1);
+    feeds.requested = ['pr-2'];
+    remote.state = 'MERGED';
+
+    // Detection starts after the add's read and finishes after the add is saved.
+    const detect = vi.mocked(github.detect).getMockImplementation()!;
+    let detected!: () => void;
+    const held = new Promise<void>((resolve) => (detected = resolve));
+
+    vi.mocked(github.detect).mockImplementationOnce(async (ids) => {
+      await held;
+
+      return detect(ids);
+    });
+
+    const detections = vi.mocked(github.detect).mock.calls.length;
+    const syncing = service.sync();
+
+    await vi.waitFor(() => expect(vi.mocked(github.detect).mock.calls.length).toBe(detections + 1));
+    release();
+    expect((await adding).snapshot.state).toBe('OPEN');
+
+    detected();
+    await syncing;
+    expect(store.snapshot('me', 'pr-2')?.state).toBe('MERGED');
+    expect(service.detail('pr-2')).toBeNull();
+  });
+
+  it('keeps what an earlier full read saw when change detection saved the merge first', async () => {
+    const { store, service, remote, holdNextRead, readsStarted } = setup();
+
+    await service.sync();
+
+    // The PR is merged with final details; a refresh reads them, but finishes late.
+    remote.title = 'Final title after the last review';
+    remote.state = 'MERGED';
+
+    const release = holdNextRead();
+    const refreshing = service.refresh('pr-2');
+
+    await readsStarted(2);
+    await service.sync();
+    expect(store.snapshot('me', 'pr-2')?.state).toBe('MERGED');
+
+    release();
+    await refreshing;
+    expect(store.snapshot('me', 'pr-2')).toMatchObject({
+      title: 'Final title after the last review',
+      state: 'MERGED',
+    });
+  });
+
+  it('never reopens a PR from a read that started before its merge was seen', async () => {
+    const { store, service, remote, holdNextRead, readsStarted } = setup();
+
+    await service.sync();
+
+    // The refresh reads it open; detection, later, sees it merged and saves that first.
+    const release = holdNextRead();
+    const refreshing = service.refresh('pr-2');
+
+    await readsStarted(2);
+    remote.state = 'MERGED';
+    remote.title = 'Details read while still open';
+    await service.sync();
+    release();
+
+    expect(await refreshing).toBeNull();
+    expect(store.snapshot('me', 'pr-2')?.state).toBe('MERGED');
+    expect(service.list().items).toHaveLength(0);
   });
 
   it('waits for every PR of a sync, even when saving one of them fails', async () => {

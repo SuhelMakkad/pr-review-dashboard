@@ -528,9 +528,13 @@ export function createGitLabWriter(
 
       context.markViewed(prId, path, key);
 
-      const revision = after ? markedRevision(before, after) : null;
+      // The diff it marked is known either way; the head and base only when both reads agree.
+      const revision = (after ? markedRevision(before, after) : null) ?? {
+        headOid: before.sha,
+        baseOid: null,
+      };
 
-      return revision ? { ...revision, fileKey: key } : null;
+      return { ...revision, fileKey: key };
     },
 
     async addConversationComment(prId, body) {

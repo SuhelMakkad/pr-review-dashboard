@@ -717,7 +717,7 @@ describe('durable GitHub operations', () => {
     ]);
   });
 
-  it('never sends an interrupted viewed mark again onto a file that changed since', async () => {
+  it('leaves an interrupted viewed mark unconfirmed when the file changed since', async () => {
     const { queue, sync, github, store, pr } = await setup();
     const pull = pr();
     const path = pull.files[0].path;
@@ -732,8 +732,8 @@ describe('durable GitHub operations', () => {
       .where(eq(githubOperations.id, operation.id))
       .get()!;
 
-    // The server stopped after the mark was sent but before its receipt was saved, and the file
-    // changed afterwards: GitHub now shows it as changed since viewed.
+    // The server stopped with the mark possibly sent, and the file now shows as changed since
+    // viewed: by this mark or an earlier one, nothing can tell.
     store.db
       .update(githubOperations)
       .set({
@@ -762,7 +762,11 @@ describe('durable GitHub operations', () => {
 
     cleanups.push(() => restarted.close());
     restarted.open();
-    await completed(restarted, operation.id);
+
+    // Neither sent again (it could mark a diff nobody has seen) nor taken as done (it could be lost).
+    const recovered = await completed(restarted, operation.id, 'needs_attention');
+
+    expect(recovered.error?.code).toBe('UNCONFIRMED');
     expect(github.writes.filter((write) => write.op === 'MarkFileViewed')).toEqual([]);
   });
 

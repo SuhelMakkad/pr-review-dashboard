@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AiEffort, AiProvider, CodexAccountStatus } from '@review-desk/shared/ai';
 import { redact } from '@/github/errors.js';
@@ -119,109 +120,144 @@ export interface AgentProcess {
 /** Process groups of agents still running, so that exiting the server can end them too. */
 const liveGroups = new Set<number>();
 
-/** An agent process group, as recorded so that a later server process can end it. */
-export interface AgentGroupRecord {
-  /** The process group id, which is the agent's own pid. */
-  group: number;
-  /** When the agent started, as `ps` reports it: tells it apart from a later process given its pid. */
-  startedAt: string;
+/**
+ * Every agent gets a random marker in its environment, which the processes it starts inherit. A
+ * marker identifies those processes beyond doubt, where a pid or process group id can belong to
+ * an unrelated process once the agent is gone.
+ */
+const MARKER_VARIABLE = 'REVIEW_DESK_AGENT';
+
+/**
+ * The markers of agents that may still be running, kept in the data directory, so a server that
+ * was killed outright lets its successor end them.
+ */
+export interface AgentJournal {
+  load(): string[];
+  save(markers: string[]): void;
 }
 
-/** Where agent process groups are recorded, so a server that crashed can end them on its next start. */
-export interface AgentGroupJournal {
-  load(): AgentGroupRecord[];
-  save(records: AgentGroupRecord[]): void;
-}
-
-const JOURNAL_KEY = 'agent-groups';
+const JOURNAL_KEY = 'agent-markers';
 
 /** A journal kept in the settings of the data directory's database. */
 export function settingsJournal(store: {
   getSetting<T>(key: string): T | null;
   setSetting(key: string, value: unknown): void;
-}): AgentGroupJournal {
+}): AgentJournal {
   return {
-    load: () => store.getSetting<AgentGroupRecord[]>(JOURNAL_KEY) ?? [],
-    save: (records) => store.setSetting(JOURNAL_KEY, records),
+    load: () => store.getSetting<string[]>(JOURNAL_KEY) ?? [],
+    save: (markers) => store.setSetting(JOURNAL_KEY, markers),
   };
 }
 
-let journal: AgentGroupJournal | null = null;
-const recorded = new Map<number, AgentGroupRecord>();
+let journal: AgentJournal | null = null;
+/** Markers of this process's agents that are still running. */
+const recorded = new Set<string>();
+/** Markers of a previous process's agents that could not be checked yet; kept until they are. */
+let carried: string[] = [];
 
 /** Records the agents this process starts from now on in `next` (null stops recording). */
-export function useAgentGroupJournal(next: AgentGroupJournal | null): void {
+export function useAgentJournal(next: AgentJournal | null): void {
   journal = next;
 }
 
 function persist(): void {
   try {
-    journal?.save([...recorded.values()]);
+    journal?.save([...carried, ...recorded]);
   } catch {
     // The database may already be closed while the process exits; the next start checks anyway.
   }
 }
 
-const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/;
+/** A process and the environment it was started with, as text to search for a marker. */
+export interface ProcessEnvironment {
+  pid: number;
+  environment: string;
+}
 
-/** Every process with its group and start time, as `ps` reports them. */
-function processTable(): { pid: number; group: number; startedAt: string }[] {
-  const result = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,lstart='], {
+/** Every process of this user with its environment, or null when they cannot be listed. */
+function listProcessEnvironments(): ProcessEnvironment[] | null {
+  if (process.platform === 'linux') {
+    try {
+      return readdirSync('/proc').flatMap((name) => {
+        if (!/^\d+$/.test(name)) return [];
+
+        try {
+          const raw = readFileSync(`/proc/${name}/environ`, 'utf8');
+
+          return [{ pid: Number(name), environment: ` ${raw.split('\0').join(' ')} ` }];
+        } catch {
+          // Another user's process, or one that just ended.
+          return [];
+        }
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  // macOS and the BSDs print the environment after the command line with -E.
+  const result = spawnSync('ps', ['-A', '-E', '-ww', '-o', 'pid=,command='], {
     encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
+    maxBuffer: 64 * 1024 * 1024,
   });
 
-  if (result.status !== 0) return [];
+  if (result.status !== 0 || result.error) return null;
 
   return result.stdout.split('\n').flatMap((line) => {
-    const match = PS_LINE.exec(line);
+    const match = /^\s*(\d+)\s(.*)$/.exec(line);
 
-    return match ? [{ pid: Number(match[1]), group: Number(match[2]), startedAt: match[3]! }] : [];
+    return match ? [{ pid: Number(match[1]), environment: ` ${match[2]} ` }] : [];
   });
 }
 
-/** When `pid` started, as `ps` reports it, or null when it is gone. */
-function startTime(pid: number): string | null {
-  const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' });
-  const text = result.status === 0 ? result.stdout.trim() : '';
-
-  return text || null;
-}
+/** How processes are listed; replaceable in tests. */
+export const agentProcesses = { list: listProcessEnvironments };
 
 /**
- * Ends the agent process groups a previous server process left running, as recorded in `source`,
- * and forgets them. A server killed outright (SIGKILL, a crash) cannot end its agents, and its
- * successor must not resume a run in a workspace an old agent still writes to; so call this once
- * the process owns the data directory and before any run resumes. A group whose leader is alive
- * with another start time belongs to a later process that was given the same pid, and is left
- * alone. A group whose leader has exited holds only what that agent started: a group id is not
- * given out again while any member of the group lives. Returns how many groups it ended.
+ * Ends the agents a previous server process left running, as recorded in `source`: every process
+ * whose environment carries one of their markers. A server killed outright (SIGKILL, a crash)
+ * cannot end its agents, and its successor must not resume a run while an old agent still works
+ * on it; so call this once the process owns the data directory, and resume nothing while it
+ * returns `verified: false`. Processes without a marker are never touched. When processes cannot
+ * be listed, the markers are kept and the next call tries again.
  */
-export function endLeftoverAgentGroups(source: AgentGroupJournal): number {
-  const records = source.load();
+export function endLeftoverAgents(source: AgentJournal): { ended: number; verified: boolean } {
+  const markers = [...new Set([...carried, ...source.load()])].filter(
+    (marker) => !recorded.has(marker),
+  );
 
-  if (records.length === 0) return 0;
+  if (markers.length === 0) {
+    carried = [];
 
-  const table = processTable();
+    return { ended: 0, verified: true };
+  }
+
+  const processes = agentProcesses.list();
+
+  if (!processes) {
+    carried = markers;
+
+    return { ended: 0, verified: false };
+  }
+
+  const tags = markers.map((marker) => ` ${MARKER_VARIABLE}=${marker} `);
   let ended = 0;
 
-  for (const record of records) {
-    const members = table.filter((entry) => entry.group === record.group);
-    const leader = members.find((entry) => entry.pid === record.group);
-
-    if (members.length === 0 || (leader && leader.startedAt !== record.startedAt)) continue;
+  for (const entry of processes) {
+    if (entry.pid === process.pid || !tags.some((tag) => entry.environment.includes(tag))) continue;
 
     try {
-      process.kill(-record.group, 'SIGKILL');
+      process.kill(entry.pid, 'SIGKILL');
       ended++;
     } catch {
       // It ended meanwhile.
     }
   }
 
-  source.save([]);
+  carried = [];
+  source.save([...recorded]);
 
-  return ended;
+  return { ended, verified: true };
 }
 
 /**
@@ -239,8 +275,6 @@ export function killAgentProcesses(): void {
   }
 
   liveGroups.clear();
-  recorded.clear();
-  persist();
 }
 
 /**
@@ -253,25 +287,28 @@ export function spawnAgentProcess(
   args: string[],
   options: ProcessOptions,
 ): AgentProcess {
+  // Recorded before the agent starts, so that if this server is killed outright at any moment
+  // after, the next one ends the agent before it resumes the run (see `endLeftoverAgents`).
+  const marker = randomUUID();
+
+  recorded.add(marker);
+  persist();
+
   const child = spawn(command, args, {
     cwd: options.cwd,
-    env: options.env,
+    env: { ...options.env, [MARKER_VARIABLE]: marker },
     detached: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const group = child.pid;
+  const forget = () => {
+    if (recorded.delete(marker)) persist();
+  };
+
+  child.once('error', forget);
 
   if (group) {
     liveGroups.add(group);
-
-    // Recorded in the data directory too, so that if this server is killed outright, the next
-    // one ends the agent before it resumes the run (see `endLeftoverAgentGroups`).
-    const startedAt = journal ? startTime(group) : null;
-
-    if (startedAt) {
-      recorded.set(group, { group, startedAt });
-      persist();
-    }
 
     // The agent is gone; anything still in its group is a stray of this run, which ends with it.
     // The group stays registered until then, so exiting the server never misses one.
@@ -283,8 +320,7 @@ export function spawnAgentProcess(
       }
 
       liveGroups.delete(group);
-
-      if (recorded.delete(group)) persist();
+      forget();
     });
   }
 

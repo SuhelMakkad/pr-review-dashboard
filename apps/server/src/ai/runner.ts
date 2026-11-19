@@ -39,9 +39,9 @@ import {
   sinceReviewInput,
 } from '@/ai/context.js';
 import {
-  endLeftoverAgentGroups,
+  endLeftoverAgents,
   settingsJournal,
-  useAgentGroupJournal,
+  useAgentJournal,
   type AgentProvider,
 } from '@/ai/provider.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
@@ -113,12 +113,10 @@ export class AiRunner {
 
     this.opened = true;
 
-    // Agents a previous server left running (it was killed outright) end before any run resumes
-    // in their workspace; this process's agents are recorded from now on.
-    const journal = settingsJournal(this.sync.store);
-
-    endLeftoverAgentGroups(journal);
-    useAgentGroupJournal(journal);
+    // Agents a previous server left running (it was killed outright) end before any run resumes;
+    // this process's agents are recorded from now on.
+    endLeftoverAgents(this.journal);
+    useAgentJournal(this.journal);
 
     const unfinished = this.db
       .select()
@@ -156,6 +154,10 @@ export class AiRunner {
 
   private get db() {
     return this.sync.store.db;
+  }
+
+  private get journal() {
+    return settingsJournal(this.sync.store);
   }
 
   settings(): AiSettings {
@@ -927,6 +929,8 @@ export class AiRunner {
 
   async recover(account: string): Promise<void> {
     if (this.closing) return;
+    // An agent of a previous server may still be running: resume nothing until that is ruled out.
+    if (!endLeftoverAgents(this.journal).verified) return;
 
     const rows = this.db
       .select()

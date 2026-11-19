@@ -407,7 +407,7 @@ export class SyncService {
         );
 
       // A newer read found it merged or closed: nothing to review, and nothing is added.
-      if (outcome.status === 'superseded' && outcome.snapshot?.state !== 'OPEN')
+      if (outcome.snapshot?.state !== 'OPEN')
         throw new ReviewError(
           'PR_CLOSED',
           409,
@@ -565,14 +565,12 @@ export class SyncService {
         }
 
         if (result && result.state !== 'OPEN') {
-          // Closure or merge is confirmed by GitHub, so the PR can leave the list. Recorded too when
-          // nothing is stored yet, so a read of it still open (a first add) cannot save it; a PR
-          // already stored as closed needs nothing.
-          if (cached || !this.store.snapshot(account.login, id)) {
-            const outcome = this.snapshots.commitState(observations.get(id)!, result.state!);
+          // Closure or merge is confirmed by GitHub, so the PR can leave the list. Recorded also
+          // when nothing is stored yet or the row is newer than this sync's list of open PRs (a
+          // first add that finished meanwhile), so neither keeps it open.
+          const outcome = this.snapshots.commitState(observations.get(id)!, result.state!);
 
-            if (outcome.status === 'committed') changed.add(id);
-          }
+          if (outcome.status === 'committed') changed.add(id);
 
           continue;
         }
