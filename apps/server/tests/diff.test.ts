@@ -142,3 +142,48 @@ describe('review diffs', () => {
     close();
   });
 });
+
+describe('viewed keys in diff manifests', () => {
+  it('names the diff the manifest renders, and shows viewed state only for that diff', async () => {
+    const { diffs, github, byNumber, close } = await demo();
+
+    try {
+      const pr = byNumber(1839).snapshot;
+      const path = pr.files[0]!.path;
+      const pullFiles = github.pullFiles.bind(github);
+
+      // The forge keys each file's diff (as GitLab does); the manifest is built and cached for A.
+      github.pullFiles = async (...args) =>
+        (await pullFiles(...args)).map((file) => ({ ...file, viewedKey: `rendered:${file.path}` }));
+
+      const first = await diffs.manifest(
+        { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: `rendered:${file.path}` })) },
+        'full',
+        null,
+      );
+
+      expect(first.revision).toEqual({ headOid: pr.headOid, baseOid: pr.baseOid ?? null });
+      expect(first.files.find((file) => file.path === path)?.viewedKey).toBe(`rendered:${path}`);
+
+      // The stored PR now carries another diff's key and its viewed state, under the same head.
+      const later = await diffs.manifest(
+        {
+          ...pr,
+          files: pr.files.map((file) => ({
+            ...file,
+            viewedKey: `newer:${file.path}`,
+            viewerViewedState: 'VIEWED' as const,
+          })),
+        },
+        'full',
+        null,
+      );
+      const file = later.files.find((candidate) => candidate.path === path)!;
+
+      expect(file.viewedKey).toBe(`rendered:${path}`);
+      expect(file.viewed).toBe('UNVIEWED');
+    } finally {
+      close();
+    }
+  });
+});

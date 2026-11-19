@@ -185,8 +185,27 @@ class FakeGitLab implements GitLabTransport {
 }
 
 const MR = 'projects/7/merge_requests/12';
+const MR_BY_PATH = 'projects/acme%2Fplatform%2Fweb/merge_requests/12';
 
 function gitlab(overrides: { mr?: Record<string, unknown>; diffs?: unknown[] } = {}) {
+  const diffs = overrides.diffs ?? [
+    {
+      diff: APP_DIFF,
+      new_path: 'src/app.ts',
+      old_path: 'src/app.ts',
+      new_file: false,
+      renamed_file: false,
+      deleted_file: false,
+    },
+    {
+      diff: '@@ -0,0 +1,2 @@\n+a\n+b\n',
+      new_path: 'src/new.ts',
+      old_path: 'src/new.ts',
+      new_file: true,
+      renamed_file: false,
+      deleted_file: false,
+    },
+  ];
   const fake = new FakeGitLab()
     .on('GET', 'user', { data: users.rev })
     .on('GET', MR, { data: mergeRequest(overrides.mr) })
@@ -206,26 +225,10 @@ function gitlab(overrides: { mr?: Record<string, unknown>; diffs?: unknown[] } =
         { id: 1, head_commit_sha: HEAD1, created_at: at(0) },
       ],
     })
-    .on('GET', `${MR}/diffs`, {
-      data: overrides.diffs ?? [
-        {
-          diff: APP_DIFF,
-          new_path: 'src/app.ts',
-          old_path: 'src/app.ts',
-          new_file: false,
-          renamed_file: false,
-          deleted_file: false,
-        },
-        {
-          diff: '@@ -0,0 +1,2 @@\n+a\n+b\n',
-          new_path: 'src/new.ts',
-          old_path: 'src/new.ts',
-          new_file: true,
-          renamed_file: false,
-          deleted_file: false,
-        },
-      ],
-    })
+    .on('GET', `${MR}/diffs`, { data: diffs })
+    // The same merge request by its project path, as listing its files reads it.
+    .on('GET', MR_BY_PATH, { data: mergeRequest(overrides.mr) })
+    .on('GET', `${MR_BY_PATH}/diffs`, { data: diffs })
     .on('GET', `${MR}/draft_notes`, {
       data: [
         {
@@ -688,6 +691,15 @@ describe('GitLab merge request snapshots', () => {
 
     expect(before).toBeDefined();
     expect(after).not.toBe(before);
+  });
+
+  it('keys the files it lists like the snapshot does, from the same diffs', async () => {
+    const { client } = gitlab();
+    const listed = await client.pullFiles('acme/platform/web', 12);
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(listed.map((file) => file.viewedKey)).toEqual(pr.files.map((file) => file.viewedKey));
+    expect(listed[0]?.viewedKey).toEqual(expect.any(String));
   });
 
   it('detects changes per project and asks about running pipelines', async () => {

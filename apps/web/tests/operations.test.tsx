@@ -151,6 +151,50 @@ it('names the diff the workspace renders, even when the PR detail is a revision 
   }
 });
 
+it('leaves a view refreshed to a newer diff alone when an older mark fails', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  let reject!: (error: Error) => void;
+
+  vi.stubGlobal('fetch', (path: string) => {
+    if (path.includes('/viewed')) return new Promise<Response>((_, fail) => (reject = fail));
+    if (path.startsWith('/api/operations'))
+      return Promise.resolve(response({ items: [], nextCursor: null }));
+
+    return Promise.resolve(response({ operation: { id: 'viewed' } }));
+  });
+
+  const key = ['diff', 'pr-one', 'full'];
+  const revision = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
+
+  client.setQueryData(key, {
+    revision: revision('a'),
+    files: [{ path: 'a.ts', viewed: 'VIEWED', viewedKey: 'diff-a' }],
+  });
+
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
+
+  try {
+    const target = viewedTarget(client.getQueryData<DiffManifest>(key)!, 'a.ts');
+
+    act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: false, target }));
+    await waitFor(() => expect(reject).toBeTypeOf('function'));
+
+    // The view refreshes to the next revision, where the file changed since you viewed it.
+    client.setQueryData(key, {
+      revision: revision('b'),
+      files: [{ path: 'a.ts', viewed: 'DISMISSED', viewedKey: 'diff-b' }],
+    });
+    await act(async () => reject(new Error('Unmark rejected')));
+
+    expect(client.getQueryData<DiffManifest>(key)?.files[0].viewed).toBe('DISMISSED');
+  } finally {
+    client.clear();
+  }
+});
+
 it('does not let an older viewed failure roll back a newer choice for the same file', async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const writes: { resolve: (response: Response) => void; reject: (error: Error) => void }[] = [];

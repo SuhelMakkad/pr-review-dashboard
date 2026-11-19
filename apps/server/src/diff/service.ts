@@ -43,6 +43,7 @@ function toDiffFile(file: RemoteFile, viewed?: DiffFile['viewed']): DiffFile {
     tooLarge: file.tooLarge || (!file.patch && changedLines > 0) ? true : undefined,
     generated: isGeneratedPath(file.path) || undefined,
     viewed,
+    ...(file.viewedKey ? { viewedKey: file.viewedKey } : {}),
   };
 }
 
@@ -64,17 +65,39 @@ export class DiffService {
     return manifest;
   }
 
+  /**
+   * The manifest with the PR's viewed state, for the revision it was built for (its cache key holds
+   * the same head and base). Where the forge keys each file's diff, a file's key comes from the
+   * diff the manifest renders, and the PR's viewed state shows only where it is about that diff.
+   */
   private withViewed(manifest: DiffManifest, pr: PullRequestSnapshot): DiffManifest {
     const files = new Map(pr.files.map((file) => [file.path, file]));
 
     return {
       ...manifest,
       revision: { headOid: pr.headOid, baseOid: pr.baseOid ?? null },
-      files: manifest.files.map((file) => ({
-        ...file,
-        viewed: files.get(file.path)?.viewerViewedState,
-        ...(files.get(file.path)?.viewedKey ? { viewedKey: files.get(file.path)!.viewedKey } : {}),
-      })),
+      files: manifest.files.map((file) => {
+        const stored = files.get(file.path);
+        const same = !file.viewedKey || stored?.viewedKey === file.viewedKey;
+
+        return { ...file, viewed: same ? stored?.viewerViewedState : 'UNVIEWED' };
+      }),
+    };
+  }
+
+  /** Each file's key for viewed marks, from the full diff of the same revision. */
+  private async withKeys(manifest: DiffManifest, pr: PullRequestSnapshot): Promise<DiffManifest> {
+    if (!pr.files.some((file) => file.viewedKey)) return manifest;
+
+    const keys = new Map((await this.full(pr)).files.map((file) => [file.path, file.viewedKey]));
+
+    return {
+      ...manifest,
+      files: manifest.files.map((file) => {
+        const viewedKey = keys.get(file.path);
+
+        return viewedKey ? { ...file, viewedKey } : file;
+      }),
     };
   }
 
@@ -85,7 +108,8 @@ export class DiffService {
   ): Promise<DiffManifest> {
     if (mode === 'full' || !reviewOid) return this.withViewed(await this.full(pr), pr);
 
-    return this.withViewed(await this.sinceReview(pr, reviewOid), pr);
+    // A mark from this view is about the file's whole diff, so its key is the full diff's.
+    return this.withViewed(await this.withKeys(await this.sinceReview(pr, reviewOid), pr), pr);
   }
 
   private async full(pr: PullRequestSnapshot): Promise<DiffManifest> {

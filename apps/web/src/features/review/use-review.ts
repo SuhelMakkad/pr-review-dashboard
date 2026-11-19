@@ -194,8 +194,10 @@ export function useReview(prId: string | null, account: string) {
         const original = manifest?.files.find((file) => file.path === variables.path);
         if (!original || !cacheBelongsTo(client, account, key)) continue;
 
+        // Only while the view still shows the diff the mark named: a view refreshed to a newer
+        // diff meanwhile already has that diff's own state.
         client.setQueryData<DiffManifest>(key, (current) =>
-          current
+          current && (!variables.target || viewShows(current, variables.path, variables.target))
             ? {
                 ...current,
                 files: current.files.map((file) =>

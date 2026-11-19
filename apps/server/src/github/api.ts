@@ -46,6 +46,11 @@ export interface RemoteFile {
   sha: string | null;
   /** The forge left the patch out for its size (GitLab says so; GitHub only omits it). */
   tooLarge?: boolean;
+  /**
+   * Identifies this very diff for viewed marks, where the forge's viewed state follows the diff
+   * (GitLab). Computed from the same response as `patch`, so it names the diff that is rendered.
+   */
+  viewedKey?: string;
 }
 
 export interface CompareResult {

@@ -26,7 +26,7 @@ import type {
 import { GitHubError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
 import type { ReviewEvent } from '@review-desk/shared/review';
-import { fingerprint } from '@/gitlab/fingerprint.js';
+import { diffKey, fingerprint } from '@/gitlab/fingerprint.js';
 import {
   isPendingReviewId,
   mergeRequestId,
@@ -576,9 +576,17 @@ export class GitLab implements GitHubApi {
   }
 
   async pullFiles(repository: string, number: number): Promise<RemoteFile[]> {
-    const diffs = await this.diffs(`${projectPath(repository)}/merge_requests/${number}`);
+    const path = `${projectPath(repository)}/merge_requests/${number}`;
+    // Read first, so a diff GitLab leaves out is keyed to a revision no newer than its diff.
+    const mr = await call<RawMergeRequest>(
+      this.transport,
+      { path },
+      'Could not load the merge request',
+    );
+    const diffs = await this.diffs(path);
+    const revision = { head: mr.sha, start: mr.diff_refs?.start_sha ?? null };
 
-    return diffs.map(remoteFile);
+    return diffs.map((diff) => ({ ...remoteFile(diff), viewedKey: diffKey(diff, revision) }));
   }
 
   async compare(repository: string, base: string, head: string): Promise<CompareResult | null> {

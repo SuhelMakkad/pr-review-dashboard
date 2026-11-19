@@ -429,15 +429,7 @@ describe('shutdown order', () => {
     await agent.done;
 
     const helper = Number(lines[0]);
-    const alive = () => {
-      try {
-        process.kill(helper, 0);
-
-        return true;
-      } catch {
-        return false;
-      }
-    };
+    const alive = () => !ended(helper);
 
     expect(helper).toBeGreaterThan(0);
     await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 5_000 });
@@ -452,15 +444,7 @@ describe('shutdown order', () => {
     });
     const started = await waitForOutput(holder, /helper \d+\n/);
     const helper = Number(/helper (\d+)/.exec(started)?.[1]);
-    const alive = (pid: number) => {
-      try {
-        process.kill(pid, 0);
-
-        return true;
-      } catch {
-        return false;
-      }
-    };
+    const alive = (pid: number) => !ended(pid);
 
     expect(helper).toBeGreaterThan(0);
     expect(agentRunning(workDir)).toBe(true);
