@@ -826,7 +826,6 @@ export class OperationQueue {
 
       if (!planned) return;
       row = planned;
-      if (combined) allowed();
 
       // Posting was automatic, so an outdated review is skipped rather than left needing attention,
       // which would also hold back your own actions on the PR. Once a step may have gone out,
@@ -1196,11 +1195,11 @@ export class OperationQueue {
   /**
    * Where the forge's approval carries no summary (GitLab), an automatic approval is sent as two
    * steps, the approval and then its summary (plan 2). A row from before plans were versioned
-   * sent both in one `approveReview` step. One the forge refused is checked on the PR, as it is
-   * now, before anything else decides about it: both there means done; the approval alone means
-   * only the summary is left; neither means both are sent. The summary is looked for through
-   * every page of the conversation, and a summary without its approval waits for you. A step
-   * whose response was lost is left to `reconcile`. Null when the row is settled here.
+   * sent both in one `approveReview` step. One the forge refused may have approved without its
+   * summary, and GitLab's history cannot always tell a send that failed from an approval since
+   * withdrawn, so nothing of it is sent again. Both on the PR (the summary found through every
+   * page) means done; anything else waits for you, unconfirmed. A step whose response was lost
+   * is left to `reconcile`. Null when the row is settled here.
    */
   private async planApproval(
     row: OperationRecord,
@@ -1210,52 +1209,34 @@ export class OperationQueue {
 
     if (action.type !== 'ai_review' || action.event !== 'APPROVE' || row.plan === 2) return row;
     if (this.sync.github.approvalCarriesSummary) return row;
-
-    const index = row.steps.findIndex((step) => step.method === 'approveReview');
-
-    if (index === -1) return this.save({ ...row, plan: 2 });
+    if (!row.steps.some((step) => step.method === 'approveReview'))
+      return this.save({ ...row, plan: 2 });
     if (!this.refusedCombined(row)) return row;
-    if (!pr)
-      throw new ReviewError(
-        'UNCONFIRMED',
-        409,
-        'This PR is no longer tracked, so Review Desk cannot tell whether its approval went out. Check the PR.',
-      );
 
-    const step = row.steps[index];
     const approved = approvalOf(row, pr, false);
-    const summary = await this.sync.github.markedComment(
-      row.repository,
-      row.number,
-      row.account,
-      postedReviewMarker(action.runId),
-    );
+    const summary = approved
+      ? await this.sync.github.markedComment(
+          row.repository,
+          row.number,
+          row.account,
+          postedReviewMarker(action.runId),
+        )
+      : null;
+
+    // Stopped while the forge was asked: it stays stopped.
+    row = this.row(row.account, row.id);
+    if (row.status === 'cancelled') throw new Cancelled();
 
     if (approved && summary) {
       this.complete(row, { url: summary.url });
       return null;
     }
 
-    if (summary)
-      throw new ReviewError(
-        'UNCONFIRMED',
-        409,
-        'The AI review summary is on the PR but its approval is not. Check the PR, then approve it yourself if it still applies.',
-      );
-
-    const steps = row.steps.slice(0, index);
-
-    if (approved)
-      steps.push({
-        method: 'approveReview',
-        args: [row.prId, action.expectedHeadOid, ''],
-        startedAt: step.startedAt,
-        completedAt: now(),
-        result: { url: approved.url },
-        uncertain: false,
-      });
-
-    return this.save({ ...row, plan: 2, steps });
+    throw new ReviewError(
+      'UNCONFIRMED',
+      409,
+      'Review Desk cannot tell whether this approval and its summary reached GitLab: the step that sent both was refused, and the merge request does not show both. Check it, then approve it yourself if it still applies.',
+    );
   }
 
   /**
@@ -1467,16 +1448,23 @@ export class OperationQueue {
         .map((step) => String(step.args[0])),
     );
 
+    // The summary after its approval is checked without your reviews, which that approval
+    // changed; a post queued before that fingerprint existed cannot be checked, and waits.
+    const summary = isSummary(action, method);
+    const expected = summary ? basis.summaryFingerprint : basis.fingerprint;
+
+    if (!expected)
+      return {
+        skipped: 'this summary was queued before Review Desk could check it after approving.',
+        code: 'DISCUSSION_CHANGED',
+        hold: true,
+        attention:
+          'This summary was queued before Review Desk could check it after approving. The PR was approved, but its summary was not posted; check the PR.',
+      };
+
     if (
       [...resolved].some((id) => !pr.threads.find((thread) => thread.id === id)?.isResolved) ||
-      publicationFingerprint(
-        pr,
-        action.runId,
-        row.account,
-        resolved,
-        // Before its summary, the approval this post gave is its own, not new discussion.
-        row.steps.some((step) => step.method === 'approveReview' && step.completedAt),
-      ) !== basis.fingerprint
+      publicationFingerprint(pr, action.runId, row.account, resolved, !summary) !== expected
     )
       return stop(
         'the PR or its discussion changed after this review. Run it again to review it.',
@@ -1750,17 +1738,16 @@ export class OperationQueue {
           result = { id: receipt.id, url: receipt.url };
         }
       } else if (step.method === 'addConversationComment' && row.action.type === 'ai_review') {
-        // The run's marker identifies the comment exactly. Absence is not proof: GitHub may not
-        // list it yet, so an unfound comment stays unconfirmed rather than being sent again.
-        const marker = postedReviewMarker(row.action.runId);
-
-        await this.sync.refresh(row.prId, row.account);
-        const posted = this.sync
-          .detail(row.prId)
-          ?.snapshot.conversation.find(
-            (comment) =>
-              isSameUser(comment.author.login, row.account) && comment.body.startsWith(marker),
-          );
+        // The run's marker identifies the comment exactly, looked for through every page of the
+        // conversation by the PR's repository and number (a snapshot keeps only the latest, and
+        // none once the PR closes). Absence is not proof: the forge may not list it yet, so an
+        // unfound comment stays unconfirmed rather than being sent again.
+        const posted = await this.sync.github.markedComment(
+          row.repository,
+          row.number,
+          row.account,
+          postedReviewMarker(row.action.runId),
+        );
 
         if (posted) {
           confirmed = true;

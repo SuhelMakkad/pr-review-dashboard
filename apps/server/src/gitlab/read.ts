@@ -59,6 +59,7 @@ import {
   call,
   GlabCli,
   paginate,
+  relativeApiPath,
   responseError,
   type GitLabResponse,
   type GitLabTransport,
@@ -758,11 +759,19 @@ export class GitLab implements GitHubApi {
         return { id: String(found.id), url: noteUrl(mr, found.id) };
       }
 
+      // GitLab gives the next page in `X-Next-Page`, or only in a `Link` header (keyset
+      // pagination, or where a proxy drops the headers): either counts.
       const nextPage = response.headers['x-next-page'];
+      const link = /<([^>]+)>;\s*rel="next"/.exec(response.headers.link ?? '')?.[1];
 
       next = nextPage
         ? `${base}/notes?sort=asc&per_page=100&page=${encodeURIComponent(nextPage)}`
-        : null;
+        : link
+          ? relativeApiPath(link)
+          : null;
+
+      if (link && !nextPage && !next)
+        throw new GitHubError('The next page of notes could not be followed.');
     }
 
     return null;

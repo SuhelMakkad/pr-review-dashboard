@@ -23,6 +23,7 @@ import {
   type MergeRequestRef,
 } from '@/gitlab/ids.js';
 import type { DiffRefs } from '@/gitlab/positions.js';
+import { approvalSummaryTag, postedReviewPrefix } from '@/ai/freshness.js';
 
 export interface RawUser {
   id: number;
@@ -194,9 +195,6 @@ const actor = (user: RawUser | null | undefined): Actor =>
     : { login: DELETED_USER };
 
 export const noteUrl = (mr: { web_url: string }, noteId: number) => `${mr.web_url}#note_${noteId}`;
-
-/** Starts every automatic AI review post (see `postedReviewMarker`). */
-const AI_REVIEW_MARKER = '<!-- review-desk:ai-review ';
 
 /** `group/sub/project!12` → `group/sub/project`; falls back to the web URL's path. */
 export function repositoryOf(mr: Pick<RawMergeRequest, 'references' | 'web_url'>): string {
@@ -460,13 +458,16 @@ export function viewerReviews(
   for (const entry of own) {
     const group = groups.at(-1);
     const previous = group?.at(-1);
-    // An automatic AI review's summary belongs to the approval it follows, however long after:
-    // the two are separate writes, and a retry can part them by more than the gap.
+    // An automatic approval's summary belongs to the approval it follows, however long after:
+    // the two are separate writes, and a retry can part them by more than the gap. Only a note
+    // that says it is such a summary, on the head the approval was given on (no push between).
     const summarises =
       !entry.note.system &&
-      entry.note.body.startsWith(AI_REVIEW_MARKER) &&
+      entry.note.body.startsWith(postedReviewPrefix) &&
+      entry.note.body.split('\n', 2)[1] === approvalSummaryTag &&
       previous !== undefined &&
-      verdictOf(previous.note) === 'approved';
+      verdictOf(previous.note) === 'approved' &&
+      headAt(versions, previous.note.created_at) === headAt(versions, entry.note.created_at);
 
     if (
       group &&

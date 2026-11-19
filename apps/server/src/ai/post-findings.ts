@@ -8,7 +8,7 @@ import {
   type SuggestedComment,
 } from '@review-desk/shared/ai';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
-import { postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
+import { approvalSummaryTag, postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
 import type { AiRunner } from '@/ai/runner.js';
 import type { AiRunRow } from '@/db/schema.js';
 import type { OperationQueue } from '@/operations/queue.js';
@@ -50,6 +50,8 @@ export function postedReviewBody(
   headOid: string,
   result: FullReviewResult,
   inputs?: ReviewInputs | null,
+  /** Posted after its approval, as a separate write (GitLab): says so on its second line. */
+  summarisesApproval = false,
 ): string {
   const blocking = hasBlockingFindings(result);
   const verdict = blocking ? 'Changes recommended' : 'No blocking findings';
@@ -69,7 +71,7 @@ export function postedReviewBody(
 
   if (content.length > room) content = content.slice(0, room).trimEnd() + TRUNCATED;
 
-  return `${marker}\n${content}\n\n${footer}`;
+  return `${marker}\n${summarisesApproval ? `${approvalSummaryTag}\n` : ''}${content}\n\n${footer}`;
 }
 
 /**
@@ -131,7 +133,13 @@ export class FindingsPublisher {
             .filter((thread) => !thread.isResolved && thread.viewerCanResolve !== false)
             .map((thread) => thread.id)
         : [];
-    const body = postedReviewBody(row.id, row.headOid, result, row.inputs);
+    const body = postedReviewBody(
+      row.id,
+      row.headOid,
+      result,
+      row.inputs,
+      event === 'APPROVE' && !this.sync.github.approvalCarriesSummary,
+    );
     const operationId = postedReviewOperationId(row.id);
 
     this.operations.enqueueAutomatic(row.account, row.prId, operationId, {
@@ -145,6 +153,7 @@ export class FindingsPublisher {
         baseRefName: reviewed.baseRefName,
         mergeBaseOid: row.inputs.mergeBaseOid,
         fingerprint,
+        summaryFingerprint: publicationFingerprint(reviewed, row.id, row.account, new Set(), false),
         threadIds,
         grants: { approve: event === 'APPROVE', resolve: threadIds.length > 0 },
       },

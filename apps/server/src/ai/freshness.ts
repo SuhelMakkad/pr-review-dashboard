@@ -9,7 +9,14 @@ const fingerprint = (value: unknown) =>
 /** Identifies each automatically posted approval or conversation comment. */
 export const postedReviewMarker = (runId: string) => `<!-- review-desk:ai-review run=${runId} -->`;
 
-const postedReviewPrefix = '<!-- review-desk:ai-review ';
+/** Starts every automatic AI review post. */
+export const postedReviewPrefix = '<!-- review-desk:ai-review ';
+
+/**
+ * The second line of a summary posted after its approval where the two are separate writes
+ * (GitLab): it ties the note to that approval, which a comment-only post never is.
+ */
+export const approvalSummaryTag = '<!-- review-desk:approval-summary -->';
 
 /**
  * Ignore refresh times, viewed files and checks: they do not change the review's evidence. Neither
@@ -46,15 +53,15 @@ export function publicationFingerprint(
   runId: string,
   account: string,
   resolved: ReadonlySet<string> = new Set(),
-  /** This post's own approval went out before its summary: its review is left out too. */
-  approved = false,
+  /**
+   * False leaves out your reviews (all of them: they are only ever yours), for the summary sent
+   * after its approval where the two are separate writes. Your approval changes your reviews,
+   * however GitLab groups it with your other notes; your comments still count, in the threads
+   * and the conversation.
+   */
+  ownReviews = true,
 ): string {
   const marker = postedReviewMarker(runId);
-  const ownApproval = (review: PullRequestSnapshot['reviews'][number]) =>
-    approved &&
-    review.state === 'APPROVED' &&
-    review.body === '' &&
-    review.commitOid === pr.headOid;
 
   return fingerprint({
     headOid: pr.headOid,
@@ -65,8 +72,8 @@ export function publicationFingerprint(
     requests: pr.requestEvents,
     // What each says, never when it changed: GitLab renews its notes' times when a discussion is
     // resolved, and reviews and verdicts read from those notes take their times from them.
-    reviews: pr.reviews
-      .filter((review) => !review.body.startsWith(marker) && !ownApproval(review))
+    reviews: (ownReviews ? pr.reviews : [])
+      .filter((review) => !review.body.startsWith(marker))
       .map((review) => ({
         id: review.id,
         state: review.state,

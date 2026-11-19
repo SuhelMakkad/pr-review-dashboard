@@ -49,6 +49,12 @@ export interface AiPostBasis {
   mergeBaseOid: string;
   /** `publicationFingerprint` of the PR the review read. */
   fingerprint: string;
+  /**
+   * The same without your reviews, which an approval changes: what the summary sent after its
+   * approval (where the two are separate writes) is checked against. Absent on posts queued
+   * before it existed, whose summary then waits for you.
+   */
+  summaryFingerprint?: string;
   /** The open threads the review read, resolved before approving; never any others. */
   threadIds: string[];
   /** What Settings allowed when the review finished. Settings must still allow it when sent. */

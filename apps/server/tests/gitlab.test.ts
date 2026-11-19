@@ -559,7 +559,7 @@ describe('GitLab merge request snapshots', () => {
     expect(fake.calls.some((call) => call.path.startsWith('projects/7/pipelines/56'))).toBe(false);
   });
 
-  it('keeps an automatic summary with its approval, however long after it was posted', () => {
+  it('keeps an approval summary with its approval, however long after, and nothing else', () => {
     const mr = { web_url: WEB } as RawMergeRequest;
     const note = (id: number, body: string, system: boolean, minute: number) => ({
       id,
@@ -570,19 +570,23 @@ describe('GitLab merge request snapshots', () => {
       updated_at: seconds(10 + minute, 0),
       system,
     });
-    const summary =
-      '<!-- review-desk:ai-review run=run-1 -->\n**AI review** · No blocking findings';
-    const discussions: RawDiscussion[] = [
-      {
-        id: 'approval',
-        individual_note: true,
-        notes: [note(301, 'approved this merge request', true, 0)],
-      },
-      // Retried after GitLab refused it: five minutes after the approval.
-      { id: 'summary', individual_note: true, notes: [note(302, summary, false, 5)] },
-    ];
+    const marker = '<!-- review-desk:ai-review run=run-1 -->';
+    const summary = `${marker}\n<!-- review-desk:approval-summary -->\n**AI review** · No blocking findings`;
+    const discussion = (id: string, ...notes: ReturnType<typeof note>[]): RawDiscussion => ({
+      id,
+      individual_note: true,
+      notes,
+    });
+    const approval = discussion('approval', note(301, 'approved this merge request', true, 0));
     const versions = [{ id: 2, head_commit_sha: HEAD2, created_at: at(0) }];
-    const reviews = viewerReviews(mr, discussions, versions, 'rev');
+
+    // Retried after GitLab refused it: five minutes after the approval.
+    const reviews = viewerReviews(
+      mr,
+      [approval, discussion('summary', note(302, summary, false, 5))],
+      versions,
+      'rev',
+    );
 
     expect(reviews).toHaveLength(1);
     expect(reviews[0]).toMatchObject({ state: 'APPROVED', body: summary, commitOid: HEAD2 });
@@ -600,6 +604,81 @@ describe('GitLab merge request snapshots', () => {
     } as unknown as Parameters<typeof reviewFingerprint>[0];
 
     expect(reviewFingerprint({ ...pr, reviews }, 'rev')).toBe(reviewFingerprint(pr, 'rev'));
+
+    // A comment-only AI post never joins an approval, nor does a summary after a push.
+    const comment = `${marker}\n**AI review** · Changes recommended`;
+
+    expect(
+      viewerReviews(
+        mr,
+        [approval, discussion('comment', note(303, comment, false, 5))],
+        versions,
+        'rev',
+      ),
+    ).toEqual([expect.objectContaining({ state: 'APPROVED', body: '', commitOid: HEAD2 })]);
+    expect(
+      viewerReviews(
+        mr,
+        [approval, discussion('summary', note(304, summary, false, 5))],
+        [...versions, { id: 3, head_commit_sha: HEAD3, created_at: seconds(12, 0) }],
+        'rev',
+      ),
+    ).toEqual([expect.objectContaining({ state: 'APPROVED', body: '', commitOid: HEAD2 })]);
+  });
+
+  it('finds a marked note on a later page, following GitLab’s Link header', async () => {
+    const { client, fake } = gitlab();
+    const notes = `${MR_BY_PATH}/notes`;
+    const older = Array.from({ length: 100 }, (_, index) => ({
+      id: index + 1,
+      type: null,
+      body: 'added 1 commit',
+      author: users.dev,
+      created_at: at(1),
+      updated_at: at(1),
+      system: true,
+    }));
+
+    fake.on('GET', notes, (request) =>
+      request.path.includes('cursor=2')
+        ? {
+            data: [
+              {
+                id: 501,
+                type: null,
+                body: '<!-- review-desk:ai-review run=run-1 -->\nSummary',
+                author: users.rev,
+                created_at: at(2),
+                updated_at: at(2),
+                system: false,
+              },
+            ],
+          }
+        : {
+            data: older,
+            headers: {
+              'content-type': 'application/json',
+              link: `<https://gitlab.example.com/api/v4/${notes}?cursor=2&per_page=100>; rel="next"`,
+            },
+          },
+    );
+
+    await expect(
+      client.markedComment(
+        'acme/platform/web',
+        12,
+        'rev',
+        '<!-- review-desk:ai-review run=run-1 -->',
+      ),
+    ).resolves.toEqual({ id: '501', url: `${WEB}#note_501` });
+    await expect(
+      client.markedComment(
+        'acme/platform/web',
+        12,
+        'rev',
+        '<!-- review-desk:ai-review run=other -->',
+      ),
+    ).resolves.toBeNull();
   });
 
   it('tells a missing target branch from one that could not be read', async () => {

@@ -221,6 +221,7 @@ describe('posting finished reviews', () => {
         baseRefName: 'main',
         mergeBaseOid: run.inputs!.mergeBaseOid,
         fingerprint: expect.any(String),
+        summaryFingerprint: expect.any(String),
         threadIds: [],
         grants: { approve: true, resolve: false },
       },
@@ -1456,6 +1457,60 @@ describe('approvals whose summary is a separate write', () => {
     },
   );
 
+  it.each([
+    [
+      'you had approved this head before',
+      ({ pull }: Setup) =>
+        pull(1839).snapshot.reviews.push({
+          id: 'approved-earlier',
+          state: 'APPROVED',
+          submittedAt: '2026-11-05T09:00:00Z',
+          updatedAt: '2026-11-05T09:00:00Z',
+          commitOid: pull(1839).snapshot.headOid,
+          body: '',
+          url: `${pull(1839).snapshot.url}#approved-earlier`,
+        }),
+    ],
+    [
+      'the approval joins a comment of yours in one review',
+      ({ pull }: Setup) =>
+        pull(1839).snapshot.reviews.push({
+          id: 'your-comment',
+          state: 'COMMENTED',
+          submittedAt: '2026-11-05T09:00:00Z',
+          updatedAt: '2026-11-05T09:00:00Z',
+          commitOid: pull(1839).snapshot.headOid,
+          body: 'Looked at the loop.',
+          url: `${pull(1839).snapshot.url}#your-comment`,
+        }),
+    ],
+  ])('posts the summary when %s', async (_case, seed) => {
+    const context = await gitlabLike();
+    const { github, sync, idOf, review, posted } = context;
+    const approve = github.approveReview.bind(github);
+
+    seed(context);
+    await sync.refresh(idOf(1839));
+    // GitLab folds the approval into the review that was there: its state changes, not its count.
+    vi.spyOn(github, 'approveReview').mockImplementationOnce(async (...args) => {
+      const receipt = await approve(...args);
+      const reviews = context.pull(1839).snapshot.reviews;
+
+      reviews.splice(reviews.length - 1, 1);
+      reviews[reviews.length - 1].state = 'APPROVED';
+
+      return receipt;
+    });
+
+    const run = await review();
+
+    await posted(run.id);
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview', 'AddComment']);
+    expect(String(github.writes[1].details.body).split('\n')[1]).toBe(
+      '<!-- review-desk:approval-summary -->',
+    );
+  });
+
   it('says the PR was approved when its summary is cancelled', async () => {
     const { github, queue, review, posted } = await gitlabLike();
 
@@ -1647,39 +1702,50 @@ describe('approvals whose summary is a separate write', () => {
       return { ...context, run };
     };
 
-    it.each([
-      ['the approval alone went out', { approved: true, summary: false }, ['AddComment']],
-      ['neither went out', { approved: false, summary: false }, ['ApproveReview', 'AddComment']],
-      ['both went out', { approved: true, summary: true }, []],
-    ])('sends what is missing when GitLab refused it and %s', async (_case, on, writes) => {
-      const { github, posted, run } = await legacy(on, true);
+    it('is done when both went out, and sends nothing again otherwise', async () => {
+      const both = await legacy({ approved: true, summary: true }, true);
 
-      await posted(run.id);
-      expect(github.writes.map((write) => write.op)).toEqual(writes);
+      await both.posted(both.run.id);
+      expect(both.github.writes).toEqual([]);
+
+      // The approval alone, or neither: GitLab's history cannot tell a send that failed from an
+      // approval since withdrawn, so it waits for you, whatever Settings say now.
+      for (const on of [
+        { approved: true, summary: false },
+        { approved: false, summary: false },
+      ]) {
+        const unsure = await legacy(on, true, (context) =>
+          context.setPosting(true, undefined, { approveFindings: false, resolveThreads: false }),
+        );
+        const held = await unsure.posted(unsure.run.id, 'needs_attention');
+
+        expect(held.error?.code).toBe('UNCONFIRMED');
+        expect(held.controls).toContain('cancel');
+        expect(unsure.github.writes).toEqual([]);
+      }
     });
 
-    it('is checked for what went out before Settings or new commits can stop it', async () => {
-      // Approving was turned off after GitLab took the approval and refused its summary.
-      const off = await legacy({ approved: true, summary: false }, true, (context) =>
-        context.setPosting(true, undefined, { approveFindings: false, resolveThreads: false }),
+    it('stays stopped when cancelled while the PR is checked', async () => {
+      const context = await legacy(
+        { approved: true, summary: false },
+        true,
+        ({ github, queue }) => {
+          vi.spyOn(github, 'markedComment').mockImplementationOnce(async () => {
+            const row = queue.list('you').items.find((item) => item.action.type === 'ai_review')!;
+
+            await queue.control('you', row.id, 'cancel');
+
+            return { id: 'posted', url: 'posted-url' };
+          });
+        },
       );
 
-      await off.posted(off.run.id);
-      expect(off.github.writes.map((write) => write.op)).toEqual(['AddComment']);
-
-      // New commits arrived meanwhile: the approval stands, and only its summary is held.
-      const moved = await legacy({ approved: true, summary: false }, true, ({ pull }) => {
-        pull(1839).snapshot.headOid = 'pushed-after-approving';
-        pull(1839).snapshot.updatedAt = new Date().toISOString();
-      });
-      const held = await moved.posted(moved.run.id, 'needs_attention');
-
-      expect(held.error?.message).toContain('The PR was approved, but its summary was not posted');
-      expect(moved.github.writes).toEqual([]);
+      expect((await context.posted(context.run.id, 'cancelled')).status).toBe('cancelled');
+      expect(context.github.writes).toEqual([]);
     });
 
     it('finds the summary through every page, and never assumes it is missing', async () => {
-      // Pushed out of the snapshot's latest comments, but on the PR.
+      // Pushed out of the snapshot's latest comments, but on the PR: done.
       const found = await legacy({ approved: true, summary: false }, true, ({ github }) => {
         vi.spyOn(github, 'markedComment').mockResolvedValue({ id: 'older', url: 'older-url' });
       });

@@ -318,7 +318,7 @@ export async function paginate<T>(
 }
 
 /** `https://host/api/v4/projects?...` → `projects?...`, for following keyset pagination links. */
-function relativeApiPath(link: string): string | null {
+export function relativeApiPath(link: string): string | null {
   const index = link.indexOf('/api/v4/');
 
   return index === -1 ? null : link.slice(index + '/api/v4/'.length);
