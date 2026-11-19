@@ -1,7 +1,7 @@
 import type { PullRequestSnapshot, FeedSource, Source } from '@review-desk/shared/types';
 import { parseAccount } from '@review-desk/shared/accounts';
 import type { ReviewEvent } from '@review-desk/shared/review';
-import type { GitHubApi } from '@/github/api.js';
+import type { DetectOptions, GitHubApi } from '@/github/api.js';
 import { scopedAccount, type CliAccount, type GitHubAccounts } from '@/github/credentials.js';
 import { GitHubError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
@@ -149,8 +149,8 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
     return this.target().resolvePull(repository, number);
   }
 
-  detect(ids: string[]) {
-    return this.target().detect(ids);
+  detect(ids: string[], options?: DetectOptions) {
+    return this.target().detect(ids, options);
   }
 
   snapshot(id: string, login: string, sources: Source[], previous?: PullRequestSnapshot) {

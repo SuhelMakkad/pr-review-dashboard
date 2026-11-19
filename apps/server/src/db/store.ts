@@ -59,6 +59,8 @@ export function* batches<T>(rows: T[]): Generator<T[]> {
 export class Store {
   readonly db: Database;
   private transactionDepth = 0;
+  /** Effects waiting for the outermost transaction to commit. */
+  private committed: (() => void)[] = [];
 
   constructor(readonly path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -72,27 +74,60 @@ export class Store {
 
   /** Runs `work` in one immediate transaction, rolling back if it throws. */
   transaction<T>(work: () => T): T {
-    const depth = this.transactionDepth++;
+    if (this.transactionDepth > 0) return this.savepoint(work);
+
+    let result: T;
+
+    this.transactionDepth++;
 
     try {
-      if (depth === 0) return this.db.transaction<T>(work as never, { behavior: 'immediate' });
+      result = this.db.transaction<T>(work as never, { behavior: 'immediate' });
+    } catch (error) {
+      this.committed = [];
 
-      const savepoint = `store_nested_${depth}`;
-      this.db.$client.exec(`SAVEPOINT ${savepoint}`);
+      throw error;
+    } finally {
+      this.transactionDepth--;
+    }
+
+    // Committed: only now may in-memory state follow what the transaction saved.
+    for (const effect of this.committed.splice(0)) effect();
+
+    return result;
+  }
+
+  /** A nested transaction: a savepoint inside the one in progress. */
+  private savepoint<T>(work: () => T): T {
+    const name = `store_nested_${this.transactionDepth++}`;
+    const pending = this.committed.length;
+
+    try {
+      this.db.$client.exec(`SAVEPOINT ${name}`);
 
       try {
         const result = work();
-        this.db.$client.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        this.db.$client.exec(`RELEASE SAVEPOINT ${name}`);
 
         return result;
       } catch (error) {
-        this.db.$client.exec(`ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);
+        this.db.$client.exec(`ROLLBACK TO SAVEPOINT ${name}; RELEASE SAVEPOINT ${name}`);
+        // What the rolled-back part asked to do after committing never happened.
+        this.committed.length = pending;
 
         throw error;
       }
     } finally {
       this.transactionDepth--;
     }
+  }
+
+  /**
+   * Runs `effect` once the outermost transaction in progress commits, and never if it rolls back;
+   * at once outside a transaction. For in-memory state that must not run ahead of the database.
+   */
+  afterCommit(effect: () => void): void {
+    if (this.transactionDepth === 0) effect();
+    else this.committed.push(effect);
   }
 
   snapshots(account: string): PullRequestSnapshot[] {

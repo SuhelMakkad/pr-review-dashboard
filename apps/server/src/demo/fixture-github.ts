@@ -518,9 +518,13 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     this.receipt(resolved ? 'ResolveThread' : 'UnresolveThread', undefined);
   }
 
-  async setFileViewed(prId: string, path: string, viewed: boolean): Promise<void> {
+  async setFileViewed(
+    prId: string,
+    path: string,
+    viewed: boolean,
+  ): Promise<{ headOid: string; baseOid: string | null } | null> {
     await this.beforeWrite();
-    this.pullById(prId);
+    const pull = this.pullById(prId);
     this.record(viewed ? 'MarkFileViewed' : 'UnmarkFileViewed', { prId, path });
 
     const files = this.scenario.world.viewed.get(prId) ?? new Map();
@@ -528,6 +532,10 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     files.set(path, viewed ? 'VIEWED' : 'UNVIEWED');
     this.scenario.world.viewed.set(prId, files);
     this.receipt(viewed ? 'MarkFileViewed' : 'UnmarkFileViewed', undefined);
+
+    return viewed
+      ? { headOid: pull.snapshot.headOid, baseOid: pull.snapshot.baseOid ?? null }
+      : null;
   }
 
   async requestReviews(prId: string, logins: string[]): Promise<void> {

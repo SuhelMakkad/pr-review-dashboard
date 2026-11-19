@@ -313,8 +313,8 @@ describe('thread and file actions', () => {
     const { snapshot } = await sync.track('you', 'acme/api', 2066);
 
     let release!: () => void;
-    const written = new Promise<void>((resolve) => {
-      release = resolve;
+    const written = new Promise<null>((resolve) => {
+      release = () => resolve(null);
     });
 
     vi.spyOn(github, 'setFileViewed').mockImplementationOnce(() => written);

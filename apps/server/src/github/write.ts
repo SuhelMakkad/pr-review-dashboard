@@ -13,6 +13,16 @@ export interface ThreadInput {
   subjectType?: 'LINE' | 'FILE';
 }
 
+/**
+ * The PR revision whose diff of a file a viewed write marked: its head and base commits, as a
+ * snapshot records them. Null when the forge cannot say, or for an unmark, which holds for every
+ * revision.
+ */
+export interface ViewedRevision {
+  headOid: string;
+  baseOid: string | null;
+}
+
 /** GitHub writes used by the review workspace and enabled automations. */
 export interface GitHubWrites {
   approveReview(
@@ -38,7 +48,7 @@ export interface GitHubWrites {
     body: string,
   ): Promise<{ id: string; url: string; pending: boolean }>;
   setThreadResolved(threadId: string, resolved: boolean): Promise<void>;
-  setFileViewed(prId: string, path: string, viewed: boolean): Promise<void>;
+  setFileViewed(prId: string, path: string, viewed: boolean): Promise<ViewedRevision | null>;
   addConversationComment(prId: string, body: string): Promise<{ id: string; url: string }>;
   /** Adds (never removes) requested reviewers; re-requesting someone asks them again. */
   requestReviews(prId: string, logins: string[]): Promise<void>;
@@ -153,7 +163,16 @@ export function createWriter(transport: GitHubTransport): GitHubWrites {
     },
 
     async setFileViewed(prId, path, viewed) {
-      await run(viewed ? 'MarkFileViewed' : 'UnmarkFileViewed', { pullRequestId: prId, path });
+      type Payload = { pullRequest: { headRefOid: string; baseRefOid: string | null } | null };
+
+      const data = await run<{ markFileAsViewed?: Payload; unmarkFileAsViewed?: Payload }>(
+        viewed ? 'MarkFileViewed' : 'UnmarkFileViewed',
+        { pullRequestId: prId, path },
+      );
+      // The PR as the mutation left it: the revision whose file it marked.
+      const pull = (viewed ? data.markFileAsViewed : data.unmarkFileAsViewed)?.pullRequest;
+
+      return viewed && pull ? { headOid: pull.headRefOid, baseOid: pull.baseRefOid ?? null } : null;
     },
 
     async requestReviews(prId, logins) {

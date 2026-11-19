@@ -15,6 +15,7 @@ import { scopedAccount } from '@/github/credentials.js';
 import type {
   BlobText,
   CompareResult,
+  DetectOptions,
   DetectResult,
   GitHubApi,
   RateBudget,
@@ -157,8 +158,6 @@ function searchFilters(query: string): string | null {
  */
 export class GitLab implements GitHubApi {
   private readonly writes: GitLabWrites;
-  /** Merge requests whose pipeline is still running; detection asks about their CI each time. */
-  private readonly pendingCi = new Set<string>();
 
   constructor(
     readonly transport: GitLabTransport,
@@ -374,10 +373,13 @@ export class GitLab implements GitHubApi {
 
   /**
    * Change detection: one list request per project for every tracked merge request, plus the head
-   * pipeline of merge requests whose CI is still running (pipeline results do not touch a merge
-   * request's `updated_at`; new notes, approvals and review requests do).
+   * pipeline of merge requests whose stored CI is still running (pipeline results do not touch a
+   * merge request's `updated_at`; new notes, approvals and review requests do).
    */
-  async detect(ids: string[]): Promise<{ results: DetectResult[]; budget: RateBudget | null }> {
+  async detect(
+    ids: string[],
+    options: DetectOptions = {},
+  ): Promise<{ results: DetectResult[]; budget: RateBudget | null }> {
     const byProject = new Map<number, number[]>();
 
     for (const id of ids) {
@@ -402,7 +404,7 @@ export class GitLab implements GitHubApi {
 
         for (const mr of response.data) {
           const id = mergeRequestId(mr.project_id, mr.iid);
-          const pipeline = this.pendingCi.has(id)
+          const pipeline = options.ciPending?.has(id)
             ? await this.headPipeline({ projectId, iid: mr.iid })
             : null;
 
@@ -457,12 +459,7 @@ export class GitLab implements GitHubApi {
     if (response.status >= 400) throw responseError(response, 'Could not load the merge request');
 
     const data = await this.collect(ref, response.data, false, login);
-    const snapshot = mergeRequestSnapshot(data, login, sources, previous);
-
-    if (snapshot.ci === 'pending') this.pendingCi.add(snapshot.id);
-    else this.pendingCi.delete(snapshot.id);
-
-    return snapshot;
+    return mergeRequestSnapshot(data, login, sources, previous);
   }
 
   /** Reads everything a snapshot needs. Light reads (history) skip files, drafts and CI. */

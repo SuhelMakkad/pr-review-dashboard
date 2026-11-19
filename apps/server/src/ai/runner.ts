@@ -418,7 +418,7 @@ export class AiRunner {
   ): Promise<AiRun> {
     this.detail(account, prId);
 
-    if (task === 'full_review' || task === 'draft_summary') await this.sync.refresh(prId);
+    if (task === 'full_review' || task === 'draft_summary') await this.sync.refresh(prId, account);
 
     const detail = this.detail(account, prId);
     const settings = this.settings();
@@ -446,7 +446,7 @@ export class AiRunner {
     const head = detail.snapshot.headOid;
 
     if (task === 'full_review') {
-      await this.sync.refresh(prId);
+      await this.sync.refresh(prId, account);
 
       const latest = this.detail(account, prId).snapshot;
 
@@ -873,7 +873,7 @@ export class AiRunner {
     // A pause may still be waiting for the old process to flush and exit. Never overlap turns.
     if (this.active.has(id)) await this.executions.get(id);
 
-    await this.sync.refresh(row.prId);
+    await this.sync.refresh(row.prId, row.account);
     const problem = this.resumeProblem(row);
 
     if (problem) throw new ReviewError('STALE_REVIEW', 409, problem);
@@ -1051,7 +1051,7 @@ export class AiRunner {
 
     const initialRevision = preparationRevision(this.reviews.draft(account, row.prId));
 
-    await this.sync.refresh(row.prId);
+    await this.sync.refresh(row.prId, row.account);
 
     const staleReason = this.staleReason(row);
 
@@ -1168,7 +1168,7 @@ export class AiRunner {
 
     this.detail(account, row.prId);
     this.reviews.drafts.assertEditable(account, row.prId);
-    await this.sync.refresh(row.prId);
+    await this.sync.refresh(row.prId, row.account);
     this.detail(account, row.prId);
 
     const reason = this.staleReason(row);

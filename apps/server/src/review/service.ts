@@ -366,7 +366,7 @@ export class ReviewService {
 
     const refreshed = this.execution
       ? null
-      : await this.sync.refresh(prId).catch((error: unknown) => {
+      : await this.sync.refresh(prId, request.account).catch((error: unknown) => {
           throw new ReviewError(
             'GITHUB_ERROR',
             502,
@@ -560,20 +560,11 @@ export class ReviewService {
     // Fails with NOT_FOUND before writing when the PR is not tracked.
     this.snapshot(prId);
 
-    await this.write(() => this.github.setFileViewed(prId, path, viewed));
+    const revision = await this.write(() => this.github.setFileViewed(prId, path, viewed));
 
-    // Reread after the write: the PR may have been refreshed, or removed from the queue, meanwhile.
-    const pr = this.sync.store.snapshot(account, prId);
-
-    if (!pr) return;
-
-    // Update the cached snapshot directly; viewed state does not change the PR's fingerprint.
-    this.sync.store.saveSnapshot(account, {
-      ...pr,
-      files: pr.files.map((file) =>
-        file.path === path ? { ...file, viewerViewedState: viewed ? 'VIEWED' : 'UNVIEWED' } : file,
-      ),
-    });
-    this.events.emit({ type: 'pulls.changed', ids: [prId] });
+    // Onto the latest stored PR and the reads that started before the write, where they show the
+    // revision the forge marked. Elsewhere the forge's own state stands; the refresh that follows
+    // every confirmed action brings it in.
+    this.sync.markViewed(account, prId, path, viewed, revision ?? null);
   }
 }

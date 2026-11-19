@@ -24,6 +24,7 @@ const BASE = 'b'.repeat(40);
 const START = 's'.repeat(40).replace(/s/g, 'c');
 const HEAD1 = '1'.repeat(40);
 const HEAD2 = '2'.repeat(40);
+const HEAD3 = '3'.repeat(40);
 const WEB = `https://${HOST}/acme/platform/web/-/merge_requests/12`;
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 10, 10, 9, minutes)).toISOString();
@@ -546,7 +547,11 @@ describe('GitLab merge request snapshots', () => {
   it('keeps viewed marks locally until the file changes again', async () => {
     const { client, fake } = gitlab();
 
-    await client.setFileViewed('MR_7_12', 'src/app.ts', true);
+    // It says which revision it marked, as a snapshot records it.
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toEqual({
+      headOid: HEAD2,
+      baseOid: START,
+    });
 
     let pr = await client.snapshot('MR_7_12', VIEWER, []);
 
@@ -575,6 +580,53 @@ describe('GitLab merge request snapshots', () => {
     expect(fake.writes()).toEqual([]);
   });
 
+  it('cannot say which revision it marked viewed when commits land during the write', async () => {
+    const { client, fake } = gitlab();
+    let reads = 0;
+
+    fake.on('GET', MR, () => {
+      reads++;
+
+      return reads === 1
+        ? { data: mergeRequest() }
+        : {
+            data: mergeRequest({
+              sha: HEAD3,
+              diff_refs: { base_sha: BASE, start_sha: START, head_sha: HEAD3 },
+            }),
+          };
+    });
+
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toBeNull();
+    expect(reads).toBe(2);
+  });
+
+  it('keeps a viewed mark that was saved when the revision cannot be read afterwards', async () => {
+    const { client, fake } = gitlab();
+    let reads = 0;
+
+    fake.on('GET', MR, () => {
+      reads++;
+
+      return reads === 2
+        ? { status: 503, data: { message: '503 Service Unavailable' } }
+        : { data: mergeRequest() };
+    });
+
+    // Succeeds, so the outbox never sends it again; only the revision is unknown.
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toBeNull();
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(pr.files.find((file) => file.path === 'src/app.ts')?.viewerViewedState).toBe('VIEWED');
+  });
+
+  it('cannot say which revision it marked viewed while GitLab has no diff refs yet', async () => {
+    const { client } = gitlab({ mr: { diff_refs: null } });
+
+    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toBeNull();
+  });
+
   it('detects changes per project and asks about running pipelines', async () => {
     const { client, fake } = gitlab();
 
@@ -589,15 +641,19 @@ describe('GitLab merge request snapshots', () => {
       { id: 'MR_7_99', state: null, fingerprint: null },
     ]);
 
-    // A snapshot with a running pipeline makes detection read its status too.
-    await client.snapshot('MR_7_12', VIEWER, []);
+    // A stored snapshot with CI still running makes detection read its pipeline too.
     fake.on('GET', MR, {
       data: mergeRequest({ head_pipeline: { id: 55, project_id: 7, status: 'failed' } }),
     });
 
-    const second = await client.detect(['MR_7_12']);
+    const second = await client.detect(['MR_7_12'], { ciPending: new Set(['MR_7_12']) });
 
     expect(second.results[0].fingerprint).not.toBe(first.results[0].fingerprint);
+
+    // Without it, detection reads no pipeline: what is polled follows saved snapshots alone.
+    const third = await client.detect(['MR_7_12']);
+
+    expect(third.results[0].fingerprint).toBe(first.results[0].fingerprint);
   });
 
   it('compares commits through the merge base', async () => {

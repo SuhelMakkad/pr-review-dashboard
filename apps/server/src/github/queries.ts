@@ -155,10 +155,10 @@ export const mutations = {
   unresolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } }
 }`,
   MarkFileViewed: `mutation MarkFileViewed($pullRequestId: ID!, $path: String!) {
-  markFileAsViewed(input: { pullRequestId: $pullRequestId, path: $path }) { pullRequest { id } }
+  markFileAsViewed(input: { pullRequestId: $pullRequestId, path: $path }) { pullRequest { id headRefOid baseRefOid } }
 }`,
   UnmarkFileViewed: `mutation UnmarkFileViewed($pullRequestId: ID!, $path: String!) {
-  unmarkFileAsViewed(input: { pullRequestId: $pullRequestId, path: $path }) { pullRequest { id } }
+  unmarkFileAsViewed(input: { pullRequestId: $pullRequestId, path: $path }) { pullRequest { id headRefOid baseRefOid } }
 }`,
   RequestReviews: `mutation RequestReviews($pullRequestId: ID!, $userLogins: [String!]) {
   requestReviewsByLogin(input: { pullRequestId: $pullRequestId, userLogins: $userLogins, union: true }) { pullRequest { id } }

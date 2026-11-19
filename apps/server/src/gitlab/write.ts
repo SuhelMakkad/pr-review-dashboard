@@ -94,6 +94,26 @@ const lineOf = (end: unknown) => {
  * arrived. Each write reads what it needs before sending, so a failed read never follows a write
  * that took effect.
  */
+/**
+ * The revision a viewed mark is for, when both reads of the merge request around the diff agree
+ * on complete diff refs whose head is the merge request's head; else unknown. GitLab fills diff
+ * refs in asynchronously, so missing ones identify nothing.
+ */
+function markedRevision(
+  before: RawMergeRequest,
+  after: RawMergeRequest,
+): { headOid: string; baseOid: string } | null {
+  const complete = (mr: RawMergeRequest) =>
+    mr.diff_refs?.head_sha && mr.diff_refs.start_sha && mr.diff_refs.base_sha ? mr.diff_refs : null;
+  const [first, second] = [complete(before), complete(after)];
+
+  if (!first || !second || first.head_sha !== after.sha || before.sha !== after.sha) return null;
+  if (first.head_sha !== second.head_sha || first.start_sha !== second.start_sha) return null;
+  if (first.base_sha !== second.base_sha) return null;
+
+  return { headOid: after.sha, baseOid: second.start_sha };
+}
+
 export function createGitLabWriter(
   transport: GitLabTransport,
   context: WriterContext,
@@ -491,14 +511,23 @@ export function createGitLabWriter(
 
       if (!viewed) {
         context.markViewed(prId, path, null);
-        return;
+        return null;
       }
 
+      // The diff is read between two reads of the merge request, so it is known which revision
+      // the mark is for; a push in between leaves that unknown.
+      const before = await context.mergeRequest(ref);
       const file = (await context.diffs(ref)).find((diff) => diffPath(diff) === path);
 
       if (!file) throw rejected(`${path} is no longer part of this merge request.`, 404);
 
       context.markViewed(prId, path, fingerprint(file.diff));
+
+      // Only says which revision was marked: the mark is saved, so a failure here must not make
+      // the outbox send it again (it could then mark a newer diff). The refresh after it tells.
+      const after = await context.mergeRequest(ref).catch(() => null);
+
+      return after ? markedRevision(before, after) : null;
     },
 
     async addConversationComment(prId, body) {

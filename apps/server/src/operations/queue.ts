@@ -607,8 +607,8 @@ export class OperationQueue {
           'The GitHub CLI account changed. Sign in to the original account before retrying.',
         );
 
-      // The refresh's own result: a slower refresh started earlier may save an older head after it.
-      const pr = (await this.sync.refresh(row.prId))?.snapshot;
+      // A read started now: an older read still in flight can no longer be saved over it.
+      const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
       if (this.row(row.account, row.id).status === 'cancelled') return;
 
       // Posting was automatic, so an outdated review is skipped rather than left needing attention,
@@ -743,7 +743,7 @@ export class OperationQueue {
             if (row.action.type === 'ai_review') {
               const expected = row.action.expectedHeadOid;
 
-              const pr = (await this.sync.refresh(row.prId))?.snapshot;
+              const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
 
               row = this.row(row.account, row.id);
               if (row.status === 'cancelled') throw new Cancelled();
@@ -774,7 +774,7 @@ export class OperationQueue {
               method === 'submitReview' &&
               (row.action.type === 'review' || row.action.type === 'comment')
             ) {
-              await this.sync.refresh(row.prId);
+              await this.sync.refresh(row.prId, row.account);
               const expected =
                 row.action.type === 'review'
                   ? row.action.review.expectedHeadOid
@@ -993,7 +993,7 @@ export class OperationQueue {
 
     // Cache refresh is independent of the confirmed write and cannot turn it into a failure.
     const refresh = this.sync
-      .refresh(row.prId)
+      .refresh(row.prId, row.account)
       .catch(() => {})
       .finally(() => this.refreshes.delete(refresh));
     this.refreshes.add(refresh);
@@ -1119,7 +1119,7 @@ export class OperationQueue {
       } else if (step.method === 'deleteReview') {
         confirmed = (await this.sync.github.reviewReceipt(String(step.args[0]))) === null;
       } else if (step.method === 'approveReview' && row.action.type === 'ai_review') {
-        await this.sync.refresh(row.prId);
+        await this.sync.refresh(row.prId, row.account);
 
         const action = row.action;
         const approved = this.sync
@@ -1140,7 +1140,7 @@ export class OperationQueue {
         // list it yet, so an unfound comment stays unconfirmed rather than being sent again.
         const marker = postedReviewMarker(row.action.runId);
 
-        await this.sync.refresh(row.prId);
+        await this.sync.refresh(row.prId, row.account);
         const posted = this.sync
           .detail(row.prId)
           ?.snapshot.conversation.find(
@@ -1153,7 +1153,7 @@ export class OperationQueue {
           result = { id: posted.id, url: posted.url };
         }
       } else if (step.method === 'setFileViewed' || step.method === 'setThreadResolved') {
-        await this.sync.refresh(row.prId);
+        await this.sync.refresh(row.prId, row.account);
         const pr = this.sync.detail(row.prId)?.snapshot;
 
         confirmed =

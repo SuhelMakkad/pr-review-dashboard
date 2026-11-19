@@ -21,6 +21,16 @@ export interface DetectResult {
   fingerprint: string | null;
 }
 
+/** What change detection may use from the stored snapshots. */
+export interface DetectOptions {
+  /**
+   * PRs whose stored snapshot has CI still running. A forge whose change detection does not see CI
+   * results (GitLab) reads their pipelines too. Taken from saved snapshots, never from reads that
+   * might not be saved.
+   */
+  ciPending?: ReadonlySet<string>;
+}
+
 export interface ResolvedPull {
   id: string;
   state: PullRequestSnapshot['state'];
@@ -75,7 +85,10 @@ export interface GitHubApi extends GitHubWrites {
   discover(login: string, source: FeedSource): Promise<string[]>;
   /** Finds a PR by repository and number; null when it does not exist or cannot be seen. */
   resolvePull(repository: string, number: number): Promise<ResolvedPull | null>;
-  detect(ids: string[]): Promise<{ results: DetectResult[]; budget: RateBudget | null }>;
+  detect(
+    ids: string[],
+    options?: DetectOptions,
+  ): Promise<{ results: DetectResult[]; budget: RateBudget | null }>;
   snapshot(
     id: string,
     login: string,

@@ -539,8 +539,8 @@ export class AutoReviewer {
     this.verifying.add(run.id);
 
     try {
-      // Its own result: a slower refresh started earlier may save an older head after it.
-      const pr = (await this.sync.refresh(run.prId))?.snapshot ?? null;
+      // A read started now: an older read still in flight can no longer be saved over it.
+      const pr = (await this.sync.refresh(run.prId, account))?.snapshot ?? null;
       const outdated = pr ? await this.changedWhileRunning(account, run, pr, asItFinished) : false;
 
       if (!this.current(account)) return false;
