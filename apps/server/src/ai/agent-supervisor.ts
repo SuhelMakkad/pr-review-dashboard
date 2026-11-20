@@ -15,15 +15,16 @@
  * releases it when this process ends. It ends only together with its whole group (after the agent
  * exits, the group gets SIGKILL with this process in it), so a free lock means no process of the
  * run's agent is left. A second supervisor for a run whose lock is held exits with 75 and starts
- * nothing.
+ * nothing, and so does one that gets the lock after the run's workspace (`<root>/<id>` for the lock
+ * `<root>/.locks/<id>.lock`) was removed under it.
  *
  * Only Node's built-in modules, so it runs as plain JavaScript from `dist` and, with Node's type
  * stripping, straight from source in development and tests.
  */
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { Socket } from 'node:net';
-import { dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 /** How long a stopped agent gets to exit after SIGTERM before the group gets SIGKILL. */
@@ -66,6 +67,14 @@ if (lockPath && lockPath !== '-') {
   // A connection nothing refers to is garbage, and collecting it would release the lock early: a
   // listener that lives as long as the process keeps it referenced until the process ends.
   process.on('exit', () => lock?.close());
+
+  // The workspace was removed (under this lock) before this process got it: nothing to run in.
+  const workspace = join(dirname(dirname(lockPath)), basename(lockPath, '.lock'));
+
+  if (!existsSync(workspace)) {
+    process.stderr.write('The workspace for this run is gone.\n');
+    process.exit(75);
+  }
 }
 
 const control = new Socket({ fd: 3, readable: true, writable: true });

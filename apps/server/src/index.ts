@@ -1,3 +1,4 @@
+import { pruneBackups } from '@/db/backups.js';
 import { systemClock } from '@/clock.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -75,6 +76,9 @@ const demoAnchor = process.env.REVIEW_DESK_DEMO_NOW
 const fixture =
   config.mode === 'demo' ? new FixtureGitHub(() => defaultScenario(demoAnchor)) : undefined;
 const store = new Store(config.databasePath);
+
+// Opening the store applied any migrations; only now is an older backup safe to let go.
+await pruneBackups(config.dataDir);
 // GitHub accounts come from the GitHub CLI, GitLab accounts (any host) from the GitLab CLI.
 const forges = fixture
   ? null
@@ -115,6 +119,8 @@ const app = await createApp(service, {
     ? { codex: new FixtureProvider('codex'), claude: new FixtureProvider('claude') }
     : { codex: new CodexProvider(), claude: new ClaudeProvider() },
   aiWorkRoot: join(config.dataDir, 'ai-runs'),
+  // Inside the data folder this process has locked: its abandoned workspaces are its to remove.
+  sweepWorkspaces: true,
   // A Linear sign-in comes first; a personal API key in the Keychain still works where allowed.
   linear: linearOAuth
     ? new PreferredLinear([new LinearMcp(linearOAuth), new LinearApi(new KeychainKeySource())])

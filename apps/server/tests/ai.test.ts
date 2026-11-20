@@ -627,6 +627,8 @@ describe('AI runner', () => {
       controls.get(join(root, first.id))!.complete();
       expect((await finished(first)).status).toBe('done');
       await vi.waitFor(() => expect(controls.has(join(root, queued.id))).toBe(true));
+      // A finished run's workspace goes in the background, once its agent has let go.
+      await runner.cleanedUp();
 
       expect(existsSync(join(root, first.id))).toBe(false);
       expect(runner.runs('you', second.prId)[0].status).toBe('running');
@@ -638,6 +640,7 @@ describe('AI runner', () => {
       const completed = await Promise.all([finished(second), finished(queued)]);
 
       expect(completed.map((run) => run.status)).toEqual(['done', 'done']);
+      await runner.cleanedUp();
       expect(completed.every((run) => !existsSync(join(root, run.id)))).toBe(true);
       expect(github.writes).toEqual([]);
     } finally {
@@ -668,6 +671,8 @@ describe('AI runner', () => {
       await vi.waitFor(() => expect(claude.has(join(root, brief.id))).toBe(true));
 
       expect(codex.size).toBe(2);
+      // Removed in the background, once each run's agent has let go of its workspace.
+      await runner.cleanedUp();
       expect(existsSync(join(root, queued.id))).toBe(false);
       expect(existsSync(join(root, first.id))).toBe(false);
       expect(runner.runs('you', second.prId)[0].status).toBe('running');
@@ -731,6 +736,7 @@ describe('AI runner', () => {
       sync.detail(run.prId)!.snapshot.baseOid,
       run.headOid,
     ]);
+    await runner.cleanedUp();
     expect(existsSync(join(root, run.id))).toBe(false);
     expect(reviews.draft('you', run.prId).comments).toEqual([]);
     expect(github.writes).toEqual([]);
@@ -1468,6 +1474,7 @@ describe('AI runner', () => {
         createdAt: run.createdAt,
         resumable: false,
       });
+      await runner.cleanedUp();
       expect(existsSync(join(root, run.id))).toBe(false);
       expect(github.writes).toEqual([]);
     } finally {
@@ -1494,6 +1501,7 @@ describe('AI runner', () => {
       runner.cancel('you', first.id);
 
       expect(await finished(first)).toMatchObject({ status: 'cancelled', resumable: false });
+      await runner.cleanedUp();
       expect(existsSync(join(root, first.id))).toBe(false);
       await expect(runner.resume('you', first.id)).rejects.toThrow('cannot be resumed');
     } finally {
@@ -1557,6 +1565,7 @@ describe('AI runner', () => {
 
       await vi.waitFor(() => expect(session.runner.runs('you', run.prId)[0].status).toBe('done'));
       expect(session.runner.runs('you', run.prId)[0].id).toBe(run.id);
+      await session.runner.cleanedUp();
       expect(existsSync(join(root, run.id))).toBe(false);
     } finally {
       await session.runner.close();

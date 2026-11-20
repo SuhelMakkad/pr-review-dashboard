@@ -1,6 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { writeBackup } from '@/db/backups.js';
 
 export interface Migration {
   version: number;
@@ -123,14 +122,6 @@ export function schemaVersion(db: DatabaseSync): number {
   return Number(row.user_version);
 }
 
-/** Where to copy the database before upgrading it, never overwriting an earlier backup. */
-export function backupPath(databasePath: string, label: string): string {
-  const directory = dirname(databasePath);
-  const base = join(directory, `backup-${label}.sqlite`);
-
-  return existsSync(base) ? join(directory, `backup-${label}-${Date.now()}.sqlite`) : base;
-}
-
 /**
  * Applies pending migrations, each in its own immediate transaction. An existing on-disk database
  * is copied with VACUUM INTO before its first pending migration, so an upgrade can be undone.
@@ -142,7 +133,7 @@ export function migrate(db: DatabaseSync, databasePath: string, list = legacyMig
   if (pending.length === 0) return current;
 
   if (current > 0 && databasePath !== ':memory:') {
-    db.prepare('VACUUM INTO ?').run(backupPath(databasePath, `v${current}`));
+    writeBackup(db, databasePath, `v${current}`);
   }
 
   for (const migration of pending) {
