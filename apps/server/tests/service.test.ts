@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { FEED_SOURCES } from '@review-desk/shared/types';
 import { TestClock } from '@/clock.js';
 import { Store } from '@/db/store.js';
 import { SyncService } from '@/sync/index.js';
@@ -237,6 +238,9 @@ describe('sync and local persistence', () => {
 
     expect(service.status.retryAt).toBeNull();
     expect(service.list().items).toHaveLength(1);
+    expect(new Set(vi.mocked(github.discover).mock.calls.map(([, source]) => source))).toEqual(
+      new Set(FEED_SOURCES),
+    );
     expect(github.teams).toHaveBeenCalled();
   });
 
