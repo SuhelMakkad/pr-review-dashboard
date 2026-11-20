@@ -12,6 +12,8 @@ interface Undo {
   label: string;
   account: string;
   run: () => void;
+  /** Undone already, from the keyboard or its toast: never twice. */
+  used: boolean;
 }
 
 /** Each account's most recent reversible action: a late reply for one never displaces another's. */
@@ -25,6 +27,8 @@ const shownAccount = (client: QueryClient) =>
  * change another account's queue than the one shown.
  */
 function runUndo(client: QueryClient, undo: Undo): boolean {
+  if (undo.used) return false;
+
   if (undo.account !== shownAccount(client)) {
     toast.error(`Switch back to ${undo.account} to undo this.`);
     return false;
@@ -32,6 +36,7 @@ function runUndo(client: QueryClient, undo: Undo): boolean {
 
   if (lastUndo.get(undo.account) === undo) lastUndo.delete(undo.account);
 
+  undo.used = true;
   undo.run();
   toast(`Undone: ${undo.label}`);
 
@@ -67,6 +72,7 @@ export function usePullActions() {
             ? {
                 label: success.message,
                 account,
+                used: false,
                 run: () =>
                   void runTriage(client, { id: item.id, account, update: reverse }).catch(
                     (error: Error) => toast.error(error.message),

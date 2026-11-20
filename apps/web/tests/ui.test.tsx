@@ -362,23 +362,30 @@ describe('inbox', () => {
     await user.keyboard('e');
     await waitFor(() => expect(writes).toContainEqual(done('me', true)));
 
-    // `other` marks the same PR done; Z then undoes `other`'s, not `me`'s.
+    // `other` marks the same PR done.
     await switchTo('other');
     await openFollow();
     await user.keyboard('e');
     await waitFor(() => expect(writes).toContainEqual(done('other', true)));
+
+    // `me`'s toast (the oldest, so the last listed), clicked while `other`'s own undo is still
+    // available, does nothing. (A plain click: the toast's swipe handling needs pointer capture.)
+    const before = writes.length;
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Undo' }).at(-1)!);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+    expect(writes.slice(before)).toEqual([]);
+
+    // Z undoes `other`'s action; its toast then cannot undo it a second time.
     await user.keyboard('z');
     await waitFor(() => expect(writes).toContainEqual(done('other', false)));
     expect(writes).not.toContainEqual(done('me', false));
 
-    // `me`'s toast, still showing (the oldest, so the last listed), does nothing while `other`
-    // is on screen. (A plain click: the toast's swipe handling needs pointer capture.)
-    const before = writes.length;
-    const undos = screen.getAllByRole('button', { name: 'Undo' });
+    const undone = writes.length;
 
-    fireEvent.click(undos.at(-1)!);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Undo' })[0]);
     await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
-    expect(writes.slice(before)).toEqual([]);
+    expect(writes.slice(undone)).toEqual([]);
 
     // Back on `me`, its own last action is still the one Z undoes.
     await switchTo('me');

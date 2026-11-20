@@ -405,13 +405,15 @@ it('shows only the saved switch from a save’s reply, so a late reply cannot un
 describe('the private note', () => {
   it('keeps the text you went back to while an older save is still on its way', async () => {
     const sent: string[] = [];
-    let release: () => void = () => {};
+    const releases = new Map<string, () => void>();
     const onSave = vi.fn(async (note: string) => {
       sent.push(note);
-      if (note === 'B') await new Promise<void>((resolve) => (release = resolve));
+      await new Promise<void>((resolve) => releases.set(note, resolve));
     });
     const view = render(<Notes account="you" id="pr-two" saved="A" onSave={onSave} />);
     const box = () => screen.getByRole('textbox', { name: 'Private note' });
+    const showSaved = (note: string) =>
+      view.rerender(<Notes account="you" id="pr-two" saved={note} onSave={onSave} />);
 
     // B is typed and its save is held; then A, the saved text, is typed back.
     fireEvent.change(box(), { target: { value: 'B' } });
@@ -419,13 +421,57 @@ describe('the private note', () => {
     fireEvent.change(box(), { target: { value: 'A' } });
     await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
 
-    // B lands, and the server's note becomes B: the editor keeps A, and saves it after B.
-    await act(async () => release());
-    view.rerender(<Notes account="you" id="pr-two" saved="B" onSave={onSave} />);
+    // Only B is on its way: A waits for it.
+    expect(sent).toEqual(['B']);
 
+    // B lands and the server shows it, while A's save is on its way: the editor keeps A.
+    await act(async () => releases.get('B')!());
+    await waitFor(() => expect(sent).toEqual(['B', 'A']));
+    showSaved('B');
     expect(box()).toHaveValue('A');
-    await waitFor(() => expect(sent.at(-1)).toBe('A'), { timeout: 2_000 });
-    expect(sent.indexOf('A')).toBeGreaterThan(sent.indexOf('B'));
+
+    // A lands and the server shows it: the editor is clean, and follows the next saved note.
+    await act(async () => releases.get('A')!());
+    showSaved('A');
+    showSaved('C');
+    await waitFor(() => expect(box()).toHaveValue('C'));
+    expect(sent).toEqual(['B', 'A']);
+  });
+
+  it('acknowledges a save whose saved note arrives before its reply, and joins one queue across editors', async () => {
+    const sent: string[] = [];
+    const releases = new Map<string, () => void>();
+    const onSave = vi.fn(async (note: string) => {
+      sent.push(note);
+      await new Promise<void>((resolve) => releases.set(note, resolve));
+    });
+    const first = render(<Notes account="you" id="pr-three" saved="" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    fireEvent.change(box(), { target: { value: 'One' } });
+    await waitFor(() => expect(sent).toEqual(['One']), { timeout: 2_000 });
+
+    // The editor goes away (a switch) and another opens for the same PR: its save waits for the
+    // first one, whatever order their replies would come in.
+    first.unmount();
+
+    const second = render(<Notes account="you" id="pr-three" saved="One" onSave={onSave} />);
+
+    fireEvent.change(box(), { target: { value: 'Two' } });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(sent).toEqual(['One']);
+
+    await act(async () => releases.get('One')!());
+    await waitFor(() => expect(sent).toEqual(['One', 'Two']));
+
+    // The server's note shows Two before Two's reply: once the reply comes, the editor is clean
+    // and follows a newer note from elsewhere.
+    second.rerender(<Notes account="you" id="pr-three" saved="Two" onSave={onSave} />);
+    await act(async () => releases.get('Two')!());
+    second.rerender(<Notes account="you" id="pr-three" saved="Three" onSave={onSave} />);
+
+    await waitFor(() => expect(box()).toHaveValue('Three'));
+    expect(sent).toEqual(['One', 'Two']);
   });
 
   it('follows a newer saved note until you type, and saves only what you typed', async () => {
@@ -461,7 +507,8 @@ describe('the status shown', () => {
       this: Query,
       ...args: Parameters<Query['setData']>
     ) {
-      const polled = this.state.fetchStatus === 'fetching';
+      // The fetch's own result, not a write made by hand (`setQueryData`) while it was on its way.
+      const polled = this.state.fetchStatus === 'fetching' && !args[1]?.manual;
 
       if (polled && !interleaved) {
         interleaved = true;

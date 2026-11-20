@@ -14,6 +14,33 @@ function readDraft(key: string): string | null {
   }
 }
 
+/**
+ * Note saves per account and PR, kept outside any one editor: an editor that remounts (a switch
+ * away and back) joins the same queue, so saves always reach the server in the order they were made.
+ */
+interface SaveQueue {
+  chain: Promise<unknown>;
+  /** Saves queued and not yet settled. */
+  pending: number;
+  /** The text of the last save queued: the one the server ends with once the queue drains. */
+  last: string | null;
+  /** Called once the queue drains, by the editor showing it (if any). */
+  drained: (() => void) | null;
+}
+
+const saveQueues = new Map<string, SaveQueue>();
+
+function saveQueue(key: string): SaveQueue {
+  let queue = saveQueues.get(key);
+
+  if (!queue) {
+    queue = { chain: Promise.resolve(), pending: 0, last: null, drained: null };
+    saveQueues.set(key, queue);
+  }
+
+  return queue;
+}
+
 function writeDraft(key: string, value: string | null) {
   try {
     if (value === null) sessionStorage.removeItem(key);
@@ -43,11 +70,29 @@ export const Notes = forwardRef<
    * own fresher copy after a switch) is shown, never saved back over by the older text.
    */
   const edited = useRef(readDraft(key) !== null);
-  /** Saves in flight, in order; each starts once the one before it has settled. */
-  const saves = useRef<Promise<unknown>>(Promise.resolve());
-  const pending = useRef(0);
+  const queue = saveQueue(key);
+  const latestSaved = useRef(saved);
 
   latest.current = note;
+  latestSaved.current = saved;
+
+  /** Clean once nothing is in flight and the text is what was saved: the draft can go. */
+  const settle = () => {
+    if (queue.pending > 0 || latest.current !== latestSaved.current) return;
+
+    edited.current = false;
+    writeDraft(key, null);
+    setState((current) => (current === 'saving' || current === 'dirty' ? 'saved' : current));
+  };
+
+  // The queue tells this editor when it drains: the saved note may have arrived before the reply.
+  useEffect(() => {
+    queue.drained = settle;
+
+    return () => {
+      if (queue.drained === settle) queue.drained = null;
+    };
+  });
 
   useEffect(() => {
     if (!edited.current) setNote(saved);
@@ -56,10 +101,8 @@ export const Notes = forwardRef<
   useEffect(() => {
     // Matching the saved note counts only once no save is in flight: an older one could still
     // land after it and replace the text you went back to.
-    if (note === saved && pending.current === 0) {
-      edited.current = false;
-      writeDraft(key, null);
-      setState((current) => (current === 'saving' || current === 'dirty' ? 'saved' : current));
+    if (note === saved && queue.pending === 0) {
+      settle();
       return;
     }
 
@@ -68,12 +111,17 @@ export const Notes = forwardRef<
     writeDraft(key, note);
     setState('dirty');
 
+    // Already the last save on its way: the queue ends with this text.
+    if (queue.pending > 0 && queue.last === note) return;
+
     const timer = setTimeout(() => {
       setState('saving');
-      pending.current += 1;
+      queue.pending += 1;
+      queue.last = note;
 
-      // After the saves before it, so the last text you typed is the one the server keeps.
-      saves.current = saves.current
+      // After the saves before it, from this editor or an earlier one: the last text you typed
+      // is the one the server keeps.
+      queue.chain = queue.chain
         .catch(() => undefined)
         .then(() => onSave(note))
         .then(
@@ -81,7 +129,8 @@ export const Notes = forwardRef<
           () => setState('error'),
         )
         .finally(() => {
-          pending.current -= 1;
+          queue.pending -= 1;
+          if (queue.pending === 0) queue.drained?.();
         });
     }, 800);
 

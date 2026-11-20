@@ -110,21 +110,14 @@ test('matches the visual baseline', async ({ page }) => {
   await open(page, '/inbox/attention/acme/api/2041');
   await expect(page.getByRole('heading', { level: 2 })).toBeVisible();
   // The Linear card loads on its own, after the PR, and eases open (a script animation, which
-  // the screenshot does not pause): the baseline has it fully open, so wait until its height
-  // has settled.
+  // the screenshot does not pause). The baseline has it fully open: its wrapper stops clipping
+  // (`overflow: visible`) only once the animation has ended.
   const card = page.getByRole('region', { name: 'Linear' });
-  let height = -1;
 
   await expect(card).toBeVisible();
   await expect
-    .poll(async () => {
-      const previous = height;
-
-      height = (await card.boundingBox())?.height ?? 0;
-
-      return height > 0 && height === previous;
-    })
-    .toBe(true);
+    .poll(() => card.evaluate((element) => getComputedStyle(element.parentElement!).overflow))
+    .toBe('visible');
   await expect(page).toHaveScreenshot('inbox-reading-pane.png', {
     mask: [page.locator('[data-volatile]')],
   });
