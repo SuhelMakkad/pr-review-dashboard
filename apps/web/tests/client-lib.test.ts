@@ -252,6 +252,18 @@ describe('account switches', () => {
     expect(client.getQueryData(queryKeys.draft('pr-1', 'me'))).toBeUndefined();
   });
 
+  it('reads an account’s kept answers again when it is switched back to', () => {
+    const client = cacheFor('me');
+
+    adoptStatus(client, as('other'));
+    expect(client.getQueryState(queryKeys.pulls('me'))?.isInvalidated).toBe(false);
+
+    // A snooze may have ended since: its queue is read again, not trusted.
+    adoptStatus(client, as('me'));
+    expect(client.getQueryState(queryKeys.pulls('me'))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.detail('me', 'pr-1'))?.isInvalidated).toBe(true);
+  });
+
   it('keeps cached answers when the account stays the same', () => {
     const client = cacheFor('me');
 
@@ -320,6 +332,8 @@ describe('account switches', () => {
           }),
       );
 
+      client.setQueryData(queryKeys.mine('me'), { account: 'me', items: [] });
+
       const sent = runTriage(client, { id: 'pr-1', account: 'me', update: { note: 'For me' } });
 
       await vi.waitFor(() => expect(answer).not.toBeNull());
@@ -368,7 +382,7 @@ describe('account switches', () => {
         snapshot: { headOid: 'new-head' },
       });
       expect(client.getQueryState(queryKeys.detail('me', 'pr-1'))?.isInvalidated).toBe(true);
-      expect(client.getQueryState(queryKeys.mine('me'))?.isInvalidated ?? true).toBe(true);
+      expect(client.getQueryState(queryKeys.mine('me'))?.isInvalidated).toBe(true);
     });
 
     it("rolls back only its own account's queue", async () => {

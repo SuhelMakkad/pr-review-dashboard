@@ -37,15 +37,28 @@ export const Notes = forwardRef<
   const [note, setNote] = useState(() => readDraft(key) ?? saved);
   const [state, setState] = useState<SaveState>(note === saved ? 'saved' : 'dirty');
   const latest = useRef(note);
+  /**
+   * True once text was typed here (or a tab draft of it survived) and not yet saved. Until then the
+   * editor follows the saved note, so a newer note from elsewhere (another window, the account's
+   * own fresher copy after a switch) is shown, never saved back over by the older text.
+   */
+  const edited = useRef(readDraft(key) !== null);
 
   latest.current = note;
 
   useEffect(() => {
+    if (!edited.current) setNote(saved);
+  }, [saved]);
+
+  useEffect(() => {
     if (note === saved) {
+      edited.current = false;
       writeDraft(key, null);
       setState((current) => (current === 'saving' || current === 'dirty' ? 'saved' : current));
       return;
     }
+
+    if (!edited.current) return;
 
     writeDraft(key, note);
     setState('dirty');
@@ -85,7 +98,10 @@ export const Notes = forwardRef<
         ref={ref}
         value={note}
         maxLength={30_000}
-        onChange={(event) => setNote(event.target.value)}
+        onChange={(event) => {
+          edited.current = true;
+          setNote(event.target.value);
+        }}
         onKeyDown={(event) => {
           if (event.key === 'Escape') event.currentTarget.blur();
         }}

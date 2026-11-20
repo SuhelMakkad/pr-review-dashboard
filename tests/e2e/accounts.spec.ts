@@ -139,8 +139,16 @@ test('saves a note held across a switch for the account it was written for', asy
   await expect(note).toHaveValue('Personal note');
 
   // Released after the switch, it still saves for you, and you-personal's note is untouched.
+  const replied = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/api/accounts/you/pulls/${id}/triage`) &&
+      response.request().method() === 'PATCH',
+  );
+
   for (const route of held) await route.continue();
   await page.unroute(`**/api/accounts/you/pulls/${id}/triage`);
+  // The browser has the reply, and has handled it, before the screen is checked.
+  await replied;
 
   await expect.poll(() => savedFor('you')).toBe('Held for you');
   expect(await savedFor('you-personal')).toBe('Personal note');

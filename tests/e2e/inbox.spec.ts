@@ -109,6 +109,8 @@ test('has no serious accessibility violations', async ({ page }) => {
 test('matches the visual baseline', async ({ page }) => {
   await open(page, '/inbox/attention/acme/api/2041');
   await expect(page.getByRole('heading', { level: 2 })).toBeVisible();
+  // The Linear card loads on its own, after the PR: the baseline has it.
+  await expect(page.getByText('Store extracted product metadata')).toBeVisible();
   await expect(page).toHaveScreenshot('inbox-reading-pane.png', {
     mask: [page.locator('[data-volatile]')],
   });

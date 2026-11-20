@@ -45,6 +45,7 @@ export function fallbackInterval(live: LiveState, ms = 15_000): number | false {
  */
 const SHARED_QUERIES = new Set<unknown>([
   queryKeys.status[0],
+  'status-poll',
   queryKeys.accounts[0],
   queryKeys.account(null)[0],
 ]);
@@ -86,6 +87,10 @@ export function adoptStatus(client: QueryClient, status: SyncStatus): void {
     client.removeQueries({ predicate: (query: Query) => !SHARED_QUERIES.has(query.queryKey[0]) });
 
   client.setQueryData(queryKeys.status, status);
+
+  // Answers kept from when this account was last shown may be out of date (a snooze that has
+  // ended since, say): read them again.
+  if (switched) void client.invalidateQueries({ queryKey: queryKeys.account(login) });
 
   // The first status names the account the cached answers were loaded for; refresh them.
   if (!switched && previous?.account?.login !== status.account?.login)
@@ -130,7 +135,10 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
 
       setState({ demo: event.demo });
 
-      if (!firstHello.value) void client.invalidateQueries();
+      // Every connection reads the status again, the first included: another window may have
+      // switched accounts between this page's first status and the stream opening.
+      if (firstHello.value) void client.invalidateQueries({ queryKey: ['status-poll'] });
+      else void client.invalidateQueries();
 
       firstHello.value = false;
       return;

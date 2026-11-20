@@ -43,6 +43,8 @@ test('queues a review, advances from the inbox, and keeps its result after navig
 }) => {
   await openFresh(page, '/inbox/attention/acme/web/1839');
   await command(page, '/api/dev/operations', { delayMs: 1200 });
+  // Enter opens the files of the PR shown, so the PR must have loaded first.
+  await expect(page.getByRole('heading', { level: 2 })).toBeVisible();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/files\?inbox=attention/);
   // The workspace loads after the URL changes; its shortcuts exist once it shows.

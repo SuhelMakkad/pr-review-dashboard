@@ -63,6 +63,8 @@ let triage: Record<string, LocalTriageState> = {};
 let heldReply: Promise<void> | null = null;
 /** While set, the status still names this account: news of a switch has not reached it yet. */
 let laggingStatus: string | null = null;
+/** How the status answers: as usual, as a failed request, or with no account signed in. */
+let statusAnswer: 'ok' | 'fails' | 'signed out' = 'ok';
 let writes: { id: string; body: Record<string, unknown> }[] = [];
 /** PRs added by hand through `POST /api/pulls/track`, and every queue change sent. */
 let added: PullRequestSnapshot[] = [];
@@ -76,6 +78,7 @@ beforeEach(() => {
   account = 'me';
   heldReply = null;
   laggingStatus = null;
+  statusAnswer = 'ok';
   triage = {};
   writes = [];
   added = [];
@@ -136,6 +139,10 @@ beforeEach(() => {
           error: null,
           setupCommand: '',
         };
+      } else if (path === '/api/status' && statusAnswer === 'fails') {
+        return { ok: false, status: 503, json: async () => ({ error: 'Server unavailable' }) };
+      } else if (path === '/api/status' && statusAnswer === 'signed out') {
+        data = { ...status(), account: null };
       } else if (path === '/api/status') {
         data = {
           ...status(),
@@ -308,6 +315,43 @@ describe('inbox', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('does not undo with Z on an account other than the one the action was for', async () => {
+    const { user } = mount();
+
+    await screen.findByRole('heading', { name: /Follow up after code changes/ });
+    await user.keyboard('e');
+    await waitFor(() =>
+      expect(writes).toContainEqual({ id: 'follow', body: { account: 'me', done: true } }),
+    );
+
+    screen.getByRole('button', { name: /^Switch GitHub account, now me\b/ }).focus();
+    await user.keyboard('{Enter}');
+    await user.click(await screen.findByRole('menuitemradio', { name: 'other' }));
+    await screen.findByRole('button', { name: /^Switch GitHub account, now other\b/ });
+
+    const before = writes.length;
+
+    await user.keyboard('z');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+
+    expect(writes.slice(before)).toEqual([]);
+    expect(triage['me:follow']?.doneAt).not.toBeNull();
+  });
+
+  it("shows the status's failure with a retry, and an empty queue with no account signed in", async () => {
+    statusAnswer = 'fails';
+
+    const { user } = mount();
+
+    expect(await screen.findByText("Can't reach Review Desk")).toBeInTheDocument();
+
+    statusAnswer = 'signed out';
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+
+    await waitFor(() => expect(screen.queryByText("Can't reach Review Desk")).toBeNull());
+    expect(screen.queryByRole('heading', { name: /Follow up after code changes/ })).toBeNull();
+  });
+
   it('autosaves a private note focused with N', async () => {
     const { user } = mount();
 
@@ -477,7 +521,7 @@ describe('switching accounts', () => {
 
     // The status reaches this window: it shows the other account's note, and writes nothing to it.
     laggingStatus = null;
-    await act(() => clients[0].invalidateQueries({ queryKey: queryKeys.status }));
+    await act(() => clients[0].invalidateQueries({ queryKey: ['status-poll'] }));
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other'),
     );

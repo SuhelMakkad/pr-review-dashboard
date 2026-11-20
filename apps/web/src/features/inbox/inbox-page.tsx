@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
+import { Outlet, useNavigate, useParams, useRouter, useSearch } from '@tanstack/react-router';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 import { Inbox, Plus } from 'lucide-react';
 import type { PullRequestItem } from '@review-desk/shared/types';
@@ -55,6 +55,7 @@ export function InboxPage() {
   const { queue } = useParams({ from: '/inbox/$queue' }) as { queue: QueueSlug };
   const search = useSearch({ from: '/inbox/$queue' });
   const navigate = useNavigate();
+  const router = useRouter();
   const pulls = usePulls();
   const [adding, setAdding] = useState(false);
   const operations = useOperations(pulls.data?.account ?? '');
@@ -133,6 +134,8 @@ export function InboxPage() {
 
   useEffect(() => {
     if (autoSelected || ref || flat.length === 0) return;
+    // You already went elsewhere (G M before the queue loaded): never pull you back.
+    if (!router.state.location.pathname.startsWith('/inbox/')) return;
 
     autoSelected = true;
     select(flat[0]);

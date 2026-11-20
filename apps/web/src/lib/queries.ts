@@ -1,4 +1,10 @@
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import {
+  skipToken,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from '@tanstack/react-query';
 import type {
   GitHubAccountList,
   PullRequestDetail,
@@ -20,28 +26,39 @@ import { api } from '@/lib/api';
 import { adoptStatus, fallbackInterval, useLive } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
 
+/** Polls the server's status under its own key; what it reads is shown only by `adoptStatus`. */
+const statusPoll = (client: QueryClient) => ({
+  queryKey: ['status-poll'] as const,
+  queryFn: async () => {
+    const status = await api<SyncStatus>('/api/status');
+
+    adoptStatus(client, status);
+
+    return status.revision ?? 0;
+  },
+});
+
+/** Reads the status now (with a poll already on its way, that one), adopting it. */
+export function readStatus(client: QueryClient): Promise<unknown> {
+  return client.fetchQuery({ ...statusPoll(client), staleTime: 0 });
+}
+
 /**
- * The status shown. `adoptStatus` is its only writer: a polled status goes through it like every
- * other, and the query then holds whatever it decided is current, so an older reply that arrives
- * late never replaces a newer status. (Nothing can run between the two: no event lands between a
- * query function's last step and the write of its result.)
+ * The status shown. `adoptStatus` is its only writer, whatever the source (this poll, the event
+ * stream, a sync or switch reply), so an older status that arrives late never replaces a newer one:
+ * the query itself never fetches.
  */
 export function useStatus() {
   const client = useQueryClient();
   const live = useLive();
 
-  return useQuery({
-    queryKey: queryKeys.status,
-    queryFn: async () => {
-      const status = await api<SyncStatus>('/api/status');
-
-      adoptStatus(client, status);
-
-      return client.getQueryData<SyncStatus>(queryKeys.status) ?? status;
-    },
+  useQuery({
+    ...statusPoll(client),
     refetchInterval: fallbackInterval(live, 10_000),
     staleTime: live.connected ? Infinity : 0,
   });
+
+  return useQuery<SyncStatus>({ queryKey: queryKeys.status, queryFn: skipToken });
 }
 
 /** The account on screen: every query of its PRs is for it. Null until the first status. */
@@ -59,27 +76,46 @@ export function useForge(): ForgeTerms {
   return forgeTerms(useStatus().data?.account?.login);
 }
 
+/**
+ * An account's list, or, before any account is known, the status: read here too, so a failure to
+ * read it shows as this list's error, with its retry, instead of a list that never loads. Once the
+ * status is known its account's list loads under that account's key; with no account at all (no
+ * sign-in) the list is empty, as the server's own answer for no account is.
+ */
+async function listFor<T>(
+  client: QueryClient,
+  account: string | null,
+  path: string,
+  none: T,
+): Promise<T> {
+  if (account) return api<T>(accountPath(account, path));
+  if (!client.getQueryData(queryKeys.status)) await readStatus(client);
+
+  return none;
+}
+
 export function usePulls() {
+  const client = useQueryClient();
   const live = useLive();
   const account = useAccount();
 
   return useQuery({
     queryKey: queryKeys.pulls(account),
-    queryFn: () => api<PullRequestList>(accountPath(account!, '/pulls')),
-    enabled: account !== null,
+    queryFn: () =>
+      listFor<PullRequestList>(client, account, '/pulls', { account: null, items: [] }),
     refetchInterval: fallbackInterval(live),
     staleTime: live.connected ? Infinity : 0,
   });
 }
 
 export function useMine() {
+  const client = useQueryClient();
   const live = useLive();
   const account = useAccount();
 
   return useQuery({
     queryKey: queryKeys.mine(account),
-    queryFn: () => api<MineList>(accountPath(account!, '/mine')),
-    enabled: account !== null,
+    queryFn: () => listFor<MineList>(client, account, '/mine', { account: null, items: [] }),
     refetchInterval: fallbackInterval(live),
     staleTime: live.connected ? Infinity : 0,
   });

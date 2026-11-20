@@ -1,13 +1,22 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DiffManifest } from '@review-desk/shared/diff';
 import { adoptStatus } from '@/lib/live';
 import { githubCommand } from '@/lib/operation-command';
-import { useSyncNow } from '@/lib/queries';
+import { useStatus, useSyncNow } from '@/lib/queries';
+import { Notes } from '@/features/pulls/notes';
 import { queryKeys } from '@/lib/query-keys';
 import {
   canMarkViewed,
@@ -391,4 +400,56 @@ it('shows only the saved switch from a save’s reply, so a late reply cannot un
   expect(withSaved(settings, { ...late, approveFindings: true }, 'approveFindings')).toEqual(
     settings,
   );
+});
+
+describe('the private note', () => {
+  it('follows a newer saved note until you type, and saves only what you typed', async () => {
+    const onSave = vi.fn(async () => undefined);
+    const view = render(<Notes account="you" id="pr-one" saved="Older note" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    // A fresher copy arrives (another window, or this account's own after a switch back).
+    view.rerender(<Notes account="you" id="pr-one" saved="Newer note" onSave={onSave} />);
+    await waitFor(() => expect(box()).toHaveValue('Newer note'));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(onSave).not.toHaveBeenCalled();
+
+    // Typed here: kept, and saved, whatever arrives meanwhile.
+    fireEvent.change(box(), { target: { value: 'Mine' } });
+    view.rerender(<Notes account="you" id="pr-one" saved="Someone else's" onSave={onSave} />);
+    expect(box()).toHaveValue('Mine');
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('Mine'), { timeout: 2_000 });
+  });
+});
+
+describe('the status shown', () => {
+  it('is never moved back by a poll that left before a newer status', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let answer: () => void = () => {};
+
+    vi.stubGlobal(
+      'fetch',
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = () => resolve(response(status({ account: { login: 'you' }, revision: 8 })));
+        }),
+    );
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const hook = renderHook(() => useStatus(), { wrapper });
+
+    try {
+      // The poll is on its way when a switch's status arrives.
+      await waitFor(() => expect(client.isFetching({ queryKey: ['status-poll'] })).toBe(1));
+      act(() => adoptStatus(client, status({ account: { login: 'other' }, revision: 9 })));
+      await act(async () => answer());
+      await waitFor(() => expect(client.isFetching({ queryKey: ['status-poll'] })).toBe(0));
+
+      expect(hook.result.current.data).toMatchObject({ account: { login: 'other' }, revision: 9 });
+    } finally {
+      client.clear();
+    }
+  });
 });

@@ -1,20 +1,26 @@
 import { useCallback } from 'react';
 import { toast } from 'sonner';
 import type { PullRequestItem } from '@review-desk/shared/types';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
+import type { SyncStatus } from '@review-desk/shared/types';
+import { queryKeys } from '@/lib/query-keys';
 import { numberSign } from '@/lib/pr-ref';
 import { runTriage, usePulls, type TriageVariables } from '@/lib/queries';
 import { shortDateTime } from '@/lib/time';
 
-type Undo = { label: string; run: () => void } | null;
+type Undo = { label: string; account: string; run: () => void } | null;
 
 let lastUndo: Undo = null;
 
-/** Undo for the most recent reversible triage action (bound to Z). */
-export function undoLast(): boolean {
+/**
+ * Undo for the most recent reversible triage action (bound to Z), only while the account it was
+ * made for is on screen: after a switch it would change another account's queue than the one shown.
+ */
+export function undoLast(client: QueryClient): boolean {
   const undo = lastUndo;
+  const shown = client.getQueryData<SyncStatus>(queryKeys.status)?.account?.login;
 
-  if (!undo) return false;
+  if (!undo || undo.account !== shown) return false;
 
   lastUndo = null;
   undo.run();
@@ -44,6 +50,7 @@ export function usePullActions() {
           lastUndo = undo
             ? {
                 label: success.message,
+                account,
                 run: () =>
                   void runTriage(client, { id: item.id, account, update: undo }).catch(
                     (error: Error) => toast.error(error.message),
@@ -53,7 +60,7 @@ export function usePullActions() {
 
           toast(success.message, {
             description: `${numberSign(item.url)}${item.number} ${item.title}`,
-            action: undo ? { label: 'Undo', onClick: () => undoLast() } : undefined,
+            action: undo ? { label: 'Undo', onClick: () => undoLast(client) } : undefined,
           });
         },
         (error: Error) => {
