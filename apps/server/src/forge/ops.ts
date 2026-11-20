@@ -21,15 +21,11 @@ const GITHUB_REST: [RegExp, ForgeOp][] = [
  */
 export function githubOp(path: string | undefined, input?: string): ForgeOp {
   if (path === 'graphql') {
-    let query = '';
-
-    try {
-      query = String((JSON.parse(input ?? '{}') as { query?: unknown }).query ?? '');
-    } catch {
-      // Not a document this server wrote.
-    }
-
-    const name = /^\s*(?:query|mutation)\s+([A-Za-z]+)/.exec(query)?.[1];
+    // The request body starts with its document (`{"query":"query Snapshot(…`): its name is
+    // read from there, never by parsing the whole request with its variables.
+    const name = /^\{"query":"(?:\\[nrt]|\s)*(?:query|mutation)\s+([A-Za-z]+)/.exec(
+      input ?? '',
+    )?.[1];
 
     return name ? named(name) : 'graphql';
   }

@@ -117,7 +117,7 @@ export class SyncService {
   start(): void {
     if (this.stopped) return;
 
-    void this.sync();
+    void this.sync({ trigger: 'start' });
     this.timer = setInterval(() => {
       void this.sync({ scheduled: true });
     }, SYNC_INTERVAL_MS);
@@ -163,11 +163,14 @@ export class SyncService {
    * Runs one sync. Scheduled runs respect per-feed cadences; explicit runs (startup, "Sync now",
    * tests) run every feed. Concurrent calls share the run in progress.
    */
-  sync(options: { scheduled?: boolean } = {}): Promise<void> {
+  sync(
+    options: { scheduled?: boolean; trigger?: 'start' | 'switch' | 'manual' } = {},
+  ): Promise<void> {
     if (this.running) return this.running;
     if (this.stopped || this.cooldown()) return Promise.resolve();
 
-    const run = this.perform(Boolean(options.scheduled)).finally(() => {
+    const trigger = options.scheduled ? 'interval' : (options.trigger ?? 'manual');
+    const run = this.perform(Boolean(options.scheduled), trigger).finally(() => {
       if (this.running === run) this.running = null;
     });
 
@@ -244,7 +247,7 @@ export class SyncService {
     // Wait until the switch no longer counts as running, or this sync would only rejoin it.
     await run;
     await switching;
-    void this.sync();
+    void this.sync({ trigger: 'switch' });
 
     return this.status;
   }
@@ -487,7 +490,10 @@ export class SyncService {
     return { tracked: remaining.length > 0 };
   }
 
-  private async perform(scheduled: boolean): Promise<void> {
+  private async perform(
+    scheduled: boolean,
+    trigger: 'interval' | 'start' | 'switch' | 'manual',
+  ): Promise<void> {
     this.status = {
       ...this.status,
       syncing: true,
@@ -700,8 +706,16 @@ export class SyncService {
 
       log.event('info', 'sync.completed', {
         forge: timing.forge,
-        trigger: scheduled ? 'interval' : 'manual',
-        outcome: retryAt && timing.outcome === 'ok' ? 'rate_limit' : timing.outcome,
+        trigger,
+        // A sync that went on past a failed feed, team read or fetch did only part of its work.
+        outcome:
+          timing.outcome !== 'ok'
+            ? timing.outcome
+            : retryAt
+              ? 'rate_limit'
+              : this.status.warnings.length > 0
+                ? 'partial'
+                : 'ok',
         discoveryMs: phase(timing.started, timing.discovered),
         detectionMs: phase(timing.discovered, timing.detected),
         fetchMs: phase(timing.detected, timing.fetched),

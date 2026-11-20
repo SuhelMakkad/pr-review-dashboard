@@ -11,12 +11,13 @@ const SLOW_MS = 5000;
  */
 export function forgeRequest(
   forge: 'github' | 'gitlab',
-  op: ForgeOp,
+  /** Named only when the record is written: naming reads the request. */
+  op: () => ForgeOp,
   timings: Omit<EventFields<'forge.request'>, 'forge' | 'op'>,
 ): void {
-  log.event((timings.totalMs ?? 0) > SLOW_MS ? 'info' : 'debug', 'forge.request', {
-    forge,
-    op,
-    ...timings,
-  });
+  const level = (timings.totalMs ?? 0) > SLOW_MS ? 'info' : 'debug';
+
+  if (!log.isLevelEnabled(level)) return;
+
+  log.event(level, 'forge.request', { forge, op: op(), ...timings });
 }

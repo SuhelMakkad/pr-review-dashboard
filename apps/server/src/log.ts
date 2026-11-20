@@ -1,4 +1,5 @@
 import { createWriteStream, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { rename, rm, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Writable } from 'node:stream';
 import pino from 'pino';
@@ -244,6 +245,8 @@ export class LogFile implements LogDestination {
   private dropped = 0;
   private buffered: string[] = [];
   private rotating = false;
+  /** A rotation queued or running: the minute's check does not queue another. */
+  private rotation: Promise<void> | null = null;
   private failed = false;
   private closed = false;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -269,11 +272,14 @@ export class LogFile implements LogDestination {
     this.warn = options.warn ?? ((message) => console.warn(message));
   }
 
-  /** Opens the file, rotating one already past the threshold. Only under the data dir's lock. */
+  /**
+   * Opens the file, rotating one already past the threshold. Only under the data dir's lock, and
+   * before the server serves anything: the rotations after this one never block the event loop.
+   */
   open(): void {
     try {
       mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-      if (this.size() >= this.rotateAt) this.shift();
+      if (sizeOf(this.path) >= this.rotateAt) this.shiftSync();
       this.attach(this.openStream(this.path));
     } catch {
       this.fail();
@@ -289,7 +295,8 @@ export class LogFile implements LogDestination {
 
     const bytes = Buffer.byteLength(line);
 
-    if (this.pending + bytes > this.budget) {
+    // A little of the budget is kept for the record of what was dropped.
+    if (this.pending + bytes > this.budget - DROPPED_RESERVE) {
       this.dropped += 1;
       return;
     }
@@ -300,36 +307,43 @@ export class LogFile implements LogDestination {
     else this.send(line, bytes);
   }
 
-  /** Rotates a file past its threshold. Serialized with `close`. */
+  /** Rotates a file past its threshold, without blocking the event loop. Serialized with `close`. */
   rotate(): Promise<void> {
-    this.chain = this.chain.then(async () => {
+    if (this.rotation) return this.rotation;
+
+    const rotation = (this.chain = this.chain.then(async () => {
+      if (this.closed || this.failed || !this.stream) return;
       // What is on disk and what is on its way there.
-      if (this.closed || this.failed || !this.stream || this.size() + this.pending < this.rotateAt)
-        return;
+      if ((await sizeOfAsync(this.path)) + this.pending < this.rotateAt) return;
 
       this.rotating = true;
 
       try {
         await this.end(this.stream);
         this.stream = null;
-        this.shift();
-        this.attach(this.openStream(this.path));
+        await this.shift();
+        if (!this.closed) this.attach(this.openStream(this.path));
       } catch {
         this.fail();
       } finally {
         this.rotating = false;
       }
 
-      for (const line of this.buffered.splice(0)) this.send(line, Buffer.byteLength(line));
+      if (this.stream)
+        for (const line of this.buffered.splice(0)) this.send(line, Buffer.byteLength(line));
+    }));
+
+    this.rotation = rotation.finally(() => {
+      this.rotation = null;
     });
 
-    return this.chain;
+    return this.rotation;
   }
 
   /**
    * Stops taking records and closes the file, after any rotation, once its descriptor is closed.
-   * `timeout` when that takes longer than `withinMs`: then the file may still be in use, and
-   * the caller must not give up the data directory's lock.
+   * `timeout` when that takes longer than `withinMs`, or the stream fails without closing: then
+   * the file may still be in use, and the caller must not give up the data directory's lock.
    */
   async close(withinMs = 2000): Promise<'closed' | 'timeout'> {
     if (this.timer) clearInterval(this.timer);
@@ -342,7 +356,7 @@ export class LogFile implements LogDestination {
       const stream = this.stream;
 
       this.stream = null;
-      if (stream) await this.end(stream).catch(() => undefined);
+      if (stream) await this.end(stream);
     }));
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<'timeout'>((resolve) => {
@@ -381,19 +395,31 @@ export class LogFile implements LogDestination {
     stream.on('error', () => this.fail());
   }
 
-  /** Ends a stream and waits until its descriptor is closed, not only flushed. */
+  /**
+   * Ends a stream and waits until its descriptor is closed, not only flushed. A stream that fails
+   * is waited for until it closes too: a caller's deadline decides when to stop waiting.
+   */
   private end(stream: Writable): Promise<void> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       if (stream.closed) return resolve();
 
       stream.once('close', () => resolve());
-      stream.once('error', reject);
       stream.end();
     });
   }
 
   /** `.1` becomes `.2` and so on, the oldest is removed, and the file becomes `.1`. */
-  private shift(): void {
+  private async shift(): Promise<void> {
+    await rm(`${this.path}.${this.keep}`, { force: true });
+
+    for (let index = this.keep - 1; index >= 1; index--)
+      await rename(`${this.path}.${index}`, `${this.path}.${index + 1}`).catch(() => undefined);
+
+    await rename(this.path, `${this.path}.1`);
+  }
+
+  /** The same, before the server serves anything. */
+  private shiftSync(): void {
     rmSync(`${this.path}.${this.keep}`, { force: true });
 
     for (let index = this.keep - 1; index >= 1; index--) {
@@ -407,14 +433,6 @@ export class LogFile implements LogDestination {
     renameSync(this.path, `${this.path}.1`);
   }
 
-  private size(): number {
-    try {
-      return statSync(this.path).size;
-    } catch {
-      return 0;
-    }
-  }
-
   /** A file that cannot be written loses records from now on, never the app. */
   private fail(): void {
     if (this.failed) return;
@@ -423,4 +441,19 @@ export class LogFile implements LogDestination {
     this.buffered = [];
     this.warn('Review Desk cannot write its log file; logging is off until it restarts.');
   }
+}
+
+/** Room kept in a log file's budget for the record of how many were dropped. */
+const DROPPED_RESERVE = 256;
+
+function sizeOf(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+async function sizeOfAsync(path: string): Promise<number> {
+  return (await stat(path).catch(() => null))?.size ?? 0;
 }

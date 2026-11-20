@@ -10,4 +10,5 @@ const cases = await runBench({
 writeFileSync('bench-results.json', `${JSON.stringify(cases, null, 2)}\n`);
 console.log('\nWrote bench-results.json.');
 
-process.exit(cases.some((entry) => entry.gate?.verdict === 'fail') ? 1 : 0);
+// A gate that failed, or could not be decided, fails the run.
+process.exit(cases.some((entry) => entry.gate && entry.gate.verdict !== 'pass') ? 1 : 0);

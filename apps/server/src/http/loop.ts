@@ -1,9 +1,6 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { log } from '@/log.js';
 
-/** Windows with fewer samples than this say little about a p99 (`log:summary` leaves them out). */
-export const MIN_WINDOW_SAMPLES = 100;
-
 /**
  * Samples the event loop's delay and logs each window's p50, p99, maximum and sample count, then
  * starts the next window: a window's p99 is valid on its own, while windows cannot be merged into

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { summariseLog } from '@/bench/log-summary.js';
-import { runBench, stats } from '@/bench/run.js';
+import { runBench } from '@/bench/run.js';
+import { stats } from '@/bench/stats.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { REBASED_PR, LARGE_PR, syntheticScenario } from '@/demo/synthetic.js';
 import { DiffService } from '@/diff/service.js';
@@ -17,17 +18,20 @@ describe('the benchmark', () => {
       '/api/pulls, 40 PRs, idle',
       '/api/pulls, 40 PRs, during a sync',
       'inbox derivation, 40 PRs',
-      'My PRs derivation, 40 PRs',
+      // Every fifth of the many is yours.
+      'My PRs derivation, 8 of 40 PRs yours',
       'full diff of a 60-file PR, cold',
-      'rebased interdiff of 20 files, cold',
+      'rebased interdiff, 20 changed, 20 diffed, cold',
       'event-loop stall during the interdiff',
       'fingerprints of the large PR',
     ]);
 
     const during = cases.find((entry) => entry.name.includes('during a sync'))!;
 
-    // Samples counted only while the sync ran, each with the whole list.
+    // Samples counted only while the sync ran, each with the whole list, and the sync stored
+    // every pushed PR's new head.
     expect(during.stats.n).toBeGreaterThan(0);
+    expect(during.notes).toMatchObject({ wrongSize: 0, changed: 10, synced: 10 });
     expect(during.gate?.verdict).not.toBe('insufficient samples');
   }, 60_000);
 
@@ -69,12 +73,12 @@ describe('the log summary', () => {
 
   it('reports routes against their gate and the worst qualifying window, never a session p99', () => {
     const lines = [
-      ...Array.from({ length: 20 }, (_, index) =>
+      ...Array.from({ length: 40 }, (_, index) =>
         line({
           event: 'http.request',
           route: '/api/pulls',
           method: 'GET',
-          ms: index < 19 ? 10 : 400,
+          ms: index < 38 ? 10 : 400,
         }),
       ),
       line({ event: 'http.request', route: '/api/status', method: 'GET', ms: 2 }),
@@ -89,8 +93,13 @@ describe('the log summary', () => {
     expect(summary.routes[0]).toMatchObject({
       route: '/api/pulls',
       method: 'GET',
-      stats: { n: 20, p95: 10 },
+      stats: { n: 40, p95: 10 },
       verdict: 'pass',
+    });
+    // One request cannot decide a route.
+    expect(summary.routes[1]).toMatchObject({
+      route: '/api/status',
+      verdict: 'insufficient samples',
     });
     expect(summary.loop).toEqual({
       windows: 3,
@@ -101,6 +110,27 @@ describe('the log summary', () => {
       overGate: 0.5,
       verdict: 'fail',
     });
+    expect(summary.dropped).toBe(0);
+  });
+
+  it('calls a pass incomplete when the log dropped records, while a failure still stands', () => {
+    const summary = summariseLog([
+      ...Array.from({ length: 30 }, () =>
+        line({ event: 'http.request', route: '/api/pulls', method: 'GET', ms: 10 }),
+      ),
+      ...Array.from({ length: 30 }, () =>
+        line({ event: 'http.request', route: '/api/pulls/:id', method: 'GET', ms: 300 }),
+      ),
+      line({ event: 'loop.delay', p50: 1, p99: 2, max: 3, count: 500 }),
+      line({ event: 'log.dropped', count: 7 }),
+    ]);
+
+    expect(summary.dropped).toBe(7);
+    expect(summary.routes.map(({ route, verdict }) => [route, verdict])).toEqual([
+      ['/api/pulls/:id', 'fail'],
+      ['/api/pulls', 'incomplete'],
+    ]);
+    expect(summary.loop.verdict).toBe('incomplete');
   });
 
   it('says when no window had enough samples', () => {

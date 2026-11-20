@@ -141,7 +141,9 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
       child.once('spawn', () => {
         spawned = performance.now();
       });
-      let stdout = '';
+      // Raw bytes, decoded once at the end: the size limit and the log count bytes, and a
+      // character split across two chunks stays whole.
+      const chunks: Buffer[] = [];
       let stderr = '';
       let size = 0;
       let timedOut = false;
@@ -151,7 +153,7 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
         child.kill('SIGTERM');
       }, timeoutMs);
 
-      child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
 
         if (size > MAX_OUTPUT_BYTES) {
@@ -159,7 +161,7 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
           return;
         }
 
-        stdout += chunk;
+        chunks.push(chunk);
       });
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
         stderr += chunk;
@@ -174,7 +176,7 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
         const ended = performance.now();
 
         // glab reads its own token: there is no credential step to time.
-        forgeRequest('gitlab', gitlabOp(args.at(-1)), {
+        forgeRequest('gitlab', () => gitlabOp(args.at(-1)), {
           spawnMs: spawned - started,
           childMs: ended - spawned,
           totalMs: ended - started,
@@ -182,7 +184,7 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
           timedOut,
           bytes: size,
         });
-        resolve({ code, stdout, stderr, timedOut });
+        resolve({ code, stdout: Buffer.concat(chunks).toString('utf8'), stderr, timedOut });
       });
 
       child.stdin.on('error', () => undefined);

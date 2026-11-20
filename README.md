@@ -107,7 +107,7 @@ The server keeps a log in `.data/logs/review-desk.log` (only you can read it). I
 - repository downloads for full reviews;
 - event-loop delay that would make the app feel slow.
 
-Past about 10 MB the file is rotated, keeping five older ones (`review-desk.log.1` to `.5`). A disk that stalls or fills loses log records, never the app. `REVIEW_DESK_LOG_LEVEL=debug` also records every request, every `gh` or `glab` call and the event-loop delay every 10 seconds. That is enough to check a real session against the performance targets with `pnpm --filter @review-desk/server log:summary .data/logs/review-desk.log`. It reports each route's p50 and p95 against a 100 ms p95, and the worst 10-second window's event-loop p99 against 50 ms. Windows with too few samples are left out.
+Past about 10 MB the file is rotated, keeping five older ones (`review-desk.log.1` to `.5`). A disk that stalls or fills loses log records, never the app. `REVIEW_DESK_LOG_LEVEL=debug` also records every request, every `gh` or `glab` call and the event-loop delay every 10 seconds. That is enough to check a real session against the performance targets with `pnpm log:summary .data/logs/review-desk.log` from the repository root. It reports each route's p50 and p95 against a 100 ms p95, and the worst 10-second window's event-loop p99 against 50 ms. A route with fewer than 30 requests, or a session with no 10-second window of at least 100 samples, is reported as undecided. If the log dropped records, a pass is reported as incomplete.
 
 ## Development
 
@@ -138,12 +138,12 @@ To change the database schema, edit `apps/server/src/db/schema.ts`, run `pnpm db
 `pnpm bench` measures the server on synthetic workloads: 500 and 1,000 PRs across 20 repositories, one PR with 3,000 changed files and 300 threads, and one rebased since your review with 400 changed files. All of it is in memory behind the demo forge. It times:
 
 - cold and warm syncs (one changed PR);
-- `/api/pulls` on a populated 1,000-PR account, idle and while a background sync of 100 changed PRs runs (samples count only while it runs);
-- the inbox and My PRs derivations;
+- `/api/pulls` on a populated 1,000-PR account, idle and while a background sync of 100 changed PRs runs (a request counts if it started during the sync; the run also checks that every answer held the whole list and that the sync stored all 100 new heads);
+- the inbox and My PRs derivations (one in five of the PRs is yours);
 - the large PR's full diff, cold;
-- the rebased interdiff, cold, with the longest event-loop stall around each build;
+- the rebased interdiff, cold, with the longest event-loop stall around each build, reporting files changed and files diffed (at most 300);
 - the large PR's fingerprints.
 
-It prints a table with each gate's verdict (route p95 under 100 ms, stall under 50 ms) and writes `bench-results.json`. Run it on a representative machine before and after a change that could affect speed; `BENCH_SMOKE=1` runs a small version, as `pnpm test` does. `pnpm bench:forge` compares matched GitHub requests through `gh api` and through direct HTTPS with the same sign-in, to estimate what the CLI itself costs. It reads the token from `gh auth token` for those requests only, never stores or prints it, and is never run by CI.
+It prints a table with each gate's verdict (route p95 under 100 ms, stall under 50 ms), writes `bench-results.json`, and exits nonzero when a gate fails or cannot be decided. Today the interdiff gate fails: the build stalls the event loop for about 400 ms, a finding for the work to move diffing off the main thread. Run it on a representative machine before and after a change that could affect speed; `BENCH_SMOKE=1` runs a small version, as `pnpm test` does. `pnpm bench:forge` compares matched github.com requests through `gh api` and through direct HTTPS with the same sign-in, each on a new connection, and reports the median end-to-end difference: what going through the CLI costs per request. It checks every response, reads the token from `gh auth token --hostname github.com` for those requests only, never stores or prints it, and is never run by CI.
 
 Every GraphQL document is validated against GitHub's published schema (`tests/schema/github.graphql`). Demo mode (`apps/server/src/demo/`) models commit graphs, force pushes, GitHub writes with a write log and failure injection, Linear issues, AI answers and review history, so end-to-end tests never touch GitHub or spend AI quota.

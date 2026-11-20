@@ -13,19 +13,9 @@ import {
 import { DiffService } from '@/diff/service.js';
 import { EventBus } from '@/events.js';
 import { SyncService } from '@/sync/service.js';
+import { LOOP_P99_MS, MIN_ROUTE_SAMPLES, ROUTE_P95_MS, stats, type Stats } from '@/bench/stats.js';
 
-/** The gates the plan names: a route's p95, and the event loop's worst delay, while it works. */
-export const ROUTE_P95_MS = 100;
-export const LOOP_P99_MS = 50;
-/** Fewer counted samples than this cannot decide the route gate. */
-export const MIN_ROUTE_SAMPLES = 30;
-
-export interface Stats {
-  n: number;
-  median: number;
-  p95: number;
-  max: number;
-}
+export { LOOP_P99_MS, MIN_ROUTE_SAMPLES, ROUTE_P95_MS, stats, type Stats } from '@/bench/stats.js';
 
 export interface BenchCase {
   name: string;
@@ -39,20 +29,6 @@ export interface BenchOptions {
   /** Small sizes and few iterations, for `pnpm test`. */
   smoke?: boolean;
   log?: (line: string) => void;
-}
-
-export function stats(values: number[]): Stats {
-  const sorted = [...values].sort((a, b) => a - b);
-  const at = (share: number) =>
-    sorted[Math.min(sorted.length - 1, Math.ceil(share * sorted.length) - 1)] ?? 0;
-  const round = (value: number) => Math.round(value * 10) / 10;
-
-  return {
-    n: sorted.length,
-    median: round(at(0.5)),
-    p95: round(at(0.95)),
-    max: round(sorted.at(-1) ?? 0),
-  };
 }
 
 async function timed(
@@ -115,7 +91,7 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
   const add = (entry: BenchCase) => {
     cases.push(entry);
     say(
-      `${entry.name.padEnd(48)} median ${String(entry.stats.median).padStart(8)} ms   p95 ${String(entry.stats.p95).padStart(8)} ms   max ${String(entry.stats.max).padStart(8)} ms${entry.gate ? `   ${entry.gate.limit}: ${entry.gate.verdict}` : ''}`,
+      `${entry.name.padEnd(52)} median ${String(entry.stats.median).padStart(8)} ms   p95 ${String(entry.stats.p95).padStart(8)} ms   max ${String(entry.stats.max).padStart(8)} ms${entry.gate ? `   ${entry.gate.limit}: ${entry.gate.verdict}` : ''}`,
     );
   };
 
@@ -163,12 +139,21 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
   });
 
   // The route while a background sync of a hundred changed PRs runs, its reads paced so the
-  // sync lasts long enough to be sampled.
-  pushTo(populated.scenario, smoke ? 10 : 100, 1000);
+  // sync lasts long enough to be sampled. A request counts when it started during the sync,
+  // however long it then took.
+  const changing = smoke ? 10 : 100;
+  const pushed = pushTo(populated.scenario, changing, 1000);
+  const heads = new Map(
+    populated.scenario.world.pulls
+      .filter(({ snapshot }) => pushed.includes(snapshot.id))
+      .map(({ snapshot }) => [snapshot.id, snapshot.headOid]),
+  );
+
   // At three reads at a time, 100 reads of 100 ms keep the sync busy for over three seconds.
   populated.github.readDelayMs = smoke ? 20 : 100;
 
   const during: number[] = [];
+  let wrongSize = 0;
   let syncing = true;
   const sync = populated.service.sync().finally(() => {
     syncing = false;
@@ -180,7 +165,8 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
     const ms = performance.now() - started;
     const items = (response.json() as { items: unknown[] }).items.length;
 
-    if (syncing && response.statusCode === 200 && items === expected) during.push(ms);
+    if (response.statusCode !== 200 || items !== expected) wrongSize += 1;
+    else during.push(ms);
 
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -188,6 +174,10 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
   await sync;
   populated.github.readDelayMs = 0;
 
+  // The sync did the work it was meant to: every pushed PR now has its new head stored.
+  const synced = pushed.filter(
+    (id) => populated.store.snapshot('you', id)?.headOid === heads.get(id),
+  ).length;
   const route = stats(during);
 
   add({
@@ -196,20 +186,30 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
     gate: {
       limit: `p95 < ${ROUTE_P95_MS} ms`,
       verdict:
-        route.n < (smoke ? 1 : MIN_ROUTE_SAMPLES)
+        wrongSize > 0 || synced !== pushed.length
           ? 'insufficient samples'
-          : route.p95 < ROUTE_P95_MS
-            ? 'pass'
-            : 'fail',
+          : route.n < (smoke ? 1 : MIN_ROUTE_SAMPLES)
+            ? 'insufficient samples'
+            : route.p95 < ROUTE_P95_MS
+              ? 'pass'
+              : 'fail',
     },
-    notes: { samples: route.n },
+    notes: { samples: route.n, wrongSize, changed: pushed.length, synced },
   });
   add({
     name: `inbox derivation, ${largest} PRs`,
     stats: stats(await timed(iterations, () => populated.service.list())),
   });
+  const authored = populated.scenario.world.pulls.filter(
+    ({ snapshot }) => snapshot.author.login === 'you',
+  ).length;
+  const mine = populated.service.mine().items.length;
+
+  if (mine !== authored)
+    throw new Error(`My PRs lists ${mine} PRs, not the ${authored} you wrote.`);
+
   add({
-    name: `My PRs derivation, ${largest} PRs`,
+    name: `My PRs derivation, ${authored} of ${largest} PRs yours`,
     stats: stats(await timed(iterations, () => populated.service.mine())),
   });
 
@@ -229,6 +229,7 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
   const reviewed = rebased.reviews[0].commitOid!;
   const builds: number[] = [];
   const stalls: number[] = [];
+  let diffed = 0;
   const histogram = monitorEventLoopDelay({ resolution: 10 });
 
   histogram.enable();
@@ -245,7 +246,8 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
     }, 5);
     const started = performance.now();
 
-    await new DiffService(populated.github).manifest(rebased, 'since-review', reviewed);
+    diffed = (await new DiffService(populated.github).manifest(rebased, 'since-review', reviewed))
+      .files.length;
     builds.push(performance.now() - started);
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -258,9 +260,14 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
   const stall = stats(stalls);
 
   add({
-    name: `rebased interdiff of ${shape(largest).rebasedFiles} files, cold`,
+    name: `rebased interdiff, ${shape(largest).rebasedFiles} changed, ${diffed} diffed, cold`,
     stats: stats(builds),
-    notes: { worstStallMs: stall.max, loopP99Ms: histogram.percentile(99) / 1e6 },
+    notes: {
+      changed: shape(largest).rebasedFiles,
+      diffed,
+      worstStallMs: stall.max,
+      loopP99Ms: histogram.percentile(99) / 1e6,
+    },
   });
   add({
     name: 'event-loop stall during the interdiff',

@@ -220,7 +220,8 @@ describe('the log file', () => {
 
     for (let index = 0; index < 50; index++) file.write(`${'z'.repeat(99)}\n`);
 
-    // Ten records fit in the budget; the forty after them were dropped, none queued.
+    // Seven records fit in the budget (a little is kept for the drop record); the rest were
+    // dropped, none queued.
     expect(disk.stream.writableLength).toBeLessThanOrEqual(1000);
 
     const written: string[] = [];
@@ -235,7 +236,7 @@ describe('the log file', () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(written.map((line) => JSON.parse(line))).toEqual([
-      expect.objectContaining({ event: 'log.dropped', count: 40 }),
+      expect.objectContaining({ event: 'log.dropped', count: 43 }),
     ]);
     disk.release();
     disk.finish();
@@ -253,6 +254,47 @@ describe('the log file', () => {
 
     // The disk never finishes the file.
     expect(await file.close(50)).toBe('timeout');
+    disk.finish();
+  });
+
+  it('waits for a rotation that is closing its stream, and keeps the lock past the deadline', async () => {
+    const dir = directory();
+    const disks = [stalled(), stalled()];
+    let opened = 0;
+    const file = new LogFile(join(dir, 'review-desk.log'), {
+      rotateAtBytes: 10,
+      openStream: () => disks[opened++].stream,
+    });
+
+    file.open();
+    file.write('past the threshold\n');
+
+    // The rotation is now ending the first stream, which the disk does not let finish.
+    const rotation = file.rotate();
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await file.close(50)).toBe('timeout');
+
+    disks[0].release();
+    disks[0].finish();
+    await rotation;
+  });
+
+  it('does not count a stream that failed without closing as closed', async () => {
+    const dir = directory();
+    const disk = stalled();
+    const file = new LogFile(join(dir, 'review-desk.log'), {
+      openStream: () => disk.stream,
+      warn: () => undefined,
+    });
+
+    file.open();
+    file.write('one\n');
+    // An error that leaves the stream open, as an injected or wrapped stream can.
+    disk.stream.emit('error', new Error('EIO'));
+
+    expect(await file.close(50)).toBe('timeout');
+    disk.release();
     disk.finish();
   });
 
@@ -302,6 +344,19 @@ describe('what is measured', () => {
       githubOp('graphql', JSON.stringify({ query: 'query Snapshot($id: ID!) { node }' })),
     ).toBe('Snapshot');
     expect(githubOp('graphql', JSON.stringify({ query: 'mutation Unknown { x }' }))).toBe('other');
+    expect(
+      githubOp(
+        'graphql',
+        JSON.stringify({ query: '\n  mutation SubmitReview { x }', variables: {} }),
+      ),
+    ).toBe('SubmitReview');
+    // Variables that look like a document never name it.
+    expect(
+      githubOp(
+        'graphql',
+        JSON.stringify({ query: '{ viewer }', variables: { body: 'query Snapshot' } }),
+      ),
+    ).toBe('graphql');
     expect(githubOp('repos/acme/secret-repo/pulls/12/files?per_page=100&page=2')).toBe(
       'pulls.files',
     );

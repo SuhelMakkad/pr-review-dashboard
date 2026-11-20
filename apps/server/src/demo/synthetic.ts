@@ -112,7 +112,21 @@ export function syntheticScenario(options: SyntheticOptions): Scenario {
       changes[`src/module-${(number + file) % 20}.ts`] = source(`${repository}/${number}`, 40, 'x');
 
     repos.derive(repository, head, sha(`${repository}:base`), changes, at(45));
-    pulls.push(pull(`PR_synthetic_${number}`, number, repository, head));
+
+    // One in five is yours, waiting on others' reviews.
+    const yours = number % 5 === 0;
+
+    pulls.push({
+      ...pull(`PR_synthetic_${number}`, number, repository, head, {
+        ...(yours
+          ? {
+              author: { login: VIEWER },
+              reviewRequests: [{ kind: 'user' as const, login: 'reviewer', name: 'reviewer' }],
+            }
+          : {}),
+      }),
+      feeds: yours ? ['authored'] : ['requested'],
+    });
   }
 
   // The large one: every file changed, and a long review discussion.

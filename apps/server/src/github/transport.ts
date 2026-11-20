@@ -79,7 +79,9 @@ export class GhCli implements GitHubTransport {
       child.once('spawn', () => {
         spawned = performance.now();
       });
-      let stdout = '';
+      // Raw bytes, decoded once at the end: the size limit and the log count bytes, and a
+      // character split across two chunks stays whole.
+      const chunks: Buffer[] = [];
       let stderr = '';
       let size = 0;
       let timedOut = false;
@@ -89,7 +91,7 @@ export class GhCli implements GitHubTransport {
         child.kill('SIGTERM');
       }, this.timeoutMs);
 
-      child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
 
         if (size > MAX_OUTPUT_BYTES) {
@@ -97,7 +99,7 @@ export class GhCli implements GitHubTransport {
           return;
         }
 
-        stdout += chunk;
+        chunks.push(chunk);
       });
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
         stderr += chunk;
@@ -118,7 +120,7 @@ export class GhCli implements GitHubTransport {
 
         const ended = performance.now();
 
-        forgeRequest('github', githubOp(args.at(-1), input), {
+        forgeRequest('github', () => githubOp(args.at(-1), input), {
           credentialMs: prepared - started,
           spawnMs: spawned - prepared,
           childMs: ended - spawned,
@@ -127,9 +129,11 @@ export class GhCli implements GitHubTransport {
           timedOut,
           bytes: size,
         });
-        resolve({ code, stdout, stderr, timedOut });
+        resolve({ code, stdout: Buffer.concat(chunks).toString('utf8'), stderr, timedOut });
       });
 
+      // gh can exit before reading its input; the result is reported through `close`.
+      child.stdin.on('error', () => undefined);
       child.stdin.end(input);
     });
   }
