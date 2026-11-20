@@ -24,6 +24,7 @@ import { asAccount } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { DraftStore } from '@/review/drafts.js';
 import { ReviewError, ReviewService } from '@/review/service.js';
+import { accountNotActive } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import type { MutationStep, OperationRecord } from './types.js';
 
@@ -274,14 +275,11 @@ export class OperationQueue {
     return row.data;
   }
 
-  private assertAccount(account: string): void {
-    if (!account || account !== this.sync.status.account?.login) {
-      throw new ReviewError(
-        'ACCOUNT_CHANGED',
-        409,
-        'GitHub account changed. Refresh before writing.',
-      );
-    }
+  /** Refuses new work for an account other than the one in use: nothing is queued or changed. */
+  private assertSelected(account: string): void {
+    const selected = this.sync.status.account?.login ?? null;
+
+    if (!account || account !== selected) throw accountNotActive(account, selected);
   }
 
   private controls(row: OperationRecord): OperationControl[] {
@@ -368,25 +366,66 @@ export class OperationQueue {
     };
   }
 
+  /** Any account's action, selected or not: reading it changes nothing. */
   get(account: string, id: string): GitHubOperation {
-    this.assertAccount(account);
-
     return this.public(this.row(account, id));
   }
 
+  /** Any account's action by ID, or null when there is none. */
   find(account: string, id: string): GitHubOperation | null {
-    this.assertAccount(account);
-    const row = this.db
+    const row = this.existing(account, id);
+
+    return row ? this.public(row) : null;
+  }
+
+  /**
+   * The receipt of an action already accepted under `id`, for any account, selected or not: a
+   * retry of one never does anything new. It must be the same action, on the same target, or the
+   * ID was used for something else. Null when there is none.
+   */
+  replay(
+    account: string,
+    id: string,
+    expected: { prId: string; request: unknown; type: GitHubAction['type']; threadId?: string },
+  ): OperationReceipt | null {
+    const existing = this.existing(account, id);
+
+    if (!existing) return null;
+
+    this.assertSame(existing, expected);
+
+    return { operation: this.public(existing) };
+  }
+
+  private existing(account: string, id: string): OperationRecord | undefined {
+    return this.db
       .select({ data: githubOperations.data })
       .from(githubOperations)
       .where(and(eq(githubOperations.account, account), eq(githubOperations.id, id)))
-      .get();
+      .get()?.data;
+  }
 
-    return row ? this.public(row.data) : null;
+  /** The request key as legacy routes made it, plus the action's type and thread. */
+  private assertSame(
+    existing: OperationRecord,
+    expected: { prId: string; request: unknown; type: GitHubAction['type']; threadId?: string },
+  ): void {
+    const threadOf = (action: GitHubAction) =>
+      action.type === 'reply' || action.type === 'resolve' ? action.threadId : undefined;
+
+    if (
+      existing.requestKey !== fingerprint({ prId: expected.prId, request: expected.request }) ||
+      existing.action.type !== expected.type ||
+      threadOf(existing.action) !== expected.threadId
+    )
+      throw new ReviewError(
+        'OPERATION_CONFLICT',
+        409,
+        'This action ID was already used for different content.',
+      );
   }
 
   list(account: string, cursor?: string): OperationList {
-    this.assertAccount(account);
     const [before, beforeId] = cursor?.split('|') ?? [];
     const page = this.db
       .select({ data: githubOperations.data })
@@ -424,8 +463,6 @@ export class OperationQueue {
     action: GitHubAction,
     request: unknown = action,
   ): OperationReceipt {
-    this.assertAccount(account);
-
     return this.insert(
       account,
       prId,
@@ -433,6 +470,8 @@ export class OperationQueue {
       action,
       request,
       () => this.sync.detailFor(account, prId)?.snapshot,
+      // Only new work needs the account in use; a replay above it returns its receipt.
+      () => this.assertSelected(account),
     );
   }
 
@@ -461,24 +500,25 @@ export class OperationQueue {
     action: GitHubAction,
     request: unknown,
     lookup: () => PullRequestSnapshot | undefined,
+    admit: () => void = () => undefined,
   ): OperationReceipt {
     const requestKey = fingerprint({ prId, request });
-    const existing = this.db
-      .select({ data: githubOperations.data })
-      .from(githubOperations)
-      .where(and(eq(githubOperations.account, account), eq(githubOperations.id, id)))
-      .get()?.data;
+    const existing = this.existing(account, id);
 
     if (existing) {
-      if (existing.requestKey !== requestKey)
-        throw new ReviewError(
-          'OPERATION_CONFLICT',
-          409,
-          'This action ID was already used for different content.',
-        );
+      this.assertSame(existing, {
+        prId,
+        request,
+        type: action.type,
+        ...(action.type === 'reply' || action.type === 'resolve'
+          ? { threadId: action.threadId }
+          : {}),
+      });
 
       return { operation: this.public(existing) };
     }
+
+    admit();
 
     const pr = lookup();
     if (!pr) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
@@ -608,7 +648,7 @@ export class OperationQueue {
       operationId: row.id,
       status: row.status,
     });
-    this.sync.events.emit({ type: 'draft.updated', id: row.prId });
+    this.sync.events.emit({ type: 'draft.updated', account: row.account, id: row.prId });
   }
 
   private pendingId(row: OperationRecord): string | null {
@@ -629,7 +669,10 @@ export class OperationQueue {
     command: OperationControl,
     confirmed = false,
   ): Promise<OperationReceipt> {
-    this.assertAccount(account);
+    // Stopping or hiding an action changes nothing on the forge: any account's can be. The rest
+    // schedule forge work, so they need the account in use.
+    if (command !== 'cancel' && command !== 'dismiss') this.assertSelected(account);
+
     const row = this.row(account, id);
 
     if (!this.controls(row).includes(command))

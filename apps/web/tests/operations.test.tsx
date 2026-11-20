@@ -71,7 +71,7 @@ it('rolls back a rejected viewed update without undoing a newer change on anothe
       return new Promise<Response>((resolve, reject) =>
         writes.push({ body: JSON.parse(String(options?.body)), resolve, reject }),
       );
-    if (path.startsWith('/api/operations'))
+    if (path.includes('/operations'))
       return Promise.resolve(response({ items: [], nextCursor: null }));
 
     return Promise.resolve(
@@ -120,7 +120,7 @@ it('names the diff the workspace renders, even when the PR detail is a revision 
 
   vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
     if (path.includes('/viewed')) bodies.push(JSON.parse(String(options?.body)));
-    if (path.startsWith('/api/operations'))
+    if (path.includes('/operations'))
       return Promise.resolve(response({ items: [], nextCursor: null }));
 
     return Promise.resolve(response({ operation: { id: 'viewed' } }));
@@ -174,7 +174,7 @@ it('leaves a view refreshed to a newer diff alone when an older mark fails', asy
 
   vi.stubGlobal('fetch', (path: string) => {
     if (path.includes('/viewed')) return new Promise<Response>((_, fail) => (reject = fail));
-    if (path.startsWith('/api/operations'))
+    if (path.includes('/operations'))
       return Promise.resolve(response({ items: [], nextCursor: null }));
 
     return Promise.resolve(response({ operation: { id: 'viewed' } }));
@@ -218,7 +218,7 @@ it('does not let an older viewed failure roll back a newer choice for the same f
   vi.stubGlobal('fetch', (path: string) => {
     if (path.includes('/viewed'))
       return new Promise<Response>((resolve, reject) => writes.push({ resolve, reject }));
-    if (path.startsWith('/api/operations'))
+    if (path.includes('/operations'))
       return Promise.resolve(response({ items: [], nextCursor: null }));
 
     return Promise.resolve(
@@ -258,7 +258,7 @@ it("rolls a rejected viewed update back only in its own account's diff, after a 
   let reject: (error: Error) => void = () => {};
   vi.stubGlobal('fetch', (path: string) => {
     if (path.includes('/viewed')) return new Promise<Response>((_, fail) => (reject = fail));
-    if (path.startsWith('/api/operations'))
+    if (path.includes('/operations'))
       return Promise.resolve(response({ items: [], nextCursor: null }));
 
     return Promise.resolve(

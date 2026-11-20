@@ -163,6 +163,11 @@ export class DraftStore {
     return this.comment(account, id)!;
   }
 
+  /** The PR a draft comment belongs to, or null when there is no such comment. */
+  commentPrId(account: string, id: string): string | null {
+    return currentPrId(this.store, account, id) || null;
+  }
+
   comment(account: string, id: string): DraftComment | null {
     const row = this.db
       .select(commentFields)

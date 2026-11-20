@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Activity, AlertTriangle, CheckCircle2, Clock3, ExternalLink, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -11,11 +11,13 @@ import {
   type OperationReceipt,
 } from '@review-desk/shared/operations';
 import { forgeTerms } from '@review-desk/shared/accounts';
+import type { SyncStatus } from '@review-desk/shared/types';
 import { api } from '@/lib/api';
 import { numberSign, refOf } from '@/lib/pr-ref';
 import { storage } from '@/lib/storage';
 import { dateTime, relativePhrase } from '@/lib/time';
-import { useStatus } from '@/lib/queries';
+import { accountPath, useStatus } from '@/lib/queries';
+import { queryKeys } from '@/lib/query-keys';
 import { Button, IconButton } from '@/ui/button';
 import { DialogClose, DialogDescription, DialogTitle, Drawer } from '@/ui/dialog';
 import { MarkdownView } from '@/ui/markdown';
@@ -104,43 +106,70 @@ export function ActivityButton() {
   );
 }
 
+/**
+ * After an action is returned to its draft: keeps what it would have sent for the PR to restore,
+ * and opens the PR, but only while the page still shows the action's account. The PR pages show
+ * the account in use, so one switched to meanwhile would open its own copy of the PR; the content
+ * then waits for its account. Exported for tests.
+ */
+export function reopened(
+  client: QueryClient,
+  operation: GitHubOperation,
+  open: (to: {
+    to: '/pr/$owner/$repo/$number/files';
+    params: { owner: string; repo: string; number: string };
+    search: { thread?: string };
+  }) => void,
+): void {
+  storage.set(
+    `review-desk-recovered:${operation.account}:${operation.prId}`,
+    JSON.stringify(operation.action),
+  );
+  window.dispatchEvent(new Event('review-desk-recovered'));
+
+  if (client.getQueryData<SyncStatus>(queryKeys.status)?.account?.login !== operation.account) {
+    toast(`Saved for ${operation.account}. Switch back to ${operation.account} to continue.`);
+    return;
+  }
+
+  const { owner, repo } = refOf(operation);
+
+  setActivityOpen(false);
+  open({
+    to: '/pr/$owner/$repo/$number/files',
+    params: { owner, repo, number: String(operation.number) },
+    search: operation.action.type === 'reply' ? { thread: operation.action.threadId } : {},
+  });
+}
+
 function OperationCard({ operation }: { operation: GitHubOperation }) {
   const client = useQueryClient();
   const navigate = useNavigate();
   const control = useMutation({
     mutationFn: (command: OperationControl) =>
-      api<OperationReceipt>(`/api/operations/${encodeURIComponent(operation.id)}/${command}`, {
-        method: 'POST',
-        body: {
-          account: operation.account,
-          // Only once you were asked: stopping what may be on the forge needs your yes.
-          confirm:
-            command === 'restore' ||
-            ((command === 'reopen' || command === 'cancel') &&
-              Boolean(operation.confirmStop || operation.error?.code === 'UNCONFIRMED')),
-        },
-      }),
-    onSuccess: (_receipt, command) => {
-      void client.invalidateQueries({ queryKey: ['operations', operation.account] });
-      void client.invalidateQueries({ queryKey: ['draft', operation.prId] });
-
-      if (command === 'reopen') {
-        storage.set(
-          `review-desk-recovered:${operation.account}:${operation.prId}`,
-          JSON.stringify(operation.action),
-        );
-        window.dispatchEvent(new Event('review-desk-recovered'));
-        const { owner, repo } = refOf(operation);
-
-        setActivityOpen(false);
-        void navigate({
-          to: '/pr/$owner/$repo/$number/files',
-          params: { owner, repo, number: String(operation.number) },
-          search: {
-            ...(operation.action.type === 'reply' ? { thread: operation.action.threadId } : {}),
+      api<OperationReceipt>(
+        accountPath(
+          operation.account,
+          `/operations/${encodeURIComponent(operation.id)}/${command}`,
+        ),
+        {
+          method: 'POST',
+          body: {
+            // Only once you were asked: stopping what may be on the forge needs your yes.
+            confirm:
+              command === 'restore' ||
+              ((command === 'reopen' || command === 'cancel') &&
+                Boolean(operation.confirmStop || operation.error?.code === 'UNCONFIRMED')),
           },
-        });
-      }
+        },
+      ),
+    // The receipt names the action the server changed: its account and PR are the ones to refresh
+    // and, for a reopen, to recover.
+    onSuccess: ({ operation: changed }, command) => {
+      void client.invalidateQueries({ queryKey: queryKeys.operations(changed.account) });
+      void client.invalidateQueries({ queryKey: queryKeys.draft(changed.account, changed.prId) });
+
+      if (command === 'reopen') reopened(client, changed, (to) => void navigate(to));
     },
   });
   const attention = operation.status === 'needs_attention';
@@ -490,7 +519,7 @@ export function ActivityDrawer() {
                   </h2>
                   <ListPresence>
                     {group.items.map((operation) => (
-                      <ListItem key={operation.id}>
+                      <ListItem key={`${operation.account}:${operation.id}`}>
                         <OperationCard operation={operation} />
                       </ListItem>
                     ))}

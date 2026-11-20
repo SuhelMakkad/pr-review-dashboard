@@ -17,6 +17,8 @@ import type {
   ReviewEvent,
 } from '@review-desk/shared/review';
 import { api } from '@/lib/api';
+import { accountSwitches } from '@/lib/live';
+import { accountPath } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 
 export const aiReviewsKey = ['ai-reviews'] as const;
@@ -93,7 +95,15 @@ export function useAiReviewStatuses(account: string | null | undefined) {
 export function useAi(prId: string | null, account: string) {
   const client = useQueryClient();
   const key = queryKeys.ai(prId ?? 'none', account);
-  const draftKey = queryKeys.draft(prId ?? 'none', account);
+  const draftKey = queryKeys.draft(account, prId ?? 'none');
+  /**
+   * Shows the draft a write answered with, unless the account shown changed while it was on its
+   * way: every draft was dropped then, to be read afresh, and an older answer must not refill it.
+   */
+  const seedDraft = (draft: ReviewDraft, since: number) => {
+    if (since === accountSwitches()) client.setQueryData(draftKey, draft);
+    else void client.invalidateQueries({ queryKey: draftKey });
+  };
   const startKey = ['ai-start', account, prId] as const;
   const starts = useMutationState({
     filters: { mutationKey: startKey, exact: true },
@@ -167,12 +177,13 @@ export function useAi(prId: string | null, account: string) {
       draftBody?: string;
     }) => {
       if (task === 'draft_summary' && draftEvent) {
-        const draft = await api<ReviewDraft>(`/api/pulls/${encodeURIComponent(prId!)}/draft`, {
-          method: 'PUT',
-          body: { account, event: draftEvent, body: draftBody },
-        });
+        const since = accountSwitches();
+        const draft = await api<ReviewDraft>(
+          accountPath(account, `/pulls/${encodeURIComponent(prId!)}/draft`),
+          { method: 'PUT', body: { event: draftEvent, body: draftBody } },
+        );
 
-        client.setQueryData(draftKey, draft);
+        seedDraft(draft, since);
       }
 
       return api<AiRun>(`/api/pulls/${encodeURIComponent(prId!)}/ai`, {
@@ -218,9 +229,8 @@ export function useAi(prId: string | null, account: string) {
         method: 'POST',
         body: { account, ...options },
       }),
-    onSuccess: (draft) => {
-      client.setQueryData(draftKey, draft);
-    },
+    onMutate: () => ({ since: accountSwitches() }),
+    onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
     onSettled: () =>
       Promise.all([
         client.invalidateQueries({ queryKey: key }),
@@ -235,7 +245,8 @@ export function useAi(prId: string | null, account: string) {
         method: 'POST',
         body: { account },
       }),
-    onSuccess: (draft) => client.setQueryData(draftKey, draft),
+    onMutate: () => ({ since: accountSwitches() }),
+    onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
     onSettled: () => client.invalidateQueries({ queryKey: key }),
   });
 

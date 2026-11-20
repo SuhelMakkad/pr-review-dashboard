@@ -33,6 +33,7 @@ import type { EventBus } from '@/events.js';
 import { asAccount } from '@/github/credentials.js';
 import { redact, safeError } from '@/github/errors.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
+import { legacyAccountError } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import {
   authorFeedbackInput,
@@ -1325,14 +1326,19 @@ export class AiRunner {
 
     if (!suggestion) throw new ReviewError('NOT_FOUND', 404, 'That suggestion no longer exists.');
 
-    return this.reviews.addComment(row.prId, {
-      account,
-      path: suggestion.path,
-      line: suggestion.line,
-      side: suggestion.side,
-      body: body ?? suggestion.body,
-      origin: 'ai',
-    });
+    // AI answers for another account as it always has, until its routes name the account.
+    return this.reviews
+      .addComment(row.prId, {
+        account,
+        path: suggestion.path,
+        line: suggestion.line,
+        side: suggestion.side,
+        body: body ?? suggestion.body,
+        origin: 'ai',
+      })
+      .catch((error: unknown) => {
+        throw legacyAccountError(error);
+      });
   }
 
   /** Prepare a summary with selected findings, without creating inline review comments. */
@@ -1456,7 +1462,7 @@ export class AiRunner {
         },
       });
     });
-    this.events.emit({ type: 'draft.updated', id: row.prId });
+    this.events.emit({ type: 'draft.updated', account: row.account, id: row.prId });
 
     return this.reviews.draft(account, row.prId);
   }
@@ -1491,7 +1497,7 @@ export class AiRunner {
     this.reviews.drafts.saveMeta(account, row.prId, {
       body: (JSON.parse(row.result) as { body: string }).body,
     });
-    this.events.emit({ type: 'draft.updated', id: row.prId });
+    this.events.emit({ type: 'draft.updated', account: row.account, id: row.prId });
 
     return this.reviews.draft(account, row.prId);
   }
