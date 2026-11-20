@@ -628,7 +628,7 @@ describe('GitLab merge request snapshots', () => {
 
   it('finds a marked note on a later page, following GitLab’s Link header', async () => {
     const { client, fake } = gitlab();
-    const notes = `${MR_BY_PATH}/notes`;
+    const notes = `${MR}/notes`;
     const older = Array.from({ length: 100 }, (_, index) => ({
       id: index + 1,
       type: null,
@@ -664,20 +664,10 @@ describe('GitLab merge request snapshots', () => {
     );
 
     await expect(
-      client.markedComment(
-        'acme/platform/web',
-        12,
-        'rev',
-        '<!-- review-desk:ai-review run=run-1 -->',
-      ),
+      client.markedComment('MR_7_12', 'rev', '<!-- review-desk:ai-review run=run-1 -->'),
     ).resolves.toEqual({ id: '501', url: `${WEB}#note_501` });
     await expect(
-      client.markedComment(
-        'acme/platform/web',
-        12,
-        'rev',
-        '<!-- review-desk:ai-review run=other -->',
-      ),
+      client.markedComment('MR_7_12', 'rev', '<!-- review-desk:ai-review run=other -->'),
     ).resolves.toBeNull();
   });
 

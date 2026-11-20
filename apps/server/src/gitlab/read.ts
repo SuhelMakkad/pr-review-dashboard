@@ -721,12 +721,12 @@ export class GitLab implements GitHubApi {
   }
 
   async markedComment(
-    repository: string,
-    number: number,
+    prId: string,
     author: string,
     marker: string,
   ): Promise<{ id: string; url: string } | null> {
-    const base = `${projectPath(repository)}/merge_requests/${number}`;
+    // By the project's numeric id and the merge request's iid, which a moved project keeps.
+    const base = mergeRequestPath(parseMergeRequestId(prId));
     let next: string | null = `${base}/notes?sort=asc&per_page=100`;
 
     // Up to 10,000 notes; past that, absence cannot be shown.

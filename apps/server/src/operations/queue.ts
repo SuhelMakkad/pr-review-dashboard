@@ -89,6 +89,54 @@ export type PostingSettings = Pick<
   'postFindings' | 'approveFindings' | 'resolveThreads'
 >;
 
+/** True once an automatic approval's own approval step has its receipt. */
+function approvedAlready(row: OperationRecord): boolean {
+  return row.steps.some((step) => step.method === 'approveReview' && step.completedAt);
+}
+
+/**
+ * An automatic approval queued before summaries were checked on their own, with the fingerprint
+ * its summary is checked against: taken from the PR now, where the PR still matches what the
+ * review read (this post's own resolutions aside). Otherwise unchanged: the approval's own check
+ * then stops it before anything more is sent.
+ */
+function withSummaryBasis(
+  row: OperationRecord,
+  action: AiReviewAction,
+  pr: PullRequestSnapshot | undefined,
+): AiReviewAction {
+  const basis = action.basis;
+
+  if (!basis || basis.summaryFingerprint || !pr) return action;
+
+  const resolved = new Set(
+    row.steps
+      .filter(
+        (step) => step.method === 'setThreadResolved' && step.completedAt && step.acknowledged,
+      )
+      .map((step) => String(step.args[0])),
+  );
+  const unchanged =
+    [...resolved].every((id) => pr.threads.find((thread) => thread.id === id)?.isResolved) &&
+    publicationFingerprint(pr, action.runId, row.account, resolved) === basis.fingerprint;
+
+  return unchanged
+    ? {
+        ...action,
+        basis: {
+          ...basis,
+          summaryFingerprint: publicationFingerprint(
+            pr,
+            action.runId,
+            row.account,
+            resolved,
+            false,
+          ),
+        },
+      }
+    : action;
+}
+
 /** True for the summary an automatic approval sends after it, where they are two steps. */
 function isSummary(action: AiReviewAction, method: string): boolean {
   return action.event === 'APPROVE' && method === 'addConversationComment';
@@ -310,7 +358,9 @@ export class OperationQueue {
     // Automatic posting has no local draft to restore; confirmed resolutions can be kept.
     if (
       !started ||
-      (row.action.type === 'ai_review' && (!uncertain || unresolvable)) ||
+      // An automatic post has no draft to go back to: whatever is unconfirmed, you can stop the
+      // rest (after confirming), keeping the receipts it has.
+      row.action.type === 'ai_review' ||
       (uncertain && !this.pendingId(row) && !row.steps.some((step) => step.completedAt))
     )
       controls.push(row.action.type === 'ai_review' ? 'cancel' : 'reopen');
@@ -656,11 +706,13 @@ export class OperationQueue {
               ? 'Returned to your draft. Saved content is available here.'
               : row.action.type !== 'ai_review'
                 ? 'Cancelled before sending. Your draft is preserved.'
-                : uncertain
-                  ? 'Stopped. Check GitHub: this review may already be posted.'
-                  : row.steps.some((step) => step.method === 'approveReview' && step.completedAt)
-                    ? 'Cancelled. The PR was approved; its summary was not posted.'
-                    : 'Cancelled. Nothing was posted.',
+                : uncertain && approvedAlready(row)
+                  ? 'Stopped. The PR was approved; check whether its summary was posted.'
+                  : uncertain
+                    ? 'Stopped. Check GitHub: this review may already be posted.'
+                    : approvedAlready(row)
+                      ? 'Cancelled. The PR was approved; its summary was not posted.'
+                      : 'Cancelled. Nothing was posted.',
         });
         new DraftStore(this.sync.store).unlock(account, row.prId, id);
       });
@@ -1210,14 +1262,13 @@ export class OperationQueue {
     if (action.type !== 'ai_review' || action.event !== 'APPROVE' || row.plan === 2) return row;
     if (this.sync.github.approvalCarriesSummary) return row;
     if (!row.steps.some((step) => step.method === 'approveReview'))
-      return this.save({ ...row, plan: 2 });
+      return this.save({ ...row, plan: 2, action: withSummaryBasis(row, action, pr) });
     if (!this.refusedCombined(row)) return row;
 
     const approved = approvalOf(row, pr, false);
     const summary = approved
       ? await this.sync.github.markedComment(
-          row.repository,
-          row.number,
+          row.prId,
           row.account,
           postedReviewMarker(action.runId),
         )
@@ -1448,9 +1499,21 @@ export class OperationQueue {
         .map((step) => String(step.args[0])),
     );
 
+    // The summary after its approval goes with that approval: withdrawn, or not shown for the
+    // reviewed commit, the summary waits for you.
+    const summary = isSummary(action, method);
+
+    if (summary && !approvalOf(row, pr, this.sync.github.approvalCarriesSummary))
+      return {
+        skipped: 'your approval of the reviewed commit is no longer on the PR.',
+        code: 'APPROVAL_WITHDRAWN',
+        hold: true,
+        attention:
+          'Your approval of the reviewed commit is no longer on the PR, so its summary was not posted. Check the PR.',
+      };
+
     // The summary after its approval is checked without your reviews, which that approval
     // changed; a post queued before that fingerprint existed cannot be checked, and waits.
-    const summary = isSummary(action, method);
     const expected = summary ? basis.summaryFingerprint : basis.fingerprint;
 
     if (!expected)
@@ -1726,8 +1789,7 @@ export class OperationQueue {
           );
         } else if (approvalOf(row, pr, false)) {
           receipt = await this.sync.github.markedComment(
-            row.repository,
-            row.number,
+            row.prId,
             row.account,
             postedReviewMarker(action.runId),
           );
@@ -1743,8 +1805,7 @@ export class OperationQueue {
         // none once the PR closes). Absence is not proof: the forge may not list it yet, so an
         // unfound comment stays unconfirmed rather than being sent again.
         const posted = await this.sync.github.markedComment(
-          row.repository,
-          row.number,
+          row.prId,
           row.account,
           postedReviewMarker(row.action.runId),
         );

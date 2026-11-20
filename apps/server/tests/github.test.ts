@@ -112,6 +112,40 @@ describe('GitHub data retrieval', () => {
     });
   });
 
+  it('finds a marked comment through every page of the conversation, by the PR’s id', async () => {
+    const comment = (id: string, login: string, body: string) => ({
+      id,
+      url: `https://github.com/a/b/pull/1#issuecomment-${id}`,
+      body,
+      author: { login },
+    });
+    const graphql = vi
+      .fn()
+      .mockResolvedValueOnce({
+        node: { comments: connection([comment('1', 'you', 'Looks good.')], true, 'page-2') },
+      })
+      .mockResolvedValueOnce({
+        node: {
+          comments: connection([
+            comment('2', 'someone-else', '<!-- review-desk:ai-review run=r -->'),
+            comment('3', 'you', '<!-- review-desk:ai-review run=r -->\nSummary'),
+          ]),
+        },
+      });
+    const github = new GitHub({ graphql, rest: vi.fn() });
+
+    expect(
+      await github.markedComment('pr-1', 'you', '<!-- review-desk:ai-review run=r -->'),
+    ).toEqual({
+      id: '3',
+      url: 'https://github.com/a/b/pull/1#issuecomment-3',
+    });
+    expect(graphql.mock.calls.map((call) => call[1])).toEqual([
+      { id: 'pr-1', cursor: null },
+      { id: 'pr-1', cursor: 'page-2' },
+    ]);
+  });
+
   it('paginates discovery and deduplicates IDs', async () => {
     const graphql = vi
       .fn()

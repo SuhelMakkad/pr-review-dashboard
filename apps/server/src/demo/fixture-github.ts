@@ -240,11 +240,8 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     return this.scenario.world.repos.compare(repository, base, head);
   }
 
-  async markedComment(repository: string, number: number, author: string, marker: string) {
-    const pull = this.scenario.world.pulls.find(
-      (candidate) =>
-        candidate.snapshot.repository === repository && candidate.snapshot.number === number,
-    );
+  async markedComment(prId: string, author: string, marker: string) {
+    const pull = this.scenario.world.pulls.find((candidate) => candidate.snapshot.id === prId);
     const found = pull?.snapshot.conversation.find(
       (comment) => isSameUser(comment.author.login, author) && comment.body.startsWith(marker),
     );

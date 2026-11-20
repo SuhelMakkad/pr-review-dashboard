@@ -1511,6 +1511,167 @@ describe('approvals whose summary is a separate write', () => {
     );
   });
 
+  it('does not post the summary once you withdrew the approval it goes with', async () => {
+    const { github, queue, pull, review, posted } = await gitlabLike();
+
+    github.failNext = 'AddComment';
+
+    const run = await review();
+    const failed = await posted(run.id, 'needs_attention');
+    const snapshot = pull(1839).snapshot;
+
+    // Withdrawn: no approval of the head on the PR any more.
+    snapshot.verdicts = snapshot.verdicts.filter((verdict) => verdict.login !== 'you');
+    snapshot.updatedAt = new Date().toISOString();
+    await queue.control('you', failed.id, 'retry');
+    await expect
+      .poll(() => queue.get('you', failed.id).error?.code, { timeout: 2500, interval: 20 })
+      .toBe('APPROVAL_WITHDRAWN');
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
+  });
+
+  it.each([
+    ['still matches what the review read', false, ['ApproveReview', 'AddComment']],
+    ['changed since the review', true, []],
+  ])(
+    'gives a post queued before summaries were checked their check, when the PR %s',
+    async (_case, changed, writes) => {
+      const context = await gitlabLike();
+      const { github, queue, store, pull, review, posted } = context;
+
+      await queue.pause();
+
+      const run = await review();
+      const data = stored(context, run.id);
+      const action = data.action as Extract<typeof data.action, { type: 'ai_review' }>;
+      const { summaryFingerprint: _new, ...basis } = action.basis!;
+
+      // As the previous version queued it: no plan, no summary fingerprint.
+      store.db
+        .update(githubOperations)
+        .set({ data: { ...data, action: { ...action, basis } } })
+        .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
+        .run();
+      if (changed) commentOn(pull(1839).snapshot, 'One more thing.');
+      queue.resume();
+
+      await posted(run.id, changed ? 'cancelled' : 'succeeded');
+      expect(github.writes.map((write) => write.op)).toEqual(writes);
+    },
+  );
+
+  it('can be stopped after a restart lost the summary’s response, keeping the approval', async () => {
+    const context = await gitlabLike();
+    const { github, queue, sync, store, review, runner } = context;
+
+    await queue.pause();
+
+    const run = await review();
+    const data = stored(context, run.id);
+    const action = data.action as Extract<typeof data.action, { type: 'ai_review' }>;
+    const now = new Date().toISOString();
+
+    // Approved; the summary step saved, then the process stopped before it was sent.
+    await github.approveReview(data.prId, action.expectedHeadOid, '');
+    store.db
+      .update(githubOperations)
+      .set({
+        status: 'running',
+        data: {
+          ...data,
+          plan: 2,
+          status: 'running',
+          steps: [
+            {
+              method: 'approveReview',
+              args: [data.prId, action.expectedHeadOid, ''],
+              startedAt: now,
+              completedAt: now,
+              result: { url: data.prUrl },
+              uncertain: false,
+              acknowledged: true,
+            },
+            {
+              method: 'addConversationComment',
+              args: [data.prId, action.body],
+              startedAt: now,
+              completedAt: null,
+              result: null,
+              uncertain: true,
+            },
+          ],
+        },
+      })
+      .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
+      .run();
+    github.writes.length = 0;
+    await queue.close();
+
+    const reopened = new OperationQueue(sync, { mutationIntervalMs: 0, retryDelaysMs: [1, 2, 3] });
+
+    reopened.posting = () => runner.settings();
+    cleanups.push(() => reopened.close());
+    reopened.open();
+
+    await expect
+      .poll(() => reopened.get('you', data.id).status, { timeout: 2500, interval: 20 })
+      .toBe('needs_attention');
+
+    const unconfirmed = reopened.get('you', data.id);
+
+    expect(unconfirmed.error?.code).toBe('UNCONFIRMED');
+    expect(unconfirmed.controls).toEqual(['check', 'cancel', 'dismiss']);
+
+    const { operation } = await reopened.control('you', data.id, 'cancel', true);
+
+    expect(operation.progress).toBe(
+      'Stopped. The PR was approved; check whether its summary was posted.',
+    );
+    expect(github.writes).toEqual([]);
+  });
+
+  it('comments rather than approving again where you had approved the PR already', async () => {
+    const { github, pull, sync, idOf, review, posted } = await gitlabLike();
+    const snapshot = pull(1839).snapshot;
+
+    snapshot.verdicts.push({
+      id: 'note-yours',
+      login: 'you',
+      state: 'APPROVED',
+      submittedAt: '2026-11-05T09:00:00Z',
+      commitOid: snapshot.headOid,
+    });
+    snapshot.updatedAt = new Date().toISOString();
+    await sync.refresh(idOf(1839));
+
+    const run = await review();
+
+    await posted(run.id);
+    expect(run.publication).toMatchObject({
+      event: 'COMMENT',
+      reason: 'You had already approved this PR.',
+    });
+    expect(github.writes.map((write) => write.op)).toEqual(['AddComment']);
+    expect(String(github.writes[0].details.body)).not.toContain('approval-summary');
+  });
+
+  it('finds a summary whose response was lost by the PR’s id, after its repository moved', async () => {
+    const { github, pull, review, posted } = await gitlabLike();
+    const add = github.addConversationComment.bind(github);
+
+    vi.spyOn(github, 'addConversationComment').mockImplementationOnce(async (...args) => {
+      await add(...args);
+      pull(1839).snapshot.repository = 'acme/renamed';
+
+      throw new GitHubError('The response was lost.');
+    });
+
+    const run = await review();
+
+    await posted(run.id);
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview', 'AddComment']);
+  });
+
   it('says the PR was approved when its summary is cancelled', async () => {
     const { github, queue, review, posted } = await gitlabLike();
 

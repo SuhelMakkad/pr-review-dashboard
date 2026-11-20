@@ -145,13 +145,13 @@ export interface GitHubApi extends GitHubWrites {
   /** The commit `branch` points to now; null when there is no such branch. */
   branchHead(repository: string, branch: string): Promise<string | null>;
   /**
-   * The comment `author` left in the PR's conversation that starts with `marker`, read through
-   * every page (a snapshot keeps only the latest ones). Null when there is none; throws when not
-   * every page could be read, so absence is never assumed.
+   * The comment `author` left in the conversation of PR `prId` that starts with `marker`, read
+   * through every page (a snapshot keeps only the latest ones). The PR is named by its id, which
+   * a renamed or moved repository keeps. Null when there is none; throws when not every page
+   * could be read, so absence is never assumed.
    */
   markedComment(
-    repository: string,
-    number: number,
+    prId: string,
     author: string,
     marker: string,
   ): Promise<{ id: string; url: string } | null>;

@@ -37,6 +37,7 @@ import {
   identityQuery,
   resolvePullQuery,
   reviewReceiptQuery,
+  conversationPageQuery,
   snapshotQuery,
   threadCommentsQuery,
   type ConnectionKey,
@@ -614,36 +615,39 @@ export class GitHub implements GitHubApi {
   }
 
   async markedComment(
-    repository: string,
-    number: number,
+    prId: string,
     author: string,
     marker: string,
   ): Promise<{ id: string; url: string } | null> {
-    const request = this.requireRequest();
+    let cursor: string | null = null;
 
     // Up to 10,000 comments; past that, absence cannot be shown.
-    for (let page = 1; page <= 100; page++) {
-      const response = await request<
-        { id: number; html_url: string; body?: string; user?: { login: string } | null }[]
-      >({ path: `repos/${repository}/issues/${number}/comments?per_page=100&page=${page}` });
+    for (let page = 0; page < 100; page++) {
+      const data: {
+        node: {
+          comments?: Connection<{
+            id: string;
+            url: string;
+            body: string;
+            author: { login: string } | null;
+          }>;
+        } | null;
+      } = await this.transport.graphql(conversationPageQuery, { id: prId, cursor });
+      const comments = data.node?.comments;
 
-      if (response.status >= 400)
-        throw new GitHubError(
-          `Could not read the conversation (HTTP ${response.status}).`,
-          null,
-          response.status,
-        );
+      if (!comments) throw new GitHubError('This PR could not be read.');
 
-      const found = response.data.find(
+      const found = comments.nodes.find(
         (comment) =>
-          comment.user &&
-          isSameUser(comment.user.login, author) &&
-          comment.body?.startsWith(marker),
+          comment.author &&
+          isSameUser(comment.author.login, author) &&
+          comment.body.startsWith(marker),
       );
 
-      if (found) return { id: String(found.id), url: found.html_url };
-      if (response.data.length < 100 || !/rel="next"/.test(response.headers.link ?? ''))
-        return null;
+      if (found) return { id: found.id, url: found.url };
+      if (!comments.pageInfo.hasNextPage) return null;
+
+      cursor = comments.pageInfo.endCursor;
     }
 
     throw new GitHubError('The conversation is too long to check for an earlier post.');
