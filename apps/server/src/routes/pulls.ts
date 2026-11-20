@@ -83,6 +83,9 @@ export function readError(reply: FastifyReply, error: unknown) {
 
 /** Maps queue-change failures to `{ error, code }` responses. */
 function queueError(reply: FastifyReply, error: unknown) {
+  if (error instanceof AccountUnavailable)
+    return reply.code(409).send({ error: error.message, code: error.code });
+
   if (error instanceof ReviewError)
     return reply.code(error.status).send({ error: error.message, code: error.code });
 

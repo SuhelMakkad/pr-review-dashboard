@@ -12,7 +12,7 @@ import {
   isSameUser,
   parseAccount,
 } from '@review-desk/shared/accounts';
-import { scopedAccount } from '@/github/credentials.js';
+import { asAccount, scopedAccount } from '@/github/credentials.js';
 import type {
   BlobText,
   CompareResult,
@@ -309,7 +309,8 @@ export class GitLab implements GitHubApi {
    * one read are not: Review Desk never reads the GitLab token.)
    */
   async verifyAccount(account: string): Promise<void> {
-    const { login } = await this.identity();
+    // Only a check: it never changes whose local state other reads use.
+    const login = gitlabAccountKey((await this.user()).username, this.host);
 
     if (login.toLowerCase() !== account.toLowerCase()) throw new AccountUnavailable(account, login);
   }
@@ -317,12 +318,12 @@ export class GitLab implements GitHubApi {
   /** The account key of the last identity read; local state is kept per account. */
   private login: string | null = null;
 
+  private user(): Promise<RawUser> {
+    return call<RawUser>(this.transport, { path: 'user' }, 'Could not read your GitLab account');
+  }
+
   async identity(): Promise<Actor> {
-    const user = await call<RawUser>(
-      this.transport,
-      { path: 'user' },
-      'Could not read your GitLab account',
-    );
+    const user = await this.user();
 
     this.login = gitlabAccountKey(user.username, this.host);
 
@@ -470,7 +471,17 @@ export class GitLab implements GitHubApi {
     return mr.head_pipeline ? { id: mr.head_pipeline.id, status: mr.head_pipeline.status } : null;
   }
 
-  async snapshot(
+  /** The MR as `login` sees it: its local state (viewed marks, submissions) is `login`'s own. */
+  snapshot(
+    id: string,
+    login: string,
+    sources: Source[],
+    previous?: PullRequestSnapshot,
+  ): Promise<PullRequestSnapshot> {
+    return asAccount(login, () => this.readSnapshot(id, login, sources, previous));
+  }
+
+  private async readSnapshot(
     id: string,
     login: string,
     sources: Source[],

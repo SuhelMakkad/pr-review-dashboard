@@ -174,7 +174,18 @@ export class GhCredentials implements GitHubAccounts {
     const login = named ?? this.selected;
 
     if (!login) return env;
-    if (login !== this.selected && (await this.ambientLogin()) === login) return env;
+
+    if (login !== this.selected) {
+      const ambient = await this.ambientLogin();
+
+      // Exactly the token that was verified, whatever else the environment holds.
+      if (ambient && ambient.login === login) {
+        env.GH_TOKEN = ambient.token;
+        delete env.GITHUB_TOKEN;
+
+        return env;
+      }
+    }
 
     env.GH_TOKEN = await this.token(login).catch((error: unknown) => {
       // A request for an account that is not the selected one cannot fall back to another's.
@@ -192,25 +203,34 @@ export class GhCredentials implements GitHubAccounts {
    * The login of the token in the server's environment, if there is one, verified with GitHub
    * once per token. A failed check counts as unknown and is tried again next time.
    */
-  private ambientLogin(): Promise<string | null> {
-    const token = AMBIENT_TOKENS.map((name) => process.env[name]).find(Boolean);
+  private async ambientLogin(): Promise<{ token: string; login: string } | null> {
+    // gh's own order for github.com; the Enterprise variables are for other hosts.
+    const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 
-    if (!token) return Promise.resolve(null);
-    if (this.ambient?.token === token) return this.ambient.login;
+    if (!token) return null;
+    if (this.ambient?.token === token) {
+      const known = await this.ambient.login;
 
-    const login = this.run(
-      ['api', 'user', '--hostname', 'github.com', '--jq', '.login'],
-      baseGhEnvironment(),
-    )
+      return known ? { token, login: known } : null;
+    }
+
+    // With only that token, so the answer is the token's and nothing else's.
+    const probe = baseGhEnvironment();
+
+    for (const name of AMBIENT_TOKENS) delete probe[name];
+    probe.GH_TOKEN = token;
+
+    const login = this.run(['api', 'user', '--hostname', 'github.com', '--jq', '.login'], probe)
       .then((result) => (result.code === 0 ? result.stdout.trim() || null : null))
       .catch(() => null);
 
     this.ambient = { token, login };
-    void login.then((value) => {
-      if (value === null && this.ambient?.login === login) this.ambient = null;
-    });
 
-    return login;
+    const verified = await login;
+
+    if (verified === null && this.ambient?.login === login) this.ambient = null;
+
+    return verified ? { token, login: verified } : null;
   }
 
   /** Drops cached tokens, so the next call reads them again (after GitHub rejects one). */

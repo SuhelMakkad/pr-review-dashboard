@@ -270,6 +270,12 @@ export class SyncService {
 
       if (target.login !== from) {
         const saved = this.store.getSetting<SyncStatus>(`status:${target.login}`);
+        // A refresh or write made while it was not selected may have hit a limit since.
+        const deadline = laterDeadline(
+          this.clock.now(),
+          saved?.retryAt,
+          this.store.getSetting<string>(`github-write-retry:${target.login}`),
+        );
 
         this.status = {
           ...(saved ?? initialStatus()),
@@ -277,6 +283,8 @@ export class SyncService {
           syncing: false,
           error: null,
           warnings: [],
+          retryAt: deadline,
+          nextSyncAt: deadline ?? saved?.nextSyncAt ?? null,
         };
         this.store.saveStatus(this.status);
         this.emitStatus();
@@ -349,22 +357,41 @@ export class SyncService {
       // Where the forge cannot carry the account with each call (GitLab), its sign-in is checked
       // before the read and again before its result is kept.
       const verify = this.github.verifyAccount?.bind(this.github);
-      const fetched = await asAccount(account, () =>
-        verify
-          ? verify(account)
-              .then(() => this.github.snapshot(id, account, cached.sources, cached))
-              .then(async (snapshot) => {
-                await verify(account);
-
-                return snapshot;
-              })
-          : this.github.snapshot(id, account, cached.sources, cached),
-      ).catch((error: unknown) => {
-        // Saved before the caller hears of it, so the next request waits too.
+      const read = () => this.github.snapshot(id, account, cached.sources, cached);
+      /** Saved before the caller hears of it, so the next request waits too. */
+      const keepLimit = (error: unknown) => {
         if (error instanceof GitHubError && error.outcome === 'rate_limit' && error.retryAt)
           this.deferUntil(error.retryAt, account);
+      };
+      const fetched = await asAccount(account, async () => {
+        if (!verify)
+          return read().catch((error: unknown) => {
+            keepLimit(error);
+            throw error;
+          });
 
-        throw error;
+        // A limit met by the first check is nobody's yet: it is not saved.
+        await verify(account);
+
+        try {
+          const snapshot = await read();
+
+          await verify(account);
+
+          return snapshot;
+        } catch (error) {
+          // A limit is the account's only if glab is still signed in as it.
+          if (
+            !(error instanceof AccountUnavailable) &&
+            (await verify(account).then(
+              () => true,
+              () => false,
+            ))
+          )
+            keepLimit(error);
+
+          throw error;
+        }
       });
       // Keep the stored sources: a PR may have been added or removed by hand during the fetch.
       const outcome = this.snapshots.commit(observation, fetched, {
@@ -745,21 +772,27 @@ export class SyncService {
             });
 
           return () => {
-            // The observation was taken when the read began, so a read that started later (such
-            // as a refresh) and was saved first still wins, however long this one waited.
-            const outcome = this.snapshots.commit(observation, snapshot, {
-              fingerprint: result?.fingerprint ?? null,
-              // Removed from the queue while it was being fetched: do not bring it back.
-              requireStored: Boolean(cached),
-              // Added or removed by hand during the fetch: keep that change.
-              sources: () => this.withManual(account.login, id, snapshot.sources),
-            });
+            try {
+              // The observation was taken when the read began, so a read that started later
+              // (such as a refresh) and was saved first still wins, however long this one waited.
+              const outcome = this.snapshots.commit(observation, snapshot, {
+                fingerprint: result?.fingerprint ?? null,
+                // Removed from the queue while it was being fetched: do not bring it back.
+                requireStored: Boolean(cached),
+                // Added or removed by hand during the fetch: keep that change.
+                sources: () => this.withManual(account.login, id, snapshot.sources),
+              });
 
-            // A later read was saved first, or the PR was removed: this read is older.
-            if (outcome.status !== 'committed') return;
+              // A later read was saved first, or the PR was removed: this read is older.
+              if (outcome.status !== 'committed') return;
 
-            this.forced.delete(id);
-            changed.add(id);
+              this.forced.delete(id);
+              changed.add(id);
+            } catch (error) {
+              // As a failed read: counted, and the other reads go on.
+              timing.failed += 1;
+              this.status.warnings.push(`${cached ? fullRef(cached) : id}: ${safeError(error)}`);
+            }
           };
         } catch (error) {
           timing.failed += 1;
@@ -980,14 +1013,15 @@ export class SyncService {
 
     if (last && this.clock.now() - Date.parse(last) < QUEUE_SAMPLE_MS) return;
 
-    const items = this.list().items;
+    const items = this.listFor(login).items;
     const attention = items.filter((item) => item.queue === 'attention');
 
     this.store.saveQueueSample(login, {
       at: isoNow(this.clock),
       attention: attention.length,
       waiting: items.filter((item) => item.queue === 'waiting').length,
-      authoredBlocked: this.mine().items.filter((item) => item.group === 'needs_you').length,
+      authoredBlocked: this.mineFor(login).items.filter((item) => item.group === 'needs_you')
+        .length,
       oldestAttentionAt: attention.map((item) => item.attentionAt).sort()[0] ?? null,
     });
   }
@@ -997,13 +1031,22 @@ export class SyncService {
   /** Status changes made by this process, counted from its start, never loaded from storage. */
   private revision = 0;
 
-  /** The status as sent to the browser: with this process's `bootId` and the current revision. */
+  /** The last status published, which a revision names: changes in between are not shown. */
+  private published: SyncStatus | null = null;
+
+  /**
+   * The status as sent to the browser: the last one published, with this process's `bootId` and
+   * its revision, so two statuses with one revision are always the same state.
+   */
   get sentStatus(): SyncStatus {
-    return { ...structuredClone(this.status), bootId: this.bootId, revision: this.revision };
+    const published = this.published ?? structuredClone(this.status);
+
+    return { ...structuredClone(published), bootId: this.bootId, revision: this.revision };
   }
 
   private emitStatus(): void {
     this.revision += 1;
+    this.published = structuredClone(this.status);
     this.events.emit({ type: 'status', status: this.sentStatus });
   }
 

@@ -180,6 +180,31 @@ describe('GitHub CLI accounts', () => {
     expect(probes()).toBe(before + 1);
   });
 
+  it('sends exactly the verified token from the environment, and never takes an Enterprise one for github.com', async () => {
+    const run = fakeGh(() => 'work-me');
+    const credentials = new GhCredentials(run);
+
+    // Only an Enterprise token: it is for another host, so nothing is probed and the account's own
+    // stored sign-in is used.
+    vi.stubEnv('GH_ENTERPRISE_TOKEN', 'enterprise-token-0123');
+
+    expect((await asAccount('work-me', () => credentials.environment())).GH_TOKEN).toBe(
+      tokens['work-me'],
+    );
+    expect(run.mock.calls.some(([args]) => args[0] === 'api')).toBe(false);
+
+    // GITHUB_TOKEN verified as work-me's: that very token goes out, as GH_TOKEN, and nothing else.
+    vi.stubEnv('GITHUB_TOKEN', 'environment-token-0123');
+
+    const env = await asAccount('work-me', () => credentials.environment());
+    const probe = run.mock.calls.find(([args]) => args[0] === 'api')?.[1];
+
+    expect(env.GH_TOKEN).toBe('environment-token-0123');
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(probe?.GH_TOKEN).toBe('environment-token-0123');
+    expect(probe?.GH_ENTERPRISE_TOKEN).toBeUndefined();
+  });
+
   it('explains a missing sign-in and keeps tokens out of error messages', async () => {
     const credentials = new GhCredentials(fakeGh());
 

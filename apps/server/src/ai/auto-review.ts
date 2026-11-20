@@ -258,6 +258,9 @@ export class AutoReviewer {
   }
 
   private async announce(row: AiRunRow): Promise<void> {
+    // Notifications cover the account in use: another account's PR is never shown in them.
+    if (row.account !== this.sync.status.account?.login) return;
+
     const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
 
     if (!pr) return;

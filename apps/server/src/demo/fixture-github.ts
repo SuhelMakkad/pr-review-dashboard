@@ -56,6 +56,8 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
   >();
   /** Every snapshot read, with the account it was answered as: tests check whose a read was. */
   readonly reads: { id: string; account: string }[] = [];
+  /** Every file listing, with the account it was answered as. */
+  readonly fileReads: { pull: string; account: string }[] = [];
   private sequence = 0;
   /** Every write GitHub would have received, for assertions in tests. */
   readonly writes: FixtureWrite[] = [];
@@ -260,6 +262,8 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
   }
 
   async pullFiles(repository: string, number: number): Promise<RemoteFile[]> {
+    this.fileReads.push({ pull: `${repository}#${number}`, account: this.effective() });
+
     return this.pullFilesSync(repository, number);
   }
 

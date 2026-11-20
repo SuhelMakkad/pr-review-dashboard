@@ -9,6 +9,7 @@ import { EventBus } from '@/events.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import type { GitHubApi } from '@/github/api.js';
 import { GitHubError } from '@/github/errors.js';
+import { DiffService } from '@/diff/service.js';
 import { SELECTED_ACCOUNT_KEY, SyncService } from '@/sync/service.js';
 import { snapshot } from '@test/fixtures.js';
 
@@ -148,6 +149,21 @@ describe('routes that name an account', () => {
     expect(fixture.reads).toHaveLength(reads);
   });
 
+  it('shows the cooldown of an account it switches to, met while that account was not in use', async () => {
+    const { fixture, service, pr, call } = await switchedAway();
+    const retryAt = new Date(Date.now() + 300_000).toISOString();
+
+    vi.spyOn(fixture, 'snapshot').mockRejectedValueOnce(
+      new GitHubError('Rate limited', retryAt, 429, 'rate_limit'),
+    );
+    expect((await call('POST', `/api/accounts/you/pulls/${pr.id}/refresh`)).statusCode).toBe(429);
+
+    const status = await service.switchAccount(DEMO_SECOND_ACCOUNT, 'you');
+
+    expect(status).toMatchObject({ account: { login: 'you' }, retryAt, nextSyncAt: retryAt });
+    expect(service.status.retryAt).toBe(retryAt);
+  });
+
   it("builds each account's diff as that account, never from another account's cache", async () => {
     const { fixture, pr, call } = await switchedAway();
 
@@ -160,21 +176,22 @@ describe('routes that name an account', () => {
 
     expect(added.statusCode).toBe(200);
 
-    const listings = vi.spyOn(fixture, 'pullFiles');
+    const listed = () => fixture.fileReads.map(({ account }) => account);
+    const before = listed().length;
     const second = await call('GET', `/api/accounts/${DEMO_SECOND_ACCOUNT}/pulls/${pr.id}/diff`);
 
     expect(second.json()).toMatchObject({ account: DEMO_SECOND_ACCOUNT });
-    expect(listings).toHaveBeenCalledTimes(1);
+    expect(listed().slice(before)).toEqual([DEMO_SECOND_ACCOUNT]);
 
-    // The same PR and revision, cached for the second account, is read again for `you`.
+    // The same PR and revision, cached for the second account, is read again, as `you`.
     const yours = await call('GET', `/api/accounts/you/pulls/${pr.id}/diff`);
 
     expect(yours.json()).toMatchObject({ account: 'you' });
-    expect(listings).toHaveBeenCalledTimes(2);
+    expect(listed().slice(before)).toEqual([DEMO_SECOND_ACCOUNT, 'you']);
 
     // And from then on comes from `you`'s own entry.
     await call('GET', `/api/accounts/you/pulls/${pr.id}/diff`);
-    expect(listings).toHaveBeenCalledTimes(2);
+    expect(listed().slice(before)).toEqual([DEMO_SECOND_ACCOUNT, 'you']);
   });
 
   it('sends every status with the boot id and a revision that only grows', async () => {
@@ -217,13 +234,15 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
       checks: 0,
       onCheck: null as null | ((check: number) => Promise<void> | void),
       onSnapshot: null as null | ((id: string) => void),
+      /** MRs discovery also returns, beyond the `count` open ones. */
+      discovered: [] as string[],
     };
     const api = {
       identity: vi.fn(async () => ({ login: state.signedIn })),
       teams: vi.fn(async () => []),
       capabilities: vi.fn(async () => ({ requestChanges: true })),
       discover: vi.fn(async (_login: string, source: string) =>
-        source === 'requested' ? ids : [],
+        source === 'requested' ? [...ids, ...state.discovered] : [],
       ),
       detect: vi.fn(async (list: string[]) => ({
         results: list.map((id) => ({
@@ -244,6 +263,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
           sources: sources as never,
         });
       }),
+      resolvePull: vi.fn(async () => ({ id: 'mr-5', state: 'OPEN' as const })),
       verifyAccount: vi.fn(async (account: string) => {
         state.checks += 1;
         await state.onCheck?.(state.checks);
@@ -260,7 +280,14 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
 
     const heads = () => ids.map((id) => store.snapshot(ACCOUNT, id)?.headOid ?? null);
 
-    return { store, service, state, ids, heads };
+    return {
+      store,
+      service,
+      state,
+      ids,
+      heads,
+      api: api as unknown as Record<string, ReturnType<typeof vi.fn>>,
+    };
   }
 
   it('saves each batch of snapshots only after glab is still the account', async () => {
@@ -293,7 +320,9 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
 
     await service.sync();
 
-    // mr-2 is reported merged, and glab signs in as someone else before detection's writes.
+    // Discovery finds a new MR; mr-2 is reported merged, and glab signs in as someone else before
+    // detection's writes.
+    state.discovered = ['mr-9'];
     state.merged.add('mr-2');
     state.onCheck = (check) => {
       // The checks of this sync: after discovery (4), after detection (5).
@@ -302,8 +331,9 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
     await service.sync();
 
     expect(store.snapshot(ACCOUNT, 'mr-2')?.state).toBe('OPEN');
-    // Discovery, checked before detection began, was saved.
-    expect([...store.membership(ACCOUNT).keys()].sort()).toEqual(ids);
+    // This sync's discovery, checked before detection began, was saved.
+    expect([...store.membership(ACCOUNT).keys()].sort()).toEqual([...ids, 'mr-9'].sort());
+    expect(store.snapshot(ACCOUNT, 'mr-9')).toBeNull();
     expect(service.status.error).toContain(`signed in as ${OTHER}`);
   });
 
@@ -354,5 +384,153 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
 
     // The held batch's read began before the refresh's, so it is older and is not saved.
     expect(store.snapshot(ACCOUNT, 'mr-1')?.headOid).toBe('head-newer');
+  });
+
+  it('caches a GitLab diff only once its last check passed', async () => {
+    let signedIn = ACCOUNT;
+    let checks = 0;
+    const pullFiles = vi.fn(async () => [
+      {
+        path: 'src/app.ts',
+        status: 'modified',
+        additions: 1,
+        deletions: 1,
+        patch: '@@ -1 +1 @@\n-a\n+b\n',
+        sha: null,
+      },
+    ]);
+    const api = {
+      pullFiles,
+      verifyAccount: vi.fn(async (account: string) => {
+        checks += 1;
+        // glab signs in as someone else while the first build reads.
+        if (checks === 2) signedIn = OTHER;
+        if (signedIn !== account) throw new AccountUnavailable(account, signedIn);
+      }),
+    } as unknown as GitHubApi;
+    const diffs = new DiffService(api);
+    const pr = snapshot({ id: 'mr-1', headOid: 'head-1', baseOid: 'base-1', files: [] });
+
+    await expect(diffs.manifest(pr, 'full', null, ACCOUNT)).rejects.toBeInstanceOf(
+      AccountUnavailable,
+    );
+
+    // The rejected build left nothing to serve: the next one reads again, and is kept.
+    signedIn = ACCOUNT;
+    await diffs.manifest(pr, 'full', null, ACCOUNT);
+    expect(pullFiles).toHaveBeenCalledTimes(2);
+
+    await diffs.manifest(pr, 'full', null, ACCOUNT);
+    expect(pullFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it('saves a refresh’s rate limit for the account only while glab is still it', async () => {
+    const { store, service, state, api } = gitlabSync(1);
+    const retryAt = new Date(Date.now() + 300_000).toISOString();
+    const limited = () => new GitHubError('Rate limited', retryAt, 429, 'rate_limit');
+
+    await service.sync();
+
+    // glab became someone else, whose limit this is: not the account's.
+    api.snapshot.mockImplementationOnce(async () => {
+      state.signedIn = OTHER;
+      throw limited();
+    });
+    await expect(service.refresh('mr-1', ACCOUNT)).rejects.toThrow('Rate limited');
+    expect(store.getSetting(`github-write-retry:${ACCOUNT}`)).toBeNull();
+
+    // Still the account: its limit is saved before the caller hears of it.
+    state.signedIn = ACCOUNT;
+    api.snapshot.mockImplementationOnce(async () => {
+      throw limited();
+    });
+    await expect(service.refresh('mr-1', ACCOUNT)).rejects.toThrow('Rate limited');
+    expect(store.getSetting(`github-write-retry:${ACCOUNT}`)).toBe(retryAt);
+  });
+
+  it('sends the last published status between publications, so a revision is one state', async () => {
+    const { service, state } = gitlabSync(1);
+
+    await service.sync();
+
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached = () => {};
+    const atCheck = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+
+    // Held after this sync's discovery, once it has published its start.
+    state.onCheck = async (check) => {
+      if (check !== 4) return;
+
+      reached();
+      await held;
+    };
+
+    const syncing = service.sync();
+
+    await atCheck;
+
+    const during = service.sentStatus;
+
+    // Live state that has not been published yet is not sent.
+    service.status.warnings.push('Not published yet');
+    expect(service.sentStatus).toEqual(during);
+
+    release();
+    await syncing;
+    expect(service.sentStatus.revision).toBeGreaterThan(during.revision!);
+  });
+
+  it('adds nothing by hand while glab is signed in as someone else', async () => {
+    const { service, state, api } = gitlabSync(1);
+
+    await service.sync();
+    state.signedIn = OTHER;
+
+    await expect(service.track(ACCOUNT, 'team/app', 5, undefined, true)).rejects.toBeInstanceOf(
+      AccountUnavailable,
+    );
+    expect(api.resolvePull).not.toHaveBeenCalled();
+  });
+});
+
+describe('a sync whose save fails', () => {
+  it('counts the failure and still reads and saves the other PRs', async () => {
+    const store = new Store(':memory:');
+    const ids = ['pr-1', 'pr-2', 'pr-3'];
+    const api = {
+      identity: vi.fn(async () => ({ login: 'octo' })),
+      teams: vi.fn(async () => []),
+      discover: vi.fn(async (_login: string, source: string) =>
+        source === 'requested' ? ids : [],
+      ),
+      detect: vi.fn(async (list: string[]) => ({
+        results: list.map((id) => ({ id, state: 'OPEN' as const, fingerprint: randomUUID() })),
+        budget: null,
+      })),
+      snapshot: vi.fn(async (id: string, _login: string, sources: string[]) =>
+        snapshot({ id, number: Number(id.slice(3)), sources: sources as never }),
+      ),
+    } as unknown as GitHubApi;
+    const service = new SyncService(store, api);
+    const save = store.saveSnapshot.bind(store);
+
+    cleanups.push(() => store.close());
+    vi.spyOn(store, 'saveSnapshot').mockImplementation((account, pr) => {
+      if (pr.id === 'pr-1') throw new Error('disk full');
+
+      save(account, pr);
+    });
+
+    await service.sync();
+
+    expect(store.snapshot('octo', 'pr-1')).toBeNull();
+    expect(store.snapshot('octo', 'pr-2')).not.toBeNull();
+    expect(store.snapshot('octo', 'pr-3')).not.toBeNull();
+    expect(service.status.warnings).toContainEqual(expect.stringContaining('disk full'));
   });
 });

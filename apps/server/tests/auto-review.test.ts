@@ -548,6 +548,26 @@ describe('automatic review', () => {
     ]);
   });
 
+  it('announces nothing about a review that finished after you switched accounts', async () => {
+    const { github, sync, providers, enable, notified, settled, runs } = await setup();
+    const run = providers.codex.run.bind(providers.codex);
+
+    enable();
+    // Another account is in use by the time the review finishes.
+    vi.spyOn(providers.codex, 'run').mockImplementationOnce(async (...args) => {
+      Object.assign(sync.status, { account: { login: 'someone-else' } });
+
+      return run(...args);
+    });
+    github.advance();
+    github.advance();
+    await sync.sync();
+    await settled();
+
+    expect(runs(1846)).toEqual([expect.objectContaining({ status: 'done' })]);
+    expect(notified.filter((notification) => notification.kind === 'ai_review_ready')).toEqual([]);
+  });
+
   it('says when an automatic review failed', async () => {
     const { github, sync, providers, enable, notified, settled } = await setup();
 
