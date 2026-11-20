@@ -235,6 +235,41 @@ describe('AI and Insights for an account not in use', () => {
     expect((await runs()).find((run) => run.id === id)?.status).toBe('paused');
   });
 
+  it('checks the account in the turn the resume goes on in, not just as its last wait ends', async () => {
+    const { service, call, runs, start } = await demo(10_000);
+    const id = await start('brief');
+
+    await call('POST', `/api/accounts/you/ai/runs/${id}/pause`);
+
+    // The plan check is the resume's last wait before it queues the run.
+    const original = AiRunner.prototype.codexStatus;
+    let release: (() => void) | null = null;
+    let read: Promise<unknown> | null = null;
+
+    vi.spyOn(AiRunner.prototype, 'codexStatus').mockImplementationOnce(function (this: AiRunner) {
+      read = new Promise((resolve) => (release = () => resolve(original.call(this))));
+
+      return read as ReturnType<typeof original>;
+    });
+
+    const resumed = call('POST', `/api/accounts/you/ai/runs/${id}/resume`);
+
+    await vi.waitFor(() => expect(release).not.toBeNull());
+
+    // The account changes in the turn after the check settles: after anything that waited on the
+    // check itself, before the resume goes on.
+    const status = service.status;
+
+    void read!.then(() => {
+      service.status = { ...status, account: { ...status.account!, login: DEMO_SECOND_ACCOUNT } };
+    });
+    release!();
+
+    expect((await resumed).json()).toMatchObject({ code: 'ACCOUNT_NOT_ACTIVE' });
+    service.status = status;
+    expect((await runs()).find((run) => run.id === id)?.status).toBe('paused');
+  });
+
   it('refuses a suggestion made for an older head, however late the head moved', async () => {
     const { fixture, service, store, pr, call, finished, start } = await demo();
     const run = await finished(await start('draft_comments'));

@@ -206,7 +206,7 @@ export function InsightsPage() {
               size="sm"
               variant="ghost"
               icon={<RefreshCw size={12} />}
-              disabled={signedOut || data?.backfill?.running || backfill.isPending}
+              disabled={!account || data?.backfill?.running || backfill.isPending}
               onClick={() => backfill.mutate()}
             >
               Re-read history
