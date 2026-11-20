@@ -79,18 +79,33 @@ function creditsUsed(usage: string | null): number | null {
 /** A run's workspace is named by its id. */
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** Bytes under `directory`, by `lstat`, never following a symlink. */
-async function sizeOf(directory: string): Promise<number> {
+/** Thrown out of a sweep's inventory once the runner is closing. */
+class SweepStopped extends Error {}
+
+/**
+ * Bytes under `directory`, by `lstat`, never following a symlink. Checks `stopped` at every entry,
+ * so a shutdown never waits for the inventory of a large workspace.
+ */
+async function sizeOf(directory: string, stopped: () => boolean): Promise<number> {
   let bytes = 0;
 
   for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (stopped()) throw new SweepStopped();
+
     const path = join(directory, entry.name);
 
-    if (entry.isDirectory()) bytes += await sizeOf(path);
+    if (entry.isDirectory()) bytes += await sizeOf(path, stopped);
     else bytes += (await lstat(path).catch(() => null))?.size ?? 0;
   }
 
   return bytes;
+}
+
+/** A real directory's identity, or null for anything else (a symlink included). */
+async function directoryIdentity(path: string): Promise<string | null> {
+  const stats = await lstat(path).catch(() => null);
+
+  return stats?.isDirectory() && !stats.isSymbolicLink() ? `${stats.dev}:${stats.ino}` : null;
 }
 
 function logWorkspaces(
@@ -259,20 +274,27 @@ export class AiRunner {
    * removal, and an agent still holding its lock defers it to the next start.
    */
   private async sweep(): Promise<void> {
-    const root = await lstat(this.workRoot).catch(() => null);
+    const root = await directoryIdentity(this.workRoot);
 
-    if (!root?.isDirectory() || root.isSymbolicLink()) return;
+    if (!root) return;
 
     const totals = { kept: 0, keptBytes: 0, removed: 0, removedBytes: 0, deferred: 0, failed: 0 };
+    const entries = await readdir(this.workRoot, { withFileTypes: true }).catch(() => null);
 
-    for (const entry of await readdir(this.workRoot, { withFileTypes: true })) {
-      if (this.closing) break;
+    if (!entries) {
+      logWorkspaces({ failed: 1 });
+      return;
+    }
+
+    for (const entry of entries) {
+      if (this.closing) return;
       if (!entry.isDirectory() || !RUN_ID.test(entry.name)) continue;
 
       const directory = join(this.workRoot, entry.name);
 
       try {
-        const bytes = await sizeOf(directory);
+        const identity = await directoryIdentity(directory);
+        const bytes = await sizeOf(directory, () => this.closing);
 
         if (!this.abandoned(entry.name)) {
           totals.kept += 1;
@@ -280,14 +302,31 @@ export class AiRunner {
           continue;
         }
 
-        if ((await removeWorkspace(directory, { waitMs: 0 })) === 'busy') {
-          totals.deferred += 1;
-          continue;
-        }
+        // Checked again under the run's lock, just before removing: still abandoned, not closing,
+        // and the root and the workspace are the very directories inventoried, never ones
+        // swapped in meanwhile. (Node cannot remove relative to an open directory, so a swap in
+        // the instant after this check is not caught; only a process of the same user could make
+        // one, and it could remove the files itself.)
+        const outcome = await removeWorkspace(directory, {
+          waitMs: 0,
+          stillAbandoned: async () =>
+            !this.closing &&
+            this.abandoned(entry.name) &&
+            (await directoryIdentity(this.workRoot)) === root &&
+            (await directoryIdentity(directory)) === identity,
+        });
 
-        totals.removed += 1;
-        totals.removedBytes += bytes;
-      } catch {
+        if (outcome === 'busy') totals.deferred += 1;
+        else if (outcome === 'kept') {
+          totals.kept += 1;
+          totals.keptBytes += bytes;
+        } else {
+          totals.removed += 1;
+          totals.removedBytes += bytes;
+        }
+      } catch (error) {
+        if (error instanceof SweepStopped) return;
+
         totals.failed += 1;
       }
     }

@@ -21,7 +21,13 @@ import { FixtureProvider } from '@/ai/fixture.js';
 import { agentLockPath } from '@/ai/provider.js';
 import { AiRunner } from '@/ai/runner.js';
 import type { RepositoryExporter } from '@/ai/workspace.js';
-import { BACKUP_NAME, backupFolder, pruneBackups, writeBackup } from '@/db/backups.js';
+import {
+  BACKUP_NAME,
+  BackupFolderUnusable,
+  clearPartialBackups,
+  pruneBackups,
+  writeBackup,
+} from '@/db/backups.js';
 import { aiRuns } from '@/db/schema.js';
 import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
@@ -50,9 +56,11 @@ function directory(): string {
   return path;
 }
 
-/** A file last modified `minutesAgo`. */
+const now = Date.now();
+
+/** A file last modified `minutesAgo`, from one fixed now, so equal ages are equal times. */
 function file(path: string, minutesAgo: number, content = 'x'): void {
-  const at = new Date(Date.now() - minutesAgo * 60_000);
+  const at = new Date(now - minutesAgo * 60_000);
 
   writeFileSync(path, content);
   utimesSync(path, at, at);
@@ -84,8 +92,9 @@ describe('database backups', () => {
       'backup-before-20261106192937_review_freshness.sqlite': 400,
       'backup-before-20261116160251_auto_review_restart-1794845016461.sqlite': 300,
       'backup-before-20261120000000_next-1794845016461-ab12.sqlite': 5,
-      'backup-before-a.sqlite': 10,
+      // The same time, written in an order that is not the tie-break's.
       'backup-before-b.sqlite': 10,
+      'backup-before-a.sqlite': 10,
       'backup-before-c.sqlite': 10,
     };
 
@@ -113,21 +122,49 @@ describe('database backups', () => {
     expect(existsSync(join(data, 'backup-v1.sqlite'))).toBe(true);
   });
 
-  it('never prunes through a symlinked backups/, and backs up into the data folder instead', async () => {
+  it('never prunes or backs up through a symlinked backups/', async () => {
     const data = directory();
     const sibling = directory();
 
     for (const version of [1, 2, 3, 4]) file(join(sibling, `backup-v${version}.sqlite`), 10);
+    file(join(sibling, 'backup-v1.sqlite.0badf00d.partial'), 10);
     symlinkSync(sibling, join(data, 'backups'));
 
     expect(await pruneBackups(data)).toMatchObject({ managed: false, removed: 0 });
-    expect(backupFolder(data)).toEqual({ path: data, managed: false });
+    clearPartialBackups(data);
 
+    // A backup goes only where the app manages it: the upgrade is refused instead.
     const path = join(data, 'review-desk.sqlite');
-    const published = writeBackup(database(path), path, 'before-test');
 
-    expect(published).toBe(join(data, 'backup-before-test.sqlite'));
-    expect(readdirSync(sibling)).toHaveLength(4);
+    expect(() => writeBackup(database(path), path, 'before-test')).toThrow(BackupFolderUnusable);
+    expect(readdirSync(sibling)).toHaveLength(5);
+    expect(readdirSync(data).filter((name) => name.startsWith('backup'))).toEqual(['backups']);
+  });
+
+  it('clears only its own staging copies, and its own after a failed backup', () => {
+    const data = directory();
+    const backups = join(data, 'backups');
+    const path = join(data, 'review-desk.sqlite');
+
+    mkdirSync(backups);
+    // An interrupted backup's copy, and files that only look like one.
+    file(join(backups, 'backup-before-x.sqlite.0badf00d.partial'), 5);
+    file(join(backups, 'export.partial'), 5);
+    file(join(backups, 'backup-before-x.sqlite.partial'), 5);
+    clearPartialBackups(data);
+
+    expect(readdirSync(backups).sort()).toEqual(
+      ['backup-before-x.sqlite.partial', 'export.partial'].sort(),
+    );
+
+    // A backup that fails takes its reserved staging file with it, and nothing else.
+    const db = new DatabaseSync(path);
+
+    db.close();
+    expect(() => writeBackup(db, path, 'before-test')).toThrow();
+    expect(readdirSync(backups).sort()).toEqual(
+      ['backup-before-x.sqlite.partial', 'export.partial'].sort(),
+    );
   });
 
   it('publishes a complete copy without replacing a file, under a name it then manages', async () => {
@@ -174,6 +211,19 @@ describe('database backups', () => {
 
     expect(await pruneBackups(data)).toEqual({ kept: 3, removed: 0, failed: 1, managed: true });
   });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'never keeps the app from starting over a backups/ it cannot read',
+    async () => {
+      const data = directory();
+
+      mkdirSync(join(data, 'backups'));
+      chmodSync(join(data, 'backups'), 0o000);
+
+      expect(() => clearPartialBackups(data)).not.toThrow();
+      expect(await pruneBackups(data)).toEqual({ kept: 0, removed: 0, failed: 1, managed: true });
+    },
+  );
 });
 
 describe('AI workspaces', () => {
@@ -323,6 +373,16 @@ describe('AI workspaces', () => {
         removedBytes: (abandoned.length - 1) * 100,
       }),
     ]);
+  });
+
+  it('starts no removal once shutdown has begun', async () => {
+    const { runner, root, leftover } = await setup();
+    const done = leftover('done');
+
+    runner.open();
+    await runner.close();
+
+    expect(existsSync(join(root, done))).toBe(true);
   });
 
   it('sweeps only a work root it was told it owns', async () => {

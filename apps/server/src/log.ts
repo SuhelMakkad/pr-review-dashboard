@@ -131,7 +131,7 @@ const schemas = {
     extractMs: 'number',
   },
   'log.dropped': { count: 'number' },
-  'backup.written': { managed: 'boolean', published: 'boolean', stagingLeft: 'boolean' },
+  'backup.written': { published: 'boolean', stagingLeft: 'boolean' },
   'retention.backups': {
     kept: 'number',
     removed: 'number',

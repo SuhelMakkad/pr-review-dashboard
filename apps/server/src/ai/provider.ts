@@ -173,8 +173,16 @@ export function agentRunning(workDir: string): boolean {
  */
 export async function removeWorkspace(
   workDir: string,
-  options: { waitMs: number },
-): Promise<'removed' | 'busy'> {
+  options: {
+    waitMs: number;
+    /** Checked once the lock is held, just before removing: false leaves the workspace. */
+    stillAbandoned?: () => Promise<boolean>;
+    /** The removal itself; tests hold it open. */
+    remove?: (path: string) => Promise<void>;
+  },
+): Promise<'removed' | 'busy' | 'kept'> {
+  const remove = options.remove ?? ((path: string) => rm(path, { recursive: true, force: true }));
+
   const path = agentLockPath(workDir);
   const deadline = performance.now() + options.waitMs;
 
@@ -194,7 +202,9 @@ export async function removeWorkspace(
 
     if (lock) {
       try {
-        await rm(workDir, { recursive: true, force: true });
+        if (options.stillAbandoned && !(await options.stillAbandoned())) return 'kept';
+
+        await remove(workDir);
 
         return 'removed';
       } finally {

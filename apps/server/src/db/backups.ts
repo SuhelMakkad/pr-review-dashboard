@@ -1,5 +1,13 @@
 import { randomBytes } from 'node:crypto';
-import { linkSync, lstatSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import {
+  closeSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  unlinkSync,
+} from 'node:fs';
 import { lstat, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -8,68 +16,129 @@ import { log } from '@/log.js';
 /** How many backups `backups/` keeps. */
 export const KEPT_BACKUPS = 3;
 
+const BASE = String.raw`backup-(?:v\d+|before-[A-Za-z0-9_-]+?)`;
+
 /**
  * The names the app gives its backups: by legacy schema version or by first pending migration,
  * with a suffix when the plain name was taken (a timestamp, then random hex since this version).
  */
-export const BACKUP_NAME =
-  /^backup-(?:v\d+|before-[A-Za-z0-9_-]+?)(?:-\d{13}(?:-[0-9a-f]{4})?)?\.sqlite$/;
+export const BACKUP_NAME = new RegExp(String.raw`^${BASE}(?:-\d{13}(?:-[0-9a-f]{4})?)?\.sqlite$`);
+
+/** The staging name a backup is written under before it is published: the app's, and no other. */
+export const STAGING_NAME = new RegExp(String.raw`^${BASE}\.sqlite\.[0-9a-f]{8}\.partial$`);
 
 const hex = (bytes: number) => randomBytes(bytes).toString('hex');
 
+/** The data folder's `backups/` refused: it exists, but is not a real directory. */
+export class BackupFolderUnusable extends Error {
+  constructor(readonly path: string) {
+    super(
+      `${path} is not a folder, so the database cannot be backed up before its upgrade. Move it aside and start Review Desk again.`,
+    );
+  }
+}
+
+interface Identity {
+  dev: number;
+  ino: number;
+}
+
+/** `path` as a real directory (not a symlink), with its identity; null otherwise. */
+function directoryAt(path: string): Identity | null {
+  const stats = lstatSync(path, { throwIfNoEntry: false });
+
+  return stats?.isDirectory() && !stats.isSymbolicLink()
+    ? { dev: stats.dev, ino: stats.ino }
+    : null;
+}
+
+async function directoryAtAsync(path: string): Promise<Identity | null> {
+  const stats = await lstat(path).catch(() => null);
+
+  return stats?.isDirectory() && !stats.isSymbolicLink()
+    ? { dev: stats.dev, ino: stats.ino }
+    : null;
+}
+
+const same = (a: Identity | null, b: Identity | null) =>
+  Boolean(a && b && a.dev === b.dev && a.ino === b.ino);
+
 /**
- * Where backups go: `backups/` in the data folder, made if missing, when it is a real directory;
- * otherwise the data folder itself, which the app never prunes.
+ * `backups/` in the data folder, made if missing. Backups only ever go there: one that exists as
+ * anything but a real directory refuses the backup, and with it the upgrade, rather than put the
+ * copy somewhere the app does not manage.
  */
-export function backupFolder(dataDir: string): { path: string; managed: boolean } {
+export function backupFolder(dataDir: string): string {
   const path = join(dataDir, 'backups');
 
   try {
     mkdirSync(path, { mode: 0o700 });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST')
-      return { path: dataDir, managed: false };
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   }
 
-  const stats = lstatSync(path, { throwIfNoEntry: false });
+  if (!directoryAt(path)) throw new BackupFolderUnusable(path);
 
-  return stats?.isDirectory() && !stats.isSymbolicLink()
-    ? { path, managed: true }
-    : { path: dataDir, managed: false };
+  return path;
 }
 
 /**
- * Removes the partial copies that an interrupted backup left in `backups/`. Called before
- * migrating, under the data folder's lock, so a leftover can neither block nor outrank a backup.
+ * Removes the staging copies an interrupted backup left in `backups/`, by the app's staging name
+ * only. Called before migrating, under the data folder's lock. Best effort: a folder that cannot
+ * be read or changed never keeps the app from starting.
  */
 export function clearPartialBackups(dataDir: string): void {
-  const folder = backupFolder(dataDir);
+  const path = join(dataDir, 'backups');
+  const identity = directoryAt(path);
 
-  if (!folder.managed) return;
+  if (!identity) return;
 
-  for (const name of readdirSync(folder.path)) {
-    if (!name.endsWith('.partial')) continue;
+  let names: string[];
 
-    const path = join(folder.path, name);
+  try {
+    names = readdirSync(path);
+  } catch {
+    return;
+  }
+
+  for (const name of names) {
+    if (!STAGING_NAME.test(name)) continue;
 
     try {
-      if (lstatSync(path).isFile()) unlinkSync(path);
+      // Only in the folder that was checked: never through one swapped in meanwhile.
+      if (!same(directoryAt(path), identity)) return;
+      if (lstatSync(join(path, name)).isFile()) unlinkSync(join(path, name));
     } catch {
-      // Best effort: the next start tries again.
+      // The next start tries again.
     }
   }
 }
 
 /**
- * Copies the database before an upgrade. The copy is written under a fresh staging name and
- * published only once complete. Publishing is a hard link, which fails instead of replacing, so
- * an existing file is never overwritten: a taken name is retried with a new suffix.
+ * Copies the database before an upgrade, into `backups/`. The copy is written under a staging name
+ * this call reserves (created exclusively, so it is nobody else's), published only once complete,
+ * and published by hard link, which fails instead of replacing: a taken name is retried with a new
+ * suffix, so an existing file is never overwritten.
  */
 export function writeBackup(db: DatabaseSync, databasePath: string, label: string): string {
   const folder = backupFolder(dirname(databasePath));
   const base = `backup-${label}`;
-  const partial = join(folder.path, `${base}.sqlite.${hex(4)}.partial`);
+  let partial: string | null = null;
   let published: string | null = null;
+
+  // Reserve a staging name; VACUUM INTO accepts an empty file.
+  for (let attempt = 0; attempt < 5 && !partial; attempt++) {
+    const candidate = join(folder, `${base}.sqlite.${hex(4)}.partial`);
+
+    try {
+      closeSync(openSync(candidate, 'wx', 0o600));
+      partial = candidate;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+  }
+
+  if (!partial) throw new Error('No free staging name to back up the database under.');
 
   try {
     db.prepare('VACUUM INTO ?').run(partial);
@@ -78,14 +147,14 @@ export function writeBackup(db: DatabaseSync, databasePath: string, label: strin
       const name = attempt === 0 ? `${base}.sqlite` : `${base}-${Date.now()}-${hex(2)}.sqlite`;
 
       try {
-        linkSync(partial, join(folder.path, name));
-        published = join(folder.path, name);
+        linkSync(partial, join(folder, name));
+        published = join(folder, name);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
     }
   } finally {
-    // Published or not, the staging name goes; one left in `backups/` is cleared next start.
+    // The reserved staging file is this call's own; one left behind is cleared next start.
     let left = false;
 
     try {
@@ -95,7 +164,6 @@ export function writeBackup(db: DatabaseSync, databasePath: string, label: strin
     }
 
     log.event(left ? 'warn' : 'info', 'backup.written', {
-      managed: folder.managed,
       published: published !== null,
       stagingLeft: left,
     });
@@ -108,27 +176,35 @@ export function writeBackup(db: DatabaseSync, databasePath: string, label: strin
 
 /**
  * Keeps the newest `keep` backups in `backups/` and removes the rest, newest by modification time
- * and then by name. Only regular files with the app's backup names are considered, and nothing
- * outside `backups/` is ever removed. Best effort: a failed removal is counted, never thrown.
+ * and then by name. Only regular files with the app's backup names are considered, nothing outside
+ * `backups/` is ever removed, and each removal first checks that `backups/` is still the folder
+ * that was listed. Best effort: anything that fails is counted, never thrown.
+ *
+ * Node cannot remove a file relative to an open directory, so a folder swapped for another in the
+ * instant between that check and the removal is not caught. Only a process of the same user could
+ * do that, and it could remove those files itself.
  */
 export async function pruneBackups(
   dataDir: string,
   keep = KEPT_BACKUPS,
 ): Promise<{ kept: number; removed: number; failed: number; managed: boolean }> {
   const folder = join(dataDir, 'backups');
-  const stats = await lstat(folder).catch(() => null);
-
-  if (!stats?.isDirectory() || stats.isSymbolicLink()) {
-    const result = { kept: 0, removed: 0, failed: 0, managed: false };
-
-    log.event('info', 'retention.backups', result);
+  const identity = await directoryAtAsync(folder);
+  const report = (result: { kept: number; removed: number; failed: number; managed: boolean }) => {
+    log.event(result.failed > 0 ? 'warn' : 'info', 'retention.backups', result);
 
     return result;
-  }
+  };
+
+  if (!identity) return report({ kept: 0, removed: 0, failed: 0, managed: false });
+
+  const names = await readdir(folder).catch(() => null);
+
+  if (!names) return report({ kept: 0, removed: 0, failed: 1, managed: true });
 
   const backups: { name: string; modified: number }[] = [];
 
-  for (const name of await readdir(folder)) {
+  for (const name of names) {
     if (!BACKUP_NAME.test(name)) continue;
 
     const entry = await lstat(join(folder, name)).catch(() => null);
@@ -145,6 +221,11 @@ export async function pruneBackups(
 
   for (const { name } of backups.slice(keep)) {
     try {
+      if (!same(await directoryAtAsync(folder), identity)) {
+        failed += 1;
+        break;
+      }
+
       await rm(join(folder, name));
       removed += 1;
     } catch {
@@ -152,9 +233,5 @@ export async function pruneBackups(
     }
   }
 
-  const result = { kept: Math.min(keep, backups.length), removed, failed, managed: true };
-
-  log.event(failed > 0 ? 'warn' : 'info', 'retention.backups', result);
-
-  return result;
+  return report({ kept: Math.min(keep, backups.length), removed, failed, managed: true });
 }

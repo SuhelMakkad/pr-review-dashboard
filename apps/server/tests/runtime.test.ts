@@ -559,7 +559,33 @@ describe('shutdown order', () => {
     agent.stop();
     await agent.done.catch(() => undefined);
 
-    expect(await removeWorkspace(workDir, { waitMs: 5_000 })).toBe('removed');
+    // While the removal runs it holds the lock: an agent starting now refuses.
+    let release = () => {};
+    const removing = removeWorkspace(workDir, {
+      waitMs: 5_000,
+      remove: async (path) => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        rmSync(path, { recursive: true, force: true });
+      },
+    });
+
+    await vi.waitFor(() => expect(agentRunning(workDir)).toBe(true));
+
+    const during = await spawnAgentProcess(process.execPath, ['-e', 'console.log("ran")'], {
+      cwd: tmpdir(),
+      env: process.env,
+      signal: new AbortController().signal,
+      timeoutMs: 60_000,
+      lockFor: workDir,
+    }).done;
+
+    expect(during.code).toBe(75);
+    expect(during.stderr).toContain('An agent for this run is still running.');
+
+    release();
+    expect(await removing).toBe('removed');
     expect(existsSync(workDir)).toBe(false);
     // The lock file stays, at the same path, for any supervisor that may have it open.
     expect(existsSync(agentLockPath(workDir))).toBe(true);
