@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { TestClock } from '@/clock.js';
 import { Store } from '@/db/store.js';
 import { SyncService } from '@/sync/index.js';
 import { GitHub, GitHubError } from '@/github/index.js';
@@ -178,6 +179,26 @@ describe('sync and local persistence', () => {
     service.update('pr-1', { account: 'me', seenReplyKeys: shown });
 
     expect(service.detail('pr-1')!.item.unreadReplyKeys).toHaveLength(1);
+  });
+
+  it('ends a snooze on the app clock, in the list and the detail alike', async () => {
+    const clock = new TestClock();
+    const service = new SyncService(store(), fakeGitHub(), undefined, null, clock);
+
+    await service.sync();
+    service.update('pr-1', {
+      account: 'me',
+      snoozeUntil: new Date(clock.now() + 3_600_000).toISOString(),
+    });
+
+    expect(service.list().items[0].queue).toBe('snoozed');
+    expect(service.detail('pr-1')?.item.snoozedUntil).not.toBeNull();
+
+    // Only the app's clock moves past the snooze.
+    clock.advance(2 * 3_600_000);
+
+    expect(service.list().items[0].queue).not.toBe('snoozed');
+    expect(service.detail('pr-1')?.item.snoozedUntil).toBeNull();
   });
 
   it('permanently wakes a snoozed PR on new activity, even after that activity is reviewed', async () => {

@@ -1,3 +1,4 @@
+import { isoNow, type Clock } from '@/clock.js';
 import { pullPath, shortRef } from '@review-desk/shared/accounts';
 import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import {
@@ -114,6 +115,11 @@ export class AutoReviewer {
     private readonly runner: AiRunner,
     private readonly notifier: Notifier,
   ) {}
+
+  /** The app's clock, shared with the sync. */
+  private get clock(): Clock {
+    return this.sync.clock;
+  }
 
   private get db() {
     return this.sync.store.db;
@@ -279,7 +285,7 @@ export class AutoReviewer {
     if (this.sync.store.getSetting<string>(primedKey(account)) === since) return false;
 
     const keys = autoReviewCandidates(this.sync.list().items);
-    const updatedAt = new Date().toISOString();
+    const updatedAt = isoNow(this.clock);
 
     this.sync.store.transaction(() => {
       for (const batch of batches(keys)) {
@@ -353,7 +359,7 @@ export class AutoReviewer {
       headOid: entry.headOid ?? null,
       restartAt: entry.restartAt ?? null,
       waitingSince: entry.waitingSince ?? null,
-      updatedAt: new Date().toISOString(),
+      updatedAt: isoNow(this.clock),
     };
 
     this.db
@@ -385,7 +391,7 @@ export class AutoReviewer {
     headOid: string,
     began?: string | null,
   ): void {
-    const now = Date.now();
+    const now = this.clock.now();
 
     this.record(account, entry, {
       status: 'waiting',
@@ -413,7 +419,7 @@ export class AutoReviewer {
         headOid: null,
         restartAt: null,
         waitingSince: null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: isoNow(this.clock),
       })
       .where(
         and(
@@ -428,7 +434,7 @@ export class AutoReviewer {
 
   /** A wait on the PR whose quiet period has not ended, which a newly found request joins. */
   private pendingWait(account: string, prId: string): LogRow | null {
-    const now = Date.now();
+    const now = this.clock.now();
 
     return (
       this.db
@@ -636,7 +642,7 @@ export class AutoReviewer {
       if (!run) {
         this.db
           .update(autoReviewLog)
-          .set({ status: 'started', updatedAt: new Date().toISOString() })
+          .set({ status: 'started', updatedAt: isoNow(this.clock) })
           .where(
             and(
               eq(autoReviewLog.account, account),
@@ -665,7 +671,7 @@ export class AutoReviewer {
 
     if (pending.length === 0) return;
 
-    const updatedAt = new Date().toISOString();
+    const updatedAt = isoNow(this.clock);
 
     this.sync.store.transaction(() => {
       this.db
@@ -799,7 +805,7 @@ export class AutoReviewer {
     if (!this.current(account, since)) return;
 
     const log = this.log(account);
-    const now = Date.now();
+    const now = this.clock.now();
     const due = autoReviewCandidates(this.sync.list().items)
       .filter(({ item, key }) => stillDue(item, key))
       .filter(({ key }) => {
