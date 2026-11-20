@@ -1,13 +1,22 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from '@testing-library/react';
+import { Query, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DiffManifest } from '@review-desk/shared/diff';
 import { adoptStatus } from '@/lib/live';
 import { githubCommand } from '@/lib/operation-command';
-import { useSyncNow } from '@/lib/queries';
+import { useStatus, useSyncNow } from '@/lib/queries';
+import { Notes } from '@/features/pulls/notes';
 import { queryKeys } from '@/lib/query-keys';
 import {
   canMarkViewed,
@@ -69,7 +78,7 @@ it('rolls back a rejected viewed update without undoing a newer change on anothe
       response({ body: '', event: 'COMMENT', comments: [], githubPendingReview: null }),
     );
   });
-  const key = ['diff', 'pr-one', 'full'];
+  const key = queryKeys.diff('you', 'pr-one', 'full');
   client.setQueryData(key, {
     files: [
       { path: 'a.ts', viewed: 'UNVIEWED' },
@@ -118,11 +127,11 @@ it('names the diff the workspace renders, even when the PR detail is a revision 
   });
 
   // The detail already has revision B; the rendered diff is still A, and another view shows B.
-  const shown = ['diff', 'pr-one', 'full'];
-  const newer = ['diff', 'pr-one', 'since'];
+  const shown = queryKeys.diff('you', 'pr-one', 'full');
+  const newer = queryKeys.diff('you', 'pr-one', 'since');
   const revision = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
 
-  client.setQueryData(queryKeys.detail('pr-one'), {
+  client.setQueryData(queryKeys.detail('you', 'pr-one'), {
     account: 'you',
     snapshot: { ...revision('b'), files: [{ path: 'a.ts', viewedKey: 'diff-b' }] },
   });
@@ -171,7 +180,7 @@ it('leaves a view refreshed to a newer diff alone when an older mark fails', asy
     return Promise.resolve(response({ operation: { id: 'viewed' } }));
   });
 
-  const key = ['diff', 'pr-one', 'full'];
+  const key = queryKeys.diff('you', 'pr-one', 'full');
   const revision = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
 
   client.setQueryData(key, {
@@ -244,49 +253,45 @@ it('does not let an older viewed failure roll back a newer choice for the same f
   }
 });
 
-it.each([
-  ['a switch in this window', 'status'],
-  ['another window, whose diff arrives before any status', 'data'],
-] as const)(
-  "does not roll a rejected viewed update back into another account's diff after %s",
-  async (_, through) => {
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    let reject: (error: Error) => void = () => {};
-    vi.stubGlobal('fetch', (path: string) => {
-      if (path.includes('/viewed')) return new Promise<Response>((_, fail) => (reject = fail));
-      if (path.startsWith('/api/operations'))
-        return Promise.resolve(response({ items: [], nextCursor: null }));
+it("rolls a rejected viewed update back only in its own account's diff, after a switch", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  let reject: (error: Error) => void = () => {};
+  vi.stubGlobal('fetch', (path: string) => {
+    if (path.includes('/viewed')) return new Promise<Response>((_, fail) => (reject = fail));
+    if (path.startsWith('/api/operations'))
+      return Promise.resolve(response({ items: [], nextCursor: null }));
 
-      return Promise.resolve(
-        response({ body: '', event: 'COMMENT', comments: [], githubPendingReview: null }),
-      );
-    });
-    const key = ['diff', 'pr-one', 'full'];
-    client.setQueryData(queryKeys.status, status({ account: { login: 'you' } }));
-    client.setQueryData(key, { account: 'you', files: [{ path: 'a.ts', viewed: 'UNVIEWED' }] });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    return Promise.resolve(
+      response({ body: '', event: 'COMMENT', comments: [], githubPendingReview: null }),
     );
-    const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
-    const viewed = () => client.getQueryData<DiffManifest>(key)?.files[0].viewed;
+  });
+  const yours = queryKeys.diff('you', 'pr-one', 'full');
+  const theirs = queryKeys.diff('other', 'pr-one', 'full');
+  client.setQueryData(queryKeys.status, status({ account: { login: 'you' }, revision: 1 }));
+  client.setQueryData(yours, { account: 'you', files: [{ path: 'a.ts', viewed: 'UNVIEWED' }] });
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
+  const viewed = (key: readonly unknown[]) =>
+    client.getQueryData<DiffManifest>(key)?.files[0].viewed;
 
-    try {
-      act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: true }));
-      await waitFor(() => expect(viewed()).toBe('VIEWED'));
+  try {
+    act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: true }));
+    await waitFor(() => expect(viewed(yours)).toBe('VIEWED'));
 
-      // The switch happens while the write is pending; the other account viewed the same file.
-      if (through === 'status')
-        act(() => adoptStatus(client, status({ account: { login: 'other' } })));
-      client.setQueryData(key, { account: 'other', files: [{ path: 'a.ts', viewed: 'VIEWED' }] });
-      await act(async () => reject(new Error('Rejected after the switch')));
+    // The switch happens while the write is pending; the other account viewed the same file.
+    act(() => adoptStatus(client, status({ account: { login: 'other' }, revision: 2 })));
+    client.setQueryData(theirs, { account: 'other', files: [{ path: 'a.ts', viewed: 'VIEWED' }] });
+    await act(async () => reject(new Error('Rejected after the switch')));
 
-      await waitFor(() => expect(hook.result.current.setViewed.isError).toBe(true));
-      expect(viewed()).toBe('VIEWED');
-    } finally {
-      client.clear();
-    }
-  },
-);
+    await waitFor(() => expect(hook.result.current.setViewed.isError).toBe(true));
+    expect(viewed(yours)).toBe('UNVIEWED');
+    expect(viewed(theirs)).toBe('VIEWED');
+  } finally {
+    client.clear();
+  }
+});
 
 it('keeps the new account when a sync reply from before a switch arrives', async () => {
   const client = new QueryClient();
@@ -295,10 +300,11 @@ it('keeps the new account when a sync reply from before a switch arrives', async
     'fetch',
     () =>
       new Promise<Response>((resolve) => {
-        answer = () => resolve(response(status({ account: { login: 'you' } })));
+        // Sent before the switch: the server numbered it before the switch's status.
+        answer = () => resolve(response(status({ account: { login: 'you' }, revision: 2 })));
       }),
   );
-  client.setQueryData(queryKeys.status, status({ account: { login: 'you' } }));
+  client.setQueryData(queryKeys.status, status({ account: { login: 'you' }, revision: 1 }));
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
@@ -307,7 +313,7 @@ it('keeps the new account when a sync reply from before a switch arrives', async
   try {
     act(() => hook.result.current.mutate());
     await waitFor(() => expect(answer).not.toBeNull());
-    act(() => adoptStatus(client, status({ account: { login: 'other' } })));
+    act(() => adoptStatus(client, status({ account: { login: 'other' }, revision: 3 })));
     await act(async () => answer!());
 
     await waitFor(() => expect(hook.result.current.isSuccess).toBe(true));
@@ -394,4 +400,274 @@ it('shows only the saved switch from a save’s reply, so a late reply cannot un
   expect(withSaved(settings, { ...late, approveFindings: true }, 'approveFindings')).toEqual(
     settings,
   );
+});
+
+describe('the private note', () => {
+  it('keeps the text you went back to while an older save is still on its way', async () => {
+    const sent: string[] = [];
+    const releases = new Map<string, () => void>();
+    const onSave = vi.fn(async (note: string) => {
+      sent.push(note);
+      await new Promise<void>((resolve) => releases.set(note, resolve));
+    });
+    const view = render(<Notes account="you" id="pr-two" saved="A" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+    const showSaved = (note: string) =>
+      view.rerender(<Notes account="you" id="pr-two" saved={note} onSave={onSave} />);
+
+    // B is typed and its save is held; then A, the saved text, is typed back.
+    fireEvent.change(box(), { target: { value: 'B' } });
+    await waitFor(() => expect(sent).toEqual(['B']), { timeout: 2_000 });
+    fireEvent.change(box(), { target: { value: 'A' } });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+
+    // Only B is on its way: A waits for it.
+    expect(sent).toEqual(['B']);
+
+    // B lands and the server shows it, while A's save is on its way: the editor keeps A.
+    await act(async () => releases.get('B')!());
+    await waitFor(() => expect(sent).toEqual(['B', 'A']));
+    showSaved('B');
+    expect(box()).toHaveValue('A');
+
+    // A lands and the server shows it: the editor is clean, and follows the next saved note.
+    await act(async () => releases.get('A')!());
+    showSaved('A');
+    showSaved('C');
+    await waitFor(() => expect(box()).toHaveValue('C'));
+    expect(sent).toEqual(['B', 'A']);
+  });
+
+  it('acknowledges a save whose saved note arrives before its reply, and joins one queue across editors', async () => {
+    const sent: string[] = [];
+    const releases = new Map<string, () => void>();
+    const onSave = vi.fn(async (note: string) => {
+      sent.push(note);
+      await new Promise<void>((resolve) => releases.set(note, resolve));
+    });
+    const first = render(<Notes account="you" id="pr-three" saved="" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    fireEvent.change(box(), { target: { value: 'One' } });
+    await waitFor(() => expect(sent).toEqual(['One']), { timeout: 2_000 });
+
+    // The editor goes away (a switch) and another opens for the same PR: its save waits for the
+    // first one, whatever order their replies would come in.
+    first.unmount();
+
+    const second = render(<Notes account="you" id="pr-three" saved="One" onSave={onSave} />);
+
+    fireEvent.change(box(), { target: { value: 'Two' } });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(sent).toEqual(['One']);
+
+    await act(async () => releases.get('One')!());
+    await waitFor(() => expect(sent).toEqual(['One', 'Two']));
+
+    // The server's note shows Two before Two's reply: once the reply comes, the editor is clean
+    // and follows a newer note from elsewhere.
+    second.rerender(<Notes account="you" id="pr-three" saved="Two" onSave={onSave} />);
+    await act(async () => releases.get('Two')!());
+    second.rerender(<Notes account="you" id="pr-three" saved="Three" onSave={onSave} />);
+
+    await waitFor(() => expect(box()).toHaveValue('Three'));
+    expect(sent).toEqual(['One', 'Two']);
+  });
+
+  it('drops the draft of a save that lands after its editor closed, never saving it again', async () => {
+    let release: () => void = () => {};
+    const onSave = vi.fn(
+      (_note: string) => new Promise<void>((resolve) => (release = () => resolve())),
+    );
+    const first = render(<Notes account="you" id="pr-four" saved="" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    fireEvent.change(box(), { target: { value: 'Held' } });
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('Held'), { timeout: 2_000 });
+
+    // The editor closes (a switch away), then the save lands.
+    first.unmount();
+    await act(async () => release());
+
+    expect(sessionStorage.getItem('review-desk-draft:you:pr-four')).toBeNull();
+
+    // Another window has saved a newer note by the time the editor opens again: it shows that one,
+    // and saves nothing.
+    render(<Notes account="you" id="pr-four" saved="Newer" onSave={onSave} />);
+    expect(box()).toHaveValue('Newer');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a failed save as an edit, even when the stale saved note matches it', async () => {
+    const releases = new Map<string, { resolve: () => void; reject: () => void }>();
+    const onSave = vi.fn(
+      (note: string) =>
+        new Promise<void>((resolve, reject) =>
+          releases.set(note, { resolve, reject: () => reject(new Error('Refused')) }),
+        ),
+    );
+    const view = render(<Notes account="you" id="pr-five" saved="A" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    fireEvent.change(box(), { target: { value: 'B' } });
+    await waitFor(() => expect(releases.has('B')).toBe(true), { timeout: 2_000 });
+    fireEvent.change(box(), { target: { value: 'A' } });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+
+    // B is saved; A's save, after it, fails, while the cached note still says A.
+    await act(async () => releases.get('B')!.resolve());
+    await waitFor(() => expect(releases.has('A')).toBe(true));
+    await act(async () => releases.get('A')!.reject());
+
+    expect(sessionStorage.getItem('review-desk-draft:you:pr-five')).toBe('A');
+
+    // The refresh then brings B: the editor keeps your A, to save again.
+    view.rerender(<Notes account="you" id="pr-five" saved="B" onSave={onSave} />);
+    expect(box()).toHaveValue('A');
+    await waitFor(() => expect(onSave.mock.calls.filter(([note]) => note === 'A').length).toBe(2), {
+      timeout: 2_000,
+    });
+  });
+
+  it('forgets a failed edit once you go back to the saved text', async () => {
+    let fail = true;
+    const onSave = vi.fn(async () => {
+      if (fail) throw new Error('Refused');
+    });
+    const first = render(<Notes account="you" id="pr-six" saved="Original" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    // An edit fails to save; then the saved text is typed back, and saves.
+    fireEvent.change(box(), { target: { value: 'Draft' } });
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('Draft'), { timeout: 2_000 });
+    fail = false;
+    fireEvent.change(box(), { target: { value: 'Original' } });
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('Original'), { timeout: 2_000 });
+    await waitFor(() => expect(sessionStorage.getItem('review-desk-draft:you:pr-six')).toBeNull());
+
+    // Reopened, the editor shows the saved text and sends nothing: the discarded edit is gone.
+    first.unmount();
+    render(<Notes account="you" id="pr-six" saved="Original" onSave={onSave} />);
+    expect(box()).toHaveValue('Original');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(onSave).toHaveBeenCalledTimes(2);
+  });
+
+  it('confirms a save in an editor opened while it was on its way', async () => {
+    let release: () => void = () => {};
+    const onSave = vi.fn(
+      (_note: string) => new Promise<void>((resolve) => (release = () => resolve())),
+    );
+    const first = render(<Notes account="you" id="pr-seven" saved="" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    fireEvent.change(box(), { target: { value: 'One' } });
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('One'), { timeout: 2_000 });
+
+    // The editor closes and opens again before the reply, with the older note still cached.
+    first.unmount();
+
+    const second = render(<Notes account="you" id="pr-seven" saved="" onSave={onSave} />);
+
+    expect(box()).toHaveValue('One');
+
+    // The reply comes, and another window has saved Two since: the editor shows it, and never
+    // sends One again.
+    await act(async () => release());
+    second.rerender(<Notes account="you" id="pr-seven" saved="Two" onSave={onSave} />);
+    expect(box()).toHaveValue('Two');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('follows a newer saved note until you type, and saves only what you typed', async () => {
+    const onSave = vi.fn(async () => undefined);
+    const view = render(<Notes account="you" id="pr-one" saved="Older note" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    // A fresher copy arrives (another window, or this account's own after a switch back).
+    view.rerender(<Notes account="you" id="pr-one" saved="Newer note" onSave={onSave} />);
+    await waitFor(() => expect(box()).toHaveValue('Newer note'));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(onSave).not.toHaveBeenCalled();
+
+    // Typed here: kept, and saved, whatever arrives meanwhile.
+    fireEvent.change(box(), { target: { value: 'Mine' } });
+    view.rerender(<Notes account="you" id="pr-one" saved="Someone else's" onSave={onSave} />);
+    expect(box()).toHaveValue('Mine');
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('Mine'), { timeout: 2_000 });
+  });
+});
+
+describe('the status shown', () => {
+  it('keeps a newer status adopted while a poll’s result is being committed', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const commit = Query.prototype.setData;
+    let interleaved = false;
+
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve(response(status({ account: { login: 'you' }, revision: 8 }))),
+    );
+    // Just before the poll's result is written into its query, a switch's status arrives.
+    const spy = vi.spyOn(Query.prototype, 'setData').mockImplementation(function (
+      this: Query,
+      ...args: Parameters<Query['setData']>
+    ) {
+      // The fetch's own result, not a write made by hand (`setQueryData`) while it was on its way.
+      const polled = this.state.fetchStatus === 'fetching' && !args[1]?.manual;
+
+      if (polled && !interleaved) {
+        interleaved = true;
+        adoptStatus(client, status({ account: { login: 'other' }, revision: 9 }));
+      }
+
+      return commit.apply(this, args);
+    });
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const hook = renderHook(() => useStatus(), { wrapper });
+
+    try {
+      await waitFor(() => expect(interleaved).toBe(true));
+      await waitFor(() => expect(client.isFetching()).toBe(0));
+
+      expect(hook.result.current.data).toMatchObject({ account: { login: 'other' }, revision: 9 });
+    } finally {
+      spy.mockRestore();
+      client.clear();
+    }
+  });
+
+  it('is never moved back by a poll that left before a newer status', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let answer: () => void = () => {};
+
+    vi.stubGlobal(
+      'fetch',
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = () => resolve(response(status({ account: { login: 'you' }, revision: 8 })));
+        }),
+    );
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const hook = renderHook(() => useStatus(), { wrapper });
+
+    try {
+      // The poll is on its way when a switch's status arrives.
+      await waitFor(() => expect(client.isFetching({ queryKey: ['status-poll'] })).toBe(1));
+      act(() => adoptStatus(client, status({ account: { login: 'other' }, revision: 9 })));
+      await act(async () => answer());
+      await waitFor(() => expect(client.isFetching({ queryKey: ['status-poll'] })).toBe(0));
+
+      expect(hook.result.current.data).toMatchObject({ account: { login: 'other' }, revision: 9 });
+    } finally {
+      client.clear();
+    }
+  });
 });

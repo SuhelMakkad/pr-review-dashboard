@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
+import { queryKeys } from '@/lib/query-keys';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router';
@@ -62,6 +63,8 @@ let triage: Record<string, LocalTriageState> = {};
 let heldReply: Promise<void> | null = null;
 /** While set, the status still names this account: news of a switch has not reached it yet. */
 let laggingStatus: string | null = null;
+/** How the status answers: as usual, as a failed request, or with no account signed in. */
+let statusAnswer: 'ok' | 'fails' | 'signed out' = 'ok';
 let writes: { id: string; body: Record<string, unknown> }[] = [];
 /** PRs added by hand through `POST /api/pulls/track`, and every queue change sent. */
 let added: PullRequestSnapshot[] = [];
@@ -75,6 +78,7 @@ beforeEach(() => {
   account = 'me';
   heldReply = null;
   laggingStatus = null;
+  statusAnswer = 'ok';
   triage = {};
   writes = [];
   added = [];
@@ -91,12 +95,17 @@ beforeEach(() => {
   );
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (path: string, options?: RequestInit) => {
-      const state = (id: string) => triage[`${account}:${id}`] ?? emptyTriage();
+    vi.fn(async (requested: string, options?: RequestInit) => {
+      // Like the server: `/api/accounts/<account>/…` serves the account it names, whichever is
+      // selected; the legacy routes serve the selected one.
+      const scoped = /^\/api\/accounts\/([^/]+)(\/.+)$/.exec(requested);
+      const who = scoped ? decodeURIComponent(scoped[1]) : account;
+      const path = scoped ? `/api${scoped[2]}` : requested;
+      const state = (id: string) => triage[`${who}:${id}`] ?? emptyTriage();
       let data: unknown;
 
       if (path === '/api/mine') {
-        data = { account, items: [] };
+        data = { account: who, items: [] };
       } else if (path === '/api/accounts') {
         data = {
           switchable: true,
@@ -130,6 +139,10 @@ beforeEach(() => {
           error: null,
           setupCommand: '',
         };
+      } else if (path === '/api/status' && statusAnswer === 'fails') {
+        return { ok: false, status: 503, json: async () => ({ error: 'Server unavailable' }) };
+      } else if (path === '/api/status' && statusAnswer === 'signed out') {
+        data = { ...status(), account: null };
       } else if (path === '/api/status') {
         data = {
           ...status(),
@@ -138,8 +151,8 @@ beforeEach(() => {
         };
       } else if (path === '/api/pulls') {
         data = {
-          account,
-          items: [...snapshots, ...added].map((pr) => deriveItem(pr, state(pr.id), account, [])),
+          account: who,
+          items: [...snapshots, ...added].map((pr) => deriveItem(pr, state(pr.id), who, [])),
         };
       } else if (path === '/api/pulls/track') {
         const body = JSON.parse(String(options?.body));
@@ -180,11 +193,12 @@ beforeEach(() => {
         const pr = [...snapshots, ...added].find((value) => value.id === id)!;
 
         if (options?.method === 'PATCH') {
-          const body = JSON.parse(String(options.body));
+          // A scoped write names its account in the path; a legacy one in its body.
+          const body = { account: who, ...JSON.parse(String(options.body)) };
           const current = { ...state(id) };
 
-          // Like the server: a write for an account that is no longer active is refused.
-          if (body.account !== account)
+          // Like the server: a legacy write for an account that is no longer active is refused.
+          if (!scoped && body.account !== account)
             return {
               ok: false,
               status: 409,
@@ -197,17 +211,17 @@ beforeEach(() => {
           if (body.done !== undefined) {
             current.doneAt = body.done ? new Date().toISOString() : null;
             current.doneActivityKeys = body.done
-              ? deriveItem(pr, state(id), account, []).activityKeys
+              ? deriveItem(pr, state(id), who, []).activityKeys
               : [];
           }
 
-          triage[`${account}:${id}`] = current;
+          triage[`${who}:${id}`] = current;
         }
 
         data = {
-          account,
+          account: who,
           snapshot: pr,
-          item: deriveItem(pr, state(id), account, []),
+          item: deriveItem(pr, state(id), who, []),
           triage: state(id),
         };
 
@@ -299,6 +313,99 @@ describe('inbox', () => {
     expect(
       within(await queue()).queryByText('Follow up after code changes'),
     ).not.toBeInTheDocument();
+  });
+
+  it('does not undo with Z on an account other than the one the action was for', async () => {
+    const { user } = mount();
+
+    await screen.findByRole('heading', { name: /Follow up after code changes/ });
+    await user.keyboard('e');
+    await waitFor(() =>
+      expect(writes).toContainEqual({ id: 'follow', body: { account: 'me', done: true } }),
+    );
+
+    screen.getByRole('button', { name: /^Switch GitHub account, now me\b/ }).focus();
+    await user.keyboard('{Enter}');
+    await user.click(await screen.findByRole('menuitemradio', { name: 'other' }));
+    await screen.findByRole('button', { name: /^Switch GitHub account, now other\b/ });
+
+    const before = writes.length;
+
+    await user.keyboard('z');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+
+    expect(writes.slice(before)).toEqual([]);
+    expect(triage['me:follow']?.doneAt).not.toBeNull();
+  });
+
+  it("undoes each account's own last action, and a toast only its own", async () => {
+    const { user, router } = mount('/inbox/attention/acme/another/2');
+    /** Marking done moves on to the next PR; this comes back to it. */
+    const openFollow = async () => {
+      await act(() => router.history.push('/inbox/attention/acme/another/2'));
+      await screen.findByRole('heading', { name: /Follow up after code changes/ });
+    };
+    const switchTo = async (login: string) => {
+      screen.getByRole('button', { name: /^Switch GitHub account, now / }).focus();
+      await user.keyboard('{Enter}');
+      await user.click(await screen.findByRole('menuitemradio', { name: login }));
+      await screen.findByRole('button', {
+        name: new RegExp(`^Switch GitHub account, now ${login}\\b`),
+      });
+    };
+    const done = (login: string, value: boolean) => ({
+      id: 'follow',
+      body: { account: login, done: value },
+    });
+
+    await screen.findByRole('heading', { name: /Follow up after code changes/ });
+    await user.keyboard('e');
+    await waitFor(() => expect(writes).toContainEqual(done('me', true)));
+
+    // `other` marks the same PR done.
+    await switchTo('other');
+    await openFollow();
+    await user.keyboard('e');
+    await waitFor(() => expect(writes).toContainEqual(done('other', true)));
+
+    // `me`'s toast (the oldest, so the last listed), clicked while `other`'s own undo is still
+    // available, does nothing. (A plain click: the toast's swipe handling needs pointer capture.)
+    const before = writes.length;
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Undo' }).at(-1)!);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+    expect(writes.slice(before)).toEqual([]);
+
+    // Z undoes `other`'s action; its toast then cannot undo it a second time.
+    await user.keyboard('z');
+    await waitFor(() => expect(writes).toContainEqual(done('other', false)));
+    expect(writes).not.toContainEqual(done('me', false));
+
+    const undone = writes.length;
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Undo' })[0]);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+    expect(writes.slice(undone)).toEqual([]);
+
+    // Back on `me`, its own last action is still the one Z undoes.
+    await switchTo('me');
+    await openFollow();
+    await user.keyboard('z');
+    await waitFor(() => expect(writes).toContainEqual(done('me', false)));
+  });
+
+  it("shows the status's failure with a retry, and an empty queue with no account signed in", async () => {
+    statusAnswer = 'fails';
+
+    const { user } = mount();
+
+    expect(await screen.findByText("Can't reach Review Desk")).toBeInTheDocument();
+
+    statusAnswer = 'signed out';
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+
+    await waitFor(() => expect(screen.queryByText("Can't reach Review Desk")).toBeNull());
+    expect(screen.queryByRole('heading', { name: /Follow up after code changes/ })).toBeNull();
   });
 
   it('autosaves a private note focused with N', async () => {
@@ -439,11 +546,13 @@ describe('switching accounts', () => {
     await pastAutosave();
 
     expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other');
-    expect(clients[0].getQueryData(['detail', 'follow'])).toMatchObject({ account: 'other' });
+    expect(clients[0].getQueryData(queryKeys.detail('other', 'follow'))).toMatchObject({
+      account: 'other',
+    });
     expect(triage['other:follow'].note).toBe('Note for other');
   });
 
-  it("ignores a late autosave reply once another window's switch reaches the PR first", async () => {
+  it('stays on the account shown while another window switches, until the status says so', async () => {
     let release = () => {};
 
     triage['other:follow'] = { ...emptyTriage(), note: 'Note for other' };
@@ -453,39 +562,29 @@ describe('switching accounts', () => {
 
     await writeNote(user, 'Note for me');
 
-    // Another window switches; this one sees the new account's PR before any status.
+    // Another window switches. This one's PR is read for the account it shows, so a refetch
+    // still brings `me`'s, and the late reply to `me`'s autosave lands on `me` alone.
     laggingStatus = 'me';
     account = 'other';
-    await act(() => clients[0].invalidateQueries({ queryKey: ['detail', 'follow'] }));
-    await waitFor(() =>
-      expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other'),
-    );
-
+    await act(() => clients[0].invalidateQueries({ queryKey: queryKeys.detail('me', 'follow') }));
     await act(async () => release());
     await pastAutosave();
 
-    expect(clients[0].getQueryData(['status'])).toMatchObject({ account: { login: 'me' } });
-    expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other');
-    expect(clients[0].getQueryData(['detail', 'follow'])).toMatchObject({ account: 'other' });
-  });
+    expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for me');
+    expect(clients[0].getQueryData(queryKeys.detail('me', 'follow'))).toMatchObject({
+      account: 'me',
+    });
 
-  it('remounts the note when PR data for another account arrives before the status', async () => {
-    triage['other:follow'] = { ...emptyTriage(), note: 'Note for other' };
-
-    const { user } = mount('/inbox/attention/acme/another/2');
-
-    await writeNote(user, 'Note for me');
-
-    // Another window switched accounts; this one learns of it from a PR refresh first.
-    account = 'other';
-    await act(() => clients[0].invalidateQueries({ queryKey: ['detail', 'follow'] }));
-
+    // The status reaches this window: it shows the other account's note, and writes nothing to it.
+    laggingStatus = null;
+    await act(() => clients[0].invalidateQueries({ queryKey: ['status-poll'] }));
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other'),
     );
     await pastAutosave();
 
     expect(triage['other:follow'].note).toBe('Note for other');
+    expect(triage['me:follow'].note).toBe('Note for me');
     expect(writes.filter((write) => write.body.account === 'other')).toEqual([]);
   });
 });

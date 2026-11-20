@@ -7,7 +7,7 @@ import { api } from '@/lib/api';
 import { Button } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { Enter } from '@/ui/motion';
-import { useLinearStatus } from '@/features/linear/use-linear';
+import { isTicketQuery, useLinearStatus } from '@/features/linear/use-linear';
 import { CardSkeleton, SettingRow, SettingsCard } from '@/features/settings/parts';
 
 export function LinearSettings({ result }: { result?: 'connected' | 'failed' }) {
@@ -26,7 +26,7 @@ export function LinearSettings({ result }: { result?: 'connected' | 'failed' }) 
     mutationFn: () => api<LinearStatus>('/api/linear/disconnect', { method: 'POST' }),
     onSuccess: (next) => {
       queryClient.setQueryData(['linear-status'], next);
-      void queryClient.invalidateQueries({ queryKey: ['tickets'] });
+      void queryClient.invalidateQueries({ predicate: (query) => isTicketQuery(query.queryKey) });
       toast('Disconnected from Linear');
     },
     onError: (error) => toast.error(error.message),
@@ -39,7 +39,7 @@ export function LinearSettings({ result }: { result?: 'connected' | 'failed' }) 
     else toast.error('Linear sign-in did not finish');
 
     void queryClient.invalidateQueries({ queryKey: ['linear-status'] });
-    void queryClient.invalidateQueries({ queryKey: ['tickets'] });
+    void queryClient.invalidateQueries({ predicate: (query) => isTicketQuery(query.queryKey) });
     void navigate({
       to: '/settings/$section',
       params: { section: 'linear' },

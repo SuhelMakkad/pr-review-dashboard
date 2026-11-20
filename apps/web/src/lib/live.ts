@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import type { Query, QueryClient, QueryKey } from '@tanstack/react-query';
 import type { ServerEvent } from '@review-desk/shared/events';
-import type { PullRequestList, SyncStatus } from '@review-desk/shared/types';
+import type { SyncStatus } from '@review-desk/shared/types';
 import { queryKeys } from '@/lib/query-keys';
 import { session } from '@/lib/session';
 import { present } from '@/lib/notifications';
@@ -38,50 +38,63 @@ export function fallbackInterval(live: LiveState, ms = 15_000): number | false {
   return live.connected ? false : ms;
 }
 
-/** Answers that hold nothing of any one account, so they survive an account switch. */
-const SHARED_QUERIES = new Set<unknown>([queryKeys.status[0], queryKeys.accounts[0]]);
+/**
+ * Answers that survive an account switch: those that hold nothing of any one account, and those
+ * keyed by the account they were fetched for (`queryKeys.account`), which can never be shown for
+ * another one and are left to expire on their own.
+ */
+const SHARED_QUERIES = new Set<unknown>([
+  queryKeys.status[0],
+  'status-poll',
+  queryKeys.accounts[0],
+  queryKeys.account(null)[0],
+]);
 
 /**
- * Shows a new sync status. When it names another account than the cached answers belong to, they
- * are dropped rather than refetched, so no screen shows, or starts editing, the previous account's
- * PRs, notes or drafts while the new account's load. The routed pages remount at the same time
- * (`useRemountKey` in the shell), so nothing they hold carries over either.
+ * Shows a new sync status, the only way one is shown. Of two statuses from this server process,
+ * the one with the lower revision is older, however late it arrives, and is ignored; one from
+ * another process means the server restarted with a new session, so the page reloads, as it does
+ * when the event stream says so.
+ *
+ * When it names another account than the one shown, answers not keyed by an account are dropped
+ * rather than refetched, so no screen shows, or starts editing, the previous account's drafts or
+ * runs while the new account's load. The routed pages remount at the same time (`useRemountKey`
+ * in the shell), so nothing they hold carries over either.
  */
 export function adoptStatus(client: QueryClient, status: SyncStatus): void {
-  const login = status.account?.login ?? null;
+  const boot = session.bootId();
+
+  if (status.bootId && boot && status.bootId !== boot) {
+    window.location.reload();
+    return;
+  }
+
   const previous = client.getQueryData<SyncStatus>(queryKeys.status);
+
+  if (
+    previous?.revision !== undefined &&
+    status.revision !== undefined &&
+    previous.bootId === status.bootId &&
+    status.revision < previous.revision
+  )
+    return;
+
+  const login = status.account?.login ?? null;
   const shown = previous?.account?.login ?? null;
-  const listed = client.getQueryData<PullRequestList>(queryKeys.pulls)?.account ?? null;
-  const switched = (shown !== null && shown !== login) || (listed !== null && listed !== login);
+  const switched = shown !== null && shown !== login;
 
   if (switched)
     client.removeQueries({ predicate: (query: Query) => !SHARED_QUERIES.has(query.queryKey[0]) });
 
   client.setQueryData(queryKeys.status, status);
 
+  // Answers kept from when this account was last shown may be out of date (a snooze that has
+  // ended since, say): read them again.
+  if (switched) void client.invalidateQueries({ queryKey: queryKeys.account(login) });
+
   // The first status names the account the cached answers were loaded for; refresh them.
   if (!switched && previous?.account?.login !== status.account?.login)
     void client.invalidateQueries();
-}
-
-/**
- * True when the cached answer at `queryKey` belongs to `account`, so a write made for that account
- * may update it or roll it back. A write can finish after a switch (removing queries does not stop
- * it), and the switch can reach the cache in either order: through the answer itself (another
- * window switched, and new PR data arrived before the status) or through the status (the answer was
- * dropped). So the answer's own account decides, and the status only when there is none. Every
- * mutation checks this before writing into a key both accounts share (a PR's detail, the queue, a
- * diff), so the previous account's data never reappears on the new account's screens.
- */
-export function cacheBelongsTo(client: QueryClient, account: string, queryKey: QueryKey): boolean {
-  const answer = client.getQueryData<{ account?: unknown }>(queryKey);
-  const owner =
-    typeof answer?.account === 'string'
-      ? answer.account
-      : client.getQueryData<SyncStatus>(queryKeys.status)?.account?.login;
-
-  // Before the first status nothing can have switched yet.
-  return owner === undefined || owner === account;
 }
 
 /**
@@ -108,7 +121,8 @@ export function refresh(client: QueryClient, queryKey: QueryKey): void {
   void client.invalidateQueries({ queryKey });
 }
 
-function handle(client: QueryClient, event: ServerEvent, firstHello: { value: boolean }) {
+/** Applies one server event to the cache. Exported for tests. */
+export function handle(client: QueryClient, event: ServerEvent, firstHello: { value: boolean }) {
   switch (event.type) {
     case 'hello': {
       const expected = session.bootId();
@@ -121,7 +135,11 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
 
       setState({ demo: event.demo });
 
-      if (!firstHello.value) void client.invalidateQueries();
+      // Every connection reads the status again, the first included: another window may have
+      // switched accounts between this page's first status and the stream opening.
+      // `refresh` reads again after a first read already on its way, which could predate a switch.
+      if (firstHello.value) refresh(client, ['status-poll']);
+      else void client.invalidateQueries();
 
       firstHello.value = false;
       return;
@@ -133,17 +151,20 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
       adoptStatus(client, event.status);
       return;
     case 'pulls.changed':
-      refresh(client, queryKeys.pulls);
+      // Only the account whose PRs changed: another account's screens never refetch for it.
+      refresh(client, queryKeys.pulls(event.account));
       // New commits can make a saved review out of date.
       refresh(client, ['ai-reviews']);
 
       for (const id of event.ids) {
-        refresh(client, queryKeys.detail(id));
-        refresh(client, ['diff', id]);
+        refresh(client, queryKeys.detail(event.account, id));
+        refresh(client, queryKeys.diff(event.account, id));
+        // A PR's tickets come from its branch, title and body.
+        refresh(client, queryKeys.tickets(event.account, id));
         refresh(client, ['ai', id]);
       }
 
-      refresh(client, queryKeys.mine);
+      refresh(client, queryKeys.mine(event.account));
 
       return;
     case 'notify':
@@ -156,7 +177,7 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
       refresh(client, ['operations', event.account]);
       refresh(client, ['draft', event.prId]);
       if (['needs_attention', 'cancelled'].includes(event.status))
-        refresh(client, ['diff', event.prId]);
+        refresh(client, queryKeys.diff(event.account, event.prId));
       return;
     case 'ai.updated':
       refresh(client, ['ai', event.prId]);
@@ -167,8 +188,10 @@ function handle(client: QueryClient, event: ServerEvent, firstHello: { value: bo
       refresh(client, ['ai', event.id]);
       return;
     case 'triage.updated':
-      refresh(client, queryKeys.pulls);
-      refresh(client, queryKeys.detail(event.id));
+      refresh(client, queryKeys.pulls(event.account));
+      // My PRs shows which of your PRs have a note.
+      refresh(client, queryKeys.mine(event.account));
+      refresh(client, queryKeys.detail(event.account, event.id));
       return;
   }
 }

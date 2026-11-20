@@ -1,5 +1,6 @@
 import { Fragment, useState } from 'react';
 import { Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
+import { useQueryClient } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { useShortcuts, type Shortcut } from '@/lib/shortcuts';
 import { setBadge } from '@/lib/notifications';
@@ -53,6 +54,7 @@ export function Shell() {
   const forge = useForge();
   const activityOpen = useActivityOpen();
   const navigate = useNavigate();
+  const client = useQueryClient();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { theme } = useAppearance();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -93,7 +95,7 @@ export function Shell() {
       group: 'General',
       run: () => setShortcutsOpen(true),
     },
-    { keys: 'z', label: 'Undo last action', group: 'General', run: () => void undoLast() },
+    { keys: 'z', label: 'Undo last action', group: 'General', run: () => void undoLast(client) },
     ...goTo,
     { keys: 'g m', label: 'Go to my PRs', group: 'Navigate', run: () => navigate({ to: '/mine' }) },
     {

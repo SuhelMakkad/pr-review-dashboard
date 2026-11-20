@@ -3,7 +3,7 @@ import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { matchesFilters } from '@/features/inbox/filters';
 import { filesUrl, formatRef, parsePrRef, placeRef, refOf } from '@/lib/pr-ref';
-import { adoptStatus, refresh } from '@/lib/live';
+import { adoptStatus, handle, refresh } from '@/lib/live';
 import { applyOptimistic, runTriage } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 import { keyCaps } from '@/lib/shortcuts';
@@ -223,30 +223,45 @@ describe('client helpers', () => {
 });
 
 describe('account switches', () => {
-  const as = (login: string) => status({ account: { login } });
+  const as = (login: string, revision?: number) =>
+    status({ account: { login }, ...(revision === undefined ? {} : { revision }) });
 
   function cacheFor(login: string) {
     const client = new QueryClient();
 
     client.setQueryData(queryKeys.status, as(login));
     client.setQueryData(queryKeys.accounts, { switchable: true, accounts: [] });
-    client.setQueryData(queryKeys.pulls, { account: login, items: [] });
-    client.setQueryData(queryKeys.detail('pr-1'), { account: login });
+    client.setQueryData(queryKeys.pulls(login), { account: login, items: [] });
+    client.setQueryData(queryKeys.detail(login, 'pr-1'), { account: login });
     client.setQueryData(queryKeys.draft('pr-1', login), { body: 'Draft' });
 
     return client;
   }
 
-  it("drops the previous account's cached answers, keeping the status and account list", () => {
+  it("keeps answers keyed by an account across a switch, and drops the rest of the previous one's", () => {
     const client = cacheFor('me');
 
     adoptStatus(client, as('other'));
 
     expect(client.getQueryData(queryKeys.status)).toEqual(as('other'));
     expect(client.getQueryData(queryKeys.accounts)).toBeDefined();
-    expect(client.getQueryData(queryKeys.pulls)).toBeUndefined();
-    expect(client.getQueryData(queryKeys.detail('pr-1'))).toBeUndefined();
+    // Keyed by `me`, so never shown for `other`: left to expire on their own.
+    expect(client.getQueryData(queryKeys.pulls('me'))).toEqual({ account: 'me', items: [] });
+    expect(client.getQueryData(queryKeys.pulls('other'))).toBeUndefined();
+    // Not yet keyed that way: dropped.
     expect(client.getQueryData(queryKeys.draft('pr-1', 'me'))).toBeUndefined();
+  });
+
+  it('reads an account’s kept answers again when it is switched back to', () => {
+    const client = cacheFor('me');
+
+    adoptStatus(client, as('other'));
+    expect(client.getQueryState(queryKeys.pulls('me'))?.isInvalidated).toBe(false);
+
+    // A snooze may have ended since: its queue is read again, not trusted.
+    adoptStatus(client, as('me'));
+    expect(client.getQueryState(queryKeys.pulls('me'))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.detail('me', 'pr-1'))?.isInvalidated).toBe(true);
   });
 
   it('keeps cached answers when the account stays the same', () => {
@@ -254,87 +269,184 @@ describe('account switches', () => {
 
     adoptStatus(client, { ...as('me'), syncing: true });
 
-    expect(client.getQueryData(queryKeys.pulls)).toEqual({ account: 'me', items: [] });
-    expect(client.getQueryData(queryKeys.detail('pr-1'))).toEqual({ account: 'me' });
+    expect(client.getQueryData(queryKeys.pulls('me'))).toEqual({ account: 'me', items: [] });
+    expect(client.getQueryData(queryKeys.draft('pr-1', 'me'))).toEqual({ body: 'Draft' });
   });
 
-  describe('a triage reply that arrives after a switch', () => {
+  it('ignores a status older than the one shown, however late it arrives', () => {
+    const client = new QueryClient();
+
+    adoptStatus(client, as('other', 5));
+    // A reply sent before the switch, arriving after it.
+    adoptStatus(client, as('me', 3));
+    expect(client.getQueryData(queryKeys.status)).toEqual(as('other', 5));
+
+    // The same revision is the same state; a newer one is shown.
+    adoptStatus(client, { ...as('other', 5), syncing: true });
+    expect(client.getQueryData<{ syncing: boolean }>(queryKeys.status)?.syncing).toBe(true);
+    adoptStatus(client, as('me', 6));
+    expect(client.getQueryData(queryKeys.status)).toEqual(as('me', 6));
+  });
+
+  it('reloads the page for a status from another server process, as for its event stream', () => {
+    const reload = vi.fn();
+
+    // No DOM here: the page's boot id and its location, as a browser has them.
+    vi.stubGlobal('document', {
+      querySelector: (selector: string) =>
+        selector.includes('review-desk-boot') ? { content: 'boot-1' } : null,
+    });
+    vi.stubGlobal('window', { location: { reload } });
+
+    const client = new QueryClient();
+
+    try {
+      adoptStatus(client, { ...as('me', 1), bootId: 'boot-1' });
+      expect(reload).not.toHaveBeenCalled();
+
+      adoptStatus(client, { ...as('me', 1), bootId: 'boot-2' });
+      expect(reload).toHaveBeenCalledTimes(1);
+      // Never shown: the page is about to reload.
+      expect(client.getQueryData<{ bootId: string }>(queryKeys.status)?.bootId).toBe('boot-1');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  describe('a triage reply that arrives late', () => {
     afterEach(() => vi.unstubAllGlobals());
 
-    /**
-     * Sends a note for `me` whose reply is held, then lets `other` reach the cache: through its
-     * status (a switch here) or only through its data (another window switched).
-     */
-    async function sendThenSwitch(
-      reply: { ok: boolean; status: number; body: unknown },
-      through: 'status' | 'data' = 'status',
-    ) {
+    /** Sends a note for `me` whose reply is held until `answer()`. */
+    async function send(reply: { ok: boolean; status: number; body: unknown }) {
       const client = cacheFor('me');
+      const paths: string[] = [];
       let answer: (() => void) | null = null;
 
       vi.stubGlobal(
         'fetch',
-        () =>
+        (path: string) =>
           new Promise((resolve) => {
+            paths.push(path);
             answer = () =>
               resolve({ ok: reply.ok, status: reply.status, json: async () => reply.body });
           }),
       );
 
+      client.setQueryData(queryKeys.mine('me'), { account: 'me', items: [] });
+
       const sent = runTriage(client, { id: 'pr-1', account: 'me', update: { note: 'For me' } });
 
       await vi.waitFor(() => expect(answer).not.toBeNull());
-      if (through === 'status') adoptStatus(client, as('other'));
-      client.setQueryData(queryKeys.pulls, { account: 'other', items: [] });
-      client.setQueryData(queryKeys.detail('pr-1'), { account: 'other' });
-      answer!();
 
-      return { client, sent };
+      return { client, sent, paths, answer: () => answer!() };
     }
 
-    it("does not put the previous account's PR back in the cache", async () => {
-      const { client, sent } = await sendThenSwitch({
+    it("is sent for its account, and never touches the next account's queue or PR", async () => {
+      const { client, sent, paths, answer } = await send({
         ok: true,
         status: 200,
         body: { account: 'me', triage: { note: 'For me' } },
       });
 
+      adoptStatus(client, as('other'));
+      client.setQueryData(queryKeys.pulls('other'), { account: 'other', items: [] });
+      client.setQueryData(queryKeys.detail('other', 'pr-1'), { account: 'other' });
+      answer();
       await sent;
 
-      expect(client.getQueryData(queryKeys.detail('pr-1'))).toEqual({ account: 'other' });
+      expect(paths).toEqual(['/api/accounts/me/pulls/pr-1/triage']);
+      expect(client.getQueryData(queryKeys.detail('other', 'pr-1'))).toEqual({ account: 'other' });
+      expect(client.getQueryData(queryKeys.pulls('other'))).toEqual({
+        account: 'other',
+        items: [],
+      });
     });
 
-    it("does not roll the previous account's queue back over the new one", async () => {
-      const { client, sent } = await sendThenSwitch({
-        ok: false,
-        status: 409,
-        body: { error: 'GitHub account changed.' },
+    it('never restores an older PR over a newer one of the same account, and reads it again', async () => {
+      const { client, sent, answer } = await send({
+        ok: true,
+        status: 200,
+        body: { account: 'me', snapshot: { headOid: 'old-head' }, triage: { note: 'For me' } },
       });
 
-      await expect(sent).rejects.toThrow('GitHub account changed.');
+      // A refresh brought a newer head (triage unchanged) before the reply arrived.
+      client.setQueryData(queryKeys.detail('me', 'pr-1'), {
+        account: 'me',
+        snapshot: { headOid: 'new-head' },
+      });
+      answer();
+      await sent;
 
-      expect(client.getQueryData(queryKeys.pulls)).toEqual({ account: 'other', items: [] });
+      expect(client.getQueryData(queryKeys.detail('me', 'pr-1'))).toEqual({
+        account: 'me',
+        snapshot: { headOid: 'new-head' },
+      });
+      expect(client.getQueryState(queryKeys.detail('me', 'pr-1'))?.isInvalidated).toBe(true);
+      expect(client.getQueryState(queryKeys.mine('me'))?.isInvalidated).toBe(true);
     });
 
-    it('also holds when the new account reached the cache before its status', async () => {
-      const success = await sendThenSwitch(
-        { ok: true, status: 200, body: { account: 'me', triage: { note: 'For me' } } },
-        'data',
-      );
+    it('shows the triage it saved at once, unless the PR was read again with another', async () => {
+      const key = queryKeys.detail('me', 'pr-1');
+      const before = { account: 'me', snapshot: { headOid: 'head' }, triage: { note: '' } };
+      const reply = { account: 'me', snapshot: { headOid: 'older' }, triage: { note: 'For me' } };
 
-      await success.sent;
+      /** Saves a note over `before`, doing `meanwhile` while the request is on its way. */
+      const save = async (meanwhile?: (client: QueryClient) => void) => {
+        const client = cacheFor('me');
+        let answer: (() => void) | null = null;
 
-      expect(success.client.getQueryData(queryKeys.status)).toEqual(as('me'));
-      expect(success.client.getQueryData(queryKeys.detail('pr-1'))).toEqual({ account: 'other' });
+        vi.stubGlobal(
+          'fetch',
+          () =>
+            new Promise((resolve) => {
+              answer = () => resolve({ ok: true, status: 200, json: async () => reply });
+            }),
+        );
+        client.setQueryData(key, before);
 
-      const failure = await sendThenSwitch(
-        { ok: false, status: 409, body: { error: 'GitHub account changed.' } },
-        'data',
-      );
+        const sent = runTriage(client, { id: 'pr-1', account: 'me', update: { note: 'For me' } });
 
-      await expect(failure.sent).rejects.toThrow('GitHub account changed.');
+        await vi.waitFor(() => expect(answer).not.toBeNull());
+        meanwhile?.(client);
+        answer!();
+        await sent;
 
-      expect(failure.client.getQueryData(queryKeys.pulls)).toEqual({
+        return client.getQueryData(key);
+      };
+
+      // Unchanged since it was sent: the reply's triage shows, and only its triage.
+      expect(await save()).toEqual({ ...before, triage: { note: 'For me' } });
+
+      // A refresh brought a newer head with the same triage: both show.
+      expect(
+        await save((client) =>
+          client.setQueryData<typeof before>(key, (detail) => ({
+            ...detail!,
+            snapshot: { headOid: 'newer' },
+          })),
+        ),
+      ).toEqual({ account: 'me', snapshot: { headOid: 'newer' }, triage: { note: 'For me' } });
+
+      // Read again with another triage (another window's note) before the reply: that one stays.
+      const theirs = { ...before, triage: { note: 'Theirs' } };
+
+      expect(await save((client) => client.setQueryData(key, theirs))).toEqual(theirs);
+    });
+
+    it("rolls back only its own account's queue", async () => {
+      const { client, sent, answer } = await send({
+        ok: false,
+        status: 409,
+        body: { error: 'Refused.' },
+      });
+
+      adoptStatus(client, as('other'));
+      client.setQueryData(queryKeys.pulls('other'), { account: 'other', items: [] });
+      answer();
+
+      await expect(sent).rejects.toThrow('Refused.');
+      expect(client.getQueryData(queryKeys.pulls('me'))).toEqual({ account: 'me', items: [] });
+      expect(client.getQueryData(queryKeys.pulls('other'))).toEqual({
         account: 'other',
         items: [],
       });
@@ -343,6 +455,32 @@ describe('account switches', () => {
 });
 
 describe('event refreshes', () => {
+  it('refreshes only the account whose PRs changed, tickets included', () => {
+    const client = new QueryClient();
+    const keys = (login: string) => [
+      queryKeys.pulls(login),
+      queryKeys.mine(login),
+      queryKeys.detail(login, 'pr-1'),
+      queryKeys.diff(login, 'pr-1', 'full'),
+      queryKeys.tickets(login, 'pr-1'),
+    ];
+    const stale = (key: readonly unknown[]) => client.getQueryState(key)?.isInvalidated;
+
+    for (const key of [...keys('me'), ...keys('other')]) client.setQueryData(key, {});
+
+    handle(client, { type: 'pulls.changed', account: 'me', ids: ['pr-1'] }, { value: false });
+
+    expect(keys('me').map(stale)).toEqual([true, true, true, true, true]);
+    expect(keys('other').map(stale)).toEqual([false, false, false, false, false]);
+
+    // Triage changes the queue, My PRs (which notes a note) and the PR, of its account only.
+    for (const key of keys('me')) client.setQueryData(key, {});
+    handle(client, { type: 'triage.updated', account: 'other', id: 'pr-1' }, { value: false });
+
+    expect(keys('me').map(stale)).toEqual([false, false, false, false, false]);
+    expect(keys('other').slice(0, 3).map(stale)).toEqual([true, true, true]);
+  });
+
   it('loads again when an event arrives while the first load is on its way', async () => {
     const client = new QueryClient();
     const answers: ((value: string) => void)[] = [];

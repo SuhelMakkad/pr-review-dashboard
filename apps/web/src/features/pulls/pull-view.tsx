@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import {
   AlarmClock,
@@ -24,7 +25,7 @@ import type {
 } from '@review-desk/shared/types';
 import { api } from '@/lib/api';
 import { filesUrl, numberSign, refOf } from '@/lib/pr-ref';
-import { usePullDetail, useTriage } from '@/lib/queries';
+import { accountPath, runTriage, usePullDetail, useTriage } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { dateTime, relativePhrase, shortDateTime } from '@/lib/time';
 import { Avatar } from '@/ui/avatar';
@@ -238,6 +239,7 @@ function PullDetailView({
   const account = detail.account;
   const authored = isSameUser(pr.author.login, account);
   const forge = forgeTerms(account);
+  const client = useQueryClient();
   const actions = usePullActions();
   const triage = useTriage();
   const inbox = useInboxNavigation();
@@ -256,9 +258,10 @@ function PullDetailView({
   // Opening a PR refreshes it when the cached copy is more than two minutes old.
   useEffect(() => {
     if (Date.now() - Date.parse(pr.fetchedAt) > 120_000) {
-      void api(`/api/pulls/${encodeURIComponent(item.id)}/refresh`, { method: 'POST' }).catch(
-        () => undefined,
-      );
+      // For the account whose PR this is, whichever account is on screen when it lands.
+      void api(accountPath(detail.account, `/pulls/${encodeURIComponent(item.id)}/refresh`), {
+        method: 'POST',
+      }).catch(() => undefined);
     }
   }, [item.id]);
   const files = showAllFiles ? pr.files : pr.files.slice(0, 12);
@@ -713,7 +716,8 @@ function PullDetailView({
             account={account}
             id={item.id}
             saved={detail.triage.note}
-            onSave={(note) => triage.mutateAsync({ id: item.id, account, update: { note } })}
+            // Not through the hook: a save can start after this view has closed (a switch away).
+            onSave={(note) => runTriage(client, { id: item.id, account, update: { note } })}
           />
         </section>
 
