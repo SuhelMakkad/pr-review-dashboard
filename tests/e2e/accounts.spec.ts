@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectAccessible, openFresh } from '@/e2e/helpers';
+import { demoWrites, expectAccessible, openFresh } from '@/e2e/helpers';
 
 // Demo mode has a second sign-in, you-personal. No feed returns a scenario PR for it, but it can
 // add one by hand, so both accounts can track the same PR.
@@ -145,4 +145,69 @@ test('saves a note held across a switch for the account it was written for', asy
   // What the client does with the late reply is covered by the unit tests of its cache.
   await expect.poll(() => savedFor('you')).toBe('Held for you');
   expect(await savedFor('you-personal')).toBe('Personal note');
+});
+
+test('refuses a review sent from a window that missed a switch, queueing nothing', async ({
+  page,
+}) => {
+  const id = 'PR_acme_web_1839';
+  const draftFor = async (login: string) =>
+    (
+      (await (await page.request.get(`/api/accounts/${login}/pulls/${id}/draft`)).json()) as {
+        body: string;
+      }
+    ).body;
+  const operationsFor = async (login: string) =>
+    (
+      (await (await page.request.get(`/api/accounts/${login}/operations`)).json()) as {
+        items: unknown[];
+      }
+    ).items;
+  // Another window switches: this one's event stream is cut, so it still shows you.
+  const switchElsewhere = (from: string, to: string) =>
+    page.evaluate(
+      async ({ from, to }) => {
+        const token = document.querySelector<HTMLMetaElement>(
+          'meta[name="review-desk-session"]',
+        )!.content;
+
+        await fetch('/api/accounts/switch', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Review-Desk': '1',
+            'X-Review-Desk-Session': token,
+          },
+          body: JSON.stringify({ from, to }),
+        });
+      },
+      { from, to },
+    );
+
+  await page.route('**/api/events', (route) => route.abort());
+  await openFresh(page, '/pr/acme/web/1839/files');
+  await expect(page.getByRole('button', { name: 'Finish review', exact: true })).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+Shift+Enter');
+
+  const sheet = page.getByRole('dialog', { name: 'Finish your review' });
+
+  await sheet.getByRole('textbox').fill('Written as you');
+  await expect.poll(() => draftFor('you')).toBe('Written as you');
+
+  await switchElsewhere('you', 'you-personal');
+  await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
+
+  await expect(
+    sheet.getByText("You're using you-personal now. Switch back to you to do this."),
+  ).toBeVisible();
+  expect(await operationsFor('you')).toEqual([]);
+  expect(await demoWrites(page)).toEqual([]);
+
+  // Back as you, the draft is as it was.
+  await switchElsewhere('you-personal', 'you');
+  await page.unroute('**/api/events');
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Finish review', exact: true })).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+Shift+Enter');
+  await expect(sheet.getByRole('textbox')).toHaveValue('Written as you');
 });

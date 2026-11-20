@@ -346,7 +346,8 @@ describe('durable GitHub operations', () => {
     await expect(submit('Different', id)).rejects.toThrow('different content');
     await expect(submit('Second operation')).rejects.toThrow('saved in Activity');
     expect(queue.list('you').items).toHaveLength(1);
-    expect(() => queue.get('another-account', id)).toThrow('account changed');
+    // Any account's actions can be read; this one is not another account's.
+    expect(() => queue.get('another-account', id)).toThrow('unavailable for this account');
     expect(pr().id).toBeTruthy();
   });
 

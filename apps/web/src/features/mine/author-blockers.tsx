@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { ArrowUpRight, CircleCheck, CircleDot, RotateCcw } from 'lucide-react';
 import type { AuthorItem, Blocker } from '@review-desk/shared/author';
 import { githubCommand } from '@/lib/operation-command';
+import { accountPath } from '@/lib/queries';
 import { openActivity } from '@/features/activity/use-operations';
 import { useOperations } from '@/features/activity/use-operations';
 import { operationUnsettled } from '@review-desk/shared/operations';
@@ -31,12 +32,14 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
     );
   const rerequest = useMutation({
     mutationFn: (logins: string[]) =>
-      githubCommand(`/api/pulls/${encodeURIComponent(item.id)}/reviewers`, { account, logins }),
+      githubCommand(accountPath(account, `/pulls/${encodeURIComponent(item.id)}/reviewers`), {
+        logins,
+      }),
     onSuccess: (_result, logins) => {
       toast(`Review request queued for ${logins.join(', ')}`, {
         action: { label: 'View activity', onClick: openActivity },
       });
-      void client.invalidateQueries({ queryKey: ['operations', account] });
+      void client.invalidateQueries({ queryKey: queryKeys.operations(account) });
       void client.invalidateQueries({ queryKey: queryKeys.mine(account) });
     },
     onError: (error) => toast.error(error.message),

@@ -10,7 +10,7 @@ export type ServerEvent =
   /** `account` is whose stored PRs changed: an account other than the selected one can refresh. */
   | { type: 'pulls.changed'; account: string; ids: string[] }
   | { type: 'triage.updated'; account: string; id: string }
-  | { type: 'draft.updated'; id: string }
+  | { type: 'draft.updated'; account: string; id: string }
   | {
       type: 'operation.updated';
       account: string;

@@ -15,7 +15,15 @@ export const queryKeys = {
       ? (['account', account, 'diff', id] as const)
       : (['account', account, 'diff', id, mode] as const),
   tickets: (account: string | null, id: string) => ['account', account, 'tickets', id] as const,
+  /**
+   * The account's review draft of one PR. Editable, so never served across a switch: `adoptStatus`
+   * drops every account's drafts whenever the account shown changes.
+   */
+  draft: (account: string | null, prId: string) => ['account', account, 'draft', prId] as const,
+  /** The account's Activity: its pages, and (`operation`) one action by ID. */
+  operations: (account: string | null) => ['account', account, 'operations'] as const,
+  operation: (account: string | null, id: string | null) =>
+    ['account', account, 'operations', 'one', id] as const,
   /** Fetched for a named account, so the account is part of the key: one never serves another. */
-  draft: (prId: string, account: string) => ['draft', prId, account] as const,
   ai: (prId: string, account: string) => ['ai', prId, account] as const,
 };

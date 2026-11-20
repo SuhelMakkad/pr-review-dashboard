@@ -154,9 +154,9 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
 
   const operations = new OperationQueue(service, options.operationQueue);
 
-  registerOperationRoutes(app, operations);
+  registerOperationRoutes(app, operations, service);
   registerAccountRoutes(app, service, operations);
-  registerReviewRoutes(app, reviews, operations);
+  registerReviewRoutes(app, reviews, operations, service);
   const linearSource = options.linear ?? new FixtureLinear(false);
   const linear = new LinearService(
     linearSource,

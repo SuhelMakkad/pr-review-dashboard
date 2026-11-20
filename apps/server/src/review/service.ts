@@ -17,7 +17,7 @@ import { GitHubError, safeError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
 import type { SyncService } from '@/sync/service.js';
 import { DraftStore } from '@/review/drafts.js';
-import { ReviewError } from '@/review/errors.js';
+import { accountNotActive, ReviewError } from '@/review/errors.js';
 import { REQUEST_CHANGES_UNSUPPORTED } from '@/gitlab/write.js';
 import type { FrozenReview } from '@review-desk/shared/operations';
 
@@ -84,15 +84,19 @@ export class ReviewService {
     this.drafts = new DraftStore(sync.store, execution?.operationId, execution?.assertActive);
   }
 
+  /**
+   * Refuses a write for an account other than the one in use. Synchronous, so a local write checks
+   * it again in the same turn as its store write, after anything it awaited.
+   */
+  assertSelected(account: string): void {
+    const selected = this.sync.status.account?.login ?? null;
+
+    if (account !== selected) throw accountNotActive(account, selected);
+  }
+
   /** Refuses writes for a stale account, re-checking the live gh login before anything is sent. */
   private async guard(account: string, live = false): Promise<void> {
-    if (account !== this.sync.status.account?.login) {
-      throw new ReviewError(
-        'ACCOUNT_CHANGED',
-        409,
-        'GitHub account changed. Refresh before writing.',
-      );
-    }
+    this.assertSelected(account);
 
     if (!live) return;
 
@@ -134,8 +138,8 @@ export class ReviewService {
     }
   }
 
-  private changed(prId: string) {
-    this.events.emit({ type: 'draft.updated', id: prId });
+  private changed(account: string, prId: string) {
+    this.events.emit({ type: 'draft.updated', account, id: prId });
   }
 
   private async refreshQuietly(account: string, prId: string): Promise<void> {
@@ -169,10 +173,10 @@ export class ReviewService {
     prId: string,
     changes: { body?: string; event?: ReviewEvent },
   ): Promise<ReviewDraft> {
-    await this.guard(account);
+    this.assertSelected(account);
     this.snapshot(account, prId);
     this.drafts.saveMeta(account, prId, changes);
-    this.changed(prId);
+    this.changed(account, prId);
 
     return this.draft(account, prId);
   }
@@ -224,6 +228,9 @@ export class ReviewService {
 
     await this.assertCommentable(pr, input);
 
+    // The diff check awaited a read: the account may no longer be in use.
+    this.assertSelected(input.account);
+
     const comment = this.drafts.addComment(input.account, prId, {
       path: input.path,
       line: input.line,
@@ -239,7 +246,7 @@ export class ReviewService {
       anchorOid: pr.headOid,
     });
 
-    this.changed(prId);
+    this.changed(input.account, prId);
 
     return comment;
   }
@@ -250,11 +257,9 @@ export class ReviewService {
     id: string,
     body: string,
   ): Promise<DraftComment> {
-    await this.guard(account);
+    this.assertSelected(account);
 
-    const comment = this.drafts.comment(account, id);
-
-    if (!comment) throw new ReviewError('NOT_FOUND', 404, 'That draft comment no longer exists.');
+    const comment = this.ownComment(account, prId, id);
     if (comment.status === 'pushed') {
       throw new ReviewError(
         'ALREADY_SENT',
@@ -264,30 +269,41 @@ export class ReviewService {
     }
 
     this.drafts.updateComment(account, id, { body });
-    this.changed(prId);
+    this.changed(account, prId);
 
     return this.drafts.comment(account, id)!;
   }
 
   async deleteComment(account: string, prId: string, id: string): Promise<void> {
-    await this.guard(account);
+    this.assertSelected(account);
+    this.ownComment(account, prId, id);
     this.drafts.deleteComment(account, id);
-    this.changed(prId);
+    this.changed(account, prId);
   }
 
-  /** Throws away the local draft and any pending review an interrupted submit left on GitHub. */
-  async discard(account: string, prId: string): Promise<void> {
-    await this.guard(account);
+  /** The draft comment `id` of `prId`: one of another PR is not found, and nothing changes. */
+  private ownComment(account: string, prId: string, id: string): DraftComment {
+    const comment =
+      this.drafts.commentPrId(account, id) === prId ? this.drafts.comment(account, id) : null;
 
-    const draft = this.drafts.draft(account, prId);
+    if (!comment) throw new ReviewError('NOT_FOUND', 404, 'That draft comment no longer exists.');
 
-    if (draft?.githubReviewId) {
-      await this.guard(account, true);
-      await this.write(() => this.github.deleteReview(draft.githubReviewId!));
-    }
+    return comment;
+  }
+
+  /**
+   * Throws away a draft that left nothing on the forge, in one synchronous turn, never calling it.
+   * False when the draft has a pending review on the forge: removing that goes through the outbox.
+   */
+  clearLocal(account: string, prId: string): boolean {
+    this.assertSelected(account);
+
+    if (this.drafts.draft(account, prId)?.githubReviewId) return false;
 
     this.drafts.clear(account, prId);
-    this.changed(prId);
+    this.changed(account, prId);
+
+    return true;
   }
 
   /**
@@ -423,7 +439,7 @@ export class ReviewService {
       .filter((comment) => comment.status === 'stale');
 
     if (stale.length || alreadyStale.length) {
-      this.changed(prId);
+      this.changed(account, prId);
 
       throw new ReviewError(
         'STALE_COMMENTS',
@@ -480,7 +496,7 @@ export class ReviewService {
 
       if (!this.execution) {
         this.drafts.clear(account, prId);
-        this.changed(prId);
+        this.changed(account, prId);
       }
       if (!this.execution) await this.refreshQuietly(account, prId);
 

@@ -61,6 +61,15 @@ const SHARED_QUERIES = new Set<unknown>([
  * runs while the new account's load. The routed pages remount at the same time (`useRemountKey`
  * in the shell), so nothing they hold carries over either.
  */
+let switches = 0;
+
+/** How many times the account shown has changed: an answer that crossed a switch is not cached. */
+export function accountSwitches(): number {
+  return switches;
+}
+
+const isDraft = (key: QueryKey) => key[0] === queryKeys.account(null)[0] && key[2] === 'draft';
+
 export function adoptStatus(client: QueryClient, status: SyncStatus): void {
   const boot = session.bootId();
 
@@ -83,8 +92,14 @@ export function adoptStatus(client: QueryClient, status: SyncStatus): void {
   const shown = previous?.account?.login ?? null;
   const switched = shown !== null && shown !== login;
 
-  if (switched)
-    client.removeQueries({ predicate: (query: Query) => !SHARED_QUERIES.has(query.queryKey[0]) });
+  // Drafts are editable: every account's is read afresh after a switch, never shown from before it.
+  if (switched) {
+    switches += 1;
+    client.removeQueries({
+      predicate: (query: Query) =>
+        !SHARED_QUERIES.has(query.queryKey[0]) || isDraft(query.queryKey),
+    });
+  }
 
   client.setQueryData(queryKeys.status, status);
 
@@ -159,6 +174,8 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
       for (const id of event.ids) {
         refresh(client, queryKeys.detail(event.account, id));
         refresh(client, queryKeys.diff(event.account, id));
+        // A draft shows the pending review the PR has on the forge.
+        refresh(client, queryKeys.draft(event.account, id));
         // A PR's tickets come from its branch, title and body.
         refresh(client, queryKeys.tickets(event.account, id));
         refresh(client, ['ai', id]);
@@ -174,8 +191,8 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
       refresh(client, ['insights']);
       return;
     case 'operation.updated':
-      refresh(client, ['operations', event.account]);
-      refresh(client, ['draft', event.prId]);
+      refresh(client, queryKeys.operations(event.account));
+      refresh(client, queryKeys.draft(event.account, event.prId));
       if (['needs_attention', 'cancelled'].includes(event.status))
         refresh(client, queryKeys.diff(event.account, event.prId));
       return;
@@ -184,8 +201,8 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
       refresh(client, ['ai-reviews']);
       return;
     case 'draft.updated':
-      refresh(client, ['draft', event.id]);
-      refresh(client, ['ai', event.id]);
+      refresh(client, queryKeys.draft(event.account, event.id));
+      refresh(client, queryKeys.ai(event.id, event.account));
       return;
     case 'triage.updated':
       refresh(client, queryKeys.pulls(event.account));

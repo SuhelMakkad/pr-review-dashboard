@@ -233,7 +233,7 @@ describe('account switches', () => {
     client.setQueryData(queryKeys.accounts, { switchable: true, accounts: [] });
     client.setQueryData(queryKeys.pulls(login), { account: login, items: [] });
     client.setQueryData(queryKeys.detail(login, 'pr-1'), { account: login });
-    client.setQueryData(queryKeys.draft('pr-1', login), { body: 'Draft' });
+    client.setQueryData(queryKeys.draft(login, 'pr-1'), { body: 'Draft' });
 
     return client;
   }
@@ -248,8 +248,8 @@ describe('account switches', () => {
     // Keyed by `me`, so never shown for `other`: left to expire on their own.
     expect(client.getQueryData(queryKeys.pulls('me'))).toEqual({ account: 'me', items: [] });
     expect(client.getQueryData(queryKeys.pulls('other'))).toBeUndefined();
-    // Not yet keyed that way: dropped.
-    expect(client.getQueryData(queryKeys.draft('pr-1', 'me'))).toBeUndefined();
+    // Editable, so never shown from before a switch, though keyed by the account: dropped.
+    expect(client.getQueryData(queryKeys.draft('me', 'pr-1'))).toBeUndefined();
   });
 
   it('reads an account’s kept answers again when it is switched back to', () => {
@@ -270,7 +270,7 @@ describe('account switches', () => {
     adoptStatus(client, { ...as('me'), syncing: true });
 
     expect(client.getQueryData(queryKeys.pulls('me'))).toEqual({ account: 'me', items: [] });
-    expect(client.getQueryData(queryKeys.draft('pr-1', 'me'))).toEqual({ body: 'Draft' });
+    expect(client.getQueryData(queryKeys.draft('me', 'pr-1'))).toEqual({ body: 'Draft' });
   });
 
   it('ignores a status older than the one shown, however late it arrives', () => {
@@ -485,7 +485,7 @@ describe('event refreshes', () => {
     const client = new QueryClient();
     const answers: ((value: string) => void)[] = [];
     const observer = new QueryObserver(client, {
-      queryKey: ['operations', 'me'],
+      queryKey: queryKeys.operations('me'),
       queryFn: () => new Promise<string>((resolve) => answers.push(resolve)),
     });
     const unsubscribe = observer.subscribe(() => {});
@@ -494,7 +494,7 @@ describe('event refreshes', () => {
       await vi.waitFor(() => expect(answers).toHaveLength(1));
 
       // The server answered before the change the event announces.
-      refresh(client, ['operations', 'me']);
+      refresh(client, queryKeys.operations('me'));
       answers[0]('Checking');
 
       await vi.waitFor(() => expect(answers).toHaveLength(2));
