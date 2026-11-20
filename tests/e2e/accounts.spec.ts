@@ -5,6 +5,28 @@ import { demoWrites, expectAccessible, openFresh } from '@/e2e/helpers';
 // add one by hand, so both accounts can track the same PR.
 test.describe.configure({ mode: 'serial' });
 
+/** Another window switches accounts: one whose event stream is cut still shows the old account. */
+function switchElsewhere(page: import('@playwright/test').Page, from: string, to: string) {
+  return page.evaluate(
+    async ({ from, to }) => {
+      const token = document.querySelector<HTMLMetaElement>(
+        'meta[name="review-desk-session"]',
+      )!.content;
+
+      await fetch('/api/accounts/switch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Review-Desk': '1',
+          'X-Review-Desk-Session': token,
+        },
+        body: JSON.stringify({ from, to }),
+      });
+    },
+    { from, to },
+  );
+}
+
 test('switches to another GitHub CLI account and back, keeping each queue', async ({ page }) => {
   await openFresh(page, '/inbox/attention');
 
@@ -163,27 +185,6 @@ test('refuses a review sent from a window that missed a switch, queueing nothing
         items: unknown[];
       }
     ).items;
-  // Another window switches: this one's event stream is cut, so it still shows you.
-  const switchElsewhere = (from: string, to: string) =>
-    page.evaluate(
-      async ({ from, to }) => {
-        const token = document.querySelector<HTMLMetaElement>(
-          'meta[name="review-desk-session"]',
-        )!.content;
-
-        await fetch('/api/accounts/switch', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Review-Desk': '1',
-            'X-Review-Desk-Session': token,
-          },
-          body: JSON.stringify({ from, to }),
-        });
-      },
-      { from, to },
-    );
-
   await page.route('**/api/events', (route) => route.abort());
   await openFresh(page, '/pr/acme/web/1839/files');
   await expect(page.getByRole('button', { name: 'Finish review', exact: true })).toBeVisible();
@@ -194,7 +195,7 @@ test('refuses a review sent from a window that missed a switch, queueing nothing
   await sheet.getByRole('textbox').fill('Written as you');
   await expect.poll(() => draftFor('you')).toBe('Written as you');
 
-  await switchElsewhere('you', 'you-personal');
+  await switchElsewhere(page, 'you', 'you-personal');
   await sheet.getByRole('button', { name: 'Submit Comment to GitHub' }).click();
 
   await expect(
@@ -204,10 +205,39 @@ test('refuses a review sent from a window that missed a switch, queueing nothing
   expect(await demoWrites(page)).toEqual([]);
 
   // Back as you, the draft is as it was.
-  await switchElsewhere('you-personal', 'you');
+  await switchElsewhere(page, 'you-personal', 'you');
   await page.unroute('**/api/events');
   await page.reload();
   await expect(page.getByRole('button', { name: 'Finish review', exact: true })).toBeVisible();
   await page.keyboard.press('ControlOrMeta+Shift+Enter');
   await expect(sheet.getByRole('textbox')).toHaveValue('Written as you');
+});
+
+test('refuses an AI review started from a window that missed a switch, running nothing', async ({
+  page,
+}) => {
+  const id = 'PR_acme_web_1839';
+  const runsFor = async (login: string) =>
+    (
+      (await (await page.request.get(`/api/accounts/${login}/pulls/${id}/ai`)).json()) as {
+        runs: unknown[];
+      }
+    ).runs;
+
+  await page.route('**/api/events', (route) => route.abort());
+  await openFresh(page, '/pr/acme/web/1839');
+
+  const report = page.getByRole('region', { name: 'Full review' });
+
+  await expect(report.getByRole('button', { name: 'Run review', exact: true })).toBeEnabled();
+  await switchElsewhere(page, 'you', 'you-personal');
+  await report.getByRole('button', { name: 'Run review', exact: true }).click();
+
+  await expect(report.getByRole('alert')).toHaveText(
+    "You're using you-personal now. Switch back to you to do this.",
+  );
+  expect(await runsFor('you')).toEqual([]);
+
+  await switchElsewhere(page, 'you-personal', 'you');
+  await page.unroute('**/api/events');
 });

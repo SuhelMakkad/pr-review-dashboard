@@ -306,7 +306,8 @@ export class SyncService {
     return this.sentStatus;
   }
 
-  private assertNotCoolingDown(account: string | null = this.status.account?.login ?? null): void {
+  /** Refuses a read while the account is cooling down after a rate limit. */
+  assertNotCoolingDown(account: string | null = this.status.account?.login ?? null): void {
     const retryAt = this.cooldown(account);
 
     if (retryAt)

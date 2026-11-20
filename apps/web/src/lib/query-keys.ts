@@ -24,6 +24,12 @@ export const queryKeys = {
   operations: (account: string | null) => ['account', account, 'operations'] as const,
   operation: (account: string | null, id: string | null) =>
     ['account', account, 'operations', 'one', id] as const,
-  /** Fetched for a named account, so the account is part of the key: one never serves another. */
-  ai: (prId: string, account: string) => ['ai', prId, account] as const,
+  /** The account's AI runs of one PR, and (`aiReviews`) its latest full review of every PR. */
+  ai: (account: string | null, prId: string) => ['account', account, 'ai', prId] as const,
+  aiReviews: (account: string | null) => ['account', account, 'ai-reviews'] as const,
+  /** The account's Insights; without `days`, every range and repository. */
+  insights: (account: string | null, days?: number, repo?: string) =>
+    days === undefined
+      ? (['account', account, 'insights'] as const)
+      : (['account', account, 'insights', days, repo ?? ''] as const),
 };

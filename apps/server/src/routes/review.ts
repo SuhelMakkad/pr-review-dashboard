@@ -1,12 +1,13 @@
 import { forForge } from '@review-desk/shared/accounts';
 import type { GitHubAction } from '@review-desk/shared/operations';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { safeError } from '@/github/errors.js';
 import { legacyAccountError } from '@/review/errors.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
 import type { OperationQueue } from '@/operations/queue.js';
-import { knownAccount, readError, type AccountParams } from '@/routes/pulls.js';
+import { readError } from '@/routes/pulls.js';
+import { input, scopedRoutes } from '@/routes/scoped.js';
 import type { SyncService } from '@/sync/service.js';
 
 const account = z.string().min(1).max(100);
@@ -129,68 +130,13 @@ async function handle(
   }
 }
 
-function parse<T>(schema: z.ZodType<T>, value: unknown, reply: FastifyReply): T | null {
-  const result = schema.safeParse(value);
-
-  if (!result.success) {
-    void reply.code(400).send({ error: 'Invalid request.', details: z.flattenError(result.error) });
-    return null;
-  }
-
-  return result.data;
-}
-
-type Request = FastifyRequest<{
-  Params: Record<string, string>;
-  Querystring: Record<string, string | undefined>;
-}>;
-
-/**
- * The request a route parses, with its account: from the body on a legacy route, from the path
- * on an account's own (`scoped`), where the body must not name one. Both give exactly the same
- * object, so an action ID accepted through one is replayed through the other.
- */
-function input<T>(
-  schema: z.ZodType<T>,
-  request: Request,
-  reply: FastifyReply,
-  scoped: string | null,
-): T | null {
-  if (scoped === null) return parse(schema, request.body, reply);
-
-  const body = request.body ?? {};
-
-  if (typeof body !== 'object' || Array.isArray(body) || 'account' in body) {
-    void reply.code(400).send({ error: 'Invalid request: the path names the account.' });
-    return null;
-  }
-
-  return parse(schema, { ...body, account: scoped }, reply);
-}
-
 export function registerReviewRoutes(
   app: FastifyInstance,
   reviews: ReviewService,
   queue: OperationQueue,
   sync: SyncService,
 ): void {
-  /**
-   * Serves `path` twice: as the legacy route, whose request names the account, and under
-   * `/api/accounts/:account`, whose path does. `work` gets the path's account, or null on the
-   * legacy route.
-   */
-  function serve(
-    method: 'get' | 'put' | 'post' | 'patch' | 'delete',
-    path: string,
-    work: (request: Request, reply: FastifyReply, scoped: string | null) => Promise<unknown>,
-  ) {
-    app[method](path, (request, reply) => work(request as Request, reply, null));
-    app[method](`/api/accounts/:account${path.slice('/api'.length)}`, (request, reply) => {
-      const account = knownAccount(sync, request.params as AccountParams, reply);
-
-      return account ? work(request as Request, reply, account) : reply;
-    });
-  }
+  const serve = scopedRoutes(app, sync);
 
   serve('get', '/api/pulls/:id/draft', async (request, reply, scoped) => {
     const account = scoped ?? String(request.query.account ?? '');

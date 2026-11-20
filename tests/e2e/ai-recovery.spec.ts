@@ -38,7 +38,7 @@ test('keeps a user-paused review across navigation and restart, then resumes the
     await page.reload();
     await expect(report.getByRole('status')).toHaveText('Paused. Your progress is saved.');
     await page.route(
-      '**/api/ai/runs/*/resume',
+      '**/api/accounts/*/ai/runs/*/resume',
       (route) =>
         route.fulfill({
           status: 503,

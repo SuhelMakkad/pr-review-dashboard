@@ -19,8 +19,9 @@ export type ServerEvent =
       status: OperationStatus;
     }
   /** `runId` is absent when no run changed, such as when an automatic restart is rescheduled. */
-  | { type: 'ai.updated'; prId: string; runId?: string }
+  | { type: 'ai.updated'; account: string; prId: string; runId?: string }
   | { type: 'notify'; notifications: ReviewNotification[] }
-  | { type: 'insights.updated' };
+  /** `account` is whose Insights changed; null for all of them (the review target is shared). */
+  | { type: 'insights.updated'; account: string | null };
 
 export type ServerEventType = ServerEvent['type'];

@@ -160,11 +160,13 @@ export function FullReview({
 
   return (
     <section aria-label="Full review" className="space-y-3">
-      <Reveal show={Boolean(ai.restartAt)}>
-        {ai.restartAt && (
+      <Reveal show={Boolean(ai.restartAt) || ai.restartPaused}>
+        {(ai.restartAt || ai.restartPaused) && (
           <p role="status" className="flex gap-1.5 text-xs text-fg-muted">
             <RefreshCw size={13} aria-hidden="true" className="mt-0.5 shrink-0 text-ai" />
-            {restartCopy(ai.restartAt)}
+            {ai.restartAt
+              ? restartCopy(ai.restartAt)
+              : `Restarts once you switch back to ${account}.`}
           </p>
         )}
       </Reveal>

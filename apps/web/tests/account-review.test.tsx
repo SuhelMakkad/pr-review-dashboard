@@ -188,7 +188,7 @@ describe('drafts and Activity per account', () => {
     const keys = (login: string) => [
       queryKeys.draft(login, 'p1'),
       queryKeys.operations(login),
-      queryKeys.ai('p1', login),
+      queryKeys.ai(login, 'p1'),
     ];
     const stale = () =>
       ['me', 'other'].map((login) =>
@@ -262,5 +262,151 @@ describe('drafts and Activity per account', () => {
       params: { owner: 'acme', repo: 'api', number: '7' },
       search: { thread: 't1' },
     });
+  });
+});
+
+describe('AI and Insights per account', () => {
+  it('refreshes the AI runs and Insights of the account an event names', () => {
+    const client = new QueryClient();
+    const keys = (login: string) => [
+      queryKeys.ai(login, 'p1'),
+      queryKeys.aiReviews(login),
+      queryKeys.insights(login, 30, ''),
+    ];
+    const stale = () =>
+      ['me', 'other'].map((login) =>
+        keys(login).map((key) => Boolean(client.getQueryState(key)?.isInvalidated)),
+      );
+    const reset = () => {
+      client.clear();
+      for (const login of ['me', 'other'])
+        for (const key of keys(login)) client.setQueryData(key, {});
+    };
+    const first = { value: false };
+
+    reset();
+    handle(client, { type: 'ai.updated', account: 'me', prId: 'p1', runId: 'r1' }, first);
+    expect(stale()).toEqual([
+      [true, true, false],
+      [false, false, false],
+    ]);
+
+    reset();
+    handle(client, { type: 'pulls.changed', account: 'me', ids: ['p1'] }, first);
+    expect(stale()).toEqual([
+      [true, true, false],
+      [false, false, false],
+    ]);
+
+    reset();
+    handle(client, { type: 'insights.updated', account: 'me' }, first);
+    expect(stale()).toEqual([
+      [false, false, true],
+      [false, false, false],
+    ]);
+
+    // The review target is every account's.
+    reset();
+    handle(client, { type: 'insights.updated', account: null }, first);
+    expect(stale()).toEqual([
+      [false, false, true],
+      [false, false, true],
+    ]);
+  });
+
+  it('reads the AI runs of the account left again on a switch, as its restarts now wait', async () => {
+    const { adoptStatus } = await import('@/lib/live');
+    const client = new QueryClient();
+
+    adoptStatus(client, as('me', 1));
+    client.setQueryData(queryKeys.ai('me', 'p1'), { runs: [], restartAt: 'soon' });
+    client.setQueryData(queryKeys.aiReviews('me'), { reviews: [] });
+    adoptStatus(client, as('other', 2));
+
+    expect(client.getQueryState(queryKeys.ai('me', 'p1'))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.aiReviews('me'))?.isInvalidated).toBe(true);
+    client.clear();
+  });
+
+  it('says why a history re-read was refused', async () => {
+    const { InsightsPage } = await import('@/features/insights/insights-page');
+    const { render, screen, fireEvent } = await import('@testing-library/react');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    vi.stubGlobal('fetch', async (path: string, options?: RequestInit) =>
+      options?.method === 'POST'
+        ? reply(notActive, 409)
+        : path.includes('/insights')
+          ? reply({
+              insights: null,
+              backfill: { doneWindows: [], finishedAt: null, lastError: null, running: false },
+              slaHours: 24,
+              repositories: [],
+            })
+          : reply({}),
+    );
+    client.setQueryData(queryKeys.status, as('me'));
+    render(
+      <QueryClientProvider client={client}>
+        <InsightsPage />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Re-read history' }));
+
+    expect(await screen.findByText(notActive.error)).toBeInTheDocument();
+    client.clear();
+  });
+});
+
+describe('Insights refreshes and empty states', () => {
+  it('reads every account’s Insights again after a first load that was on its way', async () => {
+    const { QueryObserver } = await import('@tanstack/react-query');
+    const client = new QueryClient();
+    const answers: ((value: string) => void)[] = [];
+    const observer = new QueryObserver(client, {
+      queryKey: queryKeys.insights('me', 30, ''),
+      queryFn: () => new Promise<string>((resolve) => answers.push(resolve)),
+    });
+    const unsubscribe = observer.subscribe(() => {});
+
+    try {
+      await vi.waitFor(() => expect(answers).toHaveLength(1));
+
+      // The load left before the review target changed, and answers with the old one.
+      handle(client, { type: 'insights.updated', account: null }, { value: false });
+      answers[0]('Old target');
+
+      await vi.waitFor(() => expect(answers).toHaveLength(2));
+      answers[1]('New target');
+      await vi.waitFor(() => expect(observer.getCurrentResult().data).toBe('New target'));
+    } finally {
+      unsubscribe();
+      client.clear();
+    }
+  });
+
+  it('shows Insights as empty, with nothing to read again, when signed out', async () => {
+    const { InsightsPage } = await import('@/features/insights/insights-page');
+    const { render, screen } = await import('@testing-library/react');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const fetches: string[] = [];
+
+    vi.stubGlobal('fetch', async (path: string) => {
+      fetches.push(path);
+
+      return reply({});
+    });
+    client.setQueryData(queryKeys.status, status({ account: null }));
+    render(
+      <QueryClientProvider client={client}>
+        <InsightsPage />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText('Insights appear after the first sync.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Re-read history' })).toBeDisabled();
+    expect(fetches.filter((path) => path.includes('/insights'))).toEqual([]);
+    client.clear();
   });
 });

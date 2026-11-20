@@ -30,7 +30,12 @@ const TRIGGERS = new Set<AttentionReason['kind']>(['first_review', 'requested_ag
 const MAX_ATTEMPTS = 3;
 
 /** Errors that mean "not now" for every PR: stop the pass, record nothing, retry next sync. */
-const STOP_CODES = new Set(['PLAN_LIMIT', 'SHUTTING_DOWN', 'ACCOUNT_CHANGED']);
+const STOP_CODES = new Set([
+  'PLAN_LIMIT',
+  'SHUTTING_DOWN',
+  'ACCOUNT_CHANGED',
+  'ACCOUNT_NOT_ACTIVE',
+]);
 const STOP_OUTCOMES = new Set<GitHubError['outcome']>(['rate_limit', 'unavailable', 'auth']);
 
 const primedKey = (account: string) => `auto-review-primed:${account}`;
@@ -230,11 +235,25 @@ export class AutoReviewer {
   /**
    * PRs whose automatic review new commits stopped, with when a fresh one starts. A restart that
    * is no longer coming, because the request is not due or you started a review, is left out.
+   * Restarts run only for the account in use: another account's wait for it (`pausedRestarts`).
    */
   restarts(account: string): Map<string, string> {
-    const restarts = new Map<string, string>();
+    return this.current(account) ? this.waitingRestarts(account) : new Map();
+  }
 
-    if (!this.current(account)) return restarts;
+  /** PRs of an account not in use whose restart waits for it to be in use again. */
+  pausedRestarts(account: string): Set<string> {
+    return account === this.sync.status.account?.login
+      ? new Set()
+      : new Set(this.waitingRestarts(account).keys());
+  }
+
+  /** The restarts still coming for `account`, while automatic review is on, in use or not. */
+  private waitingRestarts(account: string): Map<string, string> {
+    const restarts = new Map<string, string>();
+    const settings = this.runner.settings().autoReview;
+
+    if (this.closed || !settings.enabled) return restarts;
 
     const waiting = this.db
       .select()
@@ -377,8 +396,8 @@ export class AutoReviewer {
   }
 
   /** Lets open pages show the restart, or that it is no longer coming. */
-  private changed(prId: string, runId: string | null): void {
-    this.sync.events.emit({ type: 'ai.updated', prId, ...(runId ? { runId } : {}) });
+  private changed(account: string, prId: string, runId: string | null): void {
+    this.sync.events.emit({ type: 'ai.updated', account, prId, ...(runId ? { runId } : {}) });
   }
 
   /**
@@ -407,7 +426,7 @@ export class AutoReviewer {
         began ??
         new Date(now).toISOString(),
     });
-    this.changed(entry.prId, entry.runId ?? null);
+    this.changed(account, entry.prId, entry.runId ?? null);
   }
 
   /**
@@ -689,7 +708,8 @@ export class AutoReviewer {
         .run();
     });
 
-    for (const entry of pending) this.changed(entry.prId, entry.runId);
+    // Each with its own account: this spans every account's waits, those with no run included.
+    for (const entry of pending) this.changed(entry.account, entry.prId, entry.runId);
   }
 
   /**
@@ -835,7 +855,7 @@ export class AutoReviewer {
           this.closeWaits(account, candidate.item.id, candidate.key);
 
         // Open pages stop showing the restart, whatever became of it.
-        if (waiting) this.changed(candidate.item.id, waiting.runId);
+        if (waiting) this.changed(account, candidate.item.id, waiting.runId);
       }
     }
   }
@@ -875,7 +895,7 @@ export class AutoReviewer {
         });
         this.closeWaits(account, entry.prId, entry.key);
       });
-      this.changed(entry.prId, pending.runId);
+      this.changed(account, entry.prId, pending.runId);
 
       return true;
     }

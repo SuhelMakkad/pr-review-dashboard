@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, LoaderCircle, RefreshCw, Table2 } from 'lucide-react';
 import type { Insights } from '@review-desk/shared/insights';
 import { api } from '@/lib/api';
-import { useForge, usePulls } from '@/lib/queries';
+import { accountPath, useAccount, useForge, useStatus } from '@/lib/queries';
+import { queryKeys } from '@/lib/query-keys';
 import { relativePhrase } from '@/lib/time';
 import { Button } from '@/ui/button';
 import { cn } from '@/ui/cn';
@@ -140,27 +141,37 @@ const shortDate = (iso: string) =>
 export function InsightsPage() {
   const forge = useForge();
   const client = useQueryClient();
-  const pulls = usePulls();
-  const account = pulls.data?.account ?? '';
+  const status = useStatus();
+  const account = useAccount() ?? '';
+  // Known to have no account (signed out): nothing to load, and nothing to read again.
+  const signedOut = status.isSuccess && !account;
   const [days, setDays] = useState<(typeof ranges)[number]>(30);
   const [repo, setRepo] = useState('');
   const query = useQuery({
-    queryKey: ['insights', days, repo],
+    queryKey: queryKeys.insights(account, days, repo),
     queryFn: () =>
       api<InsightsResponse>(
-        `/api/insights?days=${days}${repo ? `&repo=${encodeURIComponent(repo)}` : ''}`,
+        accountPath(
+          account,
+          `/insights?days=${days}${repo ? `&repo=${encodeURIComponent(repo)}` : ''}`,
+        ),
       ),
+    enabled: Boolean(account),
     placeholderData: (previous) => previous,
     refetchInterval: (state) => (state.state.data?.backfill?.running ? 3000 : false),
   });
   const backfill = useMutation({
-    mutationFn: () => api('/api/insights/backfill', { method: 'POST', body: { account } }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['insights'] }),
+    mutationFn: () => api(accountPath(account, '/insights/backfill'), { method: 'POST', body: {} }),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.insights(account) }),
   });
   const target = useMutation({
     mutationFn: (slaHours: number) =>
       api('/api/insights/settings', { method: 'PUT', body: { account, slaHours } }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['insights'] }),
+    // Every account's Insights measure against the review target.
+    onSuccess: () =>
+      client.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'account' && query.queryKey[2] === 'insights',
+      }),
   });
   const data = query.data;
   const insights = data?.insights;
@@ -184,6 +195,8 @@ export function InsightsPage() {
                 <LoaderCircle size={12} className="animate-spin" aria-hidden="true" /> Reading your
                 last 90 days of reviews from {forge.name}…
               </>
+            ) : backfill.error ? (
+              <span className="text-fail">{backfill.error.message}</span>
             ) : data?.backfill?.lastError ? (
               <span className="text-fail">History is incomplete: {data.backfill.lastError}</span>
             ) : data?.backfill?.finishedAt ? (
@@ -193,7 +206,7 @@ export function InsightsPage() {
               size="sm"
               variant="ghost"
               icon={<RefreshCw size={12} />}
-              disabled={data?.backfill?.running || backfill.isPending}
+              disabled={!account || data?.backfill?.running || backfill.isPending}
               onClick={() => backfill.mutate()}
             >
               Re-read history
@@ -258,7 +271,7 @@ export function InsightsPage() {
 
         {/* Outline while loading; then the charts, a failure or the first-sync note eases in. */}
         {!insights ? (
-          query.isPending ? (
+          query.isPending && !signedOut ? (
             <InsightsSkeleton />
           ) : query.error ? (
             <Enter key="error" preset="fade" className="grid place-items-center py-10">

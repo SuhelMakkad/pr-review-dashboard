@@ -216,6 +216,7 @@ async function setup() {
     push,
     later,
     restarts: () => reviewer.restarts('you'),
+    paused: () => reviewer.pausedRestarts('you'),
   };
 }
 
@@ -626,8 +627,20 @@ describe('automatic review after new commits', () => {
   }
 
   it('stops the running review, waits for the PR to go quiet, then reviews the new head', async () => {
-    const { sync, providers, runs, logFor, settled, push, later, restarts, notified, idOf, first } =
-      await reviewing();
+    const {
+      sync,
+      providers,
+      runs,
+      logFor,
+      settled,
+      push,
+      later,
+      restarts,
+      paused,
+      notified,
+      idOf,
+      first,
+    } = await reviewing();
     const head = push(1846, 'follow-up');
 
     await sync.sync();
@@ -643,6 +656,15 @@ describe('automatic review after new commits', () => {
       AUTO_REVIEW_QUIET_MS - 1_000,
     );
     expect(restarts()).toEqual(new Map([[idOf(1846), waiting.restartAt]]));
+    expect(paused()).toEqual(new Set());
+
+    // Read while another account is in use: no countdown runs for it, and the restart waits.
+    const status = sync.status;
+
+    sync.status = { ...status, account: { ...status.account!, login: 'someone-else' } };
+    expect(restarts()).toEqual(new Map());
+    expect(paused()).toEqual(new Set([idOf(1846)]));
+    sync.status = status;
 
     // Not yet quiet for long enough.
     later(AUTO_REVIEW_QUIET_MS - 60_000);
@@ -1498,15 +1520,16 @@ describe('automatic review after new commits', () => {
 
     const updates: string[] = [];
 
+    // Each names the account of its wait, a wait with no run of its own included.
     sync.events.subscribe(({ event }) => {
-      if (event.type === 'ai.updated') updates.push(event.prId);
+      if (event.type === 'ai.updated') updates.push(`${event.account}:${event.prId}`);
     });
     enable(false);
     expect(restarts()).toEqual(new Map());
     expect(logFor(1846)).toEqual([
       expect.objectContaining({ status: 'primed', headOid: null, restartAt: null }),
     ]);
-    expect(updates).toContain(idOf(1846));
+    expect(updates).toContain(`you:${idOf(1846)}`);
 
     later(AUTO_REVIEW_QUIET_MS);
     await sync.sync();
