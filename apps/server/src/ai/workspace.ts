@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { x } from 'tar';
@@ -14,6 +15,7 @@ import { ghCredentials, scopedAccount } from '@/github/credentials.js';
 import { safeError } from '@/github/errors.js';
 import { baseGlabEnvironment, glabCwd } from '@/gitlab/transport.js';
 import { AgentError } from '@/ai/provider.js';
+import { log } from '@/log.js';
 import { observeInputs } from '@/ai/inputs.js';
 
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
@@ -119,6 +121,7 @@ export const downloadRepository: RepositoryExporter = async (
 ) => {
   const { command, args, env, cwd } = await archiveCommand(repository, oid);
   const archive = `${directory}.tar.gz`;
+  const started = performance.now();
   const controller = new AbortController();
   const combined = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(120_000)]);
 
@@ -168,7 +171,18 @@ export const downloadRepository: RepositoryExporter = async (
       }),
     ]);
 
-    return await extractRepository(archive, directory, combined);
+    const downloaded = performance.now();
+    const omitted = await extractRepository(archive, directory, combined);
+
+    // How big each snapshot is and where its time goes, for deciding whether to cache them.
+    log.event('info', 'ai.archive', {
+      side: basename(directory) === 'before' ? 'before' : 'after',
+      bytes,
+      downloadMs: downloaded - started,
+      extractMs: performance.now() - downloaded,
+    });
+
+    return omitted;
   } catch (error) {
     const timedOut = combined.aborted && !signal.aborted;
 

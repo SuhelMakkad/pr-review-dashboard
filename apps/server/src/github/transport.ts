@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
+import { githubOp } from '@/forge/ops.js';
+import { forgeRequest } from '@/forge/timing.js';
 import { ghCredentials, type GhCredentials } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 
@@ -61,13 +64,20 @@ export class GhCli implements GitHubTransport {
   ) {}
 
   private async spawn(args: string[], input?: string): Promise<RunResult> {
+    const started = performance.now();
     const env = await this.credentials.environment();
+    const prepared = performance.now();
 
     return new Promise((resolve, reject) => {
       const child = spawn('gh', args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: false,
         env,
+      });
+      let spawned = prepared;
+
+      child.once('spawn', () => {
+        spawned = performance.now();
       });
       let stdout = '';
       let stderr = '';
@@ -105,6 +115,18 @@ export class GhCli implements GitHubTransport {
       });
       child.on('close', (code) => {
         clearTimeout(timeout);
+
+        const ended = performance.now();
+
+        forgeRequest('github', githubOp(args.at(-1), input), {
+          credentialMs: prepared - started,
+          spawnMs: spawned - prepared,
+          childMs: ended - spawned,
+          totalMs: ended - started,
+          code: code ?? -1,
+          timedOut,
+          bytes: size,
+        });
         resolve({ code, stdout, stderr, timedOut });
       });
 

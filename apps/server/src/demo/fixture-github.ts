@@ -54,6 +54,8 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
   readonly writes: FixtureWrite[] = [];
   /** GitHub's approvals carry their summary; tests turn this off to act as GitLab does. */
   approvalCarriesSummary = true;
+  /** How long each PR read takes, so a benchmark can watch the server while a sync runs. */
+  readDelayMs = 0;
   /** The next write with this op name fails once (failure injection for tests). */
   failNext: string | null = null;
   loseResponseNext: string | null = null;
@@ -185,6 +187,7 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
       throw new GitHubError(
         `PR ${previous?.number ?? id} is unavailable; its cached record was retained.`,
       );
+    if (this.readDelayMs) await new Promise((resolve) => setTimeout(resolve, this.readDelayMs));
 
     const now = new Date(this.scenario.world.now()).toISOString();
     const snapshot = structuredClone(pull.snapshot);

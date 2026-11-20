@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
+import { gitlabOp } from '@/forge/ops.js';
+import { forgeRequest } from '@/forge/timing.js';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -126,11 +129,17 @@ export type GlabRunner = (args: string[], input: string | undefined) => Promise<
 export function spawnGlab(timeoutMs: number): GlabRunner {
   return (args, input) =>
     new Promise((resolve, reject) => {
+      const started = performance.now();
       const child = spawn('glab', args, {
         cwd: glabCwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: false,
         env: baseGlabEnvironment(),
+      });
+      let spawned = started;
+
+      child.once('spawn', () => {
+        spawned = performance.now();
       });
       let stdout = '';
       let stderr = '';
@@ -161,6 +170,18 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
       });
       child.on('close', (code) => {
         clearTimeout(timeout);
+
+        const ended = performance.now();
+
+        // glab reads its own token: there is no credential step to time.
+        forgeRequest('gitlab', gitlabOp(args.at(-1)), {
+          spawnMs: spawned - started,
+          childMs: ended - spawned,
+          totalMs: ended - started,
+          code: code ?? -1,
+          timedOut,
+          bytes: size,
+        });
         resolve({ code, stdout, stderr, timedOut });
       });
 

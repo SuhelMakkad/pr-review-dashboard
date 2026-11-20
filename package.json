@@ -21,7 +21,9 @@
     "format": "prettier --write apps packages tests .github *.json *.ts *.yaml README.md",
     "format:check": "prettier --check apps packages tests .github *.json *.ts *.yaml README.md",
     "db:generate": "pnpm --filter @review-desk/server db:generate",
-    "db:check": "pnpm --filter @review-desk/server db:check"
+    "db:check": "pnpm --filter @review-desk/server db:check",
+    "bench": "pnpm --filter @review-desk/shared build && pnpm --filter @review-desk/server bench",
+    "bench:forge": "pnpm --filter @review-desk/server bench:forge"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",

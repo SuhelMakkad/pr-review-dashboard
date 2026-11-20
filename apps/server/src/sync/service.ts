@@ -14,13 +14,16 @@ import {
 } from '@review-desk/shared/types';
 import {
   forForge,
+  forgeOf,
   forgeTerms,
   fullRef,
   instanceUrl,
   isSameUser,
   parseAccount,
 } from '@review-desk/shared/accounts';
+import { performance } from 'node:perf_hooks';
 import type { Store } from '@/db/store.js';
+import { log } from '@/log.js';
 import { EventBus } from '@/events.js';
 import type { DetectResult, GitHubApi } from '@/github/api.js';
 import { asAccount, type GitHubAccounts } from '@/github/credentials.js';
@@ -496,9 +499,27 @@ export class SyncService {
 
     let retryAt: string | null = null;
     const changed = new Set<string>();
+    // Wall time per phase, and the fetches' own durations (they overlap: concurrent work, not a
+    // share of the phase).
+    const timing = {
+      started: performance.now(),
+      discovered: 0,
+      detected: 0,
+      fetched: 0,
+      candidates: 0,
+      fetches: 0,
+      failed: 0,
+      fetchSumMs: 0,
+      fetchMaxMs: 0,
+      concurrency: 0,
+      forge: 'github' as 'github' | 'gitlab',
+      outcome: 'ok',
+    };
 
     try {
       const account = await this.github.identity();
+
+      timing.forge = forgeOf(account.login) === 'gitlab' ? 'gitlab' : 'github';
 
       if (account.login !== this.status.account?.login) {
         const saved = this.store.getSetting<SyncStatus>(`status:${account.login}`);
@@ -523,6 +544,7 @@ export class SyncService {
       await this.refreshTeams(account.login, scheduled);
 
       retryAt = await this.discover(account.login, scheduled);
+      timing.discovered = performance.now();
 
       const membership = this.store.membership(account.login);
       const previous = new Map(
@@ -542,6 +564,8 @@ export class SyncService {
       );
       const detected = await this.detect(ids, ciPending);
 
+      timing.detected = performance.now();
+      timing.candidates = ids.length;
       if (detected.retryAt) retryAt = detected.retryAt;
 
       const fetches: {
@@ -612,7 +636,18 @@ export class SyncService {
             // Removed from the queue since this sync read it: do not bring it back.
             if (cached && !latest) continue;
 
-            const snapshot = await this.github.snapshot(id, account.login, sources, latest);
+            const fetchStarted = performance.now();
+
+            timing.fetches += 1;
+
+            const snapshot = await this.github
+              .snapshot(id, account.login, sources, latest)
+              .finally(() => {
+                const ms = performance.now() - fetchStarted;
+
+                timing.fetchSumMs += ms;
+                timing.fetchMaxMs = Math.max(timing.fetchMaxMs, ms);
+              });
             const outcome = this.snapshots.commit(observation, snapshot, {
               fingerprint: result?.fingerprint ?? null,
               // Removed from the queue while it was being fetched: do not bring it back.
@@ -628,6 +663,7 @@ export class SyncService {
             this.forced.delete(id);
             changed.add(id);
           } catch (error) {
+            timing.failed += 1;
             this.status.warnings.push(`${cached ? fullRef(cached) : id}: ${safeError(error)}`);
 
             if (error instanceof GitHubError && error.retryAt) retryAt = error.retryAt;
@@ -636,7 +672,9 @@ export class SyncService {
       };
 
       // Every worker settles before the sync counts as done, so none still saves after it.
-      await Promise.allSettled(Array.from({ length: Math.min(3, fetches.length) }, worker));
+      timing.concurrency = Math.min(3, fetches.length);
+      await Promise.allSettled(Array.from({ length: timing.concurrency }, worker));
+      timing.fetched = performance.now();
 
       this.sampleQueue(account.login);
 
@@ -654,8 +692,28 @@ export class SyncService {
     } catch (error) {
       this.status.error = safeError(error);
       retryAt = error instanceof GitHubError ? error.retryAt : null;
+      timing.outcome = error instanceof GitHubError ? error.outcome : 'error';
     } finally {
       const now = new Date().toISOString();
+      const ended = performance.now();
+      const phase = (from: number, to: number) => (from && to ? to - from : undefined);
+
+      log.event('info', 'sync.completed', {
+        forge: timing.forge,
+        trigger: scheduled ? 'interval' : 'manual',
+        outcome: retryAt && timing.outcome === 'ok' ? 'rate_limit' : timing.outcome,
+        discoveryMs: phase(timing.started, timing.discovered),
+        detectionMs: phase(timing.discovered, timing.detected),
+        fetchMs: phase(timing.detected, timing.fetched),
+        totalMs: ended - timing.started,
+        candidates: timing.candidates,
+        fetched: timing.fetches,
+        changed: changed.size,
+        failed: timing.failed,
+        concurrency: timing.concurrency,
+        fetchSumMs: timing.fetchSumMs,
+        fetchMaxMs: timing.fetchMaxMs,
+      });
 
       this.status = {
         ...this.status,

@@ -99,6 +99,16 @@ One Review Desk process uses a data folder at a time. A second `pnpm start` or `
 
 Syncing is incremental: a cheap fingerprint per PR decides when a full refresh is needed, with a full check every 30 minutes and on opening a PR. Search failures never drop a PR, and a PR leaves the list only once GitHub confirms it was closed or merged, or you remove a PR you added by hand.
 
+The server keeps a log in `.data/logs/review-desk.log` (only you can read it). It holds measurements and nothing you wrote: each line is a JSON record of a fixed kind with fixed fields. The fields are timings, counts, HTTP statuses, error codes, a request's route as the server declares it (`/api/pulls/:id`) and what a `gh` or `glab` request did (`Snapshot`, `pulls.files`, `mr.discussions`). The log never contains PR text, reviews, comments, diffs, file or branch names, URLs, logins or tokens. It records:
+
+- each sync, by phase and count;
+- slow requests, and every server error;
+- slow `gh` and `glab` calls;
+- repository downloads for full reviews;
+- event-loop delay that would make the app feel slow.
+
+Past about 10 MB the file is rotated, keeping five older ones (`review-desk.log.1` to `.5`). A disk that stalls or fills loses log records, never the app. `REVIEW_DESK_LOG_LEVEL=debug` also records every request, every `gh` or `glab` call and the event-loop delay every 10 seconds. That is enough to check a real session against the performance targets with `pnpm --filter @review-desk/server log:summary .data/logs/review-desk.log`. It reports each route's p50 and p95 against a 100 ms p95, and the worst 10-second window's event-loop p99 against 50 ms. Windows with too few samples are left out.
+
 ## Development
 
 The repository is a pnpm workspace with one lockfile. `apps/web` (`@review-desk/web`) contains the React, TypeScript and Vite frontend (TanStack Router and Query, Tailwind CSS, Radix primitives, `@pierre/diffs`). `apps/server` (`@review-desk/server`) contains Fastify, Drizzle ORM over Node's built-in SQLite, GitHub, sync, reviews, AI, Linear, notifications and insights. `packages/shared` (`@review-desk/shared`) contains browser-safe contracts and pure rules for attention, author blockers, diffs, tickets and insights.
@@ -124,5 +134,16 @@ Animation uses the `motion` library through one layer in `apps/web/src/ui/motion
 To run a package's tests alone, use `pnpm --filter @review-desk/web test`, `pnpm --filter @review-desk/server test` or `pnpm --filter @review-desk/shared test`. After shared code has been built, `pnpm --filter <package> typecheck` checks that workspace and its tests.
 
 To change the database schema, edit `apps/server/src/db/schema.ts`, run `pnpm db:generate --name <change>` and commit the new folder under `apps/server/drizzle/`. The app applies pending migrations on start. Never edit a migration that has already been released; generate a new one instead.
+
+`pnpm bench` measures the server on synthetic workloads: 500 and 1,000 PRs across 20 repositories, one PR with 3,000 changed files and 300 threads, and one rebased since your review with 400 changed files. All of it is in memory behind the demo forge. It times:
+
+- cold and warm syncs (one changed PR);
+- `/api/pulls` on a populated 1,000-PR account, idle and while a background sync of 100 changed PRs runs (samples count only while it runs);
+- the inbox and My PRs derivations;
+- the large PR's full diff, cold;
+- the rebased interdiff, cold, with the longest event-loop stall around each build;
+- the large PR's fingerprints.
+
+It prints a table with each gate's verdict (route p95 under 100 ms, stall under 50 ms) and writes `bench-results.json`. Run it on a representative machine before and after a change that could affect speed; `BENCH_SMOKE=1` runs a small version, as `pnpm test` does. `pnpm bench:forge` compares matched GitHub requests through `gh api` and through direct HTTPS with the same sign-in, to estimate what the CLI itself costs. It reads the token from `gh auth token` for those requests only, never stores or prints it, and is never run by CI.
 
 Every GraphQL document is validated against GitHub's published schema (`tests/schema/github.graphql`). Demo mode (`apps/server/src/demo/`) models commit graphs, force pushes, GitHub writes with a write log and failure injection, Linear issues, AI answers and review history, so end-to-end tests never touch GitHub or spend AI quota.
