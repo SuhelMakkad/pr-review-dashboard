@@ -626,6 +626,78 @@ describe('GitLab merge request snapshots', () => {
     ).toEqual([expect.objectContaining({ state: 'APPROVED', body: '', commitOid: HEAD2 })]);
   });
 
+  it('keeps your comment just before an automatic approval apart from it and its summary', () => {
+    const mr = { web_url: WEB } as RawMergeRequest;
+    const at = (minute: number, second = 0) => seconds(10 + minute, second);
+    const summary =
+      '<!-- review-desk:ai-review run=run-1 -->\n<!-- review-desk:approval-summary -->\nSummary';
+    const discussions: RawDiscussion[] = [
+      {
+        id: 'code',
+        individual_note: false,
+        notes: [
+          {
+            id: 401,
+            type: 'DiffNote',
+            body: 'Consider a guard here.',
+            author: users.rev,
+            created_at: at(0),
+            updated_at: at(0),
+            system: false,
+            position: {
+              head_sha: HEAD2,
+              base_sha: BASE,
+              start_sha: START,
+              new_path: 'a.ts',
+              new_line: 3,
+            },
+          } as never,
+        ],
+      },
+      {
+        id: 'approval',
+        individual_note: true,
+        notes: [
+          {
+            id: 402,
+            type: null,
+            body: 'approved this merge request',
+            author: users.rev,
+            created_at: at(0, 30),
+            updated_at: at(0, 30),
+            system: true,
+          },
+        ],
+      },
+      {
+        id: 'summary',
+        individual_note: true,
+        notes: [
+          {
+            id: 403,
+            type: null,
+            body: summary,
+            author: users.rev,
+            created_at: at(5),
+            updated_at: at(5),
+            system: false,
+          },
+        ],
+      },
+    ];
+    const reviews = viewerReviews(
+      mr,
+      discussions,
+      [{ id: 2, head_commit_sha: HEAD2, created_at: at(-1) }],
+      'rev',
+    );
+
+    expect(reviews.map(({ state, body }) => ({ state, body }))).toEqual([
+      { state: 'COMMENTED', body: '' },
+      { state: 'APPROVED', body: summary },
+    ]);
+  });
+
   it('finds a marked note on a later page, following GitLab’s Link header', async () => {
     const { client, fake } = gitlab();
     const notes = `${MR}/notes`;

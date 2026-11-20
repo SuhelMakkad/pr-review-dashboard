@@ -1543,12 +1543,13 @@ describe('approvals whose summary is a separate write', () => {
       const action = data.action as Extract<typeof data.action, { type: 'ai_review' }>;
       const { summaryFingerprint: _new, ...basis } = action.basis!;
 
-      // As the previous version queued it: no plan, no summary fingerprint, no summary tag.
+      // As an earlier version queued it: no summary fingerprint or tag, with or without a plan.
       store.db
         .update(githubOperations)
         .set({
           data: {
             ...data,
+            ...(changed ? { plan: 2 as const } : {}),
             action: {
               ...action,
               basis,
@@ -1568,6 +1569,57 @@ describe('approvals whose summary is a separate write', () => {
       expect(github.writes).toEqual([]);
     },
   );
+
+  it('holds the summary after a restart that came before its approval was named', async () => {
+    const context = await gitlabLike();
+    const { github, queue, sync, store, review, runner } = context;
+
+    await queue.pause();
+
+    const run = await review();
+    const data = stored(context, run.id);
+    const action = data.action as Extract<typeof data.action, { type: 'ai_review' }>;
+    const now = new Date().toISOString();
+
+    // Approved and receipted, then stopped before it was named; meanwhile it may be replaced.
+    await github.approveReview(data.prId, action.expectedHeadOid, '');
+    store.db
+      .update(githubOperations)
+      .set({
+        status: 'running',
+        data: {
+          ...data,
+          plan: 2,
+          status: 'running',
+          steps: [
+            {
+              method: 'approveReview',
+              args: [data.prId, action.expectedHeadOid, ''],
+              startedAt: now,
+              completedAt: now,
+              result: { url: data.prUrl },
+              uncertain: false,
+              acknowledged: true,
+            },
+          ],
+        },
+      })
+      .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
+      .run();
+    github.writes.length = 0;
+    await queue.close();
+
+    const reopened = new OperationQueue(sync, { mutationIntervalMs: 0, retryDelaysMs: [1, 2, 3] });
+
+    reopened.posting = () => runner.settings();
+    cleanups.push(() => reopened.close());
+    reopened.open();
+
+    await expect
+      .poll(() => reopened.get('you', data.id).error?.code, { timeout: 2500, interval: 20 })
+      .toBe('APPROVAL_UNKNOWN');
+    expect(github.writes).toEqual([]);
+  });
 
   it('does not post the summary with an approval that replaced the one this post gave', async () => {
     const { github, queue, pull, review, posted } = await gitlabLike();
@@ -1810,6 +1862,10 @@ describe('approvals whose summary is a separate write', () => {
             ...data,
             plan: 2,
             status: 'running',
+            // Named right after it was given, as the live send does.
+            approvalId: context
+              .pull(1839)
+              .snapshot.verdicts.find((verdict) => verdict.login === 'you')?.id,
             steps: [
               receipt('approveReview', [data.prId, action.expectedHeadOid, '']),
               ...(receipts === 2

@@ -348,6 +348,7 @@ export class OperationQueue {
         message: forForge(operation.error.message, row.account),
       },
       controls: this.controls(row),
+      ...(this.mayHavePosted(row) ? { confirmStop: true } : {}),
       ...(_backup
         ? { savedPendingReview: { body: _backup.body, comments: _backup.comments } }
         : {}),
@@ -617,8 +618,7 @@ export class OperationQueue {
         409,
         'This action is no longer available. Refresh Activity.',
       );
-    // A combined approval the forge refused may have approved without its summary.
-    const uncertain = row.steps.some((step) => step.uncertain) || this.refusedCombined(row);
+    const uncertain = this.mayHavePosted(row);
 
     if (command === 'reopen' && uncertain && !confirmed)
       throw new ReviewError(
@@ -1074,6 +1074,11 @@ export class OperationQueue {
               };
               row = this.save({ ...row, steps });
 
+              // The approval this post just gave, named while nothing else can have replaced it:
+              // its summary goes only with that one.
+              if (method === 'approveReview' && args[2] === '' && row.action.type === 'ai_review')
+                row = await this.bindApproval(row);
+
               return result;
             } catch (error) {
               if (error instanceof GitHubError && error.outcome !== 'unknown') {
@@ -1186,6 +1191,15 @@ export class OperationQueue {
   }
 
   /**
+   * True when something of this action may be on the forge without a receipt here: a step whose
+   * response was lost, or a combined approval the forge refused, which may have approved without
+   * its summary.
+   */
+  private mayHavePosted(row: OperationRecord): boolean {
+    return row.steps.some((step) => step.uncertain) || this.refusedCombined(row);
+  }
+
+  /**
    * True for a row from before plans were versioned that sent an approval and its summary in one
    * step, which the forge answered with an error: the approval may have gone out without it.
    */
@@ -1219,20 +1233,22 @@ export class OperationQueue {
   ): Promise<OperationRecord | null> {
     const action = row.action;
 
-    if (action.type !== 'ai_review' || action.event !== 'APPROVE' || row.plan === 2) return row;
+    if (action.type !== 'ai_review' || action.event !== 'APPROVE') return row;
     if (this.sync.github.approvalCarriesSummary) return row;
-    if (!row.steps.some((step) => step.method === 'approveReview')) {
-      // Queued by an earlier version, with nothing to check its summary against after
-      // approving: nothing more of it is sent.
-      if (action.basis && !action.basis.summaryFingerprint)
-        throw new ReviewError(
-          'LEGACY_APPROVAL',
-          409,
-          'This automatic approval was queued by an earlier version of Review Desk, which could not check its summary on GitLab. Nothing more is sent; check the PR, then approve it yourself if it still applies.',
-        );
 
-      return this.save({ ...row, plan: 2 });
-    }
+    const unsent = !row.steps.some((step) => step.method === 'approveReview');
+
+    // Queued by an earlier version, with nothing to check its summary against after approving
+    // (whichever plan it was given): nothing more of it is sent.
+    if (unsent && action.basis && !action.basis.summaryFingerprint)
+      throw new ReviewError(
+        'LEGACY_APPROVAL',
+        409,
+        'This automatic approval was queued by an earlier version of Review Desk, which could not check its summary on GitLab. Nothing more is sent; check the PR, then approve it yourself if it still applies.',
+      );
+
+    if (row.plan === 2) return row;
+    if (unsent) return this.save({ ...row, plan: 2 });
     if (!this.refusedCombined(row)) return row;
 
     const approved = approvalOf(row, pr, false);
@@ -1337,14 +1353,6 @@ export class OperationQueue {
 
     this.stopFor(row, this.postProblem(row, action, open, mergeBase, method, args));
 
-    // The first check of a summary, right after its approval, records which approval that is:
-    // later attempts go only with it, never with one that replaced it.
-    if (isSummary(action, method) && !row.approvalId) {
-      const approval = approvalOf(row, open, this.sync.github.approvalCarriesSummary);
-
-      if (approval) row = this.save({ ...row, approvalId: approval.id });
-    }
-
     return row;
   }
 
@@ -1394,6 +1402,24 @@ export class OperationQueue {
       return stopped('resolving threads was turned off in Settings.', approving);
 
     return null;
+  }
+
+  /**
+   * Records which approval an automatic approval just gave, read right after it: GitLab names it
+   * by its note. Where it cannot be read, nothing is recorded, and the summary waits for you.
+   */
+  private async bindApproval(row: OperationRecord): Promise<OperationRecord> {
+    try {
+      await this.sync.refresh(row.prId, row.account);
+    } catch {
+      return row;
+    }
+
+    const pr = this.sync.store.snapshot(row.account, row.prId) ?? undefined;
+    const approval = approvalOf(row, pr, this.sync.github.approvalCarriesSummary);
+    const current = this.row(row.account, row.id);
+
+    return approval ? this.save({ ...current, approvalId: approval.id }) : current;
   }
 
   /** Holds every request to the forge until a rate limit it reported has passed. */
@@ -1477,7 +1503,15 @@ export class OperationQueue {
       ? approvalOf(row, pr, this.sync.github.approvalCarriesSummary)
       : undefined;
 
-    if (summary && (!approval || (row.approvalId && approval.id !== row.approvalId)))
+    if (summary && !row.approvalId)
+      return {
+        skipped: 'Review Desk could not record which approval this post gave.',
+        code: 'APPROVAL_UNKNOWN',
+        hold: true,
+        attention:
+          'Review Desk could not record which approval this post gave, so its summary was not posted. Check the PR.',
+      };
+    if (summary && (!approval || approval.id !== row.approvalId))
       return {
         skipped: 'your approval of the reviewed commit is no longer on the PR.',
         code: 'APPROVAL_WITHDRAWN',
@@ -1833,6 +1867,14 @@ export class OperationQueue {
         step.uncertain = false;
         this.save({
           ...row,
+          // An approval confirmed from the PR names the approval its summary goes with.
+          ...(step.method === 'approveReview' &&
+          step.args[2] === '' &&
+          result &&
+          typeof result === 'object' &&
+          'id' in result
+            ? { approvalId: String((result as { id: unknown }).id) }
+            : {}),
           status: 'queued',
           error: null,
           progress: 'GitHub confirmed the interrupted step. Resuming.',

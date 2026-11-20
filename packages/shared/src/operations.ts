@@ -82,6 +82,11 @@ export interface GitHubOperation {
   retryAt: string | null;
   dismissedAt: string | null;
   controls: OperationControl[];
+  /**
+   * Something may already be on the forge: stopping or reopening needs your confirmation, after
+   * you have checked.
+   */
+  confirmStop?: boolean;
   savedPendingReview?: {
     body: string;
     comments: { id: string; body: string; path: string; line: number | null; url: string }[];

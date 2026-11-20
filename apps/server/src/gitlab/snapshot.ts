@@ -455,28 +455,34 @@ export function viewerReviews(
     .sort((a, b) => time(a.note.created_at) - time(b.note.created_at));
   const groups: (typeof own)[] = [];
 
-  for (const entry of own) {
+  // An automatic approval's summary belongs to the approval it follows, however long after: the
+  // two are separate writes, and a retry can part them by more than the gap. Only a note that
+  // says it is such a summary, on the head the approval was given on (no push between).
+  const summarises = (summary: (typeof own)[number] | undefined, approval: (typeof own)[number]) =>
+    summary !== undefined &&
+    !summary.note.system &&
+    summary.note.body.startsWith(postedReviewPrefix) &&
+    summary.note.body.split('\n', 2)[1] === approvalSummaryTag &&
+    verdictOf(approval.note) === 'approved' &&
+    headAt(versions, approval.note.created_at) === headAt(versions, summary.note.created_at);
+
+  own.forEach((entry, index) => {
     const group = groups.at(-1);
     const previous = group?.at(-1);
-    // An automatic approval's summary belongs to the approval it follows, however long after:
-    // the two are separate writes, and a retry can part them by more than the gap. Only a note
-    // that says it is such a summary, on the head the approval was given on (no push between).
-    const summarises =
-      !entry.note.system &&
-      entry.note.body.startsWith(postedReviewPrefix) &&
-      entry.note.body.split('\n', 2)[1] === approvalSummaryTag &&
-      previous !== undefined &&
-      verdictOf(previous.note) === 'approved' &&
-      headAt(versions, previous.note.created_at) === headAt(versions, entry.note.created_at);
+    // That approval and its summary are a review of their own: your notes just before it stay
+    // the review they were.
+    const startsSummarised = summarises(own[index + 1], entry);
 
     if (
       group &&
       previous &&
-      (summarises || time(entry.note.created_at) - time(previous.note.created_at) <= REVIEW_GAP_MS)
+      !startsSummarised &&
+      (summarises(entry, previous) ||
+        time(entry.note.created_at) - time(previous.note.created_at) <= REVIEW_GAP_MS)
     )
       group.push(entry);
     else groups.push([entry]);
-  }
+  });
 
   const reviews: Review[] = [];
 
