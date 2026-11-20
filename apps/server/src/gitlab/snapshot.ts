@@ -466,22 +466,30 @@ export function viewerReviews(
     verdictOf(approval.note) === 'approved' &&
     headAt(versions, approval.note.created_at) === headAt(versions, summary.note.created_at);
 
+  // Groups that are an approval and its summary: nothing joins them after the summary.
+  const summarised = new Set<(typeof own)[number][]>();
+
   own.forEach((entry, index) => {
     const group = groups.at(-1);
     const previous = group?.at(-1);
     // That approval and its summary are a review of their own: your notes just before it stay
-    // the review they were.
+    // the review they were, and notes after it (a push may come between) are another.
     const startsSummarised = summarises(own[index + 1], entry);
+    const joinsAsSummary = previous !== undefined && summarises(entry, previous);
 
     if (
       group &&
       previous &&
       !startsSummarised &&
-      (summarises(entry, previous) ||
+      !summarised.has(group) &&
+      (joinsAsSummary ||
         time(entry.note.created_at) - time(previous.note.created_at) <= REVIEW_GAP_MS)
-    )
+    ) {
       group.push(entry);
-    else groups.push([entry]);
+      if (joinsAsSummary) summarised.add(group);
+    } else {
+      groups.push([entry]);
+    }
   });
 
   const reviews: Review[] = [];
@@ -529,7 +537,8 @@ export function viewerReviews(
         (latest, { note }) => (time(note.updated_at) > time(latest) ? note.updated_at : latest),
         end.created_at,
       ),
-      commitOid: diffHead ?? headAt(versions, end.created_at),
+      // An approval and its summary are on the commit the approval was given on.
+      commitOid: diffHead ?? headAt(versions, (summarised.has(group) ? first : end).created_at),
       body: summary?.note.body ?? '',
       url: noteUrl(mr, first.id),
     });

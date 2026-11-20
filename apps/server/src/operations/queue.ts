@@ -1237,10 +1237,17 @@ export class OperationQueue {
     if (this.sync.github.approvalCarriesSummary) return row;
 
     const unsent = !row.steps.some((step) => step.method === 'approveReview');
+    // Not given yet: never sent, or refused as a split step (a refused combined step is checked
+    // for what went out below, never sent again).
+    const notGiven =
+      !this.refusedCombined(row) &&
+      !row.steps.some(
+        (step) => step.method === 'approveReview' && (step.completedAt || step.uncertain),
+      );
 
     // Queued by an earlier version, with nothing to check its summary against after approving
     // (whichever plan it was given): nothing more of it is sent.
-    if (unsent && action.basis && !action.basis.summaryFingerprint)
+    if (notGiven && action.basis && !action.basis.summaryFingerprint)
       throw new ReviewError(
         'LEGACY_APPROVAL',
         409,
@@ -1411,7 +1418,14 @@ export class OperationQueue {
   private async bindApproval(row: OperationRecord): Promise<OperationRecord> {
     try {
       await this.sync.refresh(row.prId, row.account);
-    } catch {
+    } catch (error) {
+      // A rate limit holds everything until its time, and stops this attempt; the approval's
+      // receipt is kept. Any other failure leaves it unnamed, and the summary waits.
+      if (error instanceof GitHubError && error.outcome === 'rate_limit') {
+        this.coolDown(error);
+        throw error;
+      }
+
       return row;
     }
 
@@ -1787,7 +1801,9 @@ export class OperationQueue {
         let receipt: { id: string; url: string } | null | undefined;
 
         if (step.args[2] === '') {
-          receipt = approvalOf(row, pr, carries);
+          // Nothing on GitLab tells this approval from one you gave by hand meanwhile: an
+          // approval carries no trace of the request that made it. It stays unconfirmed.
+          receipt = undefined;
         } else if (carries) {
           receipt = pr?.reviews.find(
             (review) =>
@@ -1867,14 +1883,7 @@ export class OperationQueue {
         step.uncertain = false;
         this.save({
           ...row,
-          // An approval confirmed from the PR names the approval its summary goes with.
-          ...(step.method === 'approveReview' &&
-          step.args[2] === '' &&
-          result &&
-          typeof result === 'object' &&
-          'id' in result
-            ? { approvalId: String((result as { id: unknown }).id) }
-            : {}),
+
           status: 'queued',
           error: null,
           progress: 'GitHub confirmed the interrupted step. Resuming.',

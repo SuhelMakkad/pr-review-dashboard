@@ -1405,19 +1405,59 @@ describe('approvals whose summary is a separate write', () => {
     expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview', 'AddComment']);
   });
 
-  it.each(['ApproveReview', 'AddComment'])(
-    'confirms a lost %s response from the PR, and sends nothing twice',
-    async (lost) => {
-      const { github, review, posted } = await gitlabLike();
+  it('confirms a lost summary response from the PR, and sends nothing twice', async () => {
+    const { github, review, posted } = await gitlabLike();
 
-      github.loseResponseNext = lost;
+    github.loseResponseNext = 'AddComment';
 
-      const run = await review();
+    const run = await review();
 
-      await posted(run.id);
-      expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview', 'AddComment']);
-    },
-  );
+    await posted(run.id);
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview', 'AddComment']);
+  });
+
+  it('leaves a lost approval response unconfirmed: no approval names the request that made it', async () => {
+    const { github, review, posted } = await gitlabLike();
+
+    github.loseResponseNext = 'ApproveReview';
+
+    const run = await review();
+    const unconfirmed = await posted(run.id, 'needs_attention');
+
+    expect(unconfirmed.error?.code).toBe('UNCONFIRMED');
+    expect(unconfirmed.confirmStop).toBe(true);
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
+  });
+
+  it('stops for the forge’s rate limit while naming the approval, and keeps its receipt', async () => {
+    const { github, sync, review, posted } = await gitlabLike();
+    const refresh = sync.refresh.bind(sync);
+    const retryAt = new Date(Date.now() + 120_000).toISOString();
+    const approve = github.approveReview.bind(github);
+    let approved = false;
+
+    vi.spyOn(github, 'approveReview').mockImplementation(async (...args) => {
+      const receipt = await approve(...args);
+
+      approved = true;
+      return receipt;
+    });
+    // The first read after the approval is the one that names it.
+    vi.spyOn(sync, 'refresh').mockImplementation(async (...args) => {
+      if (approved) {
+        approved = false;
+        throw new GitHubError('GitLab rate limit reached.', retryAt, 429, 'rate_limit');
+      }
+
+      return refresh(...args);
+    });
+
+    const run = await review();
+
+    await posted(run.id, 'waiting');
+    expect(Date.parse(sync.status.retryAt!)).toBeGreaterThanOrEqual(Date.parse(retryAt));
+    expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
+  });
 
   it.each([
     [
@@ -1569,6 +1609,45 @@ describe('approvals whose summary is a separate write', () => {
       expect(github.writes).toEqual([]);
     },
   );
+
+  it('holds a split approval an earlier build saved as refused, before sending it again', async () => {
+    const context = await gitlabLike();
+    const { github, queue, store, review, posted } = context;
+
+    await queue.pause();
+
+    const run = await review();
+    const data = stored(context, run.id);
+    const action = data.action as Extract<typeof data.action, { type: 'ai_review' }>;
+    const { summaryFingerprint: _new, ...basis } = action.basis!;
+    const now = new Date().toISOString();
+
+    store.db
+      .update(githubOperations)
+      .set({
+        data: {
+          ...data,
+          plan: 2,
+          action: { ...action, basis },
+          steps: [
+            {
+              method: 'approveReview',
+              args: [data.prId, action.expectedHeadOid, ''],
+              startedAt: now,
+              completedAt: null,
+              result: null,
+              uncertain: false,
+            },
+          ],
+        },
+      })
+      .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
+      .run();
+    queue.resume();
+
+    expect((await posted(run.id, 'needs_attention')).error?.code).toBe('LEGACY_APPROVAL');
+    expect(github.writes).toEqual([]);
+  });
 
   it('holds the summary after a restart that came before its approval was named', async () => {
     const context = await gitlabLike();
