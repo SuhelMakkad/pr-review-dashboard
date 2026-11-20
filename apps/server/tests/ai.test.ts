@@ -668,6 +668,8 @@ describe('AI runner', () => {
       await vi.waitFor(() => expect(claude.has(join(root, brief.id))).toBe(true));
 
       expect(codex.size).toBe(2);
+      // Removed in the background, once each run's agent has let go of its workspace.
+      await runner.cleanedUp();
       expect(existsSync(join(root, queued.id))).toBe(false);
       expect(existsSync(join(root, first.id))).toBe(false);
       expect(runner.runs('you', second.prId)[0].status).toBe('running');
@@ -1494,6 +1496,7 @@ describe('AI runner', () => {
       runner.cancel('you', first.id);
 
       expect(await finished(first)).toMatchObject({ status: 'cancelled', resumable: false });
+      await runner.cleanedUp();
       expect(existsSync(join(root, first.id))).toBe(false);
       await expect(runner.resume('you', first.id)).rejects.toThrow('cannot be resumed');
     } finally {

@@ -131,6 +131,21 @@ const schemas = {
     extractMs: 'number',
   },
   'log.dropped': { count: 'number' },
+  'backup.written': { managed: 'boolean', published: 'boolean', stagingLeft: 'boolean' },
+  'retention.backups': {
+    kept: 'number',
+    removed: 'number',
+    failed: 'number',
+    managed: 'boolean',
+  },
+  'ai.workspaces': {
+    kept: 'number',
+    keptBytes: 'number',
+    removed: 'number',
+    removedBytes: 'number',
+    deferred: 'number',
+    failed: 'number',
+  },
 } as const satisfies Record<string, Schema>;
 
 export type LogEvent = keyof typeof schemas;

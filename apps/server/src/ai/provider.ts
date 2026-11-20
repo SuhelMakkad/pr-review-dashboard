@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
 import type { Duplex } from 'node:stream';
 import { existsSync, mkdirSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import type { AiEffort, AiProvider, CodexAccountStatus } from '@review-desk/shared/ai';
@@ -159,6 +161,50 @@ export function agentRunning(workDir: string): boolean {
     return true;
   } finally {
     probe?.close();
+  }
+}
+
+/**
+ * Removes a run's workspace while holding the run's agent lock, so no agent can be working in it:
+ * a supervisor that starts meanwhile finds the lock taken, and one that starts afterwards finds
+ * no workspace, and both exit with 75 before running anything. Waits up to `waitMs` for an agent
+ * still exiting; `busy` if it has not by then, and the workspace is left for a later attempt.
+ * The lock file stays where it is: a supervisor may already have it open.
+ */
+export async function removeWorkspace(
+  workDir: string,
+  options: { waitMs: number },
+): Promise<'removed' | 'busy'> {
+  const path = agentLockPath(workDir);
+  const deadline = performance.now() + options.waitMs;
+
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+
+  for (;;) {
+    let lock: DatabaseSync | null = null;
+
+    try {
+      lock = new DatabaseSync(path, { timeout: 0 });
+      lock.exec('PRAGMA locking_mode = EXCLUSIVE');
+      lock.exec('BEGIN EXCLUSIVE');
+    } catch {
+      lock?.close();
+      lock = null;
+    }
+
+    if (lock) {
+      try {
+        await rm(workDir, { recursive: true, force: true });
+
+        return 'removed';
+      } finally {
+        lock.close();
+      }
+    }
+
+    if (performance.now() >= deadline) return 'busy';
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 

@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -72,8 +80,9 @@ describe('database migrations', () => {
     }));
   }
 
+  /** The backups the app keeps, in the data folder's `backups/`. */
   function backups(directory: string) {
-    return readdirSync(directory).filter((file) => file.startsWith('backup-'));
+    return readdirSync(join(directory, 'backups')).filter((file) => file.startsWith('backup-'));
   }
 
   it('creates a fresh database from the Drizzle baseline', () => {
@@ -185,6 +194,46 @@ describe('database migrations', () => {
     expect(db.$client.prepare('SELECT * FROM extra').all()).toEqual([]);
   });
 
+  it('clears what an interrupted backup left, then backs up once and migrates', () => {
+    const directory = temporaryDirectory();
+    const path = join(directory, 'state.sqlite');
+    const folder = join(directory, 'migrations');
+    const legacy = new DatabaseSync(path);
+
+    migrate(legacy, path);
+    legacy.close();
+    cpSync(migrationsFolder, folder, { recursive: true });
+    new Store(path).close();
+
+    // A previous start died halfway through copying the database for this migration.
+    const partial = join(
+      directory,
+      'backups',
+      'backup-before-29990101000000_extra.sqlite.0badf00d.partial',
+    );
+
+    writeFileSync(partial, 'half a copy');
+    mkdirSync(join(folder, '29990101000000_extra'));
+    writeFileSync(
+      join(folder, '29990101000000_extra', 'migration.sql'),
+      'CREATE TABLE `extra` (`id` text);',
+    );
+
+    const db = drizzle({ client: new DatabaseSync(path) });
+
+    cleanups.push(() => db.$client.close());
+    migrateDatabase(db, path, folder);
+
+    expect(existsSync(partial)).toBe(false);
+    expect(
+      readdirSync(join(directory, 'backups')).filter((name) => name.endsWith('.partial')),
+    ).toEqual([]);
+    expect(backups(directory).sort()).toEqual(
+      [...upgradeBackups, 'backup-before-29990101000000_extra.sqlite'].sort(),
+    );
+    expect(appliedMigrations(db.$client)).toEqual([...migrations, '29990101000000_extra']);
+  });
+
   it('backs up an existing legacy database before upgrading and keeps its data', () => {
     const directory = temporaryDirectory();
     const path = join(directory, 'state.sqlite');
@@ -207,7 +256,7 @@ describe('database migrations', () => {
     };
 
     expect(migrate(legacy, path, [{ version: 1, name: 'initial', up: () => {} }, extra])).toBe(2);
-    expect(readdirSync(directory)).toContain('backup-v1.sqlite');
+    expect(backups(directory)).toContain('backup-v1.sqlite');
     expect(legacy.prepare('SELECT data FROM triage').get()).toEqual({
       data: JSON.stringify({ note: 'kept' }),
     });

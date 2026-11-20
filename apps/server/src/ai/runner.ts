@@ -1,7 +1,8 @@
 import { performance } from 'node:perf_hooks';
 import { isoNow, type Clock } from '@/clock.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { lstat, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
@@ -41,7 +42,8 @@ import {
   fullReviewInput,
   sinceReviewInput,
 } from '@/ai/context.js';
-import { agentExited, agentLockPath, agentRunning, type AgentProvider } from '@/ai/provider.js';
+import { agentExited, agentRunning, removeWorkspace, type AgentProvider } from '@/ai/provider.js';
+import { log } from '@/log.js';
 import { evidence, revalidated, type PreparedContext } from '@/ai/inputs.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
 import { draftChanged, planPreparation, preparationRevision } from '@/ai/preparation.js';
@@ -74,8 +76,54 @@ function creditsUsed(usage: string | null): number | null {
  * Runs AI tasks through local agent CLIs: one queue, at most two runs at once across providers,
  * results cached by exact input so a PR head is only analysed once per task.
  */
+/** A run's workspace is named by its id. */
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Bytes under `directory`, by `lstat`, never following a symlink. */
+async function sizeOf(directory: string): Promise<number> {
+  let bytes = 0;
+
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+
+    if (entry.isDirectory()) bytes += await sizeOf(path);
+    else bytes += (await lstat(path).catch(() => null))?.size ?? 0;
+  }
+
+  return bytes;
+}
+
+function logWorkspaces(
+  counts: Partial<
+    Record<'kept' | 'keptBytes' | 'removed' | 'removedBytes' | 'deferred' | 'failed', number>
+  >,
+): void {
+  const record = {
+    kept: 0,
+    keptBytes: 0,
+    removed: 0,
+    removedBytes: 0,
+    deferred: 0,
+    failed: 0,
+    ...counts,
+  };
+
+  log.event(record.failed > 0 || record.deferred > 0 ? 'warn' : 'info', 'ai.workspaces', record);
+}
+
+export interface AiRunnerOptions {
+  /**
+   * Removes abandoned workspaces at start-up. Only for a work root inside the locked data folder:
+   * a shared one (the system's temporary folder) may hold other processes' runs.
+   */
+  sweepWorkspaces?: boolean;
+}
+
 export class AiRunner {
   private readonly queue: string[] = [];
+  /** Workspace removals in progress; `close()` and `cleanedUp()` wait for them. */
+  private readonly removals = new Set<Promise<void>>();
+  private sweeping: Promise<void> | null = null;
   private readonly executions = new Map<string, Promise<void>>();
   private opened = false;
   private closing = false;
@@ -107,6 +155,7 @@ export class AiRunner {
     readonly providers: Record<AiProvider, AgentProvider>,
     private readonly workRoot: string,
     private readonly exportRepository: RepositoryExporter = downloadRepository,
+    private readonly options: AiRunnerOptions = {},
   ) {}
 
   /** The app's clock, shared with the sync. */
@@ -123,7 +172,6 @@ export class AiRunner {
     if (this.opened || this.closing) return;
 
     this.opened = true;
-    this.pruneAgentLocks();
 
     const unfinished = this.db
       .select()
@@ -157,6 +205,94 @@ export class AiRunner {
     }
 
     this.pump();
+
+    // In the background, once the previous process's runs are settled: start-up never waits.
+    if (this.options.sweepWorkspaces) this.sweeping = this.sweep().catch(() => undefined);
+  }
+
+  /**
+   * Resolves once every workspace removal started so far has finished. Removals never throw: a
+   * failure is logged and the workspace is left for the next start's sweep.
+   */
+  async cleanedUp(): Promise<void> {
+    await this.sweeping;
+
+    while (this.removals.size > 0) await Promise.allSettled([...this.removals]);
+  }
+
+  /** Removes a run's workspace under its agent lock, in the background but tracked. */
+  private removeLater(id: string): void {
+    const removal = removeWorkspace(join(this.workRoot, id), { waitMs: this.agentExitWaitMs })
+      .then((outcome) => {
+        if (outcome === 'busy') logWorkspaces({ deferred: 1 });
+      })
+      .catch(() => logWorkspaces({ failed: 1 }))
+      .finally(() => this.removals.delete(removal));
+
+    this.removals.add(removal);
+  }
+
+  /** True while this process is running, has queued or is unwinding the run. */
+  private inProcess(id: string): boolean {
+    return this.active.has(id) || this.executions.has(id) || this.queue.includes(id);
+  }
+
+  /**
+   * True for a run nothing can use: none recorded, done, cancelled, or failed or interrupted
+   * without both a saved request and a provider that resumes. Every paused run is kept.
+   */
+  private abandoned(id: string): boolean {
+    if (this.inProcess(id)) return false;
+
+    const row = this.row(id);
+
+    if (!row) return true;
+    if (row.status === 'done' || row.status === 'cancelled') return true;
+    if (row.status !== 'failed' && row.status !== 'interrupted') return false;
+
+    return !(row.request && this.providers[row.provider]?.supportsResume);
+  }
+
+  /**
+   * Removes the workspaces of abandoned runs that a previous process left. Only directories named
+   * by a run id are considered, never through a symlink. Each run is checked again just before its
+   * removal, and an agent still holding its lock defers it to the next start.
+   */
+  private async sweep(): Promise<void> {
+    const root = await lstat(this.workRoot).catch(() => null);
+
+    if (!root?.isDirectory() || root.isSymbolicLink()) return;
+
+    const totals = { kept: 0, keptBytes: 0, removed: 0, removedBytes: 0, deferred: 0, failed: 0 };
+
+    for (const entry of await readdir(this.workRoot, { withFileTypes: true })) {
+      if (this.closing) break;
+      if (!entry.isDirectory() || !RUN_ID.test(entry.name)) continue;
+
+      const directory = join(this.workRoot, entry.name);
+
+      try {
+        const bytes = await sizeOf(directory);
+
+        if (!this.abandoned(entry.name)) {
+          totals.kept += 1;
+          totals.keptBytes += bytes;
+          continue;
+        }
+
+        if ((await removeWorkspace(directory, { waitMs: 0 })) === 'busy') {
+          totals.deferred += 1;
+          continue;
+        }
+
+        totals.removed += 1;
+        totals.removedBytes += bytes;
+      } catch {
+        totals.failed += 1;
+      }
+    }
+
+    logWorkspaces(totals);
   }
 
   private get db() {
@@ -165,22 +301,6 @@ export class AiRunner {
 
   /** How long a resume waits for the run's previous agent to have exited before refusing. */
   agentExitWaitMs = 6_000;
-
-  /** Removes the agent locks of runs whose workspace is gone and whose agent is not running. */
-  private pruneAgentLocks(): void {
-    const directory = dirname(agentLockPath(join(this.workRoot, 'run')));
-
-    if (!existsSync(directory)) return;
-
-    for (const name of readdirSync(directory)) {
-      if (!name.endsWith('.lock')) continue;
-
-      const workDir = join(this.workRoot, name.slice(0, -'.lock'.length));
-
-      if (!existsSync(workDir) && !agentRunning(workDir))
-        rmSync(join(directory, name), { force: true });
-    }
-  }
 
   settings(): AiSettings {
     const saved = this.sync.store.getSetting<Partial<AiSettings>>(SETTINGS_KEY);
@@ -663,6 +783,7 @@ export class AiRunner {
     }
 
     await Promise.allSettled(this.executions.values());
+    await this.cleanedUp();
   }
 
   private async execute(id: string): Promise<void> {
@@ -717,7 +838,7 @@ export class AiRunner {
           const diff = await this.diffs.manifest(snapshot, 'full', null);
 
           for (const path of ['before', 'after', 'review.json'])
-            rmSync(join(workDir, path), { recursive: true, force: true });
+            await rm(join(workDir, path), { recursive: true, force: true });
 
           measured = await prepareReviewWorkspace(
             this.sync.github,
@@ -813,7 +934,7 @@ export class AiRunner {
           current.request &&
           this.providers[row.provider].supportsResume);
 
-      if (!keepWorkspace) rmSync(workDir, { recursive: true, force: true });
+      if (!keepWorkspace) this.removeLater(id);
       this.emit(row);
       this.pump();
 
@@ -899,23 +1020,28 @@ export class AiRunner {
         error: null,
         finishedAt: isoNow(this.clock),
       });
-      active.abort();
-      this.emit(row);
+      // The run's own end removes its workspace, once preparation and the agent have unwound.
+      this.sync.store.afterCommit(() => {
+        active.abort();
+        this.emit(row);
+      });
       return;
     }
 
-    const queued = this.queue.indexOf(id);
-
-    if (queued !== -1) {
-      this.queue.splice(queued, 1);
+    if (this.queue.includes(id)) {
       this.update(id, {
         status: 'cancelled',
         request: null,
         progress: null,
         finishedAt: isoNow(this.clock),
       });
-      rmSync(join(this.workRoot, id), { recursive: true, force: true });
-      this.emit(row);
+      this.sync.store.afterCommit(() => {
+        const queued = this.queue.indexOf(id);
+
+        if (queued !== -1) this.queue.splice(queued, 1);
+        this.emit(row);
+        this.removeLater(id);
+      });
     }
 
     if (['paused', 'failed', 'interrupted'].includes(row.status)) {
@@ -927,8 +1053,10 @@ export class AiRunner {
         progress: null,
         finishedAt: isoNow(this.clock),
       });
-      rmSync(join(this.workRoot, id), { recursive: true, force: true });
-      this.emit(row);
+      this.sync.store.afterCommit(() => {
+        this.emit(row);
+        this.removeLater(id);
+      });
     }
   }
 

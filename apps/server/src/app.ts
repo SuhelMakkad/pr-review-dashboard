@@ -53,6 +53,8 @@ export interface AppOptions {
   aiProviders?: Record<AiProvider, AgentProvider>;
   /** Private scratch directory for agent runs. */
   aiWorkRoot?: string;
+  /** Sweep abandoned AI workspaces at start-up: only for a work root in the locked data folder. */
+  sweepWorkspaces?: boolean;
   exportRepository?: RepositoryExporter;
   /** Linear access (Linear sign-in or a Keychain key normally, a fixture in demo mode and tests). */
   linear?: LinearSource;
@@ -144,6 +146,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
             return [];
           }
         : downloadRepository),
+    { sweepWorkspaces: options.sweepWorkspaces },
   );
 
   const operations = new OperationQueue(service, options.operationQueue);
@@ -223,6 +226,10 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     const failures = (await stopWork()).flatMap((result) =>
       result.status === 'rejected' ? [result.reason] : [],
     );
+
+    // Requests have finished by now: a cancellation one made after the runner closed has its
+    // workspace removal finished too, before the data folder's lock is released.
+    await runner.cleanedUp();
 
     if (failures.length > 0)
       throw new AggregateError(failures, 'Some work could not stop cleanly.');

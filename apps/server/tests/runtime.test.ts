@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +8,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unusedPort } from '@test/fixtures/ai/restart-helper.js';
 import { createApp } from '@/app.js';
 import { AutoReviewer } from '@/ai/auto-review.js';
-import { agentExited, agentRunning, spawnAgentProcess } from '@/ai/provider.js';
+import {
+  agentExited,
+  agentLockPath,
+  agentRunning,
+  removeWorkspace,
+  spawnAgentProcess,
+} from '@/ai/provider.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { DataDirectoryLocked, lockDataDirectory } from '@/db/lock.js';
 import type { AiRunRow } from '@/db/schema.js';
@@ -459,8 +465,11 @@ describe('shutdown order', () => {
 
   it('says a run’s agent is running until it has exited, and never starts a second one', async () => {
     const workDir = join(temporaryDirectory(), 'run-2');
+
+    mkdirSync(workDir);
+
     const options = {
-      cwd: tmpdir(),
+      cwd: workDir,
       env: process.env,
       signal: new AbortController().signal,
       timeoutMs: 60_000,
@@ -494,6 +503,8 @@ describe('shutdown order', () => {
   it('ends a helper that holds the agent’s output open, before the run counts as finished', async () => {
     const workDir = join(temporaryDirectory(), 'run-3');
     const lines: string[] = [];
+
+    mkdirSync(workDir);
     // The helper shares the agent's output and process group, ignores SIGTERM, and outlives it.
     const agent = spawnAgentProcess(
       process.execPath,
@@ -502,7 +513,7 @@ describe('shutdown order', () => {
         "const helper = require('child_process').spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\"], { stdio: 'inherit' }); helper.unref(); console.log(helper.pid); setTimeout(() => process.exit(4), 100);",
       ],
       {
-        cwd: tmpdir(),
+        cwd: workDir,
         env: process.env,
         signal: new AbortController().signal,
         timeoutMs: 60_000,
@@ -519,6 +530,51 @@ describe('shutdown order', () => {
     expect(Date.now() - started).toBeLessThan(1_500);
     expect(ended(helper)).toBe(true);
     expect(agentRunning(workDir)).toBe(false);
+  });
+
+  it('removes a workspace only once its agent has let go, and starts no agent where it was', async () => {
+    const workDir = join(temporaryDirectory(), 'run-4');
+
+    mkdirSync(workDir);
+    writeFileSync(join(workDir, 'review.json'), '{}');
+
+    const agent = spawnAgentProcess(
+      process.execPath,
+      ['-e', "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000)"],
+      {
+        cwd: workDir,
+        env: process.env,
+        signal: new AbortController().signal,
+        timeoutMs: 60_000,
+        lockFor: workDir,
+      },
+    );
+
+    await vi.waitFor(() => expect(agentRunning(workDir)).toBe(true));
+
+    // The agent holds the run's lock: the workspace stays.
+    expect(await removeWorkspace(workDir, { waitMs: 200 })).toBe('busy');
+    expect(existsSync(workDir)).toBe(true);
+
+    agent.stop();
+    await agent.done.catch(() => undefined);
+
+    expect(await removeWorkspace(workDir, { waitMs: 5_000 })).toBe('removed');
+    expect(existsSync(workDir)).toBe(false);
+    // The lock file stays, at the same path, for any supervisor that may have it open.
+    expect(existsSync(agentLockPath(workDir))).toBe(true);
+
+    // A supervisor that gets the lock after the removal finds nothing to run in.
+    const late = await spawnAgentProcess(process.execPath, ['-e', 'console.log("ran")'], {
+      cwd: tmpdir(),
+      env: process.env,
+      signal: new AbortController().signal,
+      timeoutMs: 60_000,
+      lockFor: workDir,
+    }).done;
+
+    expect(late.code).toBe(75);
+    expect(late.stderr).toContain('The workspace for this run is gone.');
   });
 
   it('lets history stop after its current window and resume on the next start', async () => {
