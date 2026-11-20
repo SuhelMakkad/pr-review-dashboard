@@ -69,6 +69,8 @@ export function accountSwitches(): number {
 }
 
 const isDraft = (key: QueryKey) => key[0] === queryKeys.account(null)[0] && key[2] === 'draft';
+const isInsights = (query: Query) =>
+  query.queryKey[0] === queryKeys.account(null)[0] && query.queryKey[2] === 'insights';
 
 export function adoptStatus(client: QueryClient, status: SyncStatus): void {
   const boot = session.bootId();
@@ -104,8 +106,18 @@ export function adoptStatus(client: QueryClient, status: SyncStatus): void {
   client.setQueryData(queryKeys.status, status);
 
   // Answers kept from when this account was last shown may be out of date (a snooze that has
-  // ended since, say): read them again.
-  if (switched) void client.invalidateQueries({ queryKey: queryKeys.account(login) });
+  // ended since, say): read them again. The account left keeps its AI runs, whose restarts now
+  // wait for it: read again too, so none shows a countdown that is not running.
+  if (switched) {
+    void client.invalidateQueries({ queryKey: queryKeys.account(login) });
+    void client.invalidateQueries({ queryKey: queryKeys.aiReviews(shown) });
+    void client.invalidateQueries({
+      predicate: (query: Query) =>
+        query.queryKey[0] === queryKeys.account(null)[0] &&
+        query.queryKey[1] === shown &&
+        query.queryKey[2] === 'ai',
+    });
+  }
 
   // The first status names the account the cached answers were loaded for; refresh them.
   if (!switched && previous?.account?.login !== status.account?.login)
@@ -169,7 +181,7 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
       // Only the account whose PRs changed: another account's screens never refetch for it.
       refresh(client, queryKeys.pulls(event.account));
       // New commits can make a saved review out of date.
-      refresh(client, ['ai-reviews']);
+      refresh(client, queryKeys.aiReviews(event.account));
 
       for (const id of event.ids) {
         refresh(client, queryKeys.detail(event.account, id));
@@ -178,7 +190,7 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
         refresh(client, queryKeys.draft(event.account, id));
         // A PR's tickets come from its branch, title and body.
         refresh(client, queryKeys.tickets(event.account, id));
-        refresh(client, ['ai', id]);
+        refresh(client, queryKeys.ai(event.account, id));
       }
 
       refresh(client, queryKeys.mine(event.account));
@@ -188,7 +200,9 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
       void present(event.notifications);
       return;
     case 'insights.updated':
-      refresh(client, ['insights']);
+      // Null: the review target every account's Insights measure against changed.
+      if (event.account === null) void client.invalidateQueries({ predicate: isInsights });
+      else refresh(client, queryKeys.insights(event.account));
       return;
     case 'operation.updated':
       refresh(client, queryKeys.operations(event.account));
@@ -197,12 +211,12 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
         refresh(client, queryKeys.diff(event.account, event.prId));
       return;
     case 'ai.updated':
-      refresh(client, ['ai', event.prId]);
-      refresh(client, ['ai-reviews']);
+      refresh(client, queryKeys.ai(event.account, event.prId));
+      refresh(client, queryKeys.aiReviews(event.account));
       return;
     case 'draft.updated':
       refresh(client, queryKeys.draft(event.account, event.id));
-      refresh(client, queryKeys.ai(event.id, event.account));
+      refresh(client, queryKeys.ai(event.account, event.id));
       return;
     case 'triage.updated':
       refresh(client, queryKeys.pulls(event.account));

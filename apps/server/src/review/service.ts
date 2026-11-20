@@ -209,27 +209,47 @@ export class ReviewService {
     }
   }
 
-  async addComment(prId: string, input: NewDraftComment): Promise<DraftComment> {
-    await this.guard(input.account);
+  /**
+   * Adds a comment to the account's draft. `expectedHeadOid` is the head it was made for (an AI
+   * suggestion's): on any other head, nothing is added.
+   */
+  async addComment(
+    prId: string,
+    input: NewDraftComment,
+    options: { expectedHeadOid?: string } = {},
+  ): Promise<DraftComment> {
+    this.assertSelected(input.account);
+
+    // The line was picked in the diff of another revision than the PR has; or, for a comment made
+    // for one head, the PR has another.
+    const assertSameRevision = (pr: PullRequestSnapshot) => {
+      const suggested = options.expectedHeadOid !== undefined;
+
+      if (
+        (suggested && options.expectedHeadOid !== pr.headOid) ||
+        (input.line !== null &&
+          input.revision &&
+          (input.revision.headOid !== pr.headOid ||
+            input.revision.baseOid !== (pr.baseOid ?? null)))
+      )
+        throw new ReviewError(
+          'HEAD_MOVED',
+          409,
+          suggested
+            ? 'This suggestion was made for an older version of the PR. Run it again.'
+            : 'The PR changed while you were commenting. Reload the diff, then comment again.',
+        );
+    };
 
     const pr = this.snapshot(input.account, prId);
 
-    // The line was picked in the diff of another revision than the PR has now.
-    if (
-      input.line !== null &&
-      input.revision &&
-      (input.revision.headOid !== pr.headOid || input.revision.baseOid !== (pr.baseOid ?? null))
-    )
-      throw new ReviewError(
-        'HEAD_MOVED',
-        409,
-        'The PR changed while you were commenting. Reload the diff, then comment again.',
-      );
-
+    assertSameRevision(pr);
     await this.assertCommentable(pr, input);
 
-    // The diff check awaited a read: the account may no longer be in use.
+    // The diff check awaited a read: the account may no longer be in use, and the PR may have
+    // moved on. Both are checked again in the write's turn.
     this.assertSelected(input.account);
+    assertSameRevision(this.snapshot(input.account, prId));
 
     const comment = this.drafts.addComment(input.account, prId, {
       path: input.path,

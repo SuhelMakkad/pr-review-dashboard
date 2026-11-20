@@ -161,12 +161,19 @@ export interface AiReviewStatus {
    * has been quiet for `AUTO_REVIEW_QUIET_MS`. Null otherwise.
    */
   restartAt: string | null;
+  /**
+   * A restart is waiting for this account to be in use again: restarts run only for the account
+   * in use, so `restartAt` is null meanwhile.
+   */
+  restartPaused?: boolean;
 }
 
 /** A PR's AI runs, and when an automatic review that new commits stopped starts again. */
 export interface AiRunsResponse {
   runs: AiRun[];
   restartAt: string | null;
+  /** As in `AiReviewStatus`: a restart waits for this account to be in use again. */
+  restartPaused?: boolean;
 }
 
 /** Fingerprints of the evidence used to generate a review, persisted with the run. */

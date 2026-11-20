@@ -3,7 +3,7 @@ import { demoWrites, expectAccessible, failNextAi, openFresh } from '@/e2e/helpe
 
 test.describe.configure({ mode: 'serial' });
 
-async function pauseNextAiStart(page: Page, pattern = '**/api/pulls/*/ai') {
+async function pauseNextAiStart(page: Page, pattern = '**/api/accounts/*/pulls/*/ai') {
   let markRequested!: () => void;
   let resume!: () => void;
 
@@ -14,16 +14,18 @@ async function pauseNextAiStart(page: Page, pattern = '**/api/pulls/*/ai') {
     resume = resolve;
   });
 
-  await page.route(
-    pattern,
-    async (route) => {
-      markRequested();
-      await resumed;
+  let paused = false;
 
-      await route.continue();
-    },
-    { times: 1 },
-  );
+  // Only the next start: the PR's runs are read from the same path.
+  await page.route(pattern, async (route) => {
+    if (paused || route.request().method() !== 'POST') return route.fallback();
+
+    paused = true;
+    markRequested();
+    await resumed;
+
+    await route.continue();
+  });
 
   return { requested, resume };
 }
@@ -108,15 +110,19 @@ test('restores the previous review and allows retrying when a new review cannot 
 
   await report.getByRole('button', { name: 'Run review', exact: true }).click();
   await expect(report.getByText('No blocking findings')).toBeVisible();
-  await page.route(
-    '**/api/pulls/*/ai',
-    (route) =>
-      route.fulfill({
-        status: 503,
-        json: { error: 'The review could not start. Try again.' },
-      }),
-    { times: 1 },
-  );
+  let refused = false;
+
+  // Only the next start, not a read of the PR's runs from the same path.
+  await page.route('**/api/accounts/*/pulls/*/ai', (route) => {
+    if (refused || route.request().method() !== 'POST') return route.fallback();
+
+    refused = true;
+
+    return route.fulfill({
+      status: 503,
+      json: { error: 'The review could not start. Try again.' },
+    });
+  });
   await report.getByRole('button', { name: 'Run again', exact: true }).click();
 
   await expect(report.getByRole('alert')).toHaveText('The review could not start. Try again.');
@@ -396,7 +402,7 @@ test('continues preparing after navigation and reopens the saved draft with edit
   await report.getByRole('button', { name: 'Run review', exact: true }).click();
   await expect(report.getByText('No blocking findings')).toBeVisible();
 
-  const preparation = await pauseNextAiStart(page, '**/api/ai/runs/*/draft');
+  const preparation = await pauseNextAiStart(page, '**/api/accounts/*/ai/runs/*/draft');
 
   await report.getByRole('button', { name: 'Prepare GitHub review' }).click();
   await preparation.requested;
@@ -466,7 +472,7 @@ test('saves generated summaries across navigation and reload until explicitly us
   await page.screenshot({ path: testInfo.outputPath('saved-summary.png') });
 
   await page.route(
-    '**/api/ai/runs/*/summary',
+    '**/api/accounts/*/ai/runs/*/summary',
     (route) =>
       route.fulfill({
         status: 503,
@@ -488,7 +494,7 @@ test('keeps preparation errors visible after navigation and allows retrying', as
 
   await report.getByRole('button', { name: 'Run review', exact: true }).click();
   await page.route(
-    '**/api/ai/runs/*/draft',
+    '**/api/accounts/*/ai/runs/*/draft',
     (route) =>
       route.fulfill({
         status: 503,
@@ -508,7 +514,7 @@ test('keeps preparation errors visible after navigation and allows retrying', as
 test('shows a saved-review loading error and allows retrying without starting another review', async ({
   page,
 }) => {
-  const pattern = '**/api/pulls/*/ai?*';
+  const pattern = '**/api/accounts/*/pulls/*/ai';
 
   await page.route(pattern, (route) =>
     route.request().method() === 'GET'

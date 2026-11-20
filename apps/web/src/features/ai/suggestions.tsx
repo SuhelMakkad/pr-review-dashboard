@@ -102,7 +102,9 @@ export function Suggestions({
                       <Button
                         size="sm"
                         icon={<Check size={12} />}
-                        disabled={ai.accept.isPending || locked}
+                        // Made for an older head: its lines are not this one's.
+                        disabled={ai.accept.isPending || locked || run.stale}
+                        title={run.stale ? 'Made for an older version of the PR' : undefined}
                         onClick={() =>
                           ai.accept.mutate(
                             { runId: run.id, index },

@@ -8,7 +8,7 @@ test.use({ serviceWorkers: 'block' });
 
 /** Answers Insights with an empty body, so the page reads fields that are missing and crashes. */
 async function crashInsights(page: Page) {
-  await page.route(/\/api\/insights\?/, (route) => route.fulfill({ json: {} }));
+  await page.route(/\/api\/accounts\/[^/]+\/insights\?/, (route) => route.fulfill({ json: {} }));
 }
 
 const openInsights = (page: Page) =>

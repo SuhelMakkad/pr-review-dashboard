@@ -33,7 +33,7 @@ import type { EventBus } from '@/events.js';
 import { asAccount } from '@/github/credentials.js';
 import { redact, safeError } from '@/github/errors.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
-import { legacyAccountError } from '@/review/errors.js';
+import { accountNotActive } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import {
   authorFeedbackInput,
@@ -145,6 +145,14 @@ export interface AiRunnerOptions {
    */
   sweepWorkspaces?: boolean;
 }
+
+/** A suggestion made for an older head: its lines are not this head's. */
+const headMoved = () =>
+  new ReviewError(
+    'HEAD_MOVED',
+    409,
+    'This suggestion was made for an older version of the PR. Run it again.',
+  );
 
 export class AiRunner {
   private readonly queue: string[] = [];
@@ -478,11 +486,41 @@ export class AiRunner {
     return status;
   }
 
-  private detail(account: string, prId: string): PullRequestDetail {
-    if (account !== this.sync.status.account?.login) {
-      throw new ReviewError('ACCOUNT_CHANGED', 409, 'GitHub account changed. Refresh first.');
+  /** Refuses new work, or a draft write, for an account other than the one in use. */
+  private assertSelected(account: string): void {
+    const selected = this.sync.status.account?.login ?? null;
+
+    if (account !== selected) throw accountNotActive(account, selected);
+  }
+
+  /**
+   * Waits for `work`, then checks the account is still in use, whatever `work` did: an outcome
+   * reached after a switch is never reported as the account's, cached results and errors alike.
+   */
+  private async stillSelected<T>(account: string, work: Promise<T>): Promise<T> {
+    let value: T;
+
+    try {
+      value = await work;
+    } catch (error) {
+      this.assertSelected(account);
+      throw error;
     }
 
+    this.assertSelected(account);
+
+    return value;
+  }
+
+  /** The PR as the account in use has it. */
+  private detail(account: string, prId: string): PullRequestDetail {
+    this.assertSelected(account);
+
+    return this.lookup(account, prId);
+  }
+
+  /** The PR as `account` has it, in use or not. */
+  private lookup(account: string, prId: string): PullRequestDetail {
     const detail = this.sync.detailFor(account, prId);
 
     if (!detail) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
@@ -650,8 +688,8 @@ export class AiRunner {
     this.db.update(aiRuns).set(changes).where(eq(aiRuns.id, id)).run();
   }
 
-  private emit(row: Pick<AiRunRow, 'prId' | 'id'>) {
-    this.events.emit({ type: 'ai.updated', prId: row.prId, runId: row.id });
+  private emit(row: Pick<AiRunRow, 'account' | 'prId' | 'id'>) {
+    this.events.emit({ type: 'ai.updated', account: row.account, prId: row.prId, runId: row.id });
   }
 
   async start(
@@ -671,7 +709,8 @@ export class AiRunner {
   ): Promise<AiRun> {
     this.detail(account, prId);
 
-    if (task === 'full_review' || task === 'draft_summary') await this.sync.refresh(prId, account);
+    if (task === 'full_review' || task === 'draft_summary')
+      await this.stillSelected(account, this.sync.refresh(prId, account));
 
     const detail = this.detail(account, prId);
     const settings = this.settings();
@@ -695,11 +734,14 @@ export class AiRunner {
             : {}),
         }
       : null;
-    const input = await this.buildInput(task, detail, account, completedReview);
+    const input = await this.stillSelected(
+      account,
+      this.buildInput(task, detail, account, completedReview),
+    );
     const head = detail.snapshot.headOid;
 
     if (task === 'full_review') {
-      await this.sync.refresh(prId, account);
+      await this.stillSelected(account, this.sync.refresh(prId, account));
 
       const latest = this.detail(account, prId).snapshot;
 
@@ -746,7 +788,7 @@ export class AiRunner {
 
     // A cached answer costs nothing; a new Codex run must fit in the plan.
     if (provider === 'codex') {
-      const status = await this.codexStatus();
+      const status = await this.stillSelected(account, this.codexStatus());
 
       if (codexBlocked(status)) {
         throw new ReviewError(
@@ -767,6 +809,11 @@ export class AiRunner {
 
     if (this.closing)
       throw new ReviewError('SHUTTING_DOWN', 503, 'The server is restarting. Try again shortly.');
+
+    // In the insert's turn: the account is still in use, and (for an automatic review) the run is
+    // still wanted.
+    this.assertSelected(account);
+
     if (options.admit && !options.admit(this.detail(account, prId)))
       throw new ReviewError('NOT_ADMITTED', 409, 'This run is no longer wanted.');
 
@@ -811,7 +858,7 @@ export class AiRunner {
 
     for (const previous of superseded) this.cancel(account, previous.id);
     this.queue.push(id);
-    this.emit({ id, prId });
+    this.emit({ id, account, prId });
     this.pump();
 
     return this.toRun(this.row(id)!, head);
@@ -1167,23 +1214,29 @@ export class AiRunner {
       );
 
     // A pause may still be waiting for the old process to flush and exit. Never overlap turns.
-    if (this.active.has(id)) await this.executions.get(id);
+    if (this.active.has(id))
+      await this.stillSelected(account, Promise.resolve(this.executions.get(id)));
 
     // Nor with the run's previous agent, which a stop has signalled but which may not have exited
     // yet, or which a server that was killed outright left behind: its lock says until it has.
-    if (!(await agentExited(join(this.workRoot, id), this.agentExitWaitMs)))
+    if (
+      !(await this.stillSelected(
+        account,
+        agentExited(join(this.workRoot, id), this.agentExitWaitMs),
+      ))
+    )
       throw new ReviewError(
         'AGENT_STILL_RUNNING',
         409,
         'The previous AI agent for this review is still stopping. Try again shortly.',
       );
 
-    await this.sync.refresh(row.prId, row.account);
+    await this.stillSelected(account, this.sync.refresh(row.prId, row.account));
     const problem = this.resumeProblem(row);
 
     if (problem) throw new ReviewError('STALE_REVIEW', 409, problem);
     if (row.provider === 'codex') {
-      const status = await this.codexStatus();
+      const status = await this.stillSelected(account, this.codexStatus());
 
       if (codexBlocked(status))
         throw new ReviewError(
@@ -1326,19 +1379,22 @@ export class AiRunner {
 
     if (!suggestion) throw new ReviewError('NOT_FOUND', 404, 'That suggestion no longer exists.');
 
-    // AI answers for another account as it always has, until its routes name the account.
-    return this.reviews
-      .addComment(row.prId, {
+    // Made for the head it read: on another head its lines are other lines. Checked here, and again
+    // where the comment is written, after the diff check's read.
+    if (this.detail(account, row.prId).snapshot.headOid !== row.headOid) throw headMoved();
+
+    return this.reviews.addComment(
+      row.prId,
+      {
         account,
         path: suggestion.path,
         line: suggestion.line,
         side: suggestion.side,
         body: body ?? suggestion.body,
         origin: 'ai',
-      })
-      .catch((error: unknown) => {
-        throw legacyAccountError(error);
-      });
+      },
+      { expectedHeadOid: row.headOid },
+    );
   }
 
   /** Prepare a summary with selected findings, without creating inline review comments. */
@@ -1365,7 +1421,7 @@ export class AiRunner {
 
     const initialRevision = preparationRevision(this.reviews.draft(account, row.prId));
 
-    await this.sync.refresh(row.prId, row.account);
+    await this.stillSelected(account, this.sync.refresh(row.prId, row.account));
 
     const staleReason = this.staleReason(row);
 
@@ -1482,7 +1538,7 @@ export class AiRunner {
 
     this.detail(account, row.prId);
     this.reviews.drafts.assertEditable(account, row.prId);
-    await this.sync.refresh(row.prId, row.account);
+    await this.stillSelected(account, this.sync.refresh(row.prId, row.account));
     this.detail(account, row.prId);
 
     const reason = this.staleReason(row);

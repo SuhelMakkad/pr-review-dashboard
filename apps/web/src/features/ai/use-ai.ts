@@ -21,7 +21,9 @@ import { accountSwitches } from '@/lib/live';
 import { accountPath } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 
-export const aiReviewsKey = ['ai-reviews'] as const;
+/** Every account's AI runs and latest reviews: settings are shared, and change what they show. */
+const isAiQuery = (query: { queryKey: readonly unknown[] }) =>
+  query.queryKey[0] === 'account' && ['ai', 'ai-reviews'].includes(String(query.queryKey[2]));
 
 export function useAiOverview() {
   return useQuery({
@@ -46,8 +48,7 @@ export function useAiSettings(account: string) {
     onSuccess: () =>
       Promise.all([
         client.invalidateQueries({ queryKey: ['ai-overview'] }),
-        client.invalidateQueries({ queryKey: aiReviewsKey }),
-        client.invalidateQueries({ queryKey: ['ai'] }),
+        client.invalidateQueries({ predicate: isAiQuery }),
       ]),
   });
 }
@@ -71,8 +72,7 @@ export function useAutomationSettings(account: string) {
     onSuccess: () =>
       Promise.all([
         client.invalidateQueries({ queryKey: ['ai-overview'] }),
-        client.invalidateQueries({ queryKey: aiReviewsKey }),
-        client.invalidateQueries({ queryKey: ['ai'] }),
+        client.invalidateQueries({ predicate: isAiQuery }),
       ]),
   });
 }
@@ -80,11 +80,8 @@ export function useAutomationSettings(account: string) {
 /** The latest full review of every tracked PR, keyed by PR id, for list badges. */
 export function useAiReviewStatuses(account: string | null | undefined) {
   return useQuery({
-    queryKey: [...aiReviewsKey, account],
-    queryFn: () =>
-      api<{ reviews: AiReviewStatus[] }>(
-        `/api/ai/reviews?account=${encodeURIComponent(account ?? '')}`,
-      ),
+    queryKey: queryKeys.aiReviews(account ?? null),
+    queryFn: () => api<{ reviews: AiReviewStatus[] }>(accountPath(account!, '/ai/reviews')),
     enabled: Boolean(account),
     select: (data) => new Map(data.reviews.map((review) => [review.prId, review])),
     staleTime: 30_000,
@@ -94,7 +91,9 @@ export function useAiReviewStatuses(account: string | null | undefined) {
 /** AI runs for one PR. Live progress arrives over the event stream; a light poll covers gaps. */
 export function useAi(prId: string | null, account: string) {
   const client = useQueryClient();
-  const key = queryKeys.ai(prId ?? 'none', account);
+  const key = queryKeys.ai(account, prId ?? 'none');
+  const run = (runId: string, rest = '') =>
+    accountPath(account, `/ai/runs/${encodeURIComponent(runId)}${rest}`);
   const draftKey = queryKeys.draft(account, prId ?? 'none');
   /**
    * Shows the draft a write answered with, unless the account shown changed while it was on its
@@ -141,9 +140,7 @@ export function useAi(prId: string | null, account: string) {
   const runs = useQuery({
     queryKey: key,
     queryFn: () =>
-      api<AiRunsResponse>(
-        `/api/pulls/${encodeURIComponent(prId!)}/ai?account=${encodeURIComponent(account)}`,
-      ),
+      api<AiRunsResponse>(accountPath(account, `/pulls/${encodeURIComponent(prId!)}/ai`)),
     enabled: Boolean(prId && account),
     refetchInterval: (query) =>
       query.state.data?.runs.some((run) => run.status === 'queued' || run.status === 'running')
@@ -186,36 +183,29 @@ export function useAi(prId: string | null, account: string) {
         seedDraft(draft, since);
       }
 
-      return api<AiRun>(`/api/pulls/${encodeURIComponent(prId!)}/ai`, {
+      return api<AiRun>(accountPath(account, `/pulls/${encodeURIComponent(prId!)}/ai`), {
         method: 'POST',
-        body: { account, task, provider, force },
+        body: { task, provider, force },
       });
     },
     onSuccess: () => client.invalidateQueries({ queryKey: key }),
   });
 
   const cancel = useMutation({
-    mutationFn: (runId: string) =>
-      api(`/api/ai/runs/${encodeURIComponent(runId)}`, { method: 'DELETE', body: { account } }),
+    mutationFn: (runId: string) => api(run(runId), { method: 'DELETE', body: {} }),
     onSuccess: () => client.invalidateQueries({ queryKey: key }),
   });
 
   const control = useMutation({
     mutationKey: controlKey,
     mutationFn: ({ runId, operation }: { runId: string; operation: 'pause' | 'resume' }) =>
-      api(`/api/ai/runs/${encodeURIComponent(runId)}/${operation}`, {
-        method: 'POST',
-        body: { account },
-      }),
+      api(run(runId, `/${operation}`), { method: 'POST', body: {} }),
     onSettled: () => client.invalidateQueries({ queryKey: key }),
   });
 
   const accept = useMutation({
     mutationFn: ({ runId, index, body }: { runId: string; index: number; body?: string }) =>
-      api<DraftComment>(`/api/ai/runs/${encodeURIComponent(runId)}/accept`, {
-        method: 'POST',
-        body: { account, index, body },
-      }),
+      api<DraftComment>(run(runId, '/accept'), { method: 'POST', body: { index, body } }),
     onSuccess: () => client.invalidateQueries({ queryKey: draftKey }),
   });
 
@@ -225,10 +215,7 @@ export function useAi(prId: string | null, account: string) {
       runId,
       ...options
     }: { runId: string; indices: number[] } & PrepareReviewOptions) =>
-      api<ReviewDraft>(`/api/ai/runs/${encodeURIComponent(runId)}/draft`, {
-        method: 'POST',
-        body: { account, ...options },
-      }),
+      api<ReviewDraft>(run(runId, '/draft'), { method: 'POST', body: options }),
     onMutate: () => ({ since: accountSwitches() }),
     onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
     onSettled: () =>
@@ -241,10 +228,7 @@ export function useAi(prId: string | null, account: string) {
   const applySummary = useMutation({
     mutationKey: applyKey,
     mutationFn: (runId: string) =>
-      api<ReviewDraft>(`/api/ai/runs/${encodeURIComponent(runId)}/summary`, {
-        method: 'POST',
-        body: { account },
-      }),
+      api<ReviewDraft>(run(runId, '/summary'), { method: 'POST', body: {} }),
     onMutate: () => ({ since: accountSwitches() }),
     onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
     onSettled: () => client.invalidateQueries({ queryKey: key }),
@@ -272,6 +256,8 @@ export function useAi(prId: string | null, account: string) {
     runs,
     /** New commits stopped the automatic review; a fresh one starts at this time. */
     restartAt: runs.data?.restartAt ?? null,
+    /** A restart waits for this account to be in use again. */
+    restartPaused: Boolean(runs.data?.restartPaused),
     start,
     cancel,
     pause: (runId: string) => control.mutate({ runId, operation: 'pause' }),

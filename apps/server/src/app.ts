@@ -177,7 +177,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   runner.onPublish = (row, reviewed) => publisher.publish(row, reviewed);
   runner.onFinished = (row) => autoReviewer.finished(row);
   operations.posting = () => runner.settings();
-  registerAiRoutes(app, runner, autoReviewer);
+  registerAiRoutes(app, runner, autoReviewer, service);
 
   const backfill = new Backfill(service, service.events);
 
