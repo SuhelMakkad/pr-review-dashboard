@@ -71,6 +71,22 @@ const SYNC_INTERVAL_MS = 60_000;
 /** Snapshots a GitLab sync reads before checking glab's sign-in and saving them. */
 const GITLAB_SAVE_BATCH = 20;
 
+/**
+ * A rate limit that cannot be tied to the account it was met for (glab may have been signed in as
+ * someone else): passed on as an ordinary failure with no deadline, so no caller saves it as that
+ * account's cooldown.
+ */
+function unattributed(error: unknown): unknown {
+  if (!(error instanceof GitHubError) || error.outcome !== 'rate_limit') return error;
+
+  return new GitHubError(
+    `${error.message} Review Desk could not confirm which GitLab account it was for, so it will try again.`,
+    null,
+    error.status,
+    'unknown',
+  );
+}
+
 /** The latest of `deadlines` still ahead of `now`, or null. A missing one counts as none. */
 function laterDeadline(now: number, ...deadlines: (string | null | undefined)[]): string | null {
   const latest = Math.max(
@@ -370,26 +386,31 @@ export class SyncService {
             throw error;
           });
 
-        // A limit met by the first check is nobody's yet: it is not saved.
-        await verify(account);
+        // A limit met by a check itself cannot be tied to the account: it is nobody's cooldown.
+        const check = () =>
+          verify(account).catch((error: unknown) => Promise.reject(unattributed(error)));
+
+        await check();
 
         try {
           const snapshot = await read();
 
-          await verify(account);
+          await check();
 
           return snapshot;
         } catch (error) {
-          // A limit is the account's only if glab is still signed in as it.
-          if (
-            !(error instanceof AccountUnavailable) &&
-            (await verify(account).then(
-              () => true,
-              () => false,
-            ))
-          )
-            keepLimit(error);
+          if (error instanceof AccountUnavailable) throw error;
 
+          // A limit is the account's only if glab is still signed in as it; otherwise it is passed
+          // on with no deadline, so no caller saves it for this account either.
+          const confirmed = await verify(account).then(
+            () => true,
+            () => false,
+          );
+
+          if (!confirmed) throw unattributed(error);
+
+          keepLimit(error);
           throw error;
         }
       });
@@ -641,7 +662,10 @@ export class SyncService {
        */
       const verify =
         timing.forge === 'gitlab' && this.github.verifyAccount
-          ? () => this.github.verifyAccount!(account.login)
+          ? () =>
+              this.github.verifyAccount!(account.login)
+                // A limit met by the check could be someone else's: never this account's status.
+                .catch((error: unknown) => Promise.reject(unattributed(error)))
           : null;
 
       if (account.login !== this.status.account?.login) {
@@ -655,6 +679,9 @@ export class SyncService {
           warnings: [],
           lastAttemptAt: this.status.lastAttemptAt,
         };
+        // Published at once, with a new revision: the routes that follow the account in use serve
+        // this account from now on, and the status must say so before they do.
+        this.emitStatus();
       } else {
         this.status.account = account;
       }

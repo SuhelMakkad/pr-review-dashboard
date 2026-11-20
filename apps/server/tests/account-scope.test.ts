@@ -431,12 +431,25 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
 
     await service.sync();
 
-    // glab became someone else, whose limit this is: not the account's.
+    // glab became someone else, whose limit this is: passed on with no deadline, so neither this
+    // refresh nor a caller (the outbox) saves it for the account.
     api.snapshot.mockImplementationOnce(async () => {
       state.signedIn = OTHER;
       throw limited();
     });
-    await expect(service.refresh('mr-1', ACCOUNT)).rejects.toThrow('Rate limited');
+    await expect(service.refresh('mr-1', ACCOUNT)).rejects.toMatchObject({
+      outcome: 'unknown',
+      retryAt: null,
+    });
+    expect(store.getSetting(`github-write-retry:${ACCOUNT}`)).toBeNull();
+
+    // Nor is a limit met by the check itself, which cannot say whose it is.
+    state.signedIn = ACCOUNT;
+    api.verifyAccount.mockRejectedValueOnce(limited());
+    await expect(service.refresh('mr-1', ACCOUNT)).rejects.toMatchObject({
+      outcome: 'unknown',
+      retryAt: null,
+    });
     expect(store.getSetting(`github-write-retry:${ACCOUNT}`)).toBeNull();
 
     // Still the account: its limit is saved before the caller hears of it.
@@ -485,23 +498,107 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
     expect(service.sentStatus.revision).toBeGreaterThan(during.revision!);
   });
 
-  it('adds nothing by hand while glab is signed in as someone else', async () => {
+  it('adds nothing by hand while glab is signed in as someone else, and says so with a 409', async () => {
     const { service, state, api } = gitlabSync(1);
 
     await service.sync();
     state.signedIn = OTHER;
 
-    await expect(service.track(ACCOUNT, 'team/app', 5, undefined, true)).rejects.toBeInstanceOf(
-      AccountUnavailable,
-    );
+    const app = await createApp(service, { sessionToken: 'test-session' });
+
+    cleanups.push(() => app.close());
+
+    const added = await app.inject({
+      method: 'POST',
+      url: '/api/pulls/track',
+      headers,
+      payload: { account: ACCOUNT, repository: 'team/app', number: 5, gitlab: true },
+    });
+
+    expect(added.statusCode).toBe(409);
+    expect(added.json()).toMatchObject({ code: 'ACCOUNT_UNAVAILABLE' });
     expect(api.resolvePull).not.toHaveBeenCalled();
+  });
+
+  it('never saves a limit met by a sync’s own check of glab as the account’s cooldown', async () => {
+    const { store, service, state } = gitlabSync(1);
+
+    await service.sync();
+
+    // After this sync's discovery glab is someone else, and its check is rate limited.
+    state.onCheck = (check) => {
+      if (check !== 4) return;
+
+      state.signedIn = OTHER;
+      throw new GitHubError(
+        'Rate limited',
+        new Date(Date.now() + 300_000).toISOString(),
+        429,
+        'rate_limit',
+      );
+    };
+    await service.sync();
+
+    expect(service.status.retryAt).toBeNull();
+    expect(store.getSetting<{ retryAt: string | null }>(`status:${ACCOUNT}`)?.retryAt).toBeNull();
+  });
+});
+
+describe('a sync that finds the CLI signed in as another account', () => {
+  it('publishes that account before the routes that follow it serve it', async () => {
+    const store = new Store(':memory:');
+    let login = 'first-me';
+    let release = () => {};
+    let reached = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const atDiscovery = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const api = {
+      identity: vi.fn(async () => ({ login })),
+      teams: vi.fn(async () => []),
+      discover: vi.fn(async () => {
+        if (login === 'second-me') {
+          reached();
+          await held;
+        }
+
+        return [];
+      }),
+      detect: vi.fn(async () => ({ results: [], budget: null })),
+      snapshot: vi.fn(),
+    } as unknown as GitHubApi;
+    const service = new SyncService(store, api);
+
+    cleanups.push(() => store.close());
+    await service.sync();
+    expect(service.sentStatus.account?.login).toBe('first-me');
+
+    // Nothing was picked in the app, so the sync follows the CLI, which now says second-me.
+    login = 'second-me';
+
+    const syncing = service.sync();
+
+    await atDiscovery;
+
+    expect(service.list().account).toBe('second-me');
+    expect(service.sentStatus.account?.login).toBe('second-me');
+
+    release();
+    await syncing;
   });
 });
 
 describe('a sync whose save fails', () => {
-  it('counts the failure and still reads and saves the other PRs', async () => {
+  it('goes on to the next PR with the reader whose save failed', async () => {
     const store = new Store(':memory:');
-    const ids = ['pr-1', 'pr-2', 'pr-3'];
+    const ids = ['pr-1', 'pr-2', 'pr-3', 'pr-4'];
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const api = {
       identity: vi.fn(async () => ({ login: 'octo' })),
       teams: vi.fn(async () => []),
@@ -512,9 +609,12 @@ describe('a sync whose save fails', () => {
         results: list.map((id) => ({ id, state: 'OPEN' as const, fingerprint: randomUUID() })),
         budget: null,
       })),
-      snapshot: vi.fn(async (id: string, _login: string, sources: string[]) =>
-        snapshot({ id, number: Number(id.slice(3)), sources: sources as never }),
-      ),
+      snapshot: vi.fn(async (id: string, _login: string, sources: string[]) => {
+        // The other two readers stay busy until the fourth PR is saved.
+        if (id === 'pr-2' || id === 'pr-3') await held;
+
+        return snapshot({ id, number: Number(id.slice(3)), sources: sources as never });
+      }),
     } as unknown as GitHubApi;
     const service = new SyncService(store, api);
     const save = store.saveSnapshot.bind(store);
@@ -526,11 +626,20 @@ describe('a sync whose save fails', () => {
       save(account, pr);
     });
 
-    await service.sync();
+    const syncing = service.sync();
+
+    try {
+      // Only the reader whose save of pr-1 failed is free to read and save pr-4.
+      await vi.waitFor(() => expect(store.snapshot('octo', 'pr-4')).not.toBeNull(), {
+        timeout: 2_000,
+      });
+    } finally {
+      release();
+      await syncing;
+    }
 
     expect(store.snapshot('octo', 'pr-1')).toBeNull();
     expect(store.snapshot('octo', 'pr-2')).not.toBeNull();
-    expect(store.snapshot('octo', 'pr-3')).not.toBeNull();
     expect(service.status.warnings).toContainEqual(expect.stringContaining('disk full'));
   });
 });

@@ -185,7 +185,9 @@ describe('GitHub CLI accounts', () => {
     const credentials = new GhCredentials(run);
 
     // Only an Enterprise token: it is for another host, so nothing is probed and the account's own
-    // stored sign-in is used.
+    // stored sign-in is used. (github.com's own variables cleared, as on any machine.)
+    vi.stubEnv('GH_TOKEN', '');
+    vi.stubEnv('GITHUB_TOKEN', '');
     vi.stubEnv('GH_ENTERPRISE_TOKEN', 'enterprise-token-0123');
 
     expect((await asAccount('work-me', () => credentials.environment())).GH_TOKEN).toBe(
