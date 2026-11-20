@@ -181,24 +181,60 @@ describe('sync and local persistence', () => {
     expect(service.detail('pr-1')!.item.unreadReplyKeys).toHaveLength(1);
   });
 
-  it('ends a snooze on the app clock, in the list and the detail alike', async () => {
+  it('accepts and ends a snooze on the app clock, through the route, the list and the detail', async () => {
     const clock = new TestClock();
+
+    // The app's clock runs two hours ahead of the process's.
+    clock.advance(2 * 3_600_000);
+
     const service = new SyncService(store(), fakeGitHub(), undefined, null, clock);
 
     await service.sync();
-    service.update('pr-1', {
-      account: 'me',
-      snoozeUntil: new Date(clock.now() + 3_600_000).toISOString(),
-    });
 
+    const app = await createApp(service, { sessionToken: 'test-session-token' });
+    const snooze = (until: number) =>
+      app.inject({
+        method: 'PATCH',
+        url: '/api/pulls/pr-1/triage',
+        headers: {
+          host: '127.0.0.1:4317',
+          'content-type': 'application/json',
+          'x-review-desk': '1',
+          'x-review-desk-session': 'test-session-token',
+        },
+        payload: { account: 'me', snoozeUntil: new Date(until).toISOString() },
+      });
+
+    // Ahead of the process's time, but already past on the app's.
+    expect((await snooze(Date.now() + 3_600_000)).statusCode).toBe(400);
+
+    const accepted = await snooze(clock.now() + 3_600_000);
+
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json().item.snoozedUntil).not.toBeNull();
     expect(service.list().items[0].queue).toBe('snoozed');
-    expect(service.detail('pr-1')?.item.snoozedUntil).not.toBeNull();
 
     // Only the app's clock moves past the snooze.
     clock.advance(2 * 3_600_000);
 
     expect(service.list().items[0].queue).not.toBe('snoozed');
     expect(service.detail('pr-1')?.item.snoozedUntil).toBeNull();
+    await app.close();
+  });
+
+  it('reads a missing cooldown as none, even on a clock set before 1970', async () => {
+    const service = new SyncService(
+      store(),
+      fakeGitHub(),
+      undefined,
+      null,
+      new TestClock(Date.parse('1969-06-01T00:00:00Z')),
+    );
+
+    await service.sync();
+
+    expect(service.status.retryAt).toBeNull();
+    expect(service.list().items).toHaveLength(1);
   });
 
   it('permanently wakes a snoozed PR on new activity, even after that activity is reviewed', async () => {

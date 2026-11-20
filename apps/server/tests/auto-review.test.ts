@@ -673,23 +673,30 @@ describe('automatic review after new commits', () => {
     await sync.sync();
     await settled();
 
-    const fresh = runs(1846).at(-1)!;
-    const stamps = [
-      ...[...waiting, ...logFor(1846)].flatMap((row) => [
-        row.updatedAt,
-        row.restartAt,
-        row.waitingSince,
-      ]),
-      ...runs(1846).flatMap((run) => [run.createdAt, run.finishedAt]),
-    ].filter((value): value is string => Boolean(value));
+    const [first, fresh] = runs(1846);
+    const [restarted] = logFor(1846);
+    /** Set, and on the app's clock: a month past the process's own, at most a quiet period ahead. */
+    const onAppClock = (value: string | null | undefined) => {
+      expect(value).toEqual(expect.any(String));
+      expect(Date.parse(value!)).toBeGreaterThan(Date.now() + 29 * 86_400_000);
+      expect(Date.parse(value!)).toBeLessThanOrEqual(clock.now() + AUTO_REVIEW_QUIET_MS);
+    };
 
-    expect(waiting).toEqual([expect.objectContaining({ status: 'waiting' })]);
+    expect(waiting).toEqual([expect.objectContaining({ status: 'waiting', runId: first.id })]);
+    onAppClock(waiting[0].updatedAt);
+    onAppClock(waiting[0].restartAt);
+    onAppClock(waiting[0].waitingSince);
+
+    expect(restarted).toEqual(expect.objectContaining({ status: 'started', runId: fresh.id }));
+    onAppClock(restarted.updatedAt);
+
+    expect(first).toEqual(expect.objectContaining({ status: 'cancelled' }));
+    onAppClock(first.createdAt);
+    onAppClock(first.finishedAt);
+
     expect(fresh).toEqual(expect.objectContaining({ trigger: 'auto', status: 'done' }));
-    expect(stamps.length).toBeGreaterThanOrEqual(6);
-    for (const value of stamps) {
-      expect(Date.parse(value)).toBeGreaterThan(Date.now() + 29 * 86_400_000);
-      expect(Date.parse(value)).toBeLessThanOrEqual(clock.now() + AUTO_REVIEW_QUIET_MS);
-    }
+    onAppClock(fresh.createdAt);
+    onAppClock(fresh.finishedAt);
     await vi.waitFor(() =>
       expect(notified.filter((item) => item.kind === 'ai_review_ready')).toEqual([
         expect.objectContaining({ key: `ai:${fresh.id}` }),

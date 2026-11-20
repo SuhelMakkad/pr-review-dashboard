@@ -749,8 +749,8 @@ export class OperationQueue {
     const cooldown = this.sync.store.getSetting<string>(`github-write-retry:${account}`);
     if (
       Math.max(
-        cooldown ? Date.parse(cooldown) : 0,
-        this.sync.status.retryAt ? Date.parse(this.sync.status.retryAt) : 0,
+        cooldown ? Date.parse(cooldown) : -Infinity,
+        this.sync.status.retryAt ? Date.parse(this.sync.status.retryAt) : -Infinity,
       ) > this.clock.now()
     )
       return;

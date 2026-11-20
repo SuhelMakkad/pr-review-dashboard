@@ -121,6 +121,8 @@ export class SyncService {
     if (this.stopped) return;
 
     void this.sync({ trigger: 'start' });
+    // A second start replaces the schedule instead of leaving the first one running.
+    this.stopSchedule?.();
     this.stopSchedule = this.clock.every(SYNC_INTERVAL_MS, () => {
       void this.sync({ scheduled: true });
     });
@@ -142,7 +144,10 @@ export class SyncService {
     if (!account) return;
 
     const until = new Date(
-      Math.max(Date.parse(retryAt), this.status.retryAt ? Date.parse(this.status.retryAt) : 0),
+      Math.max(
+        Date.parse(retryAt),
+        this.status.retryAt ? Date.parse(this.status.retryAt) : -Infinity,
+      ),
     ).toISOString();
     this.store.setSetting(`github-write-retry:${account}`, until);
     this.status = { ...this.status, retryAt: until, nextSyncAt: until };
@@ -153,9 +158,10 @@ export class SyncService {
   private cooldown(): string | null {
     const account = this.status.account?.login;
     const saved = account ? this.store.getSetting<string>(`github-write-retry:${account}`) : null;
+    // A missing deadline is none at all, never the epoch, whatever the clock reads.
     const until = Math.max(
-      saved ? Date.parse(saved) : 0,
-      this.status.retryAt ? Date.parse(this.status.retryAt) : 0,
+      saved ? Date.parse(saved) : -Infinity,
+      this.status.retryAt ? Date.parse(this.status.retryAt) : -Infinity,
     );
 
     return until > this.clock.now() ? new Date(until).toISOString() : null;

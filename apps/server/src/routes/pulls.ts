@@ -124,7 +124,8 @@ export function registerPullRoutes(app: FastifyInstance, service: SyncService): 
         .code(400)
         .send({ error: 'Invalid triage update.', details: parsed.error.flatten() });
 
-    if (parsed.data.snoozeUntil && Date.parse(parsed.data.snoozeUntil) <= Date.now()) {
+    // The app's clock, which also decides when the snooze ends.
+    if (parsed.data.snoozeUntil && Date.parse(parsed.data.snoozeUntil) <= service.clock.now()) {
       return reply.code(400).send({ error: 'Choose a snooze time in the future.' });
     }
 
