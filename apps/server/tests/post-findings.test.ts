@@ -1426,13 +1426,16 @@ describe('approvals whose summary is a separate write', () => {
 
     expect(unconfirmed.error?.code).toBe('UNCONFIRMED');
     expect(unconfirmed.confirmStop).toBe(true);
+    // Checking cannot settle it: only stopping, after confirming.
+    expect(unconfirmed.controls).toEqual(['cancel', 'dismiss']);
     expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
   });
 
   it('stops for the forge’s rate limit while naming the approval, and keeps its receipt', async () => {
-    const { github, sync, review, posted } = await gitlabLike();
+    const context = await gitlabLike();
+    const { github, sync, review, posted } = context;
     const refresh = sync.refresh.bind(sync);
-    const retryAt = new Date(Date.now() + 120_000).toISOString();
+    const retryAt = new Date(Date.now() + 300).toISOString();
     const approve = github.approveReview.bind(github);
     let approved = false;
 
@@ -1456,6 +1459,19 @@ describe('approvals whose summary is a separate write', () => {
 
     await posted(run.id, 'waiting');
     expect(Date.parse(sync.status.retryAt!)).toBeGreaterThanOrEqual(Date.parse(retryAt));
+    expect(stored(context, run.id).steps[0]).toMatchObject({
+      method: 'approveReview',
+      completedAt: expect.any(String),
+      acknowledged: true,
+    });
+
+    // After the limit, the approval is its receipt, never sent again; unnamed, its summary waits.
+    await expect
+      .poll(() => context.queue.get('you', postedReviewOperationId(run.id)).error?.code, {
+        timeout: 2500,
+        interval: 20,
+      })
+      .toBe('APPROVAL_UNKNOWN');
     expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
   });
 

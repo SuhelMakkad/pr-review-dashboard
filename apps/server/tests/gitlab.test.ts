@@ -700,14 +700,13 @@ describe('GitLab merge request snapshots', () => {
 
   it('ends an approval’s review with its summary, on the commit it approved', () => {
     const mr = { web_url: WEB } as RawMergeRequest;
-    const at = (minute: number) => seconds(10 + minute, 0);
-    const note = (id: number, body: string, system: boolean, minute: number) => ({
+    const note = (id: number, body: string, system: boolean, minute: number, second = 0) => ({
       id,
       type: null,
       body,
       author: users.rev,
-      created_at: at(minute),
-      updated_at: at(minute),
+      created_at: seconds(10 + minute, second),
+      updated_at: seconds(10 + minute, second),
       system,
     });
     const summary =
@@ -717,19 +716,21 @@ describe('GitLab merge request snapshots', () => {
       individual_note: true,
       notes,
     });
-    // Approved on HEAD2, its summary five minutes later, then a push to HEAD3 and a reply within
-    // the minute after the summary.
+    const approval = discussion('approval', note(501, 'approved this merge request', true, 0));
+
+    // Approved on HEAD2, its summary five minutes later, then a push to HEAD3 and a reply on
+    // code thirty seconds after the summary.
     const reviews = viewerReviews(
       mr,
       [
-        discussion('approval', note(501, 'approved this merge request', true, 0)),
+        approval,
         discussion('summary', note(502, summary, false, 5)),
         {
           id: 'code',
           individual_note: false,
           notes: [
             {
-              ...note(503, 'Fixed the guard.', false, 5.5),
+              ...note(503, 'Fixed the guard.', false, 5, 30),
               type: 'DiffNote',
               position: {
                 head_sha: HEAD3,
@@ -743,15 +744,30 @@ describe('GitLab merge request snapshots', () => {
         },
       ],
       [
-        { id: 2, head_commit_sha: HEAD2, created_at: at(-1) },
-        { id: 3, head_commit_sha: HEAD3, created_at: at(5.2) },
+        { id: 2, head_commit_sha: HEAD2, created_at: seconds(9, 0) },
+        { id: 3, head_commit_sha: HEAD3, created_at: seconds(15, 10) },
       ],
       'rev',
     );
 
-    expect(reviews.map(({ state, commitOid }) => ({ state, commitOid }))).toEqual([
-      { state: 'APPROVED', commitOid: HEAD2 },
-      { state: 'COMMENTED', commitOid: HEAD3 },
+    expect(reviews.map(({ state, body, commitOid }) => ({ state, body, commitOid }))).toEqual([
+      { state: 'APPROVED', body: summary, commitOid: HEAD2 },
+      { state: 'COMMENTED', body: '', commitOid: HEAD3 },
+    ]);
+
+    // A push between the approval and its summary, however soon: the summary is not its review.
+    const pushed = viewerReviews(
+      mr,
+      [approval, discussion('summary', note(504, summary, false, 0, 40))],
+      [
+        { id: 2, head_commit_sha: HEAD2, created_at: seconds(9, 0) },
+        { id: 3, head_commit_sha: HEAD3, created_at: seconds(10, 20) },
+      ],
+      'rev',
+    );
+
+    expect(pushed.map(({ state, body, commitOid }) => ({ state, body, commitOid }))).toEqual([
+      { state: 'APPROVED', body: '', commitOid: HEAD2 },
     ]);
   });
 

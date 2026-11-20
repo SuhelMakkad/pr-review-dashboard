@@ -291,7 +291,13 @@ export class OperationQueue {
     const unresolvable =
       row.action.type === 'ai_review' &&
       uncertain &&
-      unsure.every((step) => step.method === 'setThreadResolved');
+      unsure.every(
+        (step) =>
+          step.method === 'setThreadResolved' ||
+          // A split approval (GitLab), which no approval on the PR can be told to be: see
+          // `reconcile`.
+          (step.method === 'approveReview' && step.args[2] === ''),
+      );
 
     if (uncertain && !unresolvable) controls.push('check');
     else if (uncertain) {
@@ -1063,23 +1069,11 @@ export class OperationQueue {
             row = this.save({ ...row, steps, progress: this.stepLabel(method, row) });
             this.lastMutationAt = Date.now();
 
+            let result: unknown;
+
+            // Only the write itself can be refused: what follows its receipt never undoes it.
             try {
-              const result: unknown = await value.apply(target, args);
-              steps[index] = {
-                ...step,
-                completedAt: now(),
-                result: result ?? null,
-                uncertain: false,
-                acknowledged: true,
-              };
-              row = this.save({ ...row, steps });
-
-              // The approval this post just gave, named while nothing else can have replaced it:
-              // its summary goes only with that one.
-              if (method === 'approveReview' && args[2] === '' && row.action.type === 'ai_review')
-                row = await this.bindApproval(row);
-
-              return result;
+              result = await value.apply(target, args);
             } catch (error) {
               if (error instanceof GitHubError && error.outcome !== 'unknown') {
                 steps[index] = { ...step, uncertain: false };
@@ -1088,6 +1082,22 @@ export class OperationQueue {
 
               throw error;
             }
+
+            steps[index] = {
+              ...step,
+              completedAt: now(),
+              result: result ?? null,
+              uncertain: false,
+              acknowledged: true,
+            };
+            row = this.save({ ...row, steps });
+
+            // The approval this post just gave, named while nothing else can have replaced it:
+            // its summary goes only with that one.
+            if (method === 'approveReview' && args[2] === '' && row.action.type === 'ai_review')
+              row = await this.bindApproval(row);
+
+            return result;
           };
         },
       }) as GitHubApi;

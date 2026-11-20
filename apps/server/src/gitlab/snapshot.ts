@@ -476,6 +476,10 @@ export function viewerReviews(
     // the review they were, and notes after it (a push may come between) are another.
     const startsSummarised = summarises(own[index + 1], entry);
     const joinsAsSummary = previous !== undefined && summarises(entry, previous);
+    // An approval's summary joins that approval or nothing: after a push it is not its review,
+    // however soon it came.
+    const taggedSummary =
+      !entry.note.system && entry.note.body.split('\n', 2)[1] === approvalSummaryTag;
 
     if (
       group &&
@@ -483,7 +487,8 @@ export function viewerReviews(
       !startsSummarised &&
       !summarised.has(group) &&
       (joinsAsSummary ||
-        time(entry.note.created_at) - time(previous.note.created_at) <= REVIEW_GAP_MS)
+        (!taggedSummary &&
+          time(entry.note.created_at) - time(previous.note.created_at) <= REVIEW_GAP_MS))
     ) {
       group.push(entry);
       if (joinsAsSummary) summarised.add(group);
