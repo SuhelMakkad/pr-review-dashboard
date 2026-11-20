@@ -13,6 +13,9 @@ import { EventBus } from '@/events.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import { GitHubError } from '@/github/errors.js';
 import { Backfill } from '@/insights/backfill.js';
+import { extractActivity } from '@/insights/extract.js';
+import { activityEvents } from '@/db/schema.js';
+import { AiRunner } from '@/ai/runner.js';
 import { DraftStore } from '@/review/drafts.js';
 import { ReviewService } from '@/review/service.js';
 import { SyncService } from '@/sync/service.js';
@@ -157,22 +160,79 @@ describe('AI and Insights for an account not in use', () => {
     expect((await runs()).find((run) => run.id === id)?.status).toBe('cancelled');
   });
 
-  it("checks the account again once a start's preparation is done", async () => {
-    const { service, pr, call, runs } = await demo();
+  it('reports nothing reached after a switch: a cached run, a prepared draft, a resume', async () => {
+    const { service, pr, call, runs, finished, start } = await demo();
+    const brief = await finished(await start('brief'));
+    const review = await finished(await start('full_review'));
+
+    expect(
+      (await call('POST', `/api/accounts/you/ai/runs/${review.id}/draft`, { indices: [0] }))
+        .statusCode,
+    ).toBe(200);
+
+    /** Holds `method` once, switches while it is held, then lets it go. */
+    const acrossSwitch = async <T>(target: object, method: string, send: () => Promise<T>) => {
+      let release: (() => void) | null = null;
+      const original = (target as Record<string, (...args: unknown[]) => unknown>)[method];
+      const spy = vi
+        .spyOn(target as Record<string, (...args: unknown[]) => unknown>, method)
+        .mockImplementationOnce(function (this: unknown, ...args: unknown[]) {
+          return new Promise((resolve) => {
+            release = () => resolve(original.apply(this, args));
+          });
+        });
+      const sent = send();
+
+      await vi.waitFor(() => expect(release).not.toBeNull());
+      await service.switchAccount('you', DEMO_SECOND_ACCOUNT);
+      release!();
+
+      const answer = await sent;
+
+      spy.mockRestore();
+      await service.switchAccount(DEMO_SECOND_ACCOUNT, 'you');
+
+      return answer;
+    };
+
+    // The same brief again would be answered from the run already made, after its input is built.
+    const cached = await acrossSwitch(AiRunner.prototype as unknown as object, 'buildInput', () =>
+      call('POST', `/api/accounts/you/pulls/${pr.id}/ai`, { task: 'brief' }),
+    );
+
+    expect(cached.json()).toMatchObject({ code: 'ACCOUNT_NOT_ACTIVE' });
+
+    // The same preparation again would return the draft already prepared, after a refresh.
+    const prepared = await acrossSwitch(service, 'refresh', () =>
+      call('POST', `/api/accounts/you/ai/runs/${review.id}/draft`, { indices: [0] }),
+    );
+
+    expect(prepared.json()).toMatchObject({ code: 'ACCOUNT_NOT_ACTIVE' });
+    expect((await runs()).filter((run) => run.task === 'brief')).toEqual([
+      expect.objectContaining({ id: brief.id }),
+    ]);
+  });
+
+  it('never queues a resume for an account switched away from while it waited', async () => {
+    const { service, call, runs, start } = await demo(10_000);
+    const id = await start('brief');
+
+    await call('POST', `/api/accounts/you/ai/runs/${id}/pause`);
+
     let release: (() => void) | null = null;
 
-    vi.spyOn(service, 'refresh').mockImplementation(
+    vi.spyOn(service, 'refresh').mockImplementationOnce(
       () => new Promise((resolve) => (release = () => resolve(null))),
     );
 
-    const started = call('POST', `/api/accounts/you/pulls/${pr.id}/ai`, { task: 'full_review' });
+    const resumed = call('POST', `/api/accounts/you/ai/runs/${id}/resume`);
 
     await vi.waitFor(() => expect(release).not.toBeNull());
     await service.switchAccount('you', DEMO_SECOND_ACCOUNT);
     release!();
 
-    expect((await started).json()).toMatchObject({ code: 'ACCOUNT_NOT_ACTIVE' });
-    expect(await runs()).toEqual([]);
+    expect((await resumed).json()).toMatchObject({ code: 'ACCOUNT_NOT_ACTIVE' });
+    expect((await runs()).find((run) => run.id === id)?.status).toBe('paused');
   });
 
   it('refuses a suggestion made for an older head, however late the head moved', async () => {
@@ -291,10 +351,18 @@ describe('history imports per account', () => {
   });
 
   it('saves nothing from a window during which glab signed in as someone else', async () => {
-    const { store, fixture, backfill } = await imports();
+    const { store, fixture, service, backfill } = await imports();
     let signedIn = 'you';
     let reads = 0;
-    const activity = () => store.activity('you', '2000-01-01T00:00:00Z');
+    const eventsOf = (id: string) =>
+      store.activity('you').filter((event) => event.prId === id).length;
+    // Two PRs whose history holds your activity: one read in each of the first two windows.
+    const [first, second] = service
+      .listFor('you')
+      .items.map((item) => service.detailFor('you', item.id)!.snapshot)
+      .filter((snapshot) => extractActivity(snapshot, 'you', []).length > 0);
+
+    store.db.delete(activityEvents).run();
 
     // A forge that cannot carry the account with each call, as GitLab's.
     Object.assign(fixture, {
@@ -307,10 +375,8 @@ describe('history imports per account', () => {
       // The second window (an older, historical one) is read as someone else.
       if (reads === 3) signedIn = 'someone-else';
 
-      return [];
+      return reads <= 2 ? [first.id] : [second.id];
     });
-
-    const before = activity().length;
 
     await backfill.start('you');
 
@@ -318,13 +384,42 @@ describe('history imports per account', () => {
 
     expect(state.lastError).toContain('someone-else');
     expect(state.doneWindows).toEqual([]);
-    expect(activity()).toHaveLength(before);
+    expect(eventsOf(first.id)).toBeGreaterThan(0);
+    expect(eventsOf(second.id)).toBe(0);
+  });
+
+  it('never counts a window whose save rolled back as done', async () => {
+    const { store, fixture, backfill } = await imports();
+    let windows = 0;
+
+    vi.spyOn(fixture, 'searchPullIds').mockResolvedValue([]);
+
+    const setSetting = store.setSetting.bind(store);
+
+    // The second window's checkpoint fails as it is written, inside its transaction.
+    vi.spyOn(store, 'setSetting').mockImplementation((key, value) => {
+      if (key === 'backfill:you' && (value as { lastError: string | null }).lastError === null)
+        if (++windows === 2) throw new Error('Disk full');
+
+      return setSetting(key, value);
+    });
+
+    await backfill.start('you');
+
+    const state = backfill.state('you');
+
+    expect(state.lastError).toContain('Disk full');
+    // Only the first window (the newest, never marked done) was saved: nothing counts as done.
+    expect(state.doneWindows).toEqual([]);
   });
 
   it('keeps a confirmed limit as the cooldown, and keeps saved progress through a refused import', async () => {
     const { store, fixture, service, backfill } = await imports();
     const retryAt = new Date(Date.now() + 60 * 60_000).toISOString();
 
+    const verifyAccount = vi.fn(async () => undefined);
+
+    Object.assign(fixture, { verifyAccount });
     store.setSetting('backfill:you', {
       doneWindows: ['2026-08-07..2026-09-06'],
       finishedAt: null,
@@ -339,11 +434,14 @@ describe('history imports per account', () => {
     expect(backfill.state('you').doneWindows).toEqual(['2026-08-07..2026-09-06']);
     expect(() => service.assertNotCoolingDown('you')).toThrow();
 
-    // Under the cooldown, a forced import reads nothing and loses nothing.
+    // Under the cooldown, a forced import asks the forge nothing, not even who it is, and loses
+    // nothing.
     vi.mocked(fixture.searchPullIds).mockClear();
+    verifyAccount.mockClear();
     await backfill.start('you', { force: true });
 
     expect(fixture.searchPullIds).not.toHaveBeenCalled();
+    expect(verifyAccount).not.toHaveBeenCalled();
     expect(backfill.state('you')).toMatchObject({
       doneWindows: ['2026-08-07..2026-09-06'],
       lastError: expect.stringContaining('rate limited'),

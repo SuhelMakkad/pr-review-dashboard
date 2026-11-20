@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, LoaderCircle, RefreshCw, Table2 } from 'lucide-react';
 import type { Insights } from '@review-desk/shared/insights';
 import { api } from '@/lib/api';
-import { accountPath, useAccount, useForge } from '@/lib/queries';
+import { accountPath, useAccount, useForge, useStatus } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 import { relativePhrase } from '@/lib/time';
 import { Button } from '@/ui/button';
@@ -141,7 +141,10 @@ const shortDate = (iso: string) =>
 export function InsightsPage() {
   const forge = useForge();
   const client = useQueryClient();
+  const status = useStatus();
   const account = useAccount() ?? '';
+  // Known to have no account (signed out): nothing to load, and nothing to read again.
+  const signedOut = status.isSuccess && !account;
   const [days, setDays] = useState<(typeof ranges)[number]>(30);
   const [repo, setRepo] = useState('');
   const query = useQuery({
@@ -203,7 +206,7 @@ export function InsightsPage() {
               size="sm"
               variant="ghost"
               icon={<RefreshCw size={12} />}
-              disabled={data?.backfill?.running || backfill.isPending}
+              disabled={signedOut || data?.backfill?.running || backfill.isPending}
               onClick={() => backfill.mutate()}
             >
               Re-read history
@@ -268,7 +271,7 @@ export function InsightsPage() {
 
         {/* Outline while loading; then the charts, a failure or the first-sync note eases in. */}
         {!insights ? (
-          query.isPending ? (
+          query.isPending && !signedOut ? (
             <InsightsSkeleton />
           ) : query.error ? (
             <Enter key="error" preset="fade" className="grid place-items-center py-10">

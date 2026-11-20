@@ -358,3 +358,55 @@ describe('AI and Insights per account', () => {
     client.clear();
   });
 });
+
+describe('Insights refreshes and empty states', () => {
+  it('reads every account’s Insights again after a first load that was on its way', async () => {
+    const { QueryObserver } = await import('@tanstack/react-query');
+    const client = new QueryClient();
+    const answers: ((value: string) => void)[] = [];
+    const observer = new QueryObserver(client, {
+      queryKey: queryKeys.insights('me', 30, ''),
+      queryFn: () => new Promise<string>((resolve) => answers.push(resolve)),
+    });
+    const unsubscribe = observer.subscribe(() => {});
+
+    try {
+      await vi.waitFor(() => expect(answers).toHaveLength(1));
+
+      // The load left before the review target changed, and answers with the old one.
+      handle(client, { type: 'insights.updated', account: null }, { value: false });
+      answers[0]('Old target');
+
+      await vi.waitFor(() => expect(answers).toHaveLength(2));
+      answers[1]('New target');
+      await vi.waitFor(() => expect(observer.getCurrentResult().data).toBe('New target'));
+    } finally {
+      unsubscribe();
+      client.clear();
+    }
+  });
+
+  it('shows Insights as empty, with nothing to read again, when signed out', async () => {
+    const { InsightsPage } = await import('@/features/insights/insights-page');
+    const { render, screen } = await import('@testing-library/react');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const fetches: string[] = [];
+
+    vi.stubGlobal('fetch', async (path: string) => {
+      fetches.push(path);
+
+      return reply({});
+    });
+    client.setQueryData(queryKeys.status, status({ account: null }));
+    render(
+      <QueryClientProvider client={client}>
+        <InsightsPage />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText('Insights appear after the first sync.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Re-read history' })).toBeDisabled();
+    expect(fetches.filter((path) => path.includes('/insights'))).toEqual([]);
+    client.clear();
+  });
+});

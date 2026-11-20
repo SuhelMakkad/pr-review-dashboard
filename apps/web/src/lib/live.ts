@@ -109,14 +109,15 @@ export function adoptStatus(client: QueryClient, status: SyncStatus): void {
   // ended since, say): read them again. The account left keeps its AI runs, whose restarts now
   // wait for it: read again too, so none shows a countdown that is not running.
   if (switched) {
-    void client.invalidateQueries({ queryKey: queryKeys.account(login) });
-    void client.invalidateQueries({ queryKey: queryKeys.aiReviews(shown) });
-    void client.invalidateQueries({
-      predicate: (query: Query) =>
+    refresh(client, queryKeys.account(login));
+    refresh(client, queryKeys.aiReviews(shown));
+    refresh(
+      client,
+      (query: Query) =>
         query.queryKey[0] === queryKeys.account(null)[0] &&
         query.queryKey[1] === shown &&
         query.queryKey[2] === 'ai',
-    });
+    );
   }
 
   // The first status names the account the cached answers were loaded for; refresh them.
@@ -129,10 +130,11 @@ export function adoptStatus(client: QueryClient, status: SyncStatus): void {
  * already on its way, and that load can carry the state from just before the event (a reload
  * racing an outbox update, say), so such a load is invalidated again once it lands.
  */
-export function refresh(client: QueryClient, queryKey: QueryKey): void {
+export function refresh(client: QueryClient, target: QueryKey | ((query: Query) => boolean)): void {
   const cache = client.getQueryCache();
+  const filters = typeof target === 'function' ? { predicate: target } : { queryKey: target };
 
-  for (const query of cache.findAll({ queryKey })) {
+  for (const query of cache.findAll(filters)) {
     if (query.state.data !== undefined || query.state.fetchStatus !== 'fetching') continue;
 
     const unsubscribe = cache.subscribe((event) => {
@@ -145,7 +147,7 @@ export function refresh(client: QueryClient, queryKey: QueryKey): void {
     });
   }
 
-  void client.invalidateQueries({ queryKey });
+  void client.invalidateQueries(filters);
 }
 
 /** Applies one server event to the cache. Exported for tests. */
@@ -201,8 +203,7 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
       return;
     case 'insights.updated':
       // Null: the review target every account's Insights measure against changed.
-      if (event.account === null) void client.invalidateQueries({ predicate: isInsights });
-      else refresh(client, queryKeys.insights(event.account));
+      refresh(client, event.account === null ? isInsights : queryKeys.insights(event.account));
       return;
     case 'operation.updated':
       refresh(client, queryKeys.operations(event.account));

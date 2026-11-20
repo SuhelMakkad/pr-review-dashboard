@@ -48,7 +48,11 @@ export function registerInsightsRoutes(
       ? z.strictObject({}).safeParse(request.body ?? {})
       : z.strictObject({ account: z.string().min(1) }).safeParse(request.body);
 
-    if (!parsed.success) return reply.code(400).send({ error: 'Invalid request.' });
+    if (!parsed.success)
+      // The legacy route's answer for a request without its account, as before.
+      return scoped
+        ? reply.code(400).send({ error: 'Invalid request.' })
+        : reply.code(409).send({ error: 'GitHub account changed. Refresh first.' });
 
     const account = scoped ?? (parsed.data as { account: string }).account;
     const selected = service.status.account?.login ?? null;

@@ -95,9 +95,9 @@ export class Backfill {
         .all()
         .map((row) => row.prId),
     );
-    const save = (patch: Partial<Omit<BackfillState, 'running'>>) =>
+    const save = (patch: Partial<Omit<BackfillState, 'running'>>, windows = saved) =>
       this.sync.store.setSetting(this.key(login), {
-        doneWindows: [...saved],
+        doneWindows: [...windows],
         finishedAt: state.finishedAt,
         lastError: null,
         ...patch,
@@ -123,24 +123,33 @@ export class Backfill {
         // The newest window is always re-read: it is still filling up.
         if (!force && saved.has(window) && end !== now) continue;
 
-        this.sync.assertNotCoolingDown(login);
+        // A cooldown already saved is refused here, asking the forge nothing, not even who it is.
+        try {
+          this.sync.assertNotCoolingDown(login);
+        } catch (error) {
+          save({ lastError: safeError(error) });
+          return;
+        }
+
         await check();
 
         const snapshots = await this.read(login, window, force, known);
 
         await check();
 
-        // The window's activity and its checkpoint together, or neither.
+        // The window's activity and its checkpoint together, or neither; this run counts the
+        // window done, and its PRs known, only once both are committed.
+        const windows = end !== now ? new Set([...saved, window]) : saved;
+
         this.sync.store.transaction(() => {
-          for (const snapshot of snapshots) {
+          for (const snapshot of snapshots)
             this.sync.store.recordActivity(login, extractActivity(snapshot, login, teams));
-            known.add(snapshot.id);
-          }
 
-          if (end !== now) saved.add(window);
-
-          save({});
+          save({}, windows);
         });
+
+        if (end !== now) saved.add(window);
+        for (const snapshot of snapshots) known.add(snapshot.id);
         this.events.emit({ type: 'insights.updated', account: login });
       }
 

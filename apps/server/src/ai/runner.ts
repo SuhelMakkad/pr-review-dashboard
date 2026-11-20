@@ -146,6 +146,15 @@ export interface AiRunnerOptions {
   sweepWorkspaces?: boolean;
 }
 
+type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+/** `work`'s outcome, never rejecting, for the caller to check in its own turn. */
+const settled = <T>(work: Promise<T>): Promise<Settled<T>> =>
+  work.then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+
 /** A suggestion made for an older head: its lines are not this head's. */
 const headMoved = () =>
   new ReviewError(
@@ -494,22 +503,16 @@ export class AiRunner {
   }
 
   /**
-   * Waits for `work`, then checks the account is still in use, whatever `work` did: an outcome
-   * reached after a switch is never reported as the account's, cached results and errors alike.
+   * What `work` came to, the account checked first: called in the caller's own turn after its await
+   * (`this.selected(account, await settled(work))`), so an outcome reached after a switch, a result,
+   * a cached run or an error, is never reported as the account's, and nothing runs on from it.
    */
-  private async stillSelected<T>(account: string, work: Promise<T>): Promise<T> {
-    let value: T;
-
-    try {
-      value = await work;
-    } catch (error) {
-      this.assertSelected(account);
-      throw error;
-    }
-
+  private selected<T>(account: string, outcome: Settled<T>): T {
     this.assertSelected(account);
 
-    return value;
+    if (outcome.ok) return outcome.value;
+
+    throw outcome.error;
   }
 
   /** The PR as the account in use has it. */
@@ -710,7 +713,7 @@ export class AiRunner {
     this.detail(account, prId);
 
     if (task === 'full_review' || task === 'draft_summary')
-      await this.stillSelected(account, this.sync.refresh(prId, account));
+      this.selected(account, await settled(this.sync.refresh(prId, account)));
 
     const detail = this.detail(account, prId);
     const settings = this.settings();
@@ -734,14 +737,14 @@ export class AiRunner {
             : {}),
         }
       : null;
-    const input = await this.stillSelected(
+    const input = this.selected(
       account,
-      this.buildInput(task, detail, account, completedReview),
+      await settled(this.buildInput(task, detail, account, completedReview)),
     );
     const head = detail.snapshot.headOid;
 
     if (task === 'full_review') {
-      await this.stillSelected(account, this.sync.refresh(prId, account));
+      this.selected(account, await settled(this.sync.refresh(prId, account)));
 
       const latest = this.detail(account, prId).snapshot;
 
@@ -788,7 +791,7 @@ export class AiRunner {
 
     // A cached answer costs nothing; a new Codex run must fit in the plan.
     if (provider === 'codex') {
-      const status = await this.stillSelected(account, this.codexStatus());
+      const status = this.selected(account, await settled(this.codexStatus()));
 
       if (codexBlocked(status)) {
         throw new ReviewError(
@@ -1215,15 +1218,15 @@ export class AiRunner {
 
     // A pause may still be waiting for the old process to flush and exit. Never overlap turns.
     if (this.active.has(id))
-      await this.stillSelected(account, Promise.resolve(this.executions.get(id)));
+      this.selected(account, await settled(Promise.resolve(this.executions.get(id))));
 
     // Nor with the run's previous agent, which a stop has signalled but which may not have exited
     // yet, or which a server that was killed outright left behind: its lock says until it has.
     if (
-      !(await this.stillSelected(
+      !this.selected(
         account,
-        agentExited(join(this.workRoot, id), this.agentExitWaitMs),
-      ))
+        await settled(agentExited(join(this.workRoot, id), this.agentExitWaitMs)),
+      )
     )
       throw new ReviewError(
         'AGENT_STILL_RUNNING',
@@ -1231,12 +1234,12 @@ export class AiRunner {
         'The previous AI agent for this review is still stopping. Try again shortly.',
       );
 
-    await this.stillSelected(account, this.sync.refresh(row.prId, row.account));
+    this.selected(account, await settled(this.sync.refresh(row.prId, row.account)));
     const problem = this.resumeProblem(row);
 
     if (problem) throw new ReviewError('STALE_REVIEW', 409, problem);
     if (row.provider === 'codex') {
-      const status = await this.stillSelected(account, this.codexStatus());
+      const status = this.selected(account, await settled(this.codexStatus()));
 
       if (codexBlocked(status))
         throw new ReviewError(
@@ -1257,6 +1260,8 @@ export class AiRunner {
 
     if (changed) throw new ReviewError('STALE_REVIEW', 409, changed);
 
+    // In the turn that queues it: the account is still in use.
+    this.assertSelected(account);
     this.update(id, {
       status: 'queued',
       pauseReason: null,
@@ -1421,7 +1426,7 @@ export class AiRunner {
 
     const initialRevision = preparationRevision(this.reviews.draft(account, row.prId));
 
-    await this.stillSelected(account, this.sync.refresh(row.prId, row.account));
+    this.selected(account, await settled(this.sync.refresh(row.prId, row.account)));
 
     const staleReason = this.staleReason(row);
 
@@ -1538,7 +1543,7 @@ export class AiRunner {
 
     this.detail(account, row.prId);
     this.reviews.drafts.assertEditable(account, row.prId);
-    await this.stillSelected(account, this.sync.refresh(row.prId, row.account));
+    this.selected(account, await settled(this.sync.refresh(row.prId, row.account)));
     this.detail(account, row.prId);
 
     const reason = this.staleReason(row);
