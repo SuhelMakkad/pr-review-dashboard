@@ -65,7 +65,8 @@ test("keeps each account's private note on a PR both accounts track", async ({ p
   const switchTo = async (login: string) => {
     await page.getByRole('button', { name: /^Switch GitHub account, now / }).click();
     await page.getByRole('menuitemradio', { name: login, exact: true }).click();
-    await expect(page.getByText(`Switched to ${login}`)).toBeVisible();
+    // Exact: the previous switch's toast can still be showing on a slow machine.
+    await expect(page.getByText(`Switched to ${login}`, { exact: true })).toBeVisible();
   };
   /** Longer than the note's 800 ms autosave, so a wrong save would have reached the server. */
   const pastAutosave = () => page.waitForTimeout(1500);
