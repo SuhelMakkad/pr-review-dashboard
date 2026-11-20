@@ -8,7 +8,7 @@ import {
   type SuggestedComment,
 } from '@review-desk/shared/ai';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
-import { postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
+import { approvalSummaryTag, postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
 import type { AiRunner } from '@/ai/runner.js';
 import type { AiRunRow } from '@/db/schema.js';
 import type { OperationQueue } from '@/operations/queue.js';
@@ -28,6 +28,20 @@ const severityLabels: Record<SuggestedComment['severity'], string> = {
 
 /** One posting per run: retrying, recovering or finishing twice can never post it again. */
 export const postedReviewOperationId = (runId: string) => `ai-review-${runId}`;
+
+/**
+ * True where approvals are read from their own notes (GitLab) and you had approved the PR when
+ * the review read it: approving again changes nothing there, so its summary would be read as the
+ * summary of your earlier approval.
+ */
+function alreadyApproved(reviewed: PullRequestSnapshot, account: string, carries: boolean) {
+  return (
+    !carries &&
+    (reviewed.verdicts ?? []).some(
+      (verdict) => verdict.state === 'APPROVED' && isSameUser(verdict.login, account),
+    )
+  );
+}
 
 /** Says, first in the post, why a review without blocking findings did not approve. */
 function coverageNote(inputs: ReviewInputs): string {
@@ -50,6 +64,8 @@ export function postedReviewBody(
   headOid: string,
   result: FullReviewResult,
   inputs?: ReviewInputs | null,
+  /** Posted after its approval, as a separate write (GitLab): says so on its second line. */
+  summarisesApproval = false,
 ): string {
   const blocking = hasBlockingFindings(result);
   const verdict = blocking ? 'Changes recommended' : 'No blocking findings';
@@ -69,7 +85,7 @@ export function postedReviewBody(
 
   if (content.length > room) content = content.slice(0, room).trimEnd() + TRUNCATED;
 
-  return `${marker}\n${content}\n\n${footer}`;
+  return `${marker}\n${summarisesApproval ? `${approvalSummaryTag}\n` : ''}${content}\n\n${footer}`;
 }
 
 /**
@@ -121,9 +137,11 @@ export class FindingsPublisher {
           ? 'Approving is turned off in Settings.'
           : current.isDraft
             ? 'Draft PRs are not approved automatically.'
-            : isSameUser(current.author.login, row.account)
-              ? 'You cannot approve your own PR.'
-              : undefined;
+            : alreadyApproved(reviewed, row.account, this.sync.github.approvalCarriesSummary)
+              ? 'You had already approved this PR.'
+              : isSameUser(current.author.login, row.account)
+                ? 'You cannot approve your own PR.'
+                : undefined;
     const event = blocking || reason ? 'COMMENT' : 'APPROVE';
     const threadIds =
       event === 'APPROVE' && settings.resolveThreads
@@ -131,7 +149,13 @@ export class FindingsPublisher {
             .filter((thread) => !thread.isResolved && thread.viewerCanResolve !== false)
             .map((thread) => thread.id)
         : [];
-    const body = postedReviewBody(row.id, row.headOid, result, row.inputs);
+    const body = postedReviewBody(
+      row.id,
+      row.headOid,
+      result,
+      row.inputs,
+      event === 'APPROVE' && !this.sync.github.approvalCarriesSummary,
+    );
     const operationId = postedReviewOperationId(row.id);
 
     this.operations.enqueueAutomatic(row.account, row.prId, operationId, {
@@ -145,6 +169,7 @@ export class FindingsPublisher {
         baseRefName: reviewed.baseRefName,
         mergeBaseOid: row.inputs.mergeBaseOid,
         fingerprint,
+        summaryFingerprint: publicationFingerprint(reviewed, row.id, row.account, new Set(), false),
         threadIds,
         grants: { approve: event === 'APPROVE', resolve: threadIds.length > 0 },
       },

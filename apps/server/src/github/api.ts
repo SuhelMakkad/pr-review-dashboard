@@ -104,6 +104,12 @@ export interface ReviewReceipt {
  * implements it from an in-memory scenario so the UI and services run without GitHub.
  */
 export interface GitHubApi extends GitHubWrites {
+  /**
+   * True where an approval carries its summary in one write (GitHub's review body). Where it
+   * cannot (GitLab: an approval, then a note), the two are sent and checkpointed as separate
+   * steps, so each has its own receipt.
+   */
+  readonly approvalCarriesSummary: boolean;
   reviewReceipt(id: string): Promise<ReviewReceipt | null>;
   identity(): Promise<Actor>;
   /** Where the forge differs from GitHub; absent means everything is supported. */
@@ -138,6 +144,17 @@ export interface GitHubApi extends GitHubWrites {
   compare(repository: string, base: string, head: string): Promise<CompareResult | null>;
   /** The commit `branch` points to now; null when there is no such branch. */
   branchHead(repository: string, branch: string): Promise<string | null>;
+  /**
+   * The comment `author` left in the conversation of PR `prId` that starts with `marker`, read
+   * through every page (a snapshot keeps only the latest ones). The PR is named by its id, which
+   * a renamed or moved repository keeps. Null when there is none; throws when not every page
+   * could be read, so absence is never assumed.
+   */
+  markedComment(
+    prId: string,
+    author: string,
+    marker: string,
+  ): Promise<{ id: string; url: string } | null>;
   /** PR node ids matching a search (open or closed); used to backfill history. */
   searchPullIds(query: string): Promise<string[]>;
   /** Light snapshots (requests, your reviews, verdicts) for many PRs, for review history. */

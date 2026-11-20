@@ -37,6 +37,13 @@ export const reviewReceiptQuery = `query ReviewReceipt($id: ID!, $cursor: String
   } }
 }`;
 
+/** One page of a PR's conversation, by the PR's node id. */
+export const conversationPageQuery = `query ConversationPage($id: ID!, $cursor: String) {
+  node(id: $id) { ... on PullRequest {
+    comments(first: 100, after: $cursor) { nodes { id url body author { login } } ${pageInfo} }
+  } }
+}`;
+
 /** Looks up a PR by repository and number, for adding it to the queue by hand. */
 export const resolvePullQuery = `query ResolvePull($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { id state } }

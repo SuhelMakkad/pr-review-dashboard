@@ -23,6 +23,7 @@ import {
   type MergeRequestRef,
 } from '@/gitlab/ids.js';
 import type { DiffRefs } from '@/gitlab/positions.js';
+import { approvalSummaryTag, postedReviewPrefix } from '@/ai/freshness.js';
 
 export interface RawUser {
   id: number;
@@ -454,18 +455,49 @@ export function viewerReviews(
     .sort((a, b) => time(a.note.created_at) - time(b.note.created_at));
   const groups: (typeof own)[] = [];
 
-  for (const entry of own) {
+  // An automatic approval's summary belongs to the approval it follows, however long after: the
+  // two are separate writes, and a retry can part them by more than the gap. Only a note that
+  // says it is such a summary, on the head the approval was given on (no push between).
+  const summarises = (summary: (typeof own)[number] | undefined, approval: (typeof own)[number]) =>
+    summary !== undefined &&
+    !summary.note.system &&
+    summary.note.body.startsWith(postedReviewPrefix) &&
+    summary.note.body.split('\n', 2)[1] === approvalSummaryTag &&
+    verdictOf(approval.note) === 'approved' &&
+    headAt(versions, approval.note.created_at) === headAt(versions, summary.note.created_at);
+
+  // Groups that are an approval and its summary: nothing joins them after the summary.
+  const summarised = new Set<(typeof own)[number][]>();
+
+  own.forEach((entry, index) => {
     const group = groups.at(-1);
     const previous = group?.at(-1);
+    // That approval and its summary are a review of their own: your notes just before it stay
+    // the review they were, and notes after it (a push may come between) are another.
+    const startsSummarised = summarises(own[index + 1], entry);
+    const joinsAsSummary = previous !== undefined && summarises(entry, previous);
+    // An approval's summary joins that approval or nothing: after a push it is not its review,
+    // however soon it came, nor any other's. It stays a comment in the conversation.
+    const taggedSummary =
+      !entry.note.system && entry.note.body.split('\n', 2)[1] === approvalSummaryTag;
+
+    if (taggedSummary && !joinsAsSummary) return;
 
     if (
       group &&
       previous &&
-      time(entry.note.created_at) - time(previous.note.created_at) <= REVIEW_GAP_MS
-    )
+      !startsSummarised &&
+      !summarised.has(group) &&
+      (joinsAsSummary ||
+        (!taggedSummary &&
+          time(entry.note.created_at) - time(previous.note.created_at) <= REVIEW_GAP_MS))
+    ) {
       group.push(entry);
-    else groups.push([entry]);
-  }
+      if (joinsAsSummary) summarised.add(group);
+    } else {
+      groups.push([entry]);
+    }
+  });
 
   const reviews: Review[] = [];
 
@@ -512,7 +544,8 @@ export function viewerReviews(
         (latest, { note }) => (time(note.updated_at) > time(latest) ? note.updated_at : latest),
         end.created_at,
       ),
-      commitOid: diffHead ?? headAt(versions, end.created_at),
+      // An approval and its summary are on the commit the approval was given on.
+      commitOid: diffHead ?? headAt(versions, (summarised.has(group) ? first : end).created_at),
       body: summary?.note.body ?? '',
       url: noteUrl(mr, first.id),
     });

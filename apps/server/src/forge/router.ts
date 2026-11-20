@@ -177,6 +177,10 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
     return this.target().branchHead(repository, branch);
   }
 
+  markedComment(prId: string, author: string, marker: string) {
+    return this.target().markedComment(prId, author, marker);
+  }
+
   searchPullIds(query: string) {
     return this.target().searchPullIds(query);
   }
@@ -187,6 +191,10 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
 
   blobs(repository: string, requests: { oid: string; path: string }[]) {
     return this.target().blobs(repository, requests);
+  }
+
+  get approvalCarriesSummary() {
+    return this.target().approvalCarriesSummary;
   }
 
   approveReview(prId: string, commitOid: string, body: string) {

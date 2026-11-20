@@ -50,6 +50,7 @@ import {
   type RawDraftNote,
   type RawJob,
   type RawMergeRequest,
+  type RawNote,
   type RawReviewer,
   type RawUser,
   type RawVersion,
@@ -58,7 +59,9 @@ import {
   call,
   GlabCli,
   paginate,
+  relativeApiPath,
   responseError,
+  type GitLabResponse,
   type GitLabTransport,
 } from '@/gitlab/transport.js';
 import {
@@ -164,6 +167,9 @@ function searchFilters(query: string): string | null {
  * GitLab's notes, reviewers and approvals become reviews, requests and verdicts.
  */
 export class GitLab implements GitHubApi {
+  /** An approval takes no text: its summary is a separate note. */
+  readonly approvalCarriesSummary = false;
+
   private readonly writes: GitLabWrites;
 
   constructor(
@@ -712,6 +718,63 @@ export class GitLab implements GitHubApi {
         ? { complete: true, mergeBaseOid: detail.base_commit_sha }
         : {}),
     };
+  }
+
+  async markedComment(
+    prId: string,
+    author: string,
+    marker: string,
+  ): Promise<{ id: string; url: string } | null> {
+    // By the project's numeric id and the merge request's iid, which a moved project keeps.
+    const base = mergeRequestPath(parseMergeRequestId(prId));
+    let next: string | null = `${base}/notes?sort=asc&per_page=100`;
+
+    // Up to 10,000 notes; past that, absence cannot be shown.
+    for (let page = 0; next; page++) {
+      if (page === 100)
+        throw new GitHubError('The conversation is too long to check for an earlier post.');
+
+      const response: GitLabResponse<RawNote[]> = await this.transport.request<RawNote[]>({
+        path: next,
+      });
+
+      if (response.status >= 400) throw responseError(response, 'Could not read the notes');
+      if (!Array.isArray(response.data)) throw new GitHubError('Could not read the notes.');
+
+      const found = response.data.find(
+        (note) =>
+          !note.system &&
+          note.author &&
+          isSameUser(note.author.username, author) &&
+          note.body.startsWith(marker),
+      );
+
+      if (found) {
+        const mr = await call<RawMergeRequest>(
+          this.transport,
+          { path: base },
+          'Could not load the merge request',
+        );
+
+        return { id: String(found.id), url: noteUrl(mr, found.id) };
+      }
+
+      // GitLab gives the next page in `X-Next-Page`, or only in a `Link` header (keyset
+      // pagination, or where a proxy drops the headers): either counts.
+      const nextPage = response.headers['x-next-page'];
+      const link = /<([^>]+)>;\s*rel="next"/.exec(response.headers.link ?? '')?.[1];
+
+      next = nextPage
+        ? `${base}/notes?sort=asc&per_page=100&page=${encodeURIComponent(nextPage)}`
+        : link
+          ? relativeApiPath(link)
+          : null;
+
+      if (link && !nextPage && !next)
+        throw new GitHubError('The next page of notes could not be followed.');
+    }
+
+    return null;
   }
 
   async branchHead(repository: string, branch: string): Promise<string | null> {

@@ -8,6 +8,8 @@ import { GitHubError, safeError } from '@/github/errors.js';
 import { GlabAccounts } from '@/gitlab/accounts.js';
 import { commentPosition, locate, parseDiff } from '@/gitlab/positions.js';
 import { GitLab } from '@/gitlab/read.js';
+import { viewerReviews, type RawDiscussion, type RawMergeRequest } from '@/gitlab/snapshot.js';
+import { reviewFingerprint } from '@/ai/freshness.js';
 import {
   baseGlabEnvironment,
   glabCwd,
@@ -555,6 +557,269 @@ describe('GitLab merge request snapshots', () => {
     // The jobs read were pipeline 55's, so its status is shown with them.
     expect(pr.ci).toBe('pending');
     expect(fake.calls.some((call) => call.path.startsWith('projects/7/pipelines/56'))).toBe(false);
+  });
+
+  it('keeps an approval summary with its approval, however long after, and nothing else', () => {
+    const mr = { web_url: WEB } as RawMergeRequest;
+    const note = (id: number, body: string, system: boolean, minute: number) => ({
+      id,
+      type: null,
+      body,
+      author: users.rev,
+      created_at: seconds(10 + minute, 0),
+      updated_at: seconds(10 + minute, 0),
+      system,
+    });
+    const marker = '<!-- review-desk:ai-review run=run-1 -->';
+    const summary = `${marker}\n<!-- review-desk:approval-summary -->\n**AI review** · No blocking findings`;
+    const discussion = (id: string, ...notes: ReturnType<typeof note>[]): RawDiscussion => ({
+      id,
+      individual_note: true,
+      notes,
+    });
+    const approval = discussion('approval', note(301, 'approved this merge request', true, 0));
+    const versions = [{ id: 2, head_commit_sha: HEAD2, created_at: at(0) }];
+
+    // Retried after GitLab refused it: five minutes after the approval.
+    const reviews = viewerReviews(
+      mr,
+      [approval, discussion('summary', note(302, summary, false, 5))],
+      versions,
+      'rev',
+    );
+
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({ state: 'APPROVED', body: summary, commitOid: HEAD2 });
+
+    // So the review it came from is not out of date because of it.
+    const pr = {
+      baseOid: START,
+      headOid: HEAD2,
+      title: 'Title',
+      body: '',
+      reviews: [],
+      threads: [],
+      conversation: [],
+      requestEvents: [],
+    } as unknown as Parameters<typeof reviewFingerprint>[0];
+
+    expect(reviewFingerprint({ ...pr, reviews }, 'rev')).toBe(reviewFingerprint(pr, 'rev'));
+
+    // A comment-only AI post never joins an approval, nor does a summary after a push.
+    const comment = `${marker}\n**AI review** · Changes recommended`;
+
+    expect(
+      viewerReviews(
+        mr,
+        [approval, discussion('comment', note(303, comment, false, 5))],
+        versions,
+        'rev',
+      ),
+    ).toEqual([expect.objectContaining({ state: 'APPROVED', body: '', commitOid: HEAD2 })]);
+    expect(
+      viewerReviews(
+        mr,
+        [approval, discussion('summary', note(304, summary, false, 5))],
+        [...versions, { id: 3, head_commit_sha: HEAD3, created_at: seconds(12, 0) }],
+        'rev',
+      ),
+    ).toEqual([expect.objectContaining({ state: 'APPROVED', body: '', commitOid: HEAD2 })]);
+  });
+
+  it('keeps your comment just before an automatic approval apart from it and its summary', () => {
+    const mr = { web_url: WEB } as RawMergeRequest;
+    const at = (minute: number, second = 0) => seconds(10 + minute, second);
+    const summary =
+      '<!-- review-desk:ai-review run=run-1 -->\n<!-- review-desk:approval-summary -->\nSummary';
+    const discussions: RawDiscussion[] = [
+      {
+        id: 'code',
+        individual_note: false,
+        notes: [
+          {
+            id: 401,
+            type: 'DiffNote',
+            body: 'Consider a guard here.',
+            author: users.rev,
+            created_at: at(0),
+            updated_at: at(0),
+            system: false,
+            position: {
+              head_sha: HEAD2,
+              base_sha: BASE,
+              start_sha: START,
+              new_path: 'a.ts',
+              new_line: 3,
+            },
+          } as never,
+        ],
+      },
+      {
+        id: 'approval',
+        individual_note: true,
+        notes: [
+          {
+            id: 402,
+            type: null,
+            body: 'approved this merge request',
+            author: users.rev,
+            created_at: at(0, 30),
+            updated_at: at(0, 30),
+            system: true,
+          },
+        ],
+      },
+      {
+        id: 'summary',
+        individual_note: true,
+        notes: [
+          {
+            id: 403,
+            type: null,
+            body: summary,
+            author: users.rev,
+            created_at: at(5),
+            updated_at: at(5),
+            system: false,
+          },
+        ],
+      },
+    ];
+    const reviews = viewerReviews(
+      mr,
+      discussions,
+      [{ id: 2, head_commit_sha: HEAD2, created_at: at(-1) }],
+      'rev',
+    );
+
+    expect(reviews.map(({ state, body }) => ({ state, body }))).toEqual([
+      { state: 'COMMENTED', body: '' },
+      { state: 'APPROVED', body: summary },
+    ]);
+  });
+
+  it('ends an approval’s review with its summary, on the commit it approved', () => {
+    const mr = { web_url: WEB } as RawMergeRequest;
+    const note = (id: number, body: string, system: boolean, minute: number, second = 0) => ({
+      id,
+      type: null,
+      body,
+      author: users.rev,
+      created_at: seconds(10 + minute, second),
+      updated_at: seconds(10 + minute, second),
+      system,
+    });
+    const summary =
+      '<!-- review-desk:ai-review run=run-1 -->\n<!-- review-desk:approval-summary -->\nSummary';
+    const discussion = (id: string, ...notes: ReturnType<typeof note>[]): RawDiscussion => ({
+      id,
+      individual_note: true,
+      notes,
+    });
+    const approval = discussion('approval', note(501, 'approved this merge request', true, 0));
+
+    // Approved on HEAD2, its summary five minutes later, then a push to HEAD3 and a reply on
+    // code thirty seconds after the summary.
+    const reviews = viewerReviews(
+      mr,
+      [
+        approval,
+        discussion('summary', note(502, summary, false, 5)),
+        {
+          id: 'code',
+          individual_note: false,
+          notes: [
+            {
+              ...note(503, 'Fixed the guard.', false, 5, 30),
+              type: 'DiffNote',
+              position: {
+                head_sha: HEAD3,
+                base_sha: BASE,
+                start_sha: START,
+                new_path: 'a.ts',
+                new_line: 3,
+              },
+            } as never,
+          ],
+        },
+      ],
+      [
+        { id: 2, head_commit_sha: HEAD2, created_at: seconds(9, 0) },
+        { id: 3, head_commit_sha: HEAD3, created_at: seconds(15, 10) },
+      ],
+      'rev',
+    );
+
+    expect(reviews.map(({ state, body, commitOid }) => ({ state, body, commitOid }))).toEqual([
+      { state: 'APPROVED', body: summary, commitOid: HEAD2 },
+      { state: 'COMMENTED', body: '', commitOid: HEAD3 },
+    ]);
+
+    // A push between the approval and its summary, however soon: the summary is not its review,
+    // nor that of an approval of the new head given by hand right after it.
+    const pushed = viewerReviews(
+      mr,
+      [
+        approval,
+        discussion('summary', note(504, summary, false, 0, 40)),
+        discussion('manual', note(505, 'approved this merge request', true, 1, 10)),
+      ],
+      [
+        { id: 2, head_commit_sha: HEAD2, created_at: seconds(9, 0) },
+        { id: 3, head_commit_sha: HEAD3, created_at: seconds(10, 20) },
+      ],
+      'rev',
+    );
+
+    expect(pushed.map(({ state, body, commitOid }) => ({ state, body, commitOid }))).toEqual([
+      { state: 'APPROVED', body: '', commitOid: HEAD2 },
+      { state: 'APPROVED', body: '', commitOid: HEAD3 },
+    ]);
+  });
+
+  it('finds a marked note on a later page, following GitLab’s Link header', async () => {
+    const { client, fake } = gitlab();
+    const notes = `${MR}/notes`;
+    const older = Array.from({ length: 100 }, (_, index) => ({
+      id: index + 1,
+      type: null,
+      body: 'added 1 commit',
+      author: users.dev,
+      created_at: at(1),
+      updated_at: at(1),
+      system: true,
+    }));
+
+    fake.on('GET', notes, (request) =>
+      request.path.includes('cursor=2')
+        ? {
+            data: [
+              {
+                id: 501,
+                type: null,
+                body: '<!-- review-desk:ai-review run=run-1 -->\nSummary',
+                author: users.rev,
+                created_at: at(2),
+                updated_at: at(2),
+                system: false,
+              },
+            ],
+          }
+        : {
+            data: older,
+            headers: {
+              'content-type': 'application/json',
+              link: `<https://gitlab.example.com/api/v4/${notes}?cursor=2&per_page=100>; rel="next"`,
+            },
+          },
+    );
+
+    await expect(
+      client.markedComment('MR_7_12', 'rev', '<!-- review-desk:ai-review run=run-1 -->'),
+    ).resolves.toEqual({ id: '501', url: `${WEB}#note_501` });
+    await expect(
+      client.markedComment('MR_7_12', 'rev', '<!-- review-desk:ai-review run=other -->'),
+    ).resolves.toBeNull();
   });
 
   it('tells a missing target branch from one that could not be read', async () => {

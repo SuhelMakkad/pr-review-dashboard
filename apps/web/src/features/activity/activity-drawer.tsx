@@ -113,7 +113,11 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
         method: 'POST',
         body: {
           account: operation.account,
-          confirm: command === 'restore' || command === 'reopen' || command === 'cancel',
+          // Only once you were asked: stopping what may be on the forge needs your yes.
+          confirm:
+            command === 'restore' ||
+            ((command === 'reopen' || command === 'cancel') &&
+              Boolean(operation.confirmStop || operation.error?.code === 'UNCONFIRMED')),
         },
       }),
     onSuccess: (_receipt, command) => {
@@ -230,7 +234,7 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
                 return;
               if (
                 command === 'reopen' &&
-                operation.error?.code === 'UNCONFIRMED' &&
+                (operation.confirmStop || operation.error?.code === 'UNCONFIRMED') &&
                 !window.confirm(
                   'Have you checked GitHub and confirmed this action did not post? Sending it again could create a duplicate.',
                 )
@@ -238,7 +242,7 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
                 return;
               if (
                 command === 'cancel' &&
-                operation.error?.code === 'UNCONFIRMED' &&
+                (operation.confirmStop || operation.error?.code === 'UNCONFIRMED') &&
                 !window.confirm(
                   'This may already be on GitHub. Stop tracking it here? Check the PR before posting it another way.',
                 )

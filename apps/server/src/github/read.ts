@@ -13,6 +13,7 @@ import type {
   ThreadComment,
 } from '@review-desk/shared/types';
 import { createHash } from 'node:crypto';
+import { isSameUser } from '@review-desk/shared/accounts';
 import { SNAPSHOT_VERSION } from '@review-desk/shared/snapshot';
 import type {
   BlobText,
@@ -36,6 +37,7 @@ import {
   identityQuery,
   resolvePullQuery,
   reviewReceiptQuery,
+  conversationPageQuery,
   snapshotQuery,
   threadCommentsQuery,
   type ConnectionKey,
@@ -352,6 +354,8 @@ export function fingerprintOf(node: RawDetect): string {
 }
 
 export class GitHub implements GitHubApi {
+  readonly approvalCarriesSummary = true;
+
   private readonly writes: GitHubWrites;
 
   async reviewReceipt(id: string): Promise<ReviewReceipt | null> {
@@ -608,6 +612,45 @@ export class GitHub implements GitHubApi {
     }
 
     return files;
+  }
+
+  async markedComment(
+    prId: string,
+    author: string,
+    marker: string,
+  ): Promise<{ id: string; url: string } | null> {
+    let cursor: string | null = null;
+
+    // Up to 10,000 comments; past that, absence cannot be shown.
+    for (let page = 0; page < 100; page++) {
+      const data: {
+        node: {
+          comments?: Connection<{
+            id: string;
+            url: string;
+            body: string;
+            author: { login: string } | null;
+          }>;
+        } | null;
+      } = await this.transport.graphql(conversationPageQuery, { id: prId, cursor });
+      const comments = data.node?.comments;
+
+      if (!comments) throw new GitHubError('This PR could not be read.');
+
+      const found = comments.nodes.find(
+        (comment) =>
+          comment.author &&
+          isSameUser(comment.author.login, author) &&
+          comment.body.startsWith(marker),
+      );
+
+      if (found) return { id: found.id, url: found.url };
+      if (!comments.pageInfo.hasNextPage) return null;
+
+      cursor = comments.pageInfo.endCursor;
+    }
+
+    throw new GitHubError('The conversation is too long to check for an earlier post.');
   }
 
   async branchHead(repository: string, branch: string): Promise<string | null> {

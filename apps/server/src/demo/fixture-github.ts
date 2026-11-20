@@ -1,4 +1,5 @@
 import { SNAPSHOT_VERSION } from '@review-desk/shared/snapshot';
+import { isSameUser } from '@review-desk/shared/accounts';
 import type { ReviewEvent } from '@review-desk/shared/review';
 import type {
   Actor,
@@ -51,6 +52,8 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
   private sequence = 0;
   /** Every write GitHub would have received, for assertions in tests. */
   readonly writes: FixtureWrite[] = [];
+  /** GitHub's approvals carry their summary; tests turn this off to act as GitLab does. */
+  approvalCarriesSummary = true;
   /** The next write with this op name fails once (failure injection for tests). */
   failNext: string | null = null;
   loseResponseNext: string | null = null;
@@ -237,6 +240,15 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     return this.scenario.world.repos.compare(repository, base, head);
   }
 
+  async markedComment(prId: string, author: string, marker: string) {
+    const pull = this.scenario.world.pulls.find((candidate) => candidate.snapshot.id === prId);
+    const found = pull?.snapshot.conversation.find(
+      (comment) => isSameUser(comment.author.login, author) && comment.body.startsWith(marker),
+    );
+
+    return found ? { id: found.id, url: found.url } : null;
+  }
+
   async branchHead(repository: string, branch: string): Promise<string | null> {
     return this.scenario.world.repos.refOid(repository, branch);
   }
@@ -323,6 +335,15 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     pull.snapshot.reviewRequests = pull.snapshot.reviewRequests.filter(
       (reviewer) => reviewer.login !== this.scenario.world.viewer.login,
     );
+    // Acting as GitLab, an approval is also a verdict read from its own note.
+    if (!this.approvalCarriesSummary)
+      pull.snapshot.verdicts.push({
+        id: `note-${id}`,
+        login: this.scenario.world.viewer.login,
+        state: 'APPROVED',
+        submittedAt: now,
+        commitOid,
+      });
     pull.snapshot.updatedAt = now;
 
     return this.receipt('ApproveReview', {
