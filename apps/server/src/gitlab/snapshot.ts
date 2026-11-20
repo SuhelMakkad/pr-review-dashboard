@@ -477,9 +477,11 @@ export function viewerReviews(
     const startsSummarised = summarises(own[index + 1], entry);
     const joinsAsSummary = previous !== undefined && summarises(entry, previous);
     // An approval's summary joins that approval or nothing: after a push it is not its review,
-    // however soon it came.
+    // however soon it came, nor any other's. It stays a comment in the conversation.
     const taggedSummary =
       !entry.note.system && entry.note.body.split('\n', 2)[1] === approvalSummaryTag;
+
+    if (taggedSummary && !joinsAsSummary) return;
 
     if (
       group &&

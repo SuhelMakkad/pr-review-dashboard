@@ -755,10 +755,15 @@ describe('GitLab merge request snapshots', () => {
       { state: 'COMMENTED', body: '', commitOid: HEAD3 },
     ]);
 
-    // A push between the approval and its summary, however soon: the summary is not its review.
+    // A push between the approval and its summary, however soon: the summary is not its review,
+    // nor that of an approval of the new head given by hand right after it.
     const pushed = viewerReviews(
       mr,
-      [approval, discussion('summary', note(504, summary, false, 0, 40))],
+      [
+        approval,
+        discussion('summary', note(504, summary, false, 0, 40)),
+        discussion('manual', note(505, 'approved this merge request', true, 1, 10)),
+      ],
       [
         { id: 2, head_commit_sha: HEAD2, created_at: seconds(9, 0) },
         { id: 3, head_commit_sha: HEAD3, created_at: seconds(10, 20) },
@@ -768,6 +773,7 @@ describe('GitLab merge request snapshots', () => {
 
     expect(pushed.map(({ state, body, commitOid }) => ({ state, body, commitOid }))).toEqual([
       { state: 'APPROVED', body: '', commitOid: HEAD2 },
+      { state: 'APPROVED', body: '', commitOid: HEAD3 },
     ]);
   });
 
