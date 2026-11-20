@@ -24,6 +24,8 @@ interface SaveQueue {
   pending: number;
   /** The text of the last save queued: the one the server ends with once the queue drains. */
   last: string | null;
+  /** The last save queued failed: its text is not saved, and its draft is kept to retry. */
+  failed: boolean;
   /** Called once the queue drains, by the editor showing it (if any). */
   drained: (() => void) | null;
 }
@@ -34,7 +36,7 @@ function saveQueue(key: string): SaveQueue {
   let queue = saveQueues.get(key);
 
   if (!queue) {
-    queue = { chain: Promise.resolve(), pending: 0, last: null, drained: null };
+    queue = { chain: Promise.resolve(), pending: 0, last: null, failed: false, drained: null };
     saveQueues.set(key, queue);
   }
 
@@ -76,9 +78,12 @@ export const Notes = forwardRef<
   latest.current = note;
   latestSaved.current = saved;
 
-  /** Clean once nothing is in flight and the text is what was saved: the draft can go. */
+  /**
+   * Clean once nothing is in flight, the last save did not fail, and the text is what was saved:
+   * the draft can go.
+   */
   const settle = () => {
-    if (queue.pending > 0 || latest.current !== latestSaved.current) return;
+    if (queue.pending > 0 || queue.failed || latest.current !== latestSaved.current) return;
 
     edited.current = false;
     writeDraft(key, null);
@@ -125,12 +130,26 @@ export const Notes = forwardRef<
         .catch(() => undefined)
         .then(() => onSave(note))
         .then(
-          () => latest.current === note && setState('saved'),
-          () => setState('error'),
+          () => {
+            if (queue.last === note) queue.failed = false;
+            if (latest.current === note) setState('saved');
+          },
+          () => {
+            if (queue.last === note) queue.failed = true;
+            setState('error');
+          },
         )
         .finally(() => {
           queue.pending -= 1;
-          if (queue.pending === 0) queue.drained?.();
+
+          if (queue.pending > 0) return;
+
+          // Saved, with nothing newer queued: a draft of exactly that text is done, whether or not
+          // an editor still shows it, so a later editor never saves it again over a newer note. A
+          // draft of newer text, typed since, stays.
+          if (!queue.failed && readDraft(key) === queue.last) writeDraft(key, null);
+
+          queue.drained?.();
         });
     }, 800);
 

@@ -474,6 +474,62 @@ describe('the private note', () => {
     expect(sent).toEqual(['One', 'Two']);
   });
 
+  it('drops the draft of a save that lands after its editor closed, never saving it again', async () => {
+    let release: () => void = () => {};
+    const onSave = vi.fn(
+      (_note: string) => new Promise<void>((resolve) => (release = () => resolve())),
+    );
+    const first = render(<Notes account="you" id="pr-four" saved="" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    fireEvent.change(box(), { target: { value: 'Held' } });
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('Held'), { timeout: 2_000 });
+
+    // The editor closes (a switch away), then the save lands.
+    first.unmount();
+    await act(async () => release());
+
+    expect(sessionStorage.getItem('review-desk-draft:you:pr-four')).toBeNull();
+
+    // Another window has saved a newer note by the time the editor opens again: it shows that one,
+    // and saves nothing.
+    render(<Notes account="you" id="pr-four" saved="Newer" onSave={onSave} />);
+    expect(box()).toHaveValue('Newer');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a failed save as an edit, even when the stale saved note matches it', async () => {
+    const releases = new Map<string, { resolve: () => void; reject: () => void }>();
+    const onSave = vi.fn(
+      (note: string) =>
+        new Promise<void>((resolve, reject) =>
+          releases.set(note, { resolve, reject: () => reject(new Error('Refused')) }),
+        ),
+    );
+    const view = render(<Notes account="you" id="pr-five" saved="A" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    fireEvent.change(box(), { target: { value: 'B' } });
+    await waitFor(() => expect(releases.has('B')).toBe(true), { timeout: 2_000 });
+    fireEvent.change(box(), { target: { value: 'A' } });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+
+    // B is saved; A's save, after it, fails, while the cached note still says A.
+    await act(async () => releases.get('B')!.resolve());
+    await waitFor(() => expect(releases.has('A')).toBe(true));
+    await act(async () => releases.get('A')!.reject());
+
+    expect(sessionStorage.getItem('review-desk-draft:you:pr-five')).toBe('A');
+
+    // The refresh then brings B: the editor keeps your A, to save again.
+    view.rerender(<Notes account="you" id="pr-five" saved="B" onSave={onSave} />);
+    expect(box()).toHaveValue('A');
+    await waitFor(() => expect(onSave.mock.calls.filter(([note]) => note === 'A').length).toBe(2), {
+      timeout: 2_000,
+    });
+  });
+
   it('follows a newer saved note until you type, and saves only what you typed', async () => {
     const onSave = vi.fn(async () => undefined);
     const view = render(<Notes account="you" id="pr-one" saved="Older note" onSave={onSave} />);
