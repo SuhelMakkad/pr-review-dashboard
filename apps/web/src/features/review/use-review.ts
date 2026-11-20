@@ -7,7 +7,6 @@ import {
   type ViewedTarget,
 } from '@review-desk/shared/operations';
 import { api, ApiError } from '@/lib/api';
-import { cacheBelongsTo } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
 import { githubCommand } from '@/lib/operation-command';
 import { useOperations } from '@/features/activity/use-operations';
@@ -176,8 +175,8 @@ export function useReview(prId: string | null, account: string) {
     }) => githubCommand(`/api/pulls/${enc}/review`, { account, ...input }),
     onSettled: refreshDraft,
     onSuccess: () => {
-      void client.invalidateQueries({ queryKey: queryKeys.pulls });
-      void client.invalidateQueries({ queryKey: ['diff', prId] });
+      void client.invalidateQueries({ queryKey: queryKeys.pulls(account) });
+      void client.invalidateQueries({ queryKey: queryKeys.diff(account, prId ?? 'none') });
       void refreshOperations();
     },
   });
@@ -234,9 +233,9 @@ export function useReview(prId: string | null, account: string) {
       viewedVersions.set(versionKey, version);
 
       // Only views of the diff the mark names show it early; a newer diff is not marked.
+      // This account's views only: the keys name the account they were fetched for.
       const snapshots = client
-        .getQueriesData<DiffManifest>({ queryKey: ['diff', prId] })
-        .filter(([key]) => cacheBelongsTo(client, account, key))
+        .getQueriesData<DiffManifest>({ queryKey: queryKeys.diff(account, prId ?? 'none') })
         .filter(([, manifest]) => !target || !manifest || viewShows(manifest, path, target));
 
       for (const [key, manifest] of snapshots) {
@@ -256,7 +255,7 @@ export function useReview(prId: string | null, account: string) {
       if (!context || viewedVersions.get(context.versionKey) !== context.version) return;
       for (const [key, manifest] of context.snapshots) {
         const original = manifest?.files.find((file) => file.path === variables.path);
-        if (!original || !cacheBelongsTo(client, account, key)) continue;
+        if (!original) continue;
 
         // Only while the view still shows the diff the mark named: a view refreshed to a newer
         // diff meanwhile already has that diff's own state.

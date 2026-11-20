@@ -17,10 +17,10 @@ type PullLike = { id: string; repository: string; number: number; url?: string }
 export const onlyAddedByHand = (item: { sources: PullRequestItem['sources'] }) =>
   item.sources.length > 0 && item.sources.every((source) => source === 'manual');
 
-const refreshQueue = (client: QueryClient) =>
+const refreshQueue = (client: QueryClient, account: string) =>
   Promise.all([
-    client.invalidateQueries({ queryKey: queryKeys.pulls }),
-    client.invalidateQueries({ queryKey: queryKeys.mine }),
+    client.invalidateQueries({ queryKey: queryKeys.pulls(account) }),
+    client.invalidateQueries({ queryKey: queryKeys.mine(account) }),
   ]);
 
 /** Adds the PR, then waits for the queue to refetch so it is there when the caller navigates. */
@@ -35,7 +35,7 @@ async function trackPull(client: QueryClient, account: string, ref: PrRef) {
     },
   });
 
-  await refreshQueue(client);
+  await refreshQueue(client, account);
   toast.success(`Added ${formatRef(refOf(detail.snapshot))} to your review queue`);
 
   return detail;
@@ -65,7 +65,7 @@ export function useUntrackPull() {
       );
       const ref = refOf(item);
 
-      await refreshQueue(client);
+      await refreshQueue(client, account);
 
       if (result.tracked) {
         toast(`${formatRef(ref)} stays in your queue`, {

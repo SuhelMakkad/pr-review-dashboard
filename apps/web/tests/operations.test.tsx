@@ -69,7 +69,7 @@ it('rolls back a rejected viewed update without undoing a newer change on anothe
       response({ body: '', event: 'COMMENT', comments: [], githubPendingReview: null }),
     );
   });
-  const key = ['diff', 'pr-one', 'full'];
+  const key = queryKeys.diff('you', 'pr-one', 'full');
   client.setQueryData(key, {
     files: [
       { path: 'a.ts', viewed: 'UNVIEWED' },
@@ -118,11 +118,11 @@ it('names the diff the workspace renders, even when the PR detail is a revision 
   });
 
   // The detail already has revision B; the rendered diff is still A, and another view shows B.
-  const shown = ['diff', 'pr-one', 'full'];
-  const newer = ['diff', 'pr-one', 'since'];
+  const shown = queryKeys.diff('you', 'pr-one', 'full');
+  const newer = queryKeys.diff('you', 'pr-one', 'since');
   const revision = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
 
-  client.setQueryData(queryKeys.detail('pr-one'), {
+  client.setQueryData(queryKeys.detail('you', 'pr-one'), {
     account: 'you',
     snapshot: { ...revision('b'), files: [{ path: 'a.ts', viewedKey: 'diff-b' }] },
   });
@@ -171,7 +171,7 @@ it('leaves a view refreshed to a newer diff alone when an older mark fails', asy
     return Promise.resolve(response({ operation: { id: 'viewed' } }));
   });
 
-  const key = ['diff', 'pr-one', 'full'];
+  const key = queryKeys.diff('you', 'pr-one', 'full');
   const revision = (head: string) => ({ headOid: head.repeat(40), baseOid: 'c'.repeat(40) });
 
   client.setQueryData(key, {
@@ -244,49 +244,45 @@ it('does not let an older viewed failure roll back a newer choice for the same f
   }
 });
 
-it.each([
-  ['a switch in this window', 'status'],
-  ['another window, whose diff arrives before any status', 'data'],
-] as const)(
-  "does not roll a rejected viewed update back into another account's diff after %s",
-  async (_, through) => {
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    let reject: (error: Error) => void = () => {};
-    vi.stubGlobal('fetch', (path: string) => {
-      if (path.includes('/viewed')) return new Promise<Response>((_, fail) => (reject = fail));
-      if (path.startsWith('/api/operations'))
-        return Promise.resolve(response({ items: [], nextCursor: null }));
+it("rolls a rejected viewed update back only in its own account's diff, after a switch", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  let reject: (error: Error) => void = () => {};
+  vi.stubGlobal('fetch', (path: string) => {
+    if (path.includes('/viewed')) return new Promise<Response>((_, fail) => (reject = fail));
+    if (path.startsWith('/api/operations'))
+      return Promise.resolve(response({ items: [], nextCursor: null }));
 
-      return Promise.resolve(
-        response({ body: '', event: 'COMMENT', comments: [], githubPendingReview: null }),
-      );
-    });
-    const key = ['diff', 'pr-one', 'full'];
-    client.setQueryData(queryKeys.status, status({ account: { login: 'you' } }));
-    client.setQueryData(key, { account: 'you', files: [{ path: 'a.ts', viewed: 'UNVIEWED' }] });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    return Promise.resolve(
+      response({ body: '', event: 'COMMENT', comments: [], githubPendingReview: null }),
     );
-    const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
-    const viewed = () => client.getQueryData<DiffManifest>(key)?.files[0].viewed;
+  });
+  const yours = queryKeys.diff('you', 'pr-one', 'full');
+  const theirs = queryKeys.diff('other', 'pr-one', 'full');
+  client.setQueryData(queryKeys.status, status({ account: { login: 'you' }, revision: 1 }));
+  client.setQueryData(yours, { account: 'you', files: [{ path: 'a.ts', viewed: 'UNVIEWED' }] });
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const hook = renderHook(() => useReview('pr-one', 'you'), { wrapper });
+  const viewed = (key: readonly unknown[]) =>
+    client.getQueryData<DiffManifest>(key)?.files[0].viewed;
 
-    try {
-      act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: true }));
-      await waitFor(() => expect(viewed()).toBe('VIEWED'));
+  try {
+    act(() => hook.result.current.setViewed.mutate({ path: 'a.ts', viewed: true }));
+    await waitFor(() => expect(viewed(yours)).toBe('VIEWED'));
 
-      // The switch happens while the write is pending; the other account viewed the same file.
-      if (through === 'status')
-        act(() => adoptStatus(client, status({ account: { login: 'other' } })));
-      client.setQueryData(key, { account: 'other', files: [{ path: 'a.ts', viewed: 'VIEWED' }] });
-      await act(async () => reject(new Error('Rejected after the switch')));
+    // The switch happens while the write is pending; the other account viewed the same file.
+    act(() => adoptStatus(client, status({ account: { login: 'other' }, revision: 2 })));
+    client.setQueryData(theirs, { account: 'other', files: [{ path: 'a.ts', viewed: 'VIEWED' }] });
+    await act(async () => reject(new Error('Rejected after the switch')));
 
-      await waitFor(() => expect(hook.result.current.setViewed.isError).toBe(true));
-      expect(viewed()).toBe('VIEWED');
-    } finally {
-      client.clear();
-    }
-  },
-);
+    await waitFor(() => expect(hook.result.current.setViewed.isError).toBe(true));
+    expect(viewed(yours)).toBe('UNVIEWED');
+    expect(viewed(theirs)).toBe('VIEWED');
+  } finally {
+    client.clear();
+  }
+});
 
 it('keeps the new account when a sync reply from before a switch arrives', async () => {
   const client = new QueryClient();
@@ -295,10 +291,11 @@ it('keeps the new account when a sync reply from before a switch arrives', async
     'fetch',
     () =>
       new Promise<Response>((resolve) => {
-        answer = () => resolve(response(status({ account: { login: 'you' } })));
+        // Sent before the switch: the server numbered it before the switch's status.
+        answer = () => resolve(response(status({ account: { login: 'you' }, revision: 2 })));
       }),
   );
-  client.setQueryData(queryKeys.status, status({ account: { login: 'you' } }));
+  client.setQueryData(queryKeys.status, status({ account: { login: 'you' }, revision: 1 }));
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
@@ -307,7 +304,7 @@ it('keeps the new account when a sync reply from before a switch arrives', async
   try {
     act(() => hook.result.current.mutate());
     await waitFor(() => expect(answer).not.toBeNull());
-    act(() => adoptStatus(client, status({ account: { login: 'other' } })));
+    act(() => adoptStatus(client, status({ account: { login: 'other' }, revision: 3 })));
     await act(async () => answer!());
 
     await waitFor(() => expect(hook.result.current.isSuccess).toBe(true));

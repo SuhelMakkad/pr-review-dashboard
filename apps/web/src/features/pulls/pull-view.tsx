@@ -24,7 +24,7 @@ import type {
 } from '@review-desk/shared/types';
 import { api } from '@/lib/api';
 import { filesUrl, numberSign, refOf } from '@/lib/pr-ref';
-import { usePullDetail, useTriage } from '@/lib/queries';
+import { accountPath, usePullDetail, useTriage } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { dateTime, relativePhrase, shortDateTime } from '@/lib/time';
 import { Avatar } from '@/ui/avatar';
@@ -256,9 +256,10 @@ function PullDetailView({
   // Opening a PR refreshes it when the cached copy is more than two minutes old.
   useEffect(() => {
     if (Date.now() - Date.parse(pr.fetchedAt) > 120_000) {
-      void api(`/api/pulls/${encodeURIComponent(item.id)}/refresh`, { method: 'POST' }).catch(
-        () => undefined,
-      );
+      // For the account whose PR this is, whichever account is on screen when it lands.
+      void api(accountPath(detail.account, `/pulls/${encodeURIComponent(item.id)}/refresh`), {
+        method: 'POST',
+      }).catch(() => undefined);
     }
   }, [item.id]);
   const files = showAllFiles ? pr.files : pr.files.slice(0, 12);

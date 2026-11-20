@@ -95,3 +95,54 @@ test("keeps each account's private note on a PR both accounts track", async ({ p
   await pastAutosave();
   expect(await savedNote()).toBe('Note for personal');
 });
+
+test('saves a note held across a switch for the account it was written for', async ({ page }) => {
+  const id = 'PR_acme_api_2050';
+  const note = page.getByRole('textbox', { name: 'Private note' });
+  const savedFor = async (login: string) =>
+    (
+      (await (await page.request.get(`/api/accounts/${login}/pulls/${id}`)).json()) as {
+        triage?: { note: string };
+      }
+    ).triage?.note;
+  const switchTo = async (login: string) => {
+    await page.getByRole('button', { name: /^Switch GitHub account, now / }).click();
+    await page.getByRole('menuitemradio', { name: login, exact: true }).click();
+    await expect(
+      page.getByRole('button', { name: new RegExp(`account, now ${login} via GitHub CLI`) }),
+    ).toBeVisible();
+  };
+
+  // Both accounts track the PR, with notes of their own.
+  await openFresh(page, '/inbox/attention/acme/api/2050');
+  await note.fill('Note for you');
+  await expect.poll(() => savedFor('you')).toBe('Note for you');
+  await switchTo('you-personal');
+
+  await page.getByRole('button', { name: 'Add to review queue' }).click();
+  await expect(note).toHaveValue('');
+  await note.fill('Personal note');
+  await expect.poll(() => savedFor('you-personal')).toBe('Personal note');
+  await switchTo('you');
+  // The page has remounted for you once its note shows.
+  await expect(note).toHaveValue('Note for you');
+
+  // you's next save is held on its way to the server until the window has switched.
+  const held: { continue: () => Promise<void> }[] = [];
+
+  await page.route(`**/api/accounts/you/pulls/${id}/triage`, (route) => {
+    held.push(route);
+  });
+  await note.fill('Held for you');
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await switchTo('you-personal');
+  await expect(note).toHaveValue('Personal note');
+
+  // Released after the switch, it still saves for you, and you-personal's note is untouched.
+  for (const route of held) await route.continue();
+  await page.unroute(`**/api/accounts/you/pulls/${id}/triage`);
+
+  await expect.poll(() => savedFor('you')).toBe('Held for you');
+  expect(await savedFor('you-personal')).toBe('Personal note');
+  await expect(note).toHaveValue('Personal note');
+});

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { queryKeys } from '@/lib/query-keys';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -91,12 +92,17 @@ beforeEach(() => {
   );
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (path: string, options?: RequestInit) => {
-      const state = (id: string) => triage[`${account}:${id}`] ?? emptyTriage();
+    vi.fn(async (requested: string, options?: RequestInit) => {
+      // Like the server: `/api/accounts/<account>/…` serves the account it names, whichever is
+      // selected; the legacy routes serve the selected one.
+      const scoped = /^\/api\/accounts\/([^/]+)(\/.+)$/.exec(requested);
+      const who = scoped ? decodeURIComponent(scoped[1]) : account;
+      const path = scoped ? `/api${scoped[2]}` : requested;
+      const state = (id: string) => triage[`${who}:${id}`] ?? emptyTriage();
       let data: unknown;
 
       if (path === '/api/mine') {
-        data = { account, items: [] };
+        data = { account: who, items: [] };
       } else if (path === '/api/accounts') {
         data = {
           switchable: true,
@@ -138,8 +144,8 @@ beforeEach(() => {
         };
       } else if (path === '/api/pulls') {
         data = {
-          account,
-          items: [...snapshots, ...added].map((pr) => deriveItem(pr, state(pr.id), account, [])),
+          account: who,
+          items: [...snapshots, ...added].map((pr) => deriveItem(pr, state(pr.id), who, [])),
         };
       } else if (path === '/api/pulls/track') {
         const body = JSON.parse(String(options?.body));
@@ -180,11 +186,12 @@ beforeEach(() => {
         const pr = [...snapshots, ...added].find((value) => value.id === id)!;
 
         if (options?.method === 'PATCH') {
-          const body = JSON.parse(String(options.body));
+          // A scoped write names its account in the path; a legacy one in its body.
+          const body = { account: who, ...JSON.parse(String(options.body)) };
           const current = { ...state(id) };
 
-          // Like the server: a write for an account that is no longer active is refused.
-          if (body.account !== account)
+          // Like the server: a legacy write for an account that is no longer active is refused.
+          if (!scoped && body.account !== account)
             return {
               ok: false,
               status: 409,
@@ -197,17 +204,17 @@ beforeEach(() => {
           if (body.done !== undefined) {
             current.doneAt = body.done ? new Date().toISOString() : null;
             current.doneActivityKeys = body.done
-              ? deriveItem(pr, state(id), account, []).activityKeys
+              ? deriveItem(pr, state(id), who, []).activityKeys
               : [];
           }
 
-          triage[`${account}:${id}`] = current;
+          triage[`${who}:${id}`] = current;
         }
 
         data = {
-          account,
+          account: who,
           snapshot: pr,
-          item: deriveItem(pr, state(id), account, []),
+          item: deriveItem(pr, state(id), who, []),
           triage: state(id),
         };
 
@@ -439,11 +446,13 @@ describe('switching accounts', () => {
     await pastAutosave();
 
     expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other');
-    expect(clients[0].getQueryData(['detail', 'follow'])).toMatchObject({ account: 'other' });
+    expect(clients[0].getQueryData(queryKeys.detail('other', 'follow'))).toMatchObject({
+      account: 'other',
+    });
     expect(triage['other:follow'].note).toBe('Note for other');
   });
 
-  it("ignores a late autosave reply once another window's switch reaches the PR first", async () => {
+  it('stays on the account shown while another window switches, until the status says so', async () => {
     let release = () => {};
 
     triage['other:follow'] = { ...emptyTriage(), note: 'Note for other' };
@@ -453,39 +462,29 @@ describe('switching accounts', () => {
 
     await writeNote(user, 'Note for me');
 
-    // Another window switches; this one sees the new account's PR before any status.
+    // Another window switches. This one's PR is read for the account it shows, so a refetch
+    // still brings `me`'s, and the late reply to `me`'s autosave lands on `me` alone.
     laggingStatus = 'me';
     account = 'other';
-    await act(() => clients[0].invalidateQueries({ queryKey: ['detail', 'follow'] }));
-    await waitFor(() =>
-      expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other'),
-    );
-
+    await act(() => clients[0].invalidateQueries({ queryKey: queryKeys.detail('me', 'follow') }));
     await act(async () => release());
     await pastAutosave();
 
-    expect(clients[0].getQueryData(['status'])).toMatchObject({ account: { login: 'me' } });
-    expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other');
-    expect(clients[0].getQueryData(['detail', 'follow'])).toMatchObject({ account: 'other' });
-  });
+    expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for me');
+    expect(clients[0].getQueryData(queryKeys.detail('me', 'follow'))).toMatchObject({
+      account: 'me',
+    });
 
-  it('remounts the note when PR data for another account arrives before the status', async () => {
-    triage['other:follow'] = { ...emptyTriage(), note: 'Note for other' };
-
-    const { user } = mount('/inbox/attention/acme/another/2');
-
-    await writeNote(user, 'Note for me');
-
-    // Another window switched accounts; this one learns of it from a PR refresh first.
-    account = 'other';
-    await act(() => clients[0].invalidateQueries({ queryKey: ['detail', 'follow'] }));
-
+    // The status reaches this window: it shows the other account's note, and writes nothing to it.
+    laggingStatus = null;
+    await act(() => clients[0].invalidateQueries({ queryKey: queryKeys.status }));
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Private note' })).toHaveValue('Note for other'),
     );
     await pastAutosave();
 
     expect(triage['other:follow'].note).toBe('Note for other');
+    expect(triage['me:follow'].note).toBe('Note for me');
     expect(writes.filter((write) => write.body.account === 'other')).toEqual([]);
   });
 });

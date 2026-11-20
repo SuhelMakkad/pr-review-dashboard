@@ -1,10 +1,4 @@
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-  type QueryClient,
-  type QueryKey,
-} from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import type {
   GitHubAccountList,
   PullRequestDetail,
@@ -23,18 +17,41 @@ export interface MineList {
   items: AuthorItem[];
 }
 import { api } from '@/lib/api';
-import { adoptStatus, cacheBelongsTo, fallbackInterval, useLive } from '@/lib/live';
+import { adoptStatus, fallbackInterval, useLive } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
 
+/**
+ * The status shown. `adoptStatus` is its only writer: a polled status goes through it like every
+ * other, and the query then holds whatever it decided is current, so an older reply that arrives
+ * late never replaces a newer status. (Nothing can run between the two: no event lands between a
+ * query function's last step and the write of its result.)
+ */
 export function useStatus() {
+  const client = useQueryClient();
   const live = useLive();
 
   return useQuery({
     queryKey: queryKeys.status,
-    queryFn: () => api<SyncStatus>('/api/status'),
+    queryFn: async () => {
+      const status = await api<SyncStatus>('/api/status');
+
+      adoptStatus(client, status);
+
+      return client.getQueryData<SyncStatus>(queryKeys.status) ?? status;
+    },
     refetchInterval: fallbackInterval(live, 10_000),
     staleTime: live.connected ? Infinity : 0,
   });
+}
+
+/** The account on screen: every query of its PRs is for it. Null until the first status. */
+export function useAccount(): string | null {
+  return useStatus().data?.account?.login ?? null;
+}
+
+/** A route of one account's PRs: `/api/accounts/<account><path>`. */
+export function accountPath(account: string, path: string): string {
+  return `/api/accounts/${encodeURIComponent(account)}${path}`;
 }
 
 /** Names for the current account's forge (GitHub or GitLab, PR or MR), for labels and messages. */
@@ -44,10 +61,12 @@ export function useForge(): ForgeTerms {
 
 export function usePulls() {
   const live = useLive();
+  const account = useAccount();
 
   return useQuery({
-    queryKey: queryKeys.pulls,
-    queryFn: () => api<PullRequestList>('/api/pulls'),
+    queryKey: queryKeys.pulls(account),
+    queryFn: () => api<PullRequestList>(accountPath(account!, '/pulls')),
+    enabled: account !== null,
     refetchInterval: fallbackInterval(live),
     staleTime: live.connected ? Infinity : 0,
   });
@@ -55,10 +74,12 @@ export function usePulls() {
 
 export function useMine() {
   const live = useLive();
+  const account = useAccount();
 
   return useQuery({
-    queryKey: queryKeys.mine,
-    queryFn: () => api<MineList>('/api/mine'),
+    queryKey: queryKeys.mine(account),
+    queryFn: () => api<MineList>(accountPath(account!, '/mine')),
+    enabled: account !== null,
     refetchInterval: fallbackInterval(live),
     staleTime: live.connected ? Infinity : 0,
   });
@@ -66,21 +87,28 @@ export function useMine() {
 
 export function usePullDetail(id: string | null) {
   const live = useLive();
+  const account = useAccount();
 
   return useQuery({
-    queryKey: queryKeys.detail(id ?? 'none'),
-    queryFn: () => api<PullRequestDetail>(`/api/pulls/${encodeURIComponent(id!)}`),
-    enabled: Boolean(id),
+    queryKey: queryKeys.detail(account, id ?? 'none'),
+    queryFn: () =>
+      api<PullRequestDetail>(accountPath(account!, `/pulls/${encodeURIComponent(id!)}`)),
+    enabled: Boolean(id) && account !== null,
     refetchInterval: fallbackInterval(live),
     staleTime: live.connected ? Infinity : 0,
   });
 }
 
 export function useDiff(id: string | null, mode: DiffMode) {
+  const account = useAccount();
+
   return useQuery({
-    queryKey: queryKeys.diff(id ?? 'none', mode),
-    queryFn: () => api<DiffManifest>(`/api/pulls/${encodeURIComponent(id!)}/diff?mode=${mode}`),
-    enabled: Boolean(id),
+    queryKey: queryKeys.diff(account, id ?? 'none', mode),
+    queryFn: () =>
+      api<DiffManifest>(
+        accountPath(account!, `/pulls/${encodeURIComponent(id!)}/diff?mode=${mode}`),
+      ),
+    enabled: Boolean(id) && account !== null,
     staleTime: 30_000,
   });
 }
@@ -119,12 +147,8 @@ export function useSyncNow() {
 
   return useMutation({
     mutationFn: () => api<SyncStatus>('/api/sync', { method: 'POST' }),
-    // A reply sent before a switch must not switch the screens back; switches arrive through
-    // adoptStatus.
-    onSuccess: (status) => {
-      if (status.account && cacheBelongsTo(client, status.account.login, queryKeys.status))
-        client.setQueryData(queryKeys.status, status);
-    },
+    // Ordered by its revision like every status: a reply older than the status shown is ignored.
+    onSuccess: (status) => adoptStatus(client, status),
   });
 }
 
@@ -172,45 +196,43 @@ export interface TriageVariables {
 }
 
 /**
- * Applies a triage update optimistically, writes it, and rolls back on failure. Independent of any
- * component, so callers can navigate away (e.g. auto-advance) without losing the result. The
- * cached queue and PR belong to the account it was sent for, so they are left alone once another
- * account is on screen.
+ * Applies a triage update optimistically to the account's queue, writes it to that account, and
+ * rolls back on failure. Independent of any component, so callers can navigate away (e.g.
+ * auto-advance) without losing the result. Everything it touches is keyed by the account it was
+ * sent for, so a switch meanwhile never shows it on the other account's screens. The reply is not
+ * written into the PR's detail: it could be older than a refresh that arrived meanwhile, so the
+ * detail is read again instead.
  */
 export async function runTriage(
   client: QueryClient,
   { id, account, update }: TriageVariables,
 ): Promise<PullRequestDetail> {
-  const owned = (key: QueryKey) => cacheBelongsTo(client, account, key);
+  const queue = queryKeys.pulls(account);
 
-  await client.cancelQueries({ queryKey: queryKeys.pulls });
+  await client.cancelQueries({ queryKey: queue });
 
-  const previous = owned(queryKeys.pulls)
-    ? client.getQueryData<PullRequestList>(queryKeys.pulls)
-    : undefined;
+  const previous = client.getQueryData<PullRequestList>(queue);
 
   if (previous) {
-    client.setQueryData<PullRequestList>(queryKeys.pulls, {
+    client.setQueryData<PullRequestList>(queue, {
       ...previous,
       items: previous.items.map((item) => (item.id === id ? applyOptimistic(item, update) : item)),
     });
   }
 
   try {
-    const detail = await api<PullRequestDetail>(`/api/pulls/${encodeURIComponent(id)}/triage`, {
-      method: 'PATCH',
-      body: { account, ...update },
-    });
-
-    if (owned(queryKeys.detail(id))) client.setQueryData(queryKeys.detail(id), detail);
-
-    return detail;
+    return await api<PullRequestDetail>(
+      accountPath(account, `/pulls/${encodeURIComponent(id)}/triage`),
+      { method: 'PATCH', body: update },
+    );
   } catch (error) {
-    if (previous && owned(queryKeys.pulls)) client.setQueryData(queryKeys.pulls, previous);
+    if (previous) client.setQueryData(queue, previous);
 
     throw error;
   } finally {
-    void client.invalidateQueries({ queryKey: queryKeys.pulls });
+    void client.invalidateQueries({ queryKey: queue });
+    void client.invalidateQueries({ queryKey: queryKeys.mine(account) });
+    void client.invalidateQueries({ queryKey: queryKeys.detail(account, id) });
   }
 }
 

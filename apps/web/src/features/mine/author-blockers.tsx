@@ -37,7 +37,7 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
         action: { label: 'View activity', onClick: openActivity },
       });
       void client.invalidateQueries({ queryKey: ['operations', account] });
-      void client.invalidateQueries({ queryKey: queryKeys.mine });
+      void client.invalidateQueries({ queryKey: queryKeys.mine(account) });
     },
     onError: (error) => toast.error(error.message),
   });
