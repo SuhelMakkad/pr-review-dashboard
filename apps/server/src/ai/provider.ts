@@ -175,8 +175,11 @@ export async function removeWorkspace(
   workDir: string,
   options: {
     waitMs: number;
-    /** Checked once the lock is held, just before removing: false leaves the workspace. */
-    stillAbandoned?: () => Promise<boolean>;
+    /**
+     * Checked once the lock is held, synchronously and immediately before the removal starts, so
+     * nothing else runs in between: false leaves the workspace.
+     */
+    stillAbandoned?: () => boolean;
     /** The removal itself; tests hold it open. */
     remove?: (path: string) => Promise<void>;
   },
@@ -202,7 +205,7 @@ export async function removeWorkspace(
 
     if (lock) {
       try {
-        if (options.stillAbandoned && !(await options.stillAbandoned())) return 'kept';
+        if (options.stillAbandoned && !options.stillAbandoned()) return 'kept';
 
         await remove(workDir);
 

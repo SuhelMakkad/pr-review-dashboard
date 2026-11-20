@@ -1,7 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { isoNow, type Clock } from '@/clock.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { lstat, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
@@ -99,6 +99,17 @@ async function sizeOf(directory: string, stopped: () => boolean): Promise<number
   }
 
   return bytes;
+}
+
+/** The same, at once: for the last check before a removal, with nothing running in between. */
+function directoryIdentitySync(path: string): string | null {
+  try {
+    const stats = lstatSync(path, { throwIfNoEntry: false });
+
+    return stats?.isDirectory() && !stats.isSymbolicLink() ? `${stats.dev}:${stats.ino}` : null;
+  } catch {
+    return null;
+  }
 }
 
 /** A real directory's identity, or null for anything else (a symlink included). */
@@ -313,14 +324,13 @@ export class AiRunner {
         // one, and it could remove the files itself.)
         const outcome = await removeWorkspace(directory, {
           waitMs: 0,
-          stillAbandoned: async () => {
-            const unchanged =
-              (await directoryIdentity(this.workRoot)) === root &&
-              (await directoryIdentity(directory)) === identity;
-
-            // After the last wait, so a shutdown or a run that began meanwhile is seen.
-            return unchanged && !this.closing && this.abandoned(entry.name);
-          },
+          // Synchronous, with the removal started right after it: nothing runs in between, so a
+          // shutdown, a run that began, or a swapped root or workspace is always seen.
+          stillAbandoned: () =>
+            directoryIdentitySync(this.workRoot) === root &&
+            directoryIdentitySync(directory) === identity &&
+            !this.closing &&
+            this.abandoned(entry.name),
         });
 
         if (outcome === 'busy') totals.deferred += 1;

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -25,10 +26,24 @@ import { EventBus } from '@/events.js';
 import { ReviewService } from '@/review/service.js';
 import { SyncService } from '@/sync/index.js';
 
-/** Runs before each asynchronous `lstat`, so a test can change the disk at that moment. */
+/** Runs before each `lstat`, asynchronous or not, so a test can change the disk at that moment. */
 const hook = vi.hoisted(() => ({
   before: null as null | ((path: string) => Promise<void> | void),
+  beforeSync: null as null | ((path: string) => void),
 }));
+
+vi.mock('node:fs', async (original) => {
+  const actual = await original<typeof import('node:fs')>();
+
+  return {
+    ...actual,
+    lstatSync: ((...args: Parameters<typeof actual.lstatSync>) => {
+      hook.beforeSync?.(String(args[0]));
+
+      return actual.lstatSync(...args);
+    }) as typeof actual.lstatSync,
+  };
+});
 
 vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>();
@@ -47,6 +62,7 @@ const cleanups: (() => unknown)[] = [];
 
 afterEach(async () => {
   hook.before = null;
+  hook.beforeSync = null;
 
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
@@ -111,28 +127,23 @@ async function runnerWith(root: string) {
 }
 
 describe('retention races', () => {
-  it('starts no removal when shutdown begins during the last check before it', async () => {
+  it('starts no removal when shutdown begins while the workspace is being looked at', async () => {
     const root = directory();
     const { runner, done } = await runnerWith(root);
     const id = done();
     const workspace = join(root, id);
-    let looks = 0;
     let closing: Promise<void> | null = null;
 
-    // The workspace itself is looked at twice: for its identity, and under the lock just before
-    // removal. Shutdown begins at that second look.
+    // Shutdown begins during the inventory, at the workspace's last file.
     hook.before = (path) => {
-      if (path !== workspace) return;
-
-      looks += 1;
-      if (looks === 2) closing = runner.close();
+      if (path === join(workspace, 'after', 'file.ts')) closing ??= runner.close();
     };
 
     runner.open();
     await runner.cleanedUp();
     await closing;
 
-    expect(looks).toBe(2);
+    expect(closing).not.toBeNull();
     expect(existsSync(workspace)).toBe(true);
   });
 
@@ -145,8 +156,11 @@ describe('retention races', () => {
 
     writeFileSync(join(elsewhere, 'keep.txt'), 'not the app’s');
 
+    const looked: string[] = [];
+
     // Between the listing and the first look, the directory becomes a symlink to elsewhere.
     hook.before = (path) => {
+      looked.push(path);
       if (path !== workspace || !existsSync(join(workspace, 'after'))) return;
 
       renameSync(workspace, `${workspace}.moved`);
@@ -156,8 +170,10 @@ describe('retention races', () => {
     runner.open();
     await runner.cleanedUp();
 
-    expect(existsSync(workspace)).toBe(true);
+    // Still the symlink, its target intact, and nothing under it was ever looked at.
+    expect(lstatSync(workspace).isSymbolicLink()).toBe(true);
     expect(readFileSync(join(elsewhere, 'keep.txt'), 'utf8')).toBe('not the app’s');
+    expect(looked.filter((path) => path.startsWith(`${workspace}/`))).toEqual([]);
   });
 
   it('keeps a backup restored under an old name after the backups were ranked', async () => {
@@ -181,15 +197,12 @@ describe('retention races', () => {
       );
     }
 
-    // The oldest is ranked for removal; then a fresh copy is restored under its name.
-    let checks = 0;
-
-    hook.before = (path) => {
+    // The oldest is ranked for removal; then, just before its last check, a fresh copy is
+    // restored under its name.
+    hook.beforeSync = (path) => {
       if (path !== join(backups, 'backup-v1.sqlite')) return;
 
-      checks += 1;
-      if (checks !== 2) return;
-
+      hook.beforeSync = null;
       writeFileSync(join(backups, 'restored.tmp'), 'restored');
       renameSync(join(backups, 'restored.tmp'), join(backups, 'backup-v1.sqlite'));
     };

@@ -9,7 +9,7 @@ import {
   readdirSync,
   unlinkSync,
 } from 'node:fs';
-import { lstat, readdir, rm } from 'node:fs/promises';
+import { lstat, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { log } from '@/log.js';
@@ -246,14 +246,16 @@ export async function pruneBackups(
   let failed = 0;
 
   for (const backup of backups.slice(keep)) {
+    // The folder and the file are checked and the file unlinked in one synchronous step, so
+    // nothing runs in between: a swapped folder, or a backup restored under the ranked name,
+    // is always seen, and the file is gone in a single call.
     try {
-      if (!same(await directoryAtAsync(folder), identity)) {
+      if (!same(directoryAt(folder), identity)) {
         failed += 1;
         break;
       }
 
-      // Still the very file that was ranked: one restored under its name meanwhile stays.
-      const current = await lstat(join(folder, backup.name)).catch(() => null);
+      const current = lstatSync(join(folder, backup.name), { throwIfNoEntry: false });
 
       if (
         !current?.isFile() ||
@@ -263,7 +265,7 @@ export async function pruneBackups(
       )
         continue;
 
-      await rm(join(folder, backup.name));
+      unlinkSync(join(folder, backup.name));
       removed += 1;
     } catch {
       failed += 1;
