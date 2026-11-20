@@ -110,7 +110,10 @@ pnpm test          # unit and component tests (Vitest)
 pnpm e2e           # builds, then Playwright against demo mode in light and dark, with axe scans and visual baselines
 pnpm typecheck
 pnpm format:check
+pnpm db:check      # the migration history is consistent (Drizzle Kit's check)
 ```
+
+GitHub Actions runs these on every pull request and on `main` (`.github/workflows/ci.yml`). Format, types, unit tests and the migration history run in one job. End-to-end tests run on Linux with `--ignore-snapshots`, because the visual baselines are macOS renderings. A separate macOS job compares the screenshots too; it reports a difference without failing the change, since a hosted runner's fonts can render slightly differently from the Mac the baselines were recorded on.
 
 Within a workspace, `@/` points to that workspace's `src/` directory. For example, the web app imports `@/ui/button`, and the server imports `@/db/store.js`. Node ESM imports in the server and shared package retain their `.js` extension; their builds rewrite aliases to relative JavaScript imports so production runs with plain Node. Imports between workspaces use package names such as `@review-desk/shared/ai`, declared with `workspace:*` dependencies. Tests use `@test/fixtures` for the common root fixtures. Vite and Vitest resolve aliases from the importing workspace; TypeScript and tsx use that workspace's configuration.
 

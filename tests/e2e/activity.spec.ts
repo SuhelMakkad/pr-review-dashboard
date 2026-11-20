@@ -149,10 +149,13 @@ test('preserves a partial review and restores an editable draft through confirme
   await openFresh(page, '/pr/acme/web/1839/files');
   await expect(page.getByRole('navigation', { name: 'Changed files' })).toBeVisible();
   await page.keyboard.press('c');
-  await page
-    .getByRole('textbox', { name: /^Comment on src\// })
-    .fill('Keep the entire file comment.');
+
+  const composer = page.getByRole('textbox', { name: /^Comment on src\// });
+
+  await composer.fill('Keep the entire file comment.');
   await page.keyboard.press('ControlOrMeta+Enter');
+  // Saved as a draft before the review is finished: the shortcut does nothing while it is open.
+  await expect(composer).not.toBeVisible();
   await failNext(page, 'SubmitReview');
   await page.keyboard.press('ControlOrMeta+Shift+Enter');
   const sheet = page.getByRole('dialog', { name: 'Finish your review' });
