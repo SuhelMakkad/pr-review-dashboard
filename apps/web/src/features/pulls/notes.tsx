@@ -1,8 +1,10 @@
-import { forwardRef, useEffect, useRef, useState } from 'react';
+import { forwardRef, useEffect, useState } from 'react';
 import { Lock } from 'lucide-react';
 import { forgeTerms } from '@review-desk/shared/accounts';
 
 type SaveState = 'saved' | 'dirty' | 'saving' | 'error';
+
+const DEBOUNCE_MS = 800;
 
 const draftKey = (account: string, id: string) => `review-desk-draft:${account}:${id}`;
 
@@ -14,35 +16,6 @@ function readDraft(key: string): string | null {
   }
 }
 
-/**
- * Note saves per account and PR, kept outside any one editor: an editor that remounts (a switch
- * away and back) joins the same queue, so saves always reach the server in the order they were made.
- */
-interface SaveQueue {
-  chain: Promise<unknown>;
-  /** Saves queued and not yet settled. */
-  pending: number;
-  /** The text of the last save queued: the one the server ends with once the queue drains. */
-  last: string | null;
-  /** The last save queued failed: its text is not saved, and its draft is kept to retry. */
-  failed: boolean;
-  /** Called once the queue drains, by the editor showing it (if any). */
-  drained: (() => void) | null;
-}
-
-const saveQueues = new Map<string, SaveQueue>();
-
-function saveQueue(key: string): SaveQueue {
-  let queue = saveQueues.get(key);
-
-  if (!queue) {
-    queue = { chain: Promise.resolve(), pending: 0, last: null, failed: false, drained: null };
-    saveQueues.set(key, queue);
-  }
-
-  return queue;
-}
-
 function writeDraft(key: string, value: string | null) {
   try {
     if (value === null) sessionStorage.removeItem(key);
@@ -50,6 +23,134 @@ function writeDraft(key: string, value: string | null) {
   } catch {
     // The server copy is authoritative; the tab draft is only a safety net.
   }
+}
+
+/**
+ * One PR's note, per account, kept outside any editor: the text you typed and have not had
+ * confirmed, and the saves on their way. Editors only show it, so one that closes (a switch away)
+ * and one that opens later share the same edit, the same order of saves and the same outcome.
+ */
+class NoteEdit {
+  /** Typed and not yet confirmed saved, mirrored in the tab draft; null once saved. */
+  edit: string | null;
+  /** The last save that settled failed: the edit is kept, and is retried. */
+  failed = false;
+  /** Saves sent and not yet settled. */
+  private pending = 0;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private chain: Promise<unknown> = Promise.resolve();
+  private readonly listeners = new Set<() => void>();
+
+  constructor(private readonly key: string) {
+    this.edit = readDraft(key);
+  }
+
+  get state(): SaveState {
+    if (this.edit === null) return 'saved';
+    if (this.timer) return 'dirty';
+    if (this.pending > 0) return 'saving';
+
+    return this.failed ? 'error' : 'dirty';
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify() {
+    for (const listener of this.listeners) listener();
+  }
+
+  private acknowledge() {
+    this.edit = null;
+    this.failed = false;
+    writeDraft(this.key, null);
+  }
+
+  /** You typed `text` in an editor showing `saved`. */
+  type(text: string, saved: string, onSave: (note: string) => Promise<unknown>) {
+    this.edit = text;
+    writeDraft(this.key, text);
+    this.schedule(saved, onSave);
+  }
+
+  /**
+   * Sends the edit after a pause, unless it is the saved note with nothing on its way and nothing
+   * failed: then there is nothing to send. With a save on its way, or one that failed, it is sent
+   * even then, since the server may not end with it otherwise.
+   */
+  schedule(saved: string, onSave: (note: string) => Promise<unknown>) {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+
+    if (this.edit === null) return this.notify();
+
+    if (this.edit === saved && this.pending === 0 && !this.failed) {
+      this.acknowledge();
+      return this.notify();
+    }
+
+    this.timer = setTimeout(() => this.send(onSave), DEBOUNCE_MS);
+    this.notify();
+  }
+
+  /** Retries an edit nothing is sending: one that failed, or a tab draft restored after a reload. */
+  retry(saved: string, onSave: (note: string) => Promise<unknown>) {
+    if (this.edit === null || this.timer || this.pending > 0) return;
+
+    this.schedule(saved, onSave);
+  }
+
+  private send(onSave: (note: string) => Promise<unknown>) {
+    const text = this.edit;
+
+    this.timer = null;
+    if (text === null) return this.notify();
+
+    this.pending += 1;
+    this.notify();
+
+    // After every save before it, from this editor or an earlier one: the server ends with the
+    // last text you typed.
+    this.chain = this.chain
+      .catch(() => undefined)
+      .then(() => onSave(text))
+      .then(
+        () => this.settle(text, true),
+        () => this.settle(text, false),
+      );
+  }
+
+  private settle(text: string, ok: boolean) {
+    this.pending -= 1;
+    this.failed = !ok;
+
+    // Confirmed only by its own save, with nothing newer typed or on its way since, whether or not
+    // an editor still shows it: a later editor then never sends it again over a newer note.
+    const confirmed = ok && this.pending === 0 && !this.timer && this.edit === text;
+
+    if (!confirmed) return this.notify();
+
+    this.acknowledge();
+    // Shown after the saved note catches up: the save's reply updates it in the same tick, and the
+    // cache tells its readers on the next one. Editors would otherwise flash the older note.
+    setTimeout(() => this.notify(), 0);
+  }
+}
+
+const noteEdits = new Map<string, NoteEdit>();
+
+function noteEdit(key: string): NoteEdit {
+  let edit = noteEdits.get(key);
+
+  if (!edit) {
+    edit = new NoteEdit(key);
+    noteEdits.set(key, edit);
+  }
+
+  return edit;
 }
 
 /** Private note that autosaves to the local database; a tab-local draft survives crashes. */
@@ -63,98 +164,19 @@ export const Notes = forwardRef<
   }
 >(function Notes({ account, id, saved, onSave }, ref) {
   const key = draftKey(account, id);
-  const [note, setNote] = useState(() => readDraft(key) ?? saved);
-  const [state, setState] = useState<SaveState>(note === saved ? 'saved' : 'dirty');
-  const latest = useRef(note);
-  /**
-   * True once text was typed here (or a tab draft of it survived) and not yet saved. Until then the
-   * editor follows the saved note, so a newer note from elsewhere (another window, the account's
-   * own fresher copy after a switch) is shown, never saved back over by the older text.
-   */
-  const edited = useRef(readDraft(key) !== null);
-  const queue = saveQueue(key);
-  const latestSaved = useRef(saved);
+  const note = noteEdit(key);
+  const [, render] = useState(0);
 
-  latest.current = note;
-  latestSaved.current = saved;
+  useEffect(() => note.subscribe(() => render((version) => version + 1)), [note]);
 
-  /**
-   * Clean once nothing is in flight, the last save did not fail, and the text is what was saved:
-   * the draft can go.
-   */
-  const settle = () => {
-    if (queue.pending > 0 || queue.failed || latest.current !== latestSaved.current) return;
-
-    edited.current = false;
-    writeDraft(key, null);
-    setState((current) => (current === 'saving' || current === 'dirty' ? 'saved' : current));
-  };
-
-  // The queue tells this editor when it drains: the saved note may have arrived before the reply.
+  // An edit nothing is sending (one that failed, or a tab draft restored after a reload) is sent
+  // again when the editor opens and whenever the saved note changes.
   useEffect(() => {
-    queue.drained = settle;
-
-    return () => {
-      if (queue.drained === settle) queue.drained = null;
-    };
-  });
-
-  useEffect(() => {
-    if (!edited.current) setNote(saved);
-  }, [saved]);
-
-  useEffect(() => {
-    // Matching the saved note counts only once no save is in flight: an older one could still
-    // land after it and replace the text you went back to.
-    if (note === saved && queue.pending === 0) {
-      settle();
-      return;
-    }
-
-    if (!edited.current) return;
-
-    writeDraft(key, note);
-    setState('dirty');
-
-    // Already the last save on its way: the queue ends with this text.
-    if (queue.pending > 0 && queue.last === note) return;
-
-    const timer = setTimeout(() => {
-      setState('saving');
-      queue.pending += 1;
-      queue.last = note;
-
-      // After the saves before it, from this editor or an earlier one: the last text you typed
-      // is the one the server keeps.
-      queue.chain = queue.chain
-        .catch(() => undefined)
-        .then(() => onSave(note))
-        .then(
-          () => {
-            if (queue.last === note) queue.failed = false;
-            if (latest.current === note) setState('saved');
-          },
-          () => {
-            if (queue.last === note) queue.failed = true;
-            setState('error');
-          },
-        )
-        .finally(() => {
-          queue.pending -= 1;
-
-          if (queue.pending > 0) return;
-
-          // Saved, with nothing newer queued: a draft of exactly that text is done, whether or not
-          // an editor still shows it, so a later editor never saves it again over a newer note. A
-          // draft of newer text, typed since, stays.
-          if (!queue.failed && readDraft(key) === queue.last) writeDraft(key, null);
-
-          queue.drained?.();
-        });
-    }, 800);
-
-    return () => clearTimeout(timer);
+    note.retry(saved, onSave);
   }, [note, saved]);
+
+  const shown = note.edit ?? saved;
+  const state = note.state;
 
   return (
     <section aria-labelledby="notes-heading">
@@ -178,12 +200,9 @@ export const Notes = forwardRef<
       </div>
       <textarea
         ref={ref}
-        value={note}
+        value={shown}
         maxLength={30_000}
-        onChange={(event) => {
-          edited.current = true;
-          setNote(event.target.value);
-        }}
+        onChange={(event) => note.type(event.target.value, saved, onSave)}
         onKeyDown={(event) => {
           if (event.key === 'Escape') event.currentTarget.blur();
         }}

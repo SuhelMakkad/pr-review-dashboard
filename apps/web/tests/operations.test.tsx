@@ -530,6 +530,57 @@ describe('the private note', () => {
     });
   });
 
+  it('forgets a failed edit once you go back to the saved text', async () => {
+    let fail = true;
+    const onSave = vi.fn(async () => {
+      if (fail) throw new Error('Refused');
+    });
+    const first = render(<Notes account="you" id="pr-six" saved="Original" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    // An edit fails to save; then the saved text is typed back, and saves.
+    fireEvent.change(box(), { target: { value: 'Draft' } });
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('Draft'), { timeout: 2_000 });
+    fail = false;
+    fireEvent.change(box(), { target: { value: 'Original' } });
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('Original'), { timeout: 2_000 });
+    await waitFor(() => expect(sessionStorage.getItem('review-desk-draft:you:pr-six')).toBeNull());
+
+    // Reopened, the editor shows the saved text and sends nothing: the discarded edit is gone.
+    first.unmount();
+    render(<Notes account="you" id="pr-six" saved="Original" onSave={onSave} />);
+    expect(box()).toHaveValue('Original');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(onSave).toHaveBeenCalledTimes(2);
+  });
+
+  it('confirms a save in an editor opened while it was on its way', async () => {
+    let release: () => void = () => {};
+    const onSave = vi.fn(
+      (_note: string) => new Promise<void>((resolve) => (release = () => resolve())),
+    );
+    const first = render(<Notes account="you" id="pr-seven" saved="" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    fireEvent.change(box(), { target: { value: 'One' } });
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('One'), { timeout: 2_000 });
+
+    // The editor closes and opens again before the reply, with the older note still cached.
+    first.unmount();
+
+    const second = render(<Notes account="you" id="pr-seven" saved="" onSave={onSave} />);
+
+    expect(box()).toHaveValue('One');
+
+    // The reply comes, and another window has saved Two since: the editor shows it, and never
+    // sends One again.
+    await act(async () => release());
+    second.rerender(<Notes account="you" id="pr-seven" saved="Two" onSave={onSave} />);
+    expect(box()).toHaveValue('Two');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
   it('follows a newer saved note until you type, and saves only what you typed', async () => {
     const onSave = vi.fn(async () => undefined);
     const view = render(<Notes account="you" id="pr-one" saved="Older note" onSave={onSave} />);

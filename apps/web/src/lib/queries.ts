@@ -248,6 +248,8 @@ export async function runTriage(
   await client.cancelQueries({ queryKey: queue });
 
   const previous = client.getQueryData<PullRequestList>(queue);
+  const detailKey = queryKeys.detail(account, id);
+  const sentOver = client.getQueryData<PullRequestDetail>(detailKey)?.triage;
 
   if (previous) {
     client.setQueryData<PullRequestList>(queue, {
@@ -257,10 +259,21 @@ export async function runTriage(
   }
 
   try {
-    return await api<PullRequestDetail>(
+    const detail = await api<PullRequestDetail>(
       accountPath(account, `/pulls/${encodeURIComponent(id)}/triage`),
       { method: 'PATCH', body: update },
     );
+
+    // The triage as this change left it shows at once (a saved note, say), unless the PR was read
+    // again meanwhile with another triage: that read is as new as this reply, or newer. Only the
+    // triage: the rest of the reply can be older than the cached PR.
+    client.setQueryData<PullRequestDetail>(detailKey, (current) =>
+      current && sentOver && current.triage === sentOver
+        ? { ...current, triage: detail.triage }
+        : current,
+    );
+
+    return detail;
   } catch (error) {
     if (previous) client.setQueryData(queue, previous);
 
@@ -268,7 +281,7 @@ export async function runTriage(
   } finally {
     void client.invalidateQueries({ queryKey: queue });
     void client.invalidateQueries({ queryKey: queryKeys.mine(account) });
-    void client.invalidateQueries({ queryKey: queryKeys.detail(account, id) });
+    void client.invalidateQueries({ queryKey: detailKey });
   }
 }
 

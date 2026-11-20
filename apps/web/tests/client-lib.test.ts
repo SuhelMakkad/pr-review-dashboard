@@ -385,6 +385,54 @@ describe('account switches', () => {
       expect(client.getQueryState(queryKeys.mine('me'))?.isInvalidated).toBe(true);
     });
 
+    it('shows the triage it saved at once, unless the PR was read again with another', async () => {
+      const key = queryKeys.detail('me', 'pr-1');
+      const before = { account: 'me', snapshot: { headOid: 'head' }, triage: { note: '' } };
+      const reply = { account: 'me', snapshot: { headOid: 'older' }, triage: { note: 'For me' } };
+
+      /** Saves a note over `before`, doing `meanwhile` while the request is on its way. */
+      const save = async (meanwhile?: (client: QueryClient) => void) => {
+        const client = cacheFor('me');
+        let answer: (() => void) | null = null;
+
+        vi.stubGlobal(
+          'fetch',
+          () =>
+            new Promise((resolve) => {
+              answer = () => resolve({ ok: true, status: 200, json: async () => reply });
+            }),
+        );
+        client.setQueryData(key, before);
+
+        const sent = runTriage(client, { id: 'pr-1', account: 'me', update: { note: 'For me' } });
+
+        await vi.waitFor(() => expect(answer).not.toBeNull());
+        meanwhile?.(client);
+        answer!();
+        await sent;
+
+        return client.getQueryData(key);
+      };
+
+      // Unchanged since it was sent: the reply's triage shows, and only its triage.
+      expect(await save()).toEqual({ ...before, triage: { note: 'For me' } });
+
+      // A refresh brought a newer head with the same triage: both show.
+      expect(
+        await save((client) =>
+          client.setQueryData<typeof before>(key, (detail) => ({
+            ...detail!,
+            snapshot: { headOid: 'newer' },
+          })),
+        ),
+      ).toEqual({ account: 'me', snapshot: { headOid: 'newer' }, triage: { note: 'For me' } });
+
+      // Read again with another triage (another window's note) before the reply: that one stays.
+      const theirs = { ...before, triage: { note: 'Theirs' } };
+
+      expect(await save((client) => client.setQueryData(key, theirs))).toEqual(theirs);
+    });
+
     it("rolls back only its own account's queue", async () => {
       const { client, sent, answer } = await send({
         ok: false,

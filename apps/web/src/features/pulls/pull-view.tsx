@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import {
   AlarmClock,
@@ -24,7 +25,7 @@ import type {
 } from '@review-desk/shared/types';
 import { api } from '@/lib/api';
 import { filesUrl, numberSign, refOf } from '@/lib/pr-ref';
-import { accountPath, usePullDetail, useTriage } from '@/lib/queries';
+import { accountPath, runTriage, usePullDetail, useTriage } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { dateTime, relativePhrase, shortDateTime } from '@/lib/time';
 import { Avatar } from '@/ui/avatar';
@@ -238,6 +239,7 @@ function PullDetailView({
   const account = detail.account;
   const authored = isSameUser(pr.author.login, account);
   const forge = forgeTerms(account);
+  const client = useQueryClient();
   const actions = usePullActions();
   const triage = useTriage();
   const inbox = useInboxNavigation();
@@ -714,7 +716,8 @@ function PullDetailView({
             account={account}
             id={item.id}
             saved={detail.triage.note}
-            onSave={(note) => triage.mutateAsync({ id: item.id, account, update: { note } })}
+            // Not through the hook: a save can start after this view has closed (a switch away).
+            onSave={(note) => runTriage(client, { id: item.id, account, update: { note } })}
           />
         </section>
 
