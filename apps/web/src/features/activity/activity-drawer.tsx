@@ -163,8 +163,8 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
           },
         },
       ),
-    // The server's copy of the action it changed, not this card's: a card can be reused for
-    // another account's action of the same ID while the request is on its way.
+    // The receipt names the action the server changed: its account and PR are the ones to refresh
+    // and, for a reopen, to recover.
     onSuccess: ({ operation: changed }, command) => {
       void client.invalidateQueries({ queryKey: queryKeys.operations(changed.account) });
       void client.invalidateQueries({ queryKey: queryKeys.draft(changed.account, changed.prId) });
