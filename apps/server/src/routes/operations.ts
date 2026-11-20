@@ -33,15 +33,37 @@ export function registerOperationRoutes(
     }
   }
 
+  /**
+   * The legacy routes' answer for an account this app never worked as (or none): refused as a
+   * stale window's request, as before. Reads of a known account are served, selected or not.
+   */
+  const known = (account: string) => {
+    if (!sync.knows(account))
+      throw new ReviewError(
+        'ACCOUNT_CHANGED',
+        409,
+        'GitHub account changed. Refresh before writing.',
+      );
+  };
+
   const list = (
     account: string,
     cursor: string | undefined,
     reply: FastifyReply,
     scoped: boolean,
-  ) => handle(reply, scoped, () => queue.list(account, cursor));
+  ) =>
+    handle(reply, scoped, () => {
+      if (!scoped) known(account);
+
+      return queue.list(account, cursor);
+    });
 
   const one = (account: string, id: string, reply: FastifyReply, scoped: boolean) =>
-    handle(reply, scoped, () => ({ operation: queue.get(account, id) }));
+    handle(reply, scoped, () => {
+      if (!scoped) known(account);
+
+      return { operation: queue.get(account, id) };
+    });
 
   async function command(
     account: string,

@@ -90,7 +90,10 @@ describe('action IDs across the move to account routes', () => {
     expect(sent).toEqual(['saved-before-the-move']);
   });
 
-  it('keeps the ID of an action refused for an account not in use, to send again later', async () => {
+  it.each([
+    ['an account not in use', notActive],
+    ['a PR that kept changing', { error: 'Try again.', code: 'QUEUE_CHANGED' }],
+  ])('keeps the ID of an action refused for %s, to send again later', async (_case, refusal) => {
     const { githubCommand } = await import('@/lib/operation-command');
     const sent: string[] = [];
     let refuse = true;
@@ -98,13 +101,13 @@ describe('action IDs across the move to account routes', () => {
     vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
       sent.push(JSON.parse(String(options.body)).operationId);
 
-      return refuse ? reply(notActive, 409) : reply({ operation: { id: sent.at(-1) } }, 202);
+      return refuse ? reply(refusal, 409) : reply({ operation: { id: sent.at(-1) } }, 202);
     });
 
     const path = `/api/accounts/me/pulls/${crypto.randomUUID()}/review`;
 
     await expect(githubCommand(path, { event: 'COMMENT', body: '' })).rejects.toThrow(
-      'Switch back to me',
+      refusal.error,
     );
     refuse = false;
     await githubCommand(path, { event: 'COMMENT', body: '' });

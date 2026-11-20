@@ -255,30 +255,79 @@ describe('drafts, review actions and Activity for an account not in use', () => 
         operationId,
       });
 
-    // The account changes while the read is on its way: nothing is queued.
-    const switched = reply();
+    const reads = () => refresh.mock.calls.length;
+    const away = async (count: number, failure?: unknown) => {
+      const sent = reply();
 
-    await vi.waitFor(() => expect(refresh).toHaveBeenCalled());
-    await service.switchAccount('you', DEMO_SECOND_ACCOUNT);
-    release();
-    expect((await switched).json()).toMatchObject({ code: 'ACCOUNT_NOT_ACTIVE' });
+      await vi.waitFor(() => expect(reads()).toBe(count));
+      await service.switchAccount('you', DEMO_SECOND_ACCOUNT);
+      release(failure);
 
-    await service.switchAccount(DEMO_SECOND_ACCOUNT, 'you');
+      const answer = (await sent).json();
+
+      await service.switchAccount(DEMO_SECOND_ACCOUNT, 'you');
+
+      return answer;
+    };
+
+    // The account changes while the read is on its way, whether the read then succeeds or fails:
+    // the account not in use is the answer, and nothing is queued.
+    expect(await away(1)).toMatchObject({ code: 'ACCOUNT_NOT_ACTIVE' });
+    expect(await away(2, new AccountUnavailable('you', 'someone-else'))).toMatchObject({
+      code: 'ACCOUNT_NOT_ACTIVE',
+    });
 
     // A read that fails answers as a failed read does; one that succeeds without the thread, 404.
     const failed = reply();
 
-    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(reads()).toBe(3));
     release(new AccountUnavailable('you', 'someone-else'));
     expect((await failed).json()).toMatchObject({ code: 'ACCOUNT_UNAVAILABLE' });
 
     const missing = reply();
 
-    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(reads()).toBe(4));
     release();
     expect((await missing).statusCode).toBe(404);
     expect((await call('GET', scoped('/operations'))).json().items).toEqual([]);
     expect(reviewEvents()).toEqual([]);
+
+    // The same reply is accepted elsewhere while this one's read is on its way, and the read then
+    // fails: the receipt is the answer.
+    const operationId = randomUUID();
+    const raced = reply(operationId);
+
+    await vi.waitFor(() => expect(reads()).toBe(5));
+
+    const accepted = new OperationQueue(service).enqueue(
+      'you',
+      pr.id,
+      operationId,
+      { type: 'reply', threadId: 'thread-not-shown', body: 'Late' },
+      { account: 'you', prId: pr.id, body: 'Late', operationId },
+    );
+
+    release(new AccountUnavailable('you', 'someone-else'));
+
+    const answer = await raced;
+
+    expect(answer.statusCode).toBe(202);
+    expect(answer.json().operation.id).toBe(accepted.operation.id);
+  });
+
+  it('refuses a legacy Activity read for an account this app never used, and serves any other', async () => {
+    const { call, away } = await demo();
+
+    await away();
+
+    for (const url of [
+      '/api/operations?account=nobody',
+      '/api/operations',
+      '/api/operations/x?account=nobody',
+    ])
+      expect((await call('GET', url)).json()).toMatchObject({ code: 'ACCOUNT_CHANGED' });
+
+    expect((await call('GET', '/api/operations?account=you')).statusCode).toBe(200);
   });
 
   it('refuses a comment or thread of another PR, changing nothing', async () => {

@@ -163,13 +163,13 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
           },
         },
       ),
-    onSuccess: (_receipt, command) => {
-      void client.invalidateQueries({ queryKey: queryKeys.operations(operation.account) });
-      void client.invalidateQueries({
-        queryKey: queryKeys.draft(operation.account, operation.prId),
-      });
+    // The server's copy of the action it changed, not this card's: a card can be reused for
+    // another account's action of the same ID while the request is on its way.
+    onSuccess: ({ operation: changed }, command) => {
+      void client.invalidateQueries({ queryKey: queryKeys.operations(changed.account) });
+      void client.invalidateQueries({ queryKey: queryKeys.draft(changed.account, changed.prId) });
 
-      if (command === 'reopen') reopened(client, operation, (to) => void navigate(to));
+      if (command === 'reopen') reopened(client, changed, (to) => void navigate(to));
     },
   });
   const attention = operation.status === 'needs_attention';
@@ -519,7 +519,7 @@ export function ActivityDrawer() {
                   </h2>
                   <ListPresence>
                     {group.items.map((operation) => (
-                      <ListItem key={operation.id}>
+                      <ListItem key={`${operation.account}:${operation.id}`}>
                         <OperationCard operation={operation} />
                       </ListItem>
                     ))}

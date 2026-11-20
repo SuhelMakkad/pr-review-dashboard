@@ -50,6 +50,8 @@ const RETRYABLE = new Set([
   'ACCOUNT_NOT_ACTIVE',
   'ACCOUNT_UNAVAILABLE',
   'RATE_LIMITED',
+  // A reply's PR kept changing while it was read again to find the thread.
+  'QUEUE_CHANGED',
 ]);
 
 /** Keep the command ID after an uncertain acceptance response, including across reloads. */
