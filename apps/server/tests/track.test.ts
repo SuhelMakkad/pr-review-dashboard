@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
+import type { SyncStatus } from '@review-desk/shared/types';
 import { createApp } from '@/app.js';
+import { feedMembership } from '@/db/schema.js';
+import { AccountUnavailable } from '@/forge/account.js';
+import type { GitHubApi } from '@/github/api.js';
 import { Store } from '@/db/store.js';
 import { GitHub, GitHubError } from '@/github/index.js';
 import { candidates } from '@/notify/notifier.js';
@@ -300,53 +305,178 @@ describe('queue API', () => {
     await service.sync();
 
     const app = await createApp(service, { sessionToken: 'test-session-token' });
-    const track = (payload: Record<string, unknown>) =>
-      app.inject({ method: 'POST', url: '/api/pulls/track', headers, payload });
+    const track = (payload: Record<string, unknown>, account = 'me') =>
+      app.inject({ method: 'POST', url: `/api/accounts/${account}/pulls/track`, headers, payload });
 
-    expect((await track({ account: 'me', repository: 'acme', number: 2 })).statusCode).toBe(400);
-    expect((await track({ account: 'me', repository: 'acme/repo', number: 0 })).statusCode).toBe(
+    expect((await track({ repository: 'acme', number: 2 })).statusCode).toBe(400);
+    expect((await track({ repository: 'acme/repo', number: 0 })).statusCode).toBe(400);
+    // The path names the account; a body that names one too is refused.
+    expect((await track({ account: 'me', repository: 'acme/repo', number: 2 })).statusCode).toBe(
       400,
     );
 
-    const missing = await track({ account: 'me', repository: 'acme/missing', number: 2 });
+    const missing = await track({ repository: 'acme/missing', number: 2 });
 
     expect(missing.statusCode).toBe(404);
     expect(missing.json().code).toBe('NOT_FOUND');
 
-    const stale = await track({ account: 'old-account', repository: 'acme/repo', number: 2 });
+    // An account this app never worked as.
+    const unknown = await track({ repository: 'acme/repo', number: 2 }, 'old-account');
 
-    expect(stale.statusCode).toBe(409);
-    expect(stale.json().code).toBe('ACCOUNT_CHANGED');
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json().code).toBe('UNKNOWN_ACCOUNT');
 
-    const added = await track({ account: 'me', repository: 'acme/repo', number: 2 });
+    const added = await track({ repository: 'acme/repo', number: 2 });
 
     expect(added.statusCode).toBe(200);
     expect(added.json().snapshot.sources).toEqual(['manual']);
+    expect(added.json().membershipId).toEqual(expect.any(String));
     expect(
-      (await app.inject({ method: 'GET', url: '/api/pulls', headers })).json().items,
+      (await app.inject({ method: 'GET', url: '/api/accounts/me/pulls', headers })).json().items,
     ).toHaveLength(1);
+
+    // A malformed membership is refused rather than removing whatever is there.
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: '/api/accounts/me/pulls/pr-2/track',
+          headers,
+          payload: { membershipId: null },
+        })
+      ).statusCode,
+    ).toBe(400);
 
     const removed = await app.inject({
       method: 'DELETE',
-      url: '/api/pulls/pr-2/track',
+      url: '/api/accounts/me/pulls/pr-2/track',
       headers,
-      payload: { account: 'me' },
+      payload: { membershipId: added.json().membershipId },
     });
 
     expect(removed.json()).toEqual({ tracked: false });
-    expect((await app.inject({ method: 'GET', url: '/api/pulls', headers })).json().items).toEqual(
-      [],
-    );
+    expect(
+      (await app.inject({ method: 'GET', url: '/api/accounts/me/pulls', headers })).json().items,
+    ).toEqual([]);
 
     vi.mocked(github.resolvePull).mockRejectedValue(
       new GitHubError('Rate limited', '2030-01-01T00:00:00.000Z', 403, 'rate_limit'),
     );
 
-    const limited = await track({ account: 'me', repository: 'acme/repo', number: 2 });
+    const limited = await track({ repository: 'acme/repo', number: 2 });
 
     expect(limited.statusCode).toBe(429);
     expect(limited.json().code).toBe('RATE_LIMITED');
 
     await app.close();
+  });
+});
+
+describe('adding by hand for an account not in use', () => {
+  const ANN = 'ann@git.a.example';
+  const BOB = 'bob@git.b.example';
+
+  /** Ann's GitLab serves below `/gitlab`; Bob, in use, is on another GitLab at its root. */
+  function inactive() {
+    const store = new Store(':memory:');
+    const state = { signedIn: ANN, onSnapshot: null as null | (() => void) };
+    const api = {
+      resolvePull: vi.fn(async (repository: string, number: number) =>
+        repository === 'team/app' && number === 5 ? { id: 'mr-5', state: 'OPEN' as const } : null,
+      ),
+      snapshot: vi.fn(async (id: string, _login: string, sources: FeedSource[]) => {
+        state.onSnapshot?.();
+
+        return snapshot({
+          id,
+          number: 5,
+          url: 'https://git.a.example/gitlab/team/app/-/merge_requests/5',
+          sources,
+          reviews: [],
+        });
+      }),
+      verifyAccount: vi.fn(async (account: string) => {
+        if (state.signedIn !== account) throw new AccountUnavailable(account, state.signedIn);
+      }),
+    } as unknown as GitHubApi;
+    const service = new SyncService(store, api);
+    const account = (login: string, webUrl: string) =>
+      ({ ...service.status, account: { login, webUrl } }) as unknown as SyncStatus;
+
+    stores.push(store);
+    store.setSetting(`status:${ANN}`, account(ANN, 'https://git.a.example/gitlab/ann'));
+    service.status = account(BOB, 'https://git.b.example/bob');
+
+    const track = () => service.track(ANN, 'gitlab/team/app', 5, 'git.a.example', true);
+
+    return { store, service, api, state, track };
+  }
+
+  it('reads as that account, below its own web root, under its own cooldown', async () => {
+    const { service, api, track } = inactive();
+    const later = new Date(Date.now() + 3_600_000).toISOString();
+
+    // Bob's cooldown is Bob's.
+    service.deferUntil(later, BOB);
+
+    const added = await track();
+
+    expect(added.snapshot.id).toBe('mr-5');
+    expect(added.membershipId).toEqual(expect.any(String));
+    expect(api.resolvePull).toHaveBeenCalledWith('team/app', 5);
+
+    // Ann's refuses Ann's add, reading nothing.
+    service.untrack(ANN, 'mr-5');
+    service.deferUntil(later, ANN);
+    await expect(track()).rejects.toMatchObject({ outcome: 'rate_limit' });
+    expect(api.resolvePull).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves nothing when glab signs in as someone else during the reads', async () => {
+    const { store, state, track } = inactive();
+
+    state.onSnapshot = () => (state.signedIn = 'eve@git.a.example');
+
+    await expect(track()).rejects.toBeInstanceOf(AccountUnavailable);
+    expect(store.snapshot(ANN, 'mr-5')).toBeNull();
+    expect(store.manualAddedAt(ANN, 'mr-5')).toBeNull();
+  });
+
+  it('lets an Undo remove only the membership its add made, however fast the next one came', async () => {
+    const { store, service, track } = inactive();
+
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-21T10:00:00Z'));
+
+    const first = await track();
+
+    // A second add of a PR already added changes nothing, and offers no Undo.
+    expect((await track()).membershipId).toBeNull();
+
+    // Removed and added again in the same instant: the first add's Undo is not the re-add's.
+    service.untrack(ANN, 'mr-5');
+
+    const second = await track();
+
+    expect(second.membershipId).not.toBe(first.membershipId);
+    expect(() => service.untrack(ANN, 'mr-5', first.membershipId!)).toThrow('added again since');
+    expect(store.manualAddedAt(ANN, 'mr-5')).not.toBeNull();
+    expect(service.untrack(ANN, 'mr-5', second.membershipId!)).toEqual({ tracked: false });
+  });
+
+  it('offers no Undo for a PR added before memberships had IDs, and still removes it', async () => {
+    const { store, service, track } = inactive();
+
+    await track();
+    service.untrack(ANN, 'mr-5');
+    await track();
+    // As a version before memberships had IDs saved it.
+    store.db
+      .update(feedMembership)
+      .set({ membershipId: null })
+      .where(eq(feedMembership.account, ANN))
+      .run();
+
+    expect((await track()).membershipId).toBeNull();
+    expect(service.untrack(ANN, 'mr-5')).toEqual({ tracked: false });
   });
 });

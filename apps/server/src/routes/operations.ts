@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { OperationQueue } from '@/operations/queue.js';
-import { legacyAccountError, ReviewError } from '@/review/errors.js';
+import { ReviewError } from '@/review/errors.js';
 import { safeError } from '@/github/errors.js';
 import { knownAccount, type AccountParams } from '@/routes/pulls.js';
 import type { SyncService } from '@/sync/service.js';
@@ -10,20 +10,17 @@ const commands = z.enum(['cancel', 'retry', 'check', 'reopen', 'dismiss', 'resto
 
 /**
  * Activity: any account's actions can be read, and stopped or hidden; the commands that schedule
- * forge work need the account in use. Each route is served twice: legacy, with the account in the
- * query or body, and under `/api/accounts/:account`, with it in the path.
+ * forge work need the account in use.
  */
 export function registerOperationRoutes(
   app: FastifyInstance,
   queue: OperationQueue,
   sync: SyncService,
 ): void {
-  async function handle(reply: FastifyReply, scoped: boolean, work: () => unknown) {
+  async function handle(reply: FastifyReply, work: () => unknown) {
     try {
       return await work();
-    } catch (raw) {
-      const error = scoped ? raw : legacyAccountError(raw);
-
+    } catch (error) {
       if (error instanceof ReviewError)
         return reply
           .code(error.status)
@@ -33,75 +30,13 @@ export function registerOperationRoutes(
     }
   }
 
-  /**
-   * The legacy routes' answer for an account this app never worked as (or none): refused as a
-   * stale window's request, as before. Reads of a known account are served, selected or not.
-   */
-  const known = (account: string) => {
-    if (!sync.knows(account))
-      throw new ReviewError(
-        'ACCOUNT_CHANGED',
-        409,
-        'GitHub account changed. Refresh before writing.',
-      );
-  };
-
-  const list = (
-    account: string,
-    cursor: string | undefined,
-    reply: FastifyReply,
-    scoped: boolean,
-  ) =>
-    handle(reply, scoped, () => {
-      if (!scoped) known(account);
-
-      return queue.list(account, cursor);
-    });
-
-  const one = (account: string, id: string, reply: FastifyReply, scoped: boolean) =>
-    handle(reply, scoped, () => {
-      if (!scoped) known(account);
-
-      return { operation: queue.get(account, id) };
-    });
-
-  async function command(
-    account: string,
-    params: { id: string; command: string },
-    confirm: boolean | undefined,
-    reply: FastifyReply,
-    scoped: boolean,
-  ) {
-    const parsed = commands.safeParse(params.command);
-
-    if (!parsed.success) return reply.code(400).send({ error: 'Invalid operation command.' });
-    if (parsed.data === 'restore' && !confirm)
-      return reply.code(400).send({
-        error: 'Confirm removing the pending GitHub review before restoring its draft.',
-      });
-
-    return handle(reply, scoped, () => queue.control(account, params.id, parsed.data, confirm));
-  }
-
-  app.get<{ Querystring: { account?: string; cursor?: string } }>(
-    '/api/operations',
-    async (request, reply) =>
-      list(String(request.query.account ?? ''), request.query.cursor, reply, false),
-  );
-
   app.get<{ Params: AccountParams; Querystring: { cursor?: string } }>(
     '/api/accounts/:account/operations',
     async (request, reply) => {
       const account = knownAccount(sync, request.params, reply);
 
-      return account ? list(account, request.query.cursor, reply, true) : reply;
+      return account ? handle(reply, () => queue.list(account, request.query.cursor)) : reply;
     },
-  );
-
-  app.get<{ Params: { id: string }; Querystring: { account?: string } }>(
-    '/api/operations/:id',
-    async (request, reply) =>
-      one(String(request.query.account ?? ''), request.params.id, reply, false),
   );
 
   app.get<{ Params: AccountParams & { id: string } }>(
@@ -109,21 +44,9 @@ export function registerOperationRoutes(
     async (request, reply) => {
       const account = knownAccount(sync, request.params, reply);
 
-      return account ? one(account, request.params.id, reply, true) : reply;
-    },
-  );
-
-  app.post<{ Params: { id: string; command: string } }>(
-    '/api/operations/:id/:command',
-    async (request, reply) => {
-      const body = z
-        .object({ account: z.string().min(1), confirm: z.boolean().optional() })
-        .strict()
-        .safeParse(request.body);
-
-      if (!body.success) return reply.code(400).send({ error: 'Invalid operation command.' });
-
-      return command(body.data.account, request.params, body.data.confirm, reply, false);
+      return account
+        ? handle(reply, () => ({ operation: queue.get(account, request.params.id) }))
+        : reply;
     },
   );
 
@@ -138,10 +61,18 @@ export function registerOperationRoutes(
         .object({ confirm: z.boolean().optional() })
         .strict()
         .safeParse(request.body ?? {});
+      const command = commands.safeParse(request.params.command);
 
-      if (!body.success) return reply.code(400).send({ error: 'Invalid operation command.' });
+      if (!body.success || !command.success)
+        return reply.code(400).send({ error: 'Invalid operation command.' });
+      if (command.data === 'restore' && !body.data.confirm)
+        return reply.code(400).send({
+          error: 'Confirm removing the pending GitHub review before restoring its draft.',
+        });
 
-      return command(account, request.params, body.data.confirm, reply, true);
+      return handle(reply, () =>
+        queue.control(account, request.params.id, command.data, body.data.confirm),
+      );
     },
   );
 }

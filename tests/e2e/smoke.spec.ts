@@ -14,11 +14,11 @@ test('writes without the session token are refused', async ({ page }) => {
   await page.goto('/');
 
   const status = await page.evaluate(async () => {
-    const pulls = await (await fetch('/api/pulls')).json();
-    const response = await fetch(`/api/pulls/${pulls.items[0].id}/triage`, {
+    const pulls = await (await fetch('/api/accounts/you/pulls')).json();
+    const response = await fetch(`/api/accounts/you/pulls/${pulls.items[0].id}/triage`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'X-Review-Desk': '1' },
-      body: JSON.stringify({ account: pulls.account, note: 'no token' }),
+      body: JSON.stringify({ note: 'no token' }),
     });
 
     return response.status;

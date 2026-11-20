@@ -2407,16 +2407,16 @@ describe('posting through the app', () => {
     const id = sync.list().items.find((item) => item.number === 1839)!.id;
     const started = await app.inject({
       method: 'POST',
-      url: `/api/pulls/${id}/ai`,
+      url: `/api/accounts/you/pulls/${id}/ai`,
       headers,
-      payload: { account: 'you', task: 'full_review' },
+      payload: { task: 'full_review' },
     });
 
     expect(started.statusCode).toBe(200);
 
     const operations = async () =>
       (
-        await app.inject({ method: 'GET', url: '/api/operations?account=you', headers })
+        await app.inject({ method: 'GET', url: '/api/accounts/you/operations', headers })
       ).json() as OperationList;
 
     await expect

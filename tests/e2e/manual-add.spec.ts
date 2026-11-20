@@ -24,8 +24,19 @@ test('adds an untracked PR from the Not tracked screen, then removes it', async 
   await page.getByRole('button', { name: 'Remove from queue' }).click();
   await expect(page.getByRole('option', { name: new RegExp(title) })).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Undo' }).click();
+  const toast = (text: string) =>
+    page.locator('[data-sonner-toast]', { hasText: text }).getByRole('button', { name: 'Undo' });
+
+  // The removal's Undo adds it again. The first add's Undo is no longer that membership's, so it
+  // removes nothing; the re-add's own Undo (the newest toast) takes it back off.
+  await toast('Removed').click();
   await expect(page.getByRole('option', { name: new RegExp(title) })).toHaveCount(1);
+  await toast('Added').last().click();
+  await expect(page.getByText('added again since, so nothing was removed')).toBeVisible();
+  await expect(page.getByRole('option', { name: new RegExp(title) })).toHaveCount(1);
+  // The refusal's toast is stacked over it: the click goes to the button itself.
+  await toast('Added').first().dispatchEvent('click');
+  await expect(page.getByRole('option', { name: new RegExp(title) })).toHaveCount(0);
 });
 
 test('adds a PR from the inbox header, explaining PRs it cannot find', async ({ page }) => {

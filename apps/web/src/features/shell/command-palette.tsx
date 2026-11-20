@@ -60,7 +60,7 @@ export function CommandPalette({
   const actions = usePullActions();
   const forge = useForge();
   const status = useStatus();
-  const { item: current } = useCurrentPull();
+  const { item: current, account: currentAccount } = useCurrentPull();
   const accounts = useAccounts(open);
   const switcher = useAccountSwitcher();
   // Compared with the live status: a cached list can predate the last switch.
@@ -220,7 +220,10 @@ export function CommandPalette({
                 <Kbd keys="y" className="ml-auto" />
               </Command.Item>
               {onlyAddedByHand(current) && (
-                <Command.Item className={itemClass} onSelect={run(() => untrack.mutate(current))}>
+                <Command.Item
+                  className={itemClass}
+                  onSelect={run(() => untrack.mutate({ item: current, account: currentAccount! }))}
+                >
                   <ListMinus size={15} className="text-fg-subtle" aria-hidden="true" />
                   Remove from review queue
                 </Command.Item>

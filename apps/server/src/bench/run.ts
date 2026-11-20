@@ -158,7 +158,7 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
     'x-review-desk': '1',
     'x-review-desk-session': 'bench',
   };
-  const list = () => app.inject({ method: 'GET', url: '/api/pulls', headers });
+  const list = () => app.inject({ method: 'GET', url: '/api/accounts/you/pulls', headers });
 
   // The inbox the fixture implies: every PR asking for your review that you did not write.
   const inbox = populated.scenario.world.pulls
@@ -170,11 +170,11 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
 
   if (JSON.stringify(listed.items.map(({ id }) => id).sort()) !== JSON.stringify(inbox))
     throw new Error(
-      `/api/pulls lists ${listed.items.length} PRs, not the ${expected} in the inbox.`,
+      `The PR list has ${listed.items.length} PRs, not the ${expected} in the inbox.`,
     );
 
   add({
-    name: `/api/pulls, ${largest} PRs, idle`,
+    name: `PR list, ${largest} PRs, idle`,
     stats: stats(await timed(iterations * 3, list)),
   });
 
@@ -221,7 +221,7 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
   const route = stats(during);
 
   add({
-    name: `/api/pulls, ${largest} PRs, during a sync`,
+    name: `PR list, ${largest} PRs, during a sync`,
     stats: route,
     gate: {
       limit: `p95 < ${ROUTE_P95_MS} ms`,

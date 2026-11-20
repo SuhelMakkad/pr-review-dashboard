@@ -20,13 +20,3 @@ export function accountNotActive(account: string, selected: string | null): Revi
     { account, selected },
   );
 }
-
-/**
- * The legacy routes' and AI's answer for the same refusal, kept until they move to account paths:
- * `ACCOUNT_CHANGED`, with its old wording.
- */
-export function legacyAccountError(error: unknown): unknown {
-  return error instanceof ReviewError && error.code === 'ACCOUNT_NOT_ACTIVE'
-    ? new ReviewError('ACCOUNT_CHANGED', 409, 'GitHub account changed. Refresh before writing.')
-    : error;
-}

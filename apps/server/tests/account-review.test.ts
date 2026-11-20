@@ -182,25 +182,26 @@ describe('drafts, review actions and Activity for an account not in use', () => 
     expect(drafts.draft('you', pr.id)).toEqual(before);
     expect((await call('GET', scoped('/operations'))).json().items).toEqual([]);
     expect(reviewEvents()).toEqual([]);
-
-    // The legacy routes keep their answer until they go.
-    const legacy = await call('PUT', `/api/pulls/${pr.id}/draft`, { account: 'you', body: 'X' });
-
-    expect(legacy.json()).toMatchObject({ code: 'ACCOUNT_CHANGED' });
   });
 
-  it('replays an accepted action through either route, selected or not, and only that action', async () => {
-    const { pr, call, away } = await demo();
+  it('replays an action accepted before the account routes, selected or not, and only that action', async () => {
+    const { service, pr, call, away } = await demo();
     const operationId = randomUUID();
     const viewed = { path: pr.files[0].path, viewed: true, operationId };
-    const first = await call('POST', `/api/pulls/${pr.id}/viewed`, { account: 'you', ...viewed });
 
-    expect(first.statusCode).toBe(202);
+    // Saved as the routes that named the account in their body saved it: the account in the request.
+    const first = new OperationQueue(service).enqueue(
+      'you',
+      pr.id,
+      operationId,
+      { type: 'viewed', path: viewed.path, viewed: true },
+      { account: 'you', path: viewed.path, viewed: true, operationId },
+    );
 
     const again = await call('POST', scoped(`/pulls/${pr.id}/viewed`), viewed);
 
     expect(again.statusCode).toBe(202);
-    expect(again.json().operation.id).toBe(first.json().operation.id);
+    expect(again.json().operation.id).toBe(first.operation.id);
 
     await away();
 
@@ -313,21 +314,6 @@ describe('drafts, review actions and Activity for an account not in use', () => 
 
     expect(answer.statusCode).toBe(202);
     expect(answer.json().operation.id).toBe(accepted.operation.id);
-  });
-
-  it('refuses a legacy Activity read for an account this app never used, and serves any other', async () => {
-    const { call, away } = await demo();
-
-    await away();
-
-    for (const url of [
-      '/api/operations?account=nobody',
-      '/api/operations',
-      '/api/operations/x?account=nobody',
-    ])
-      expect((await call('GET', url)).json()).toMatchObject({ code: 'ACCOUNT_CHANGED' });
-
-    expect((await call('GET', '/api/operations?account=you')).statusCode).toBe(200);
   });
 
   it('refuses a comment or thread of another PR, changing nothing', async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -229,13 +230,19 @@ export class Store {
     });
   }
 
-  /** Marks a PR as added by hand. Discovery never replaces the `manual` feed. */
-  addManual(account: string, id: string, at: string): void {
-    this.db
+  /**
+   * Marks a PR as added by hand. Discovery never replaces the `manual` feed. Returns the new
+   * membership's ID, or null when the PR was already added by hand (nothing changed).
+   */
+  addManual(account: string, id: string, at: string): string | null {
+    const membershipId = randomUUID();
+    const result = this.db
       .insert(feedMembership)
-      .values({ account, id, feed: 'manual', seenAt: at })
+      .values({ account, id, feed: 'manual', seenAt: at, membershipId })
       .onConflictDoNothing()
       .run();
+
+    return Number(result.changes) > 0 ? membershipId : null;
   }
 
   /** When the PR was added by hand; null when it was not. */
@@ -255,17 +262,28 @@ export class Store {
     return row?.seenAt ?? null;
   }
 
-  removeManual(account: string, id: string): void {
-    this.db
-      .delete(feedMembership)
-      .where(
-        and(
-          eq(feedMembership.account, account),
-          eq(feedMembership.id, id),
-          eq(feedMembership.feed, 'manual'),
-        ),
-      )
-      .run();
+  /**
+   * Removes the PR's manual membership; with `membershipId`, only that one, so an Undo never
+   * removes a membership added again since. True when one was removed.
+   */
+  removeManual(account: string, id: string, membershipId?: string): boolean {
+    return (
+      Number(
+        this.db
+          .delete(feedMembership)
+          .where(
+            and(
+              eq(feedMembership.account, account),
+              eq(feedMembership.id, id),
+              eq(feedMembership.feed, 'manual'),
+              membershipId === undefined
+                ? undefined
+                : eq(feedMembership.membershipId, membershipId),
+            ),
+          )
+          .run().changes,
+      ) > 0
+    );
   }
 
   /**

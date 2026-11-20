@@ -1631,7 +1631,9 @@ describe('automatic review routes', () => {
     expect(saved.json().autoReview.since).not.toBe('1999-01-01T00:00:00.000Z');
 
     const reviews = async () =>
-      (await app.inject({ method: 'GET', url: '/api/ai/reviews?account=you', headers })).json() as {
+      (
+        await app.inject({ method: 'GET', url: '/api/accounts/you/ai/reviews', headers })
+      ).json() as {
         reviews: AiReviewStatus[];
       };
 
@@ -1692,7 +1694,7 @@ describe('automatic review routes', () => {
 
     const detail = await app.inject({
       method: 'GET',
-      url: `/api/pulls/${encodeURIComponent(waiting.item.id)}/ai?account=you`,
+      url: `/api/accounts/you/pulls/${encodeURIComponent(waiting.item.id)}/ai`,
       headers,
     });
 

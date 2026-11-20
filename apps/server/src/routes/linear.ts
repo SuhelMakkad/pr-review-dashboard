@@ -65,13 +65,4 @@ export function registerLinearRoutes(
       return linear.ticketsFor(detail.snapshot);
     },
   );
-
-  // Legacy, for the selected account.
-  app.get<{ Params: { id: string } }>('/api/pulls/:id/tickets', async (request, reply) => {
-    const detail = service.detail(request.params.id);
-
-    if (!detail) return reply.code(404).send({ error: 'This PR is no longer tracked.' });
-
-    return linear.ticketsFor(detail.snapshot);
-  });
 }

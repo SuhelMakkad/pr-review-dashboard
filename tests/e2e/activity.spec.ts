@@ -35,7 +35,7 @@ async function activity(page: Page) {
 }
 
 async function operations(page: Page): Promise<OperationList> {
-  return (await page.request.get('/api/operations?account=you')).json();
+  return (await page.request.get('/api/accounts/you/operations')).json();
 }
 
 test('queues a review, advances from the inbox, and keeps its result after navigation and reload', async ({

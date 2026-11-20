@@ -20,18 +20,16 @@ export function parse<T>(schema: z.ZodType<T>, value: unknown, reply: FastifyRep
 }
 
 /**
- * The request a route parses, with its account: from the body on a legacy route, from the path
- * on an account's own (`scoped`), where the body must not name one. Both give exactly the same
- * object, so an action ID accepted through one is replayed through the other.
+ * The request a route parses, with the path's account in it: the body must not name one. The
+ * account stays part of the parsed request, as it was when legacy routes read it from the body,
+ * so an action accepted before them is replayed by the same fingerprint.
  */
 export function input<T>(
   schema: z.ZodType<T>,
   request: ScopedRequest,
   reply: FastifyReply,
-  scoped: string | null,
+  account: string,
 ): T | null {
-  if (scoped === null) return parse(schema, request.body, reply);
-
   const body = request.body ?? {};
 
   if (typeof body !== 'object' || Array.isArray(body) || 'account' in body) {
@@ -39,21 +37,19 @@ export function input<T>(
     return null;
   }
 
-  return parse(schema, { ...body, account: scoped }, reply);
+  return parse(schema, { ...body, account }, reply);
 }
 
 /**
- * Serves each route twice: as the legacy route, whose request names the account, and under
- * `/api/accounts/:account`, whose path does. `work` gets the path's account, or null on the
- * legacy route. An account this app never worked as is not served.
+ * Serves each route under `/api/accounts/:account`, for the account its path names. An account
+ * this app never worked as is not served.
  */
 export function scopedRoutes(app: FastifyInstance, sync: SyncService) {
   return function serve(
     method: 'get' | 'put' | 'post' | 'patch' | 'delete',
     path: string,
-    work: (request: ScopedRequest, reply: FastifyReply, scoped: string | null) => Promise<unknown>,
+    work: (request: ScopedRequest, reply: FastifyReply, account: string) => Promise<unknown>,
   ) {
-    app[method](path, (request, reply) => work(request as ScopedRequest, reply, null));
     app[method](`/api/accounts/:account${path.slice('/api'.length)}`, (request, reply) => {
       const account = knownAccount(sync, request.params as AccountParams, reply);
 

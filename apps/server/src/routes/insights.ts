@@ -20,12 +20,9 @@ export function registerInsightsRoutes(
 ): void {
   const serve = scopedRoutes(app, service);
 
-  serve('get', '/api/insights', async (request, _reply, scoped) => {
-    const login = scoped ?? service.status.account?.login;
+  serve('get', '/api/insights', async (request, _reply, login) => {
     const days = [7, 30, 90].includes(Number(request.query.days)) ? Number(request.query.days) : 30;
     const slaHours = service.store.getSetting<number>(SLA_KEY) ?? 24;
-
-    if (!login) return { insights: null, backfill: null, slaHours, repositories: [] };
 
     // Look back further than the range so requests made just before it still pair with reviews.
     const since = new Date(Date.now() - (days + 30) * DAY).toISOString();
@@ -43,23 +40,13 @@ export function registerInsightsRoutes(
     };
   });
 
-  serve('post', '/api/insights/backfill', async (request, reply, scoped) => {
-    const parsed = scoped
-      ? z.strictObject({}).safeParse(request.body ?? {})
-      : z.strictObject({ account: z.string().min(1) }).safeParse(request.body);
+  serve('post', '/api/insights/backfill', async (request, reply, account) => {
+    if (!z.strictObject({}).safeParse(request.body ?? {}).success)
+      return reply.code(400).send({ error: 'Invalid request.' });
 
-    if (!parsed.success)
-      // The legacy route's answer for a request without its account, as before.
-      return scoped
-        ? reply.code(400).send({ error: 'Invalid request.' })
-        : reply.code(409).send({ error: 'GitHub account changed. Refresh first.' });
-
-    const account = scoped ?? (parsed.data as { account: string }).account;
     const selected = service.status.account?.login ?? null;
 
     if (account !== selected) {
-      if (!scoped) return reply.code(409).send({ error: 'GitHub account changed. Refresh first.' });
-
       const refusal = accountNotActive(account, selected);
 
       return reply

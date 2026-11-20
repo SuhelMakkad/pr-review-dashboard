@@ -196,14 +196,14 @@ describe('sync and local persistence', () => {
     const snooze = (until: number) =>
       app.inject({
         method: 'PATCH',
-        url: '/api/pulls/pr-1/triage',
+        url: '/api/accounts/me/pulls/pr-1/triage',
         headers: {
           host: '127.0.0.1:4317',
           'content-type': 'application/json',
           'x-review-desk': '1',
           'x-review-desk-session': 'test-session-token',
         },
-        payload: { account: 'me', snoozeUntil: new Date(until).toISOString() },
+        payload: { snoozeUntil: new Date(until).toISOString() },
       });
 
     // Ahead of the process's time, but already past on the app's.
@@ -302,21 +302,26 @@ describe('local API', () => {
       'x-review-desk': '1',
       'x-review-desk-session': 'test-session-token',
     };
-    const read = await app.inject({ method: 'GET', url: '/api/pulls', headers });
+    const read = await app.inject({ method: 'GET', url: '/api/accounts/me/pulls', headers });
 
     expect(read.statusCode).toBe(200);
     expect(read.json().items).toHaveLength(1);
     expect(
-      (await app.inject({ method: 'GET', url: '/api/pulls', headers: { host: 'evil.example' } }))
-        .statusCode,
+      (
+        await app.inject({
+          method: 'GET',
+          url: '/api/accounts/me/pulls',
+          headers: { host: 'evil.example' },
+        })
+      ).statusCode,
     ).toBe(403);
     expect(
       (
         await app.inject({
           method: 'PATCH',
-          url: '/api/pulls/pr-1/triage',
+          url: '/api/accounts/me/pulls/pr-1/triage',
           headers: { ...headers, origin: 'https://evil.example' },
-          payload: { account: 'me', note: 'bad' },
+          payload: { note: 'bad' },
         })
       ).statusCode,
     ).toBe(403);
@@ -324,9 +329,9 @@ describe('local API', () => {
       (
         await app.inject({
           method: 'PATCH',
-          url: '/api/pulls/pr-1/triage',
+          url: '/api/accounts/me/pulls/pr-1/triage',
           headers: { host: '127.0.0.1:4317' },
-          payload: { account: 'me' },
+          payload: {},
         })
       ).statusCode,
     ).toBe(403);
@@ -334,9 +339,9 @@ describe('local API', () => {
       (
         await app.inject({
           method: 'PATCH',
-          url: '/api/pulls/pr-1/triage',
+          url: '/api/accounts/me/pulls/pr-1/triage',
           headers,
-          payload: { account: 'me', unexpected: true },
+          payload: { unexpected: true },
         })
       ).statusCode,
     ).toBe(400);
@@ -344,19 +349,19 @@ describe('local API', () => {
       (
         await app.inject({
           method: 'PATCH',
-          url: '/api/pulls/pr-1/triage',
+          url: '/api/accounts/old-account/pulls/pr-1/triage',
           headers,
-          payload: { account: 'old-account', note: 'bad' },
+          payload: { note: 'bad' },
         })
       ).statusCode,
-    ).toBe(409);
+    ).toBe(404);
     expect(
       (
         await app.inject({
           method: 'PATCH',
-          url: '/api/pulls/pr-1/triage',
+          url: '/api/accounts/me/pulls/pr-1/triage',
           headers,
-          payload: { account: 'me', note: 'Saved safely' },
+          payload: { note: 'Saved safely' },
         })
       ).json().triage.note,
     ).toBe('Saved safely');

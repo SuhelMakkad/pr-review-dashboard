@@ -15,8 +15,8 @@ describe('the benchmark', () => {
       'warm sync (1 changed), 20 PRs',
       'cold full sync, 40 PRs',
       'warm sync (1 changed), 40 PRs',
-      '/api/pulls, 40 PRs, idle',
-      '/api/pulls, 40 PRs, during a sync',
+      'PR list, 40 PRs, idle',
+      'PR list, 40 PRs, during a sync',
       'inbox derivation, 40 PRs',
       // Every fifth of the many is yours.
       'My PRs derivation, 8 of 40 PRs yours',

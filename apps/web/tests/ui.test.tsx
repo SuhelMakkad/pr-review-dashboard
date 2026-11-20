@@ -167,13 +167,14 @@ beforeEach(() => {
           reviews: [],
         });
 
-        queueChanges.push({ method: 'POST', path, body });
+        queueChanges.push({ method: 'POST', path: requested, body });
         added = [pr];
         data = {
-          account,
+          account: who,
           snapshot: pr,
-          item: deriveItem(pr, state(pr.id), account, []),
+          item: deriveItem(pr, state(pr.id), who, []),
           triage: state(pr.id),
+          membershipId: 'membership-1',
         };
       } else if (/^\/api\/pulls\/[^/]+\/draft(\?|$)/.test(path)) {
         data = {
@@ -185,7 +186,11 @@ beforeEach(() => {
           githubPendingReview: null,
         };
       } else if (path.endsWith('/track') && options?.method === 'DELETE') {
-        queueChanges.push({ method: 'DELETE', path, body: JSON.parse(String(options.body)) });
+        queueChanges.push({
+          method: 'DELETE',
+          path: requested,
+          body: JSON.parse(String(options.body)),
+        });
         added = [];
         data = { tracked: false };
       } else {
@@ -449,8 +454,8 @@ describe('adding PRs by hand', () => {
     expect(queueChanges).toEqual([
       {
         method: 'POST',
-        path: '/api/pulls/track',
-        body: { account: 'me', repository: 'acme/web', number: 77 },
+        path: '/api/accounts/me/pulls/track',
+        body: { repository: 'acme/web', number: 77 },
       },
     ]);
     expect(screen.getByText(/Tracked because you added it/)).toBeInTheDocument();
@@ -462,8 +467,8 @@ describe('adding PRs by hand', () => {
     );
     expect(queueChanges[1]).toEqual({
       method: 'DELETE',
-      path: '/api/pulls/added/track',
-      body: { account: 'me' },
+      path: '/api/accounts/me/pulls/added/track',
+      body: {},
     });
   });
 

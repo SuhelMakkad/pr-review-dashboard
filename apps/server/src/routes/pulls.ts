@@ -15,27 +15,25 @@ const updateSchema = z
   })
   .strict();
 
-const trackSchema = z
+/** Undo names the membership its add made; Remove names none, and removes the current one. */
+const untrackSchema = z.object({ membershipId: z.uuid().optional() }).strict();
+
+/** Adding by hand for the account the path names. */
+const scopedTrackSchema = z
   .object({
-    account: z.string().min(1).max(100),
-    // `owner/repo` on GitHub; GitLab projects can sit in nested groups (`group/sub/project`).
     repository: z
       .string()
       .max(400)
       .regex(/^[\w.-]+(?:\/[\w.-]+)+$/),
     number: z.number().int().positive().max(1_000_000_000),
-    /** The host of a pasted link (`github.com`, or a GitLab host, port included). */
     host: z
       .string()
       .max(255)
       .regex(/^[\w.-]+(?::\d{1,5})?$/)
       .optional(),
-    /** True for a GitLab reference (`group/project!123` or an MR link). */
     gitlab: z.boolean().optional(),
   })
   .strict();
-
-const untrackSchema = z.object({ account: z.string().min(1).max(100) }).strict();
 
 /** Triage for the account the path names, so the body carries no account of its own. */
 const scopedUpdateSchema = updateSchema.omit({ account: true });
@@ -171,95 +169,60 @@ export function registerPullRoutes(app: FastifyInstance, service: SyncService): 
     },
   );
 
-  // Legacy, for the selected account; they go once the web uses only the scoped routes.
+  app.post<{ Params: AccountParams }>(
+    '/api/accounts/:account/pulls/track',
+    async (request, reply) => {
+      const account = knownAccount(service, request.params, reply);
 
+      if (!account) return reply;
+
+      const parsed = scopedTrackSchema.safeParse(request.body);
+
+      if (!parsed.success)
+        return reply.code(400).send({
+          error:
+            'Enter a PR as owner/repo#123, a GitLab MR as group/project!123, or a link to either.',
+          details: z.flattenError(parsed.error),
+        });
+
+      const { repository, number, host, gitlab } = parsed.data;
+
+      try {
+        return await service.track(account, repository, number, host, gitlab);
+      } catch (error) {
+        return queueError(reply, error);
+      }
+    },
+  );
+
+  app.delete<{ Params: AccountParams & { id: string } }>(
+    '/api/accounts/:account/pulls/:id/track',
+    async (request, reply) => {
+      const account = knownAccount(service, request.params, reply);
+
+      if (!account) return reply;
+
+      const parsed = untrackSchema.safeParse(request.body ?? {});
+
+      if (!parsed.success)
+        return reply
+          .code(400)
+          .send({ error: 'Invalid request.', details: z.flattenError(parsed.error) });
+
+      try {
+        return service.untrack(account, request.params.id, parsed.data.membershipId);
+      } catch (error) {
+        return queueError(reply, error);
+      }
+    },
+  );
+
+  // Not any one account's: the selected account's sync, and the status every window shows.
   app.get('/api/status', async () => service.sentStatus);
-  app.get('/api/pulls', async () => service.list());
-  app.get('/api/mine', async () => service.mine());
-
-  app.get<{ Params: { id: string } }>('/api/pulls/:id', async (request, reply) => {
-    const detail = service.detail(request.params.id);
-
-    return (
-      detail ??
-      reply.code(404).send({ error: 'This PR is no longer tracked for the active account.' })
-    );
-  });
-
-  app.post<{ Params: { id: string } }>('/api/pulls/:id/refresh', async (request, reply) => {
-    try {
-      const detail = await service.refresh(request.params.id);
-
-      return detail ?? reply.code(404).send({ error: 'PR not found.' });
-    } catch (error) {
-      return readError(reply, error);
-    }
-  });
-
-  app.post('/api/pulls/track', async (request, reply) => {
-    const parsed = trackSchema.safeParse(request.body);
-
-    if (!parsed.success)
-      return reply.code(400).send({
-        error:
-          'Enter a PR as owner/repo#123, a GitLab MR as group/project!123, or a link to either.',
-        details: z.flattenError(parsed.error),
-      });
-
-    const { account, repository, number, host, gitlab } = parsed.data;
-
-    try {
-      return await service.track(account, repository, number, host, gitlab);
-    } catch (error) {
-      return queueError(reply, error);
-    }
-  });
-
-  app.delete<{ Params: { id: string } }>('/api/pulls/:id/track', async (request, reply) => {
-    const parsed = untrackSchema.safeParse(request.body);
-
-    if (!parsed.success)
-      return reply
-        .code(400)
-        .send({ error: 'Invalid request.', details: z.flattenError(parsed.error) });
-
-    try {
-      return service.untrack(parsed.data.account, request.params.id);
-    } catch (error) {
-      return queueError(reply, error);
-    }
-  });
 
   app.post('/api/sync', async (_request, reply) => {
     void service.sync();
 
     return reply.code(202).send(service.sentStatus);
-  });
-
-  app.patch<{ Params: { id: string } }>('/api/pulls/:id/triage', async (request, reply) => {
-    const parsed = updateSchema.safeParse(request.body);
-
-    if (!parsed.success)
-      return reply
-        .code(400)
-        .send({ error: 'Invalid triage update.', details: parsed.error.flatten() });
-
-    // The app's clock, which also decides when the snooze ends.
-    if (parsed.data.snoozeUntil && Date.parse(parsed.data.snoozeUntil) <= service.clock.now()) {
-      return reply.code(400).send({ error: 'Choose a snooze time in the future.' });
-    }
-
-    try {
-      const result = service.update(request.params.id, parsed.data);
-
-      return result ?? reply.code(404).send({ error: 'PR not found.' });
-    } catch (error) {
-      if (error instanceof Error && error.message === 'ACCOUNT_CHANGED')
-        return reply
-          .code(409)
-          .send({ error: 'GitHub account changed. Refresh before updating this PR.' });
-
-      throw error;
-    }
   });
 }

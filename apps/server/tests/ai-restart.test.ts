@@ -37,7 +37,7 @@ it.each(['SIGTERM', 'SIGKILL'] as const)(
 
     try {
       child = await startServer(directory, port, 60_000);
-      const pulls = await request<PullRequestList>('/api/pulls');
+      const pulls = await request<PullRequestList>('/api/accounts/you/pulls');
       const ids = [1839, 2041, 2050].map((number) => {
         const pull = pulls.items.find((item) => item.number === number);
 
@@ -49,8 +49,7 @@ it.each(['SIGTERM', 'SIGKILL'] as const)(
 
       for (const id of ids)
         runs.push(
-          await request<AiRun>(`/api/pulls/${encodeURIComponent(id)}/ai`, {
-            account: 'you',
+          await request<AiRun>(`/api/accounts/you/pulls/${encodeURIComponent(id)}/ai`, {
             task: 'full_review',
           }),
         );
@@ -60,7 +59,7 @@ it.each(['SIGTERM', 'SIGKILL'] as const)(
             async () =>
               (
                 await request<{ runs: AiRun[] }>(
-                  `/api/pulls/${encodeURIComponent(id)}/ai?account=you`,
+                  `/api/accounts/you/pulls/${encodeURIComponent(id)}/ai`,
                 )
               ).runs[0].progress,
           )
@@ -88,14 +87,14 @@ it.each(['SIGTERM', 'SIGKILL'] as const)(
             async () =>
               (
                 await request<{ runs: AiRun[] }>(
-                  `/api/pulls/${encodeURIComponent(run.prId)}/ai?account=you`,
+                  `/api/accounts/you/pulls/${encodeURIComponent(run.prId)}/ai`,
                 )
               ).runs[0].status,
           )
           .toBe('done');
         const saved = (
           await request<{ runs: AiRun[] }>(
-            `/api/pulls/${encodeURIComponent(run.prId)}/ai?account=you`,
+            `/api/accounts/you/pulls/${encodeURIComponent(run.prId)}/ai`,
           )
         ).runs[0];
 

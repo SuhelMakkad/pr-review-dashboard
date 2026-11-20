@@ -41,20 +41,4 @@ export function registerDiffRoutes(
       }
     },
   );
-
-  // Legacy, for the selected account.
-  app.get<{ Params: { id: string }; Querystring: { mode?: string } }>(
-    '/api/pulls/:id/diff',
-    async (request, reply) => {
-      const detail = service.detail(request.params.id);
-
-      if (!detail) return reply.code(404).send({ error: 'This PR is no longer tracked.' });
-
-      try {
-        return await diff(detail, modeOf(request.query.mode));
-      } catch (error) {
-        return readError(reply, error);
-      }
-    },
-  );
 }

@@ -320,17 +320,19 @@ export class SyncService {
   }
 
   /** The active login, or ACCOUNT_CHANGED when a request was made for a different account. */
-  private activeLogin(account: string): string {
-    const login = this.status.account?.login;
+  /** `account`, refused unless this app has worked as it. */
+  private knownLogin(account: string): string {
+    if (!account || !this.knows(account))
+      throw new ReviewError('UNKNOWN_ACCOUNT', 404, 'Review Desk has not used this account.');
 
-    if (!login || login !== account)
-      throw new ReviewError(
-        'ACCOUNT_CHANGED',
-        409,
-        this.worded('GitHub account changed. Refresh before changing your queue.'),
-      );
+    return account;
+  }
 
-    return login;
+  /** The account's own saved details (its web address, say), in use or not. */
+  private accountOf(login: string): SyncStatus['account'] {
+    return login === this.status.account?.login
+      ? this.status.account
+      : (this.store.getSetting<SyncStatus>(`status:${login}`)?.account ?? null);
   }
 
   /**
@@ -431,13 +433,15 @@ export class SyncService {
     host?: string,
     /** True for a GitLab reference such as `group/project!12`. */
     gitlab = false,
-  ): Promise<PullRequestDetail> {
-    const login = this.activeLogin(account);
+  ): Promise<PullRequestDetail & { membershipId: string | null }> {
+    const login = this.knownLogin(account);
 
-    this.assertNotCoolingDown();
+    this.assertNotCoolingDown(login);
 
     const { forge, host: accountHost } = parseAccount(login);
-    const instance = instanceUrl(this.status.account?.webUrl);
+    // This account's own GitLab web address, in use or not: another's could have another root.
+    const webUrl = this.accountOf(login)?.webUrl;
+    const instance = instanceUrl(webUrl);
     // A link names the web host, which GitLab can serve apart from glab's host name for its API.
     const hosts = [accountHost, instance ? new URL(instance).host : null].filter(
       (candidate): candidate is string => Boolean(candidate),
@@ -460,7 +464,7 @@ export class SyncService {
       );
 
     // Only a link carries the relative URL root; a typed `group/project!12` never does.
-    const repository = forge === 'gitlab' && host ? this.withoutRelativeRoot(path) : path;
+    const repository = forge === 'gitlab' && host ? this.withoutRelativeRoot(path, webUrl) : path;
 
     if (repository === null)
       throw new ReviewError(
@@ -476,9 +480,30 @@ export class SyncService {
         Promise.reject(unattributed(error)),
       );
 
+    /** A limit the account met is its cooldown, once glab is confirmed to still be it. */
+    const keepLimit = async (error: unknown) => {
+      if (!(error instanceof GitHubError) || error.outcome !== 'rate_limit' || !error.retryAt)
+        return;
+
+      const confirmed = await verify().then(
+        () => true,
+        () => false,
+      );
+
+      if (confirmed) this.deferUntil(error.retryAt, login);
+    };
+    const reading = async <T>(read: () => Promise<T>): Promise<T> => {
+      try {
+        return await asAccount(login, read);
+      } catch (error) {
+        await keepLimit(error);
+        throw error;
+      }
+    };
+
     await verify();
 
-    const resolved = await asAccount(login, () => this.github.resolvePull(repository, number));
+    const resolved = await reading(() => this.github.resolvePull(repository, number));
 
     if (!resolved)
       throw new ReviewError(
@@ -499,15 +524,16 @@ export class SyncService {
     const feeds = this.store.membership(login).get(resolved.id) ?? [];
 
     // Fetch before writing anything, so a failure leaves the queue as it was.
-    const fetched = await asAccount(login, () =>
+    const fetched = await reading(() =>
       this.github.snapshot(resolved.id, login, ordered([...feeds, 'manual']), cached),
     );
 
     await verify();
 
     const sources = () => ordered(this.store.membership(login).get(resolved.id) ?? []);
+    let membershipId: string | null = null;
     const snapshot = this.store.transaction(() => {
-      this.store.addManual(login, resolved.id, isoNow(this.clock));
+      membershipId = this.store.addManual(login, resolved.id, isoNow(this.clock));
 
       const outcome = this.snapshots.commit(observation, fetched, { fingerprint: null, sources });
 
@@ -544,12 +570,13 @@ export class SyncService {
 
     if (!detail)
       throw new ReviewError(
-        'ACCOUNT_CHANGED',
+        'QUEUE_CHANGED',
         409,
-        this.worded('GitHub account changed. Refresh.'),
+        this.worded('This PR was removed from your queue while it was being added. Add it again.'),
       );
 
-    return detail;
+    // Null when it was already added by hand: an Undo would remove that earlier membership.
+    return { ...detail, membershipId };
   }
 
   /**
@@ -557,8 +584,8 @@ export class SyncService {
    * `https://example.com/gitlab`, `gitlab/group/project` is the project `group/project`. The root
    * comes from the signed-in account's own profile address, which GitLab writes with it.
    */
-  private withoutRelativeRoot(path: string): string | null {
-    const base = instanceUrl(this.status.account?.webUrl);
+  private withoutRelativeRoot(path: string, webUrl: string | undefined): string | null {
+    const base = instanceUrl(webUrl);
     const root = base ? new URL(base).pathname.replace(/^\/+|\/+$/g, '') : '';
 
     if (!root) return path;
@@ -573,8 +600,8 @@ export class SyncService {
    * Removes a PR you added by hand. It stays tracked only while a GitHub feed (a review request,
    * an assignment and so on) still returns it.
    */
-  untrack(account: string, id: string): { tracked: boolean } {
-    const login = this.activeLogin(account);
+  untrack(account: string, id: string, membershipId?: string): { tracked: boolean } {
+    const login = this.knownLogin(account);
     const cached = this.store.snapshot(login, id);
     const feeds = this.store.membership(login).get(id) ?? [];
 
@@ -585,7 +612,14 @@ export class SyncService {
     const remaining = ordered(feeds.filter((feed) => feed !== 'manual'));
 
     this.store.transaction(() => {
-      this.store.removeManual(login, id);
+      // An Undo names the membership its add made: one added again since is not its to remove.
+      if (!this.store.removeManual(login, id, membershipId) && membershipId !== undefined)
+        throw new ReviewError(
+          'NOT_ADDED',
+          409,
+          'This PR was added again since, so nothing was removed.',
+        );
+
       // Reads that started before the removal must not bring the PR or its old sources back.
       this.snapshots.invalidate(login, id);
 
