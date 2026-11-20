@@ -243,7 +243,7 @@ export class AutoReviewer {
       .all();
 
     for (const entry of waiting) {
-      const item = this.sync.detail(entry.prId)?.item;
+      const item = this.sync.detailFor(account, entry.prId)?.item;
 
       if (!entry.restartAt || !item || !stillDue(item, entry.key)) continue;
       if (this.runner.activeRun(account, entry.prId, 'full_review')) continue;
@@ -258,7 +258,10 @@ export class AutoReviewer {
   }
 
   private async announce(row: AiRunRow): Promise<void> {
-    const pr = this.sync.detail(row.prId)?.snapshot;
+    // Notifications cover the account in use: another account's PR is never shown in them.
+    if (row.account !== this.sync.status.account?.login) return;
+
+    const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
 
     if (!pr) return;
 
@@ -284,7 +287,7 @@ export class AutoReviewer {
     if (!enabled || !since) return false;
     if (this.sync.store.getSetting<string>(primedKey(account)) === since) return false;
 
-    const keys = autoReviewCandidates(this.sync.list().items);
+    const keys = autoReviewCandidates(this.sync.listFor(account).items);
     const updatedAt = isoNow(this.clock);
 
     this.sync.store.transaction(() => {
@@ -725,7 +728,7 @@ export class AutoReviewer {
       .filter((entry) => entry.status === 'waiting' || stoppable.has(entry.runId ?? ''));
 
     for (const entry of entries) {
-      const pr = this.sync.detail(entry.prId)?.snapshot;
+      const pr = this.sync.detailFor(account, entry.prId)?.snapshot;
 
       if (!pr) continue;
 
@@ -806,7 +809,7 @@ export class AutoReviewer {
 
     const log = this.log(account);
     const now = this.clock.now();
-    const due = autoReviewCandidates(this.sync.list().items)
+    const due = autoReviewCandidates(this.sync.listFor(account).items)
       .filter(({ item, key }) => stillDue(item, key))
       .filter(({ key }) => {
         const entry = log.get(key);
@@ -944,7 +947,7 @@ export class AutoReviewer {
 
       // New commits arrived while the review was being prepared: wait for the PR to go quiet.
       if (error instanceof ReviewError && error.code === 'HEAD_MOVED') {
-        const head = this.sync.detail(candidate.item.id)?.snapshot.headOid;
+        const head = this.sync.detailFor(account, candidate.item.id)?.snapshot.headOid;
 
         if (head && this.current(account, since))
           this.wait(
@@ -966,7 +969,8 @@ export class AutoReviewer {
 
       // A restart tries again once the PR has been quiet again, until it runs out of attempts.
       if (waiting && attempts < MAX_ATTEMPTS) {
-        const head = this.sync.detail(candidate.item.id)?.snapshot.headOid ?? waiting.headOid;
+        const head =
+          this.sync.detailFor(account, candidate.item.id)?.snapshot.headOid ?? waiting.headOid;
 
         if (head) this.wait(account, { ...waiting, attempts }, head);
 

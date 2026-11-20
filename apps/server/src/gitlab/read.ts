@@ -1,3 +1,4 @@
+import { AccountUnavailable } from '@/forge/account.js';
 import type {
   Actor,
   FeedSource,
@@ -11,7 +12,7 @@ import {
   isSameUser,
   parseAccount,
 } from '@review-desk/shared/accounts';
-import { scopedAccount } from '@/github/credentials.js';
+import { asAccount, scopedAccount } from '@/github/credentials.js';
 import type {
   BlobText,
   CompareResult,
@@ -200,7 +201,8 @@ export class GitLab implements GitHubApi {
 
   /** Per account once known (every sync and write reads the identity first), else per host. */
   private localKey(key: string): string {
-    return `gitlab:${this.login ?? this.host}:${key}`;
+    // The account the work runs as names its own state; the last identity read is the fallback.
+    return `gitlab:${scopedAccount() ?? this.login ?? this.host}:${key}`;
   }
 
   private release: Promise<GitLabVersion | null> | null = null;
@@ -300,15 +302,28 @@ export class GitLab implements GitHubApi {
       );
   }
 
+  /**
+   * Refuses a read for `account` while glab is signed in to this host as someone else. Called
+   * before a live read starts and again before its result is kept, so a sign-in change during it
+   * is caught. (glab reads its own token for each request, so a change and a change back inside
+   * one read are not: Review Desk never reads the GitLab token.)
+   */
+  async verifyAccount(account: string): Promise<void> {
+    // Only a check: it never changes whose local state other reads use.
+    const login = gitlabAccountKey((await this.user()).username, this.host);
+
+    if (login.toLowerCase() !== account.toLowerCase()) throw new AccountUnavailable(account, login);
+  }
+
   /** The account key of the last identity read; local state is kept per account. */
   private login: string | null = null;
 
+  private user(): Promise<RawUser> {
+    return call<RawUser>(this.transport, { path: 'user' }, 'Could not read your GitLab account');
+  }
+
   async identity(): Promise<Actor> {
-    const user = await call<RawUser>(
-      this.transport,
-      { path: 'user' },
-      'Could not read your GitLab account',
-    );
+    const user = await this.user();
 
     this.login = gitlabAccountKey(user.username, this.host);
 
@@ -456,7 +471,17 @@ export class GitLab implements GitHubApi {
     return mr.head_pipeline ? { id: mr.head_pipeline.id, status: mr.head_pipeline.status } : null;
   }
 
-  async snapshot(
+  /** The MR as `login` sees it: its local state (viewed marks, submissions) is `login`'s own. */
+  snapshot(
+    id: string,
+    login: string,
+    sources: Source[],
+    previous?: PullRequestSnapshot,
+  ): Promise<PullRequestSnapshot> {
+    return asAccount(login, () => this.readSnapshot(id, login, sources, previous));
+  }
+
+  private async readSnapshot(
     id: string,
     login: string,
     sources: Source[],

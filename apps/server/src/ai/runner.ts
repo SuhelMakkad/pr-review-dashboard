@@ -482,7 +482,7 @@ export class AiRunner {
       throw new ReviewError('ACCOUNT_CHANGED', 409, 'GitHub account changed. Refresh first.');
     }
 
-    const detail = this.sync.detail(prId);
+    const detail = this.sync.detailFor(account, prId);
 
     if (!detail) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
 
@@ -498,17 +498,18 @@ export class AiRunner {
     const pr = detail.snapshot;
 
     if (task === 'full_review')
-      return fullReviewInput(pr, await this.diffs.manifest(pr, 'full', null));
-    if (task === 'brief') return briefInput(pr, await this.diffs.manifest(pr, 'full', null));
+      return fullReviewInput(pr, await this.diffs.manifest(pr, 'full', null, account));
+    if (task === 'brief')
+      return briefInput(pr, await this.diffs.manifest(pr, 'full', null, account));
     if (task === 'draft_comments')
-      return draftCommentsInput(pr, await this.diffs.manifest(pr, 'full', null));
+      return draftCommentsInput(pr, await this.diffs.manifest(pr, 'full', null, account));
     if (task === 'author_feedback') return authorFeedbackInput(pr);
 
     if (task === 'draft_summary') {
       const draft = this.reviews.draft(account, pr.id);
       return draftSummaryInput(
         pr,
-        await this.diffs.manifest(pr, 'full', null),
+        await this.diffs.manifest(pr, 'full', null, account),
         draft,
         completedReview?.result ? (JSON.parse(completedReview.result) as FullReviewResult) : null,
       );
@@ -518,7 +519,11 @@ export class AiRunner {
 
     if (!reviewOid) throw new ReviewError('NO_REVIEW', 422, 'You have not reviewed this PR yet.');
 
-    return sinceReviewInput(pr, await this.diffs.manifest(pr, 'since-review', reviewOid), account);
+    return sinceReviewInput(
+      pr,
+      await this.diffs.manifest(pr, 'since-review', reviewOid, account),
+      account,
+    );
   }
 
   private toRun(row: AiRunRow, currentHead?: string): AiRun {
@@ -566,7 +571,7 @@ export class AiRunner {
     if (row.promptVersion !== promptVersions[row.task])
       return 'Review instructions changed. Generate a new review.';
 
-    const pr = this.sync.detail(row.prId)?.snapshot;
+    const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
 
     if (!pr) return 'This PR is no longer tracked.';
     if (!row.request) return 'This run has no saved checkpoint. Generate a new review.';
@@ -577,7 +582,7 @@ export class AiRunner {
   }
 
   private staleReason(row: AiRunRow, currentHead?: string): string | null {
-    const pr = this.sync.detail(row.prId)?.snapshot;
+    const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
 
     if ((currentHead ?? pr?.headOid) && (currentHead ?? pr?.headOid) !== row.headOid)
       return 'New commits arrived after this was generated.';
@@ -892,7 +897,7 @@ export class AiRunner {
           this.emit(row);
 
           const snapshot = saved.snapshot;
-          const diff = await this.diffs.manifest(snapshot, 'full', null);
+          const diff = await this.diffs.manifest(snapshot, 'full', null, row.account);
 
           for (const path of ['before', 'after', 'review.json'])
             await rm(join(workDir, path), { recursive: true, force: true });
@@ -1040,11 +1045,11 @@ export class AiRunner {
   /** Keeps only anchors GitHub would accept; the rest stay as unanchored suggestions. */
   private async anchor(row: AiRunRow, result: DraftCommentsResult): Promise<DraftCommentsResult> {
     // The run's own snapshot, since the active account may have changed while it ran.
-    const snapshot = row.request?.snapshot ?? this.sync.detail(row.prId)?.snapshot;
+    const snapshot = row.request?.snapshot ?? this.sync.detailFor(row.account, row.prId)?.snapshot;
 
     if (!snapshot) return result;
 
-    const full = await this.diffs.manifest(snapshot, 'full', null);
+    const full = await this.diffs.manifest(snapshot, 'full', null, row.account);
 
     return {
       ...result,
@@ -1277,7 +1282,7 @@ export class AiRunner {
     for (const row of rows) if (!latest.has(row.prId)) latest.set(row.prId, row);
 
     return [...latest.values()]
-      .filter((row) => this.sync.detail(row.prId))
+      .filter((row) => this.sync.detailFor(account, row.prId))
       .map((row) => ({
         prId: row.prId,
         runId: row.id,
@@ -1289,7 +1294,7 @@ export class AiRunner {
 
   /** Keep the latest attempt and latest completed result so a failed retry never loses a review. */
   runs(account: string, prId: string): AiRun[] {
-    const head = this.sync.detail(prId)?.snapshot.headOid;
+    const head = this.sync.detailFor(account, prId)?.snapshot.headOid;
     const rows = this.db
       .select()
       .from(aiRuns)

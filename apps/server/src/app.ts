@@ -88,7 +88,10 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     });
   });
   const sessionToken = options.sessionToken ?? createSessionToken();
-  const bootId = options.bootId ?? randomUUID();
+  const bootId = options.bootId ?? service.bootId;
+
+  // One id for the page, the event stream and every status sent.
+  service.bootId = bootId;
   const demo = Boolean(options.fixture);
   const webRoot = options.webRoot && existsSync(options.webRoot) ? options.webRoot : null;
   const index = webRoot ? loadIndexHtml(webRoot, { token: sessionToken, bootId, demo }) : null;
@@ -179,7 +182,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   const backfill = new Backfill(service, service.events);
 
   service.afterSync = async (login) => {
-    await notifier.afterSync(login, service.list().items, service.mine().items);
+    await notifier.afterSync(login, service.listFor(login).items, service.mineFor(login).items);
     await runner.recover(login);
     operations.wake();
 

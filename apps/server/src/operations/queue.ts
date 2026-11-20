@@ -426,7 +426,14 @@ export class OperationQueue {
   ): OperationReceipt {
     this.assertAccount(account);
 
-    return this.insert(account, prId, id, action, request, () => this.sync.detail(prId)?.snapshot);
+    return this.insert(
+      account,
+      prId,
+      id,
+      action,
+      request,
+      () => this.sync.detailFor(account, prId)?.snapshot,
+    );
   }
 
   /**
@@ -844,7 +851,7 @@ export class OperationQueue {
         return (await this.sync.refresh(row.prId, row.account))?.snapshot;
       };
       const pr = await preflight().catch((error: unknown) => {
-        this.coolDown(error);
+        this.coolDown(row.account, error);
         if (!combined) allowed();
 
         throw error;
@@ -1057,7 +1064,7 @@ export class OperationQueue {
                 row.action.type === 'review'
                   ? row.action.review.expectedHeadOid
                   : row.action.expectedHeadOid;
-              if (this.sync.detail(row.prId)?.snapshot.headOid !== expected)
+              if (this.sync.detailFor(row.account, row.prId)?.snapshot.headOid !== expected)
                 throw new ReviewError(
                   'HEAD_MOVED',
                   409,
@@ -1336,7 +1343,7 @@ export class OperationQueue {
       try {
         return await lookup();
       } catch (error) {
-        this.coolDown(error);
+        this.coolDown(row.account, error);
         allowed();
 
         throw error;
@@ -1447,7 +1454,7 @@ export class OperationQueue {
       // A rate limit holds everything until its time, and stops this attempt; the approval's
       // receipt is kept. Any other failure leaves it unnamed, and the summary waits.
       if (error instanceof GitHubError && error.outcome === 'rate_limit') {
-        this.coolDown(error);
+        this.coolDown(row.account, error);
         throw error;
       }
 
@@ -1461,10 +1468,13 @@ export class OperationQueue {
     return approval ? this.save({ ...current, approvalId: approval.id }) : current;
   }
 
-  /** Holds every request to the forge until a rate limit it reported has passed. */
-  private coolDown(error: unknown): void {
+  /** Holds every request of the action's account until a rate limit it reported has passed. */
+  private coolDown(account: string, error: unknown): void {
     if (error instanceof GitHubError && error.outcome === 'rate_limit')
-      this.sync.deferUntil(error.retryAt ?? new Date(this.clock.now() + 60_000).toISOString());
+      this.sync.deferUntil(
+        error.retryAt ?? new Date(this.clock.now() + 60_000).toISOString(),
+        account,
+      );
   }
 
   /** Records why a post stops: skipped when nothing was sent yet, otherwise needing attention. */
@@ -1721,7 +1731,10 @@ export class OperationQueue {
       error instanceof GitHubError &&
       ['rate_limit', 'unavailable', 'unknown'].includes(error.outcome);
     if (error instanceof GitHubError && error.outcome === 'rate_limit') {
-      this.sync.deferUntil(error.retryAt ?? new Date(this.clock.now() + 60_000).toISOString());
+      this.sync.deferUntil(
+        error.retryAt ?? new Date(this.clock.now() + 60_000).toISOString(),
+        row.account,
+      );
     }
     if (retryable && row.attempts < this.retryDelays.length) {
       const retryAt = new Date(
@@ -1735,7 +1748,7 @@ export class OperationQueue {
         ),
       ).toISOString();
 
-      if (error.outcome === 'rate_limit') this.sync.deferUntil(retryAt);
+      if (error.outcome === 'rate_limit') this.sync.deferUntil(retryAt, row.account);
       this.save({
         ...row,
         status: 'waiting',
@@ -1815,7 +1828,7 @@ export class OperationQueue {
         await this.sync.refresh(row.prId, row.account);
 
         const action = row.action;
-        const pr = this.sync.detail(row.prId)?.snapshot;
+        const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
         const carries = this.sync.github.approvalCarriesSummary;
 
         // An approval sent alone (plan 2) is confirmed by your approval of the head (see
@@ -1869,7 +1882,7 @@ export class OperationQueue {
         // It waits for you (`confirmed` stays false).
       } else if (step.method === 'setFileViewed' || step.method === 'setThreadResolved') {
         await this.sync.refresh(row.prId, row.account);
-        const pr = this.sync.detail(row.prId)?.snapshot;
+        const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
 
         const viewedState = pr?.files.find((file) => file.path === step.args[1])?.viewerViewedState;
 

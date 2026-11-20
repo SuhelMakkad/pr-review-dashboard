@@ -1,3 +1,4 @@
+import { AccountUnavailable } from '@/forge/account.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import { GITHUB_HOST, parseAccount, type Forge } from '@review-desk/shared/accounts';
@@ -43,17 +44,33 @@ const scope = new AsyncLocalStorage<string>();
 
 /**
  * Runs `work` with GitHub requests made as `login`, even if another account is selected meanwhile.
- * Work that belongs to one account (an AI run, a queued write) uses it so a switch cannot change
- * whose credentials it continues with. It only applies once an account is selected in the app.
+ * Work that belongs to one account (an AI run, a queued write, a request for one account's PRs)
+ * uses it so a switch cannot change whose credentials it continues with.
  */
 export function asAccount<T>(login: string, work: () => T): T {
   return scope.run(login, work);
+}
+
+/**
+ * Runs `work` outside any account scope: for work that is always the selected account's, such as
+ * a sync, even when something scoped to another account set it off.
+ */
+export function unscoped<T>(work: () => T): T {
+  return scope.exit(work);
 }
 
 /** The account the current work was started as with `asAccount`, if any. */
 export function scopedAccount(): string | null {
   return scope.getStore() ?? null;
 }
+
+/** Tokens a `gh` call would take from the environment instead of the account it asks for. */
+const AMBIENT_TOKENS = [
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+];
 
 /** Child environment for gh: never forward debug output that could print credentials. */
 export function baseGhEnvironment(): NodeJS.ProcessEnv {
@@ -81,13 +98,15 @@ const runGh: Run = (args, env) =>
  * The GitHub CLI accounts the server can use, and the environment for each `gh` call.
  *
  * Nothing is selected by default, so `gh` uses its active account as before. Once you pick an
- * account in the app, each call gets that account's token from `gh auth token --user` in its
- * `GH_TOKEN`. Tokens stay in this process's memory for a minute; they are never stored, logged
+ * account in the app, or work names one, each call gets that account's token from
+ * `gh auth token --user` in its `GH_TOKEN`. Tokens stay in this process's memory for a minute; they are never stored, logged
  * or sent to the browser, and `gh auth switch` is never run, so terminals are unaffected.
  */
 export class GhCredentials implements GitHubAccounts {
   private selected: string | null = null;
   private readonly tokens = new Map<string, { token: Promise<string>; expiresAt: number }>();
+  /** Whose the token in the server's environment is, read once per token value. */
+  private ambient: { token: string; login: Promise<string | null> } | null = null;
 
   constructor(private readonly run: Run = runGh) {}
 
@@ -137,23 +156,81 @@ export class GhCredentials implements GitHubAccounts {
       }));
   }
 
-  /** The environment for one `gh` call, carrying the token of the account it acts as. */
+  /**
+   * The environment for one `gh` call, carrying the token of the account it acts as: the account
+   * the work is scoped to, else the selected one, else gh's own (nothing set).
+   * - The selected account is a stored sign-in (the list leaves out tokens from the environment) and
+   *   keeps that sign-in's token, even when a token in the environment has the same login: the two
+   *   can grant different access.
+   * - Another account uses the environment's token only if that token is verified to be its own.
+   * - Otherwise the account's stored sign-in; without one the call fails, never falling back to
+   *   someone else's token.
+   */
   async environment(): Promise<NodeJS.ProcessEnv> {
     const env = baseGhEnvironment();
     const scoped = scope.getStore();
     // Work scoped to a GitLab account (`user@host`) never runs gh; it never gets a GitHub token.
-    const login = this.selected
-      ? scoped && parseAccount(scoped).forge === 'github'
-        ? scoped
-        : this.selected
-      : null;
+    const named = scoped && parseAccount(scoped).forge === 'github' ? scoped : null;
+    const login = named ?? this.selected;
 
     if (!login) return env;
 
-    env.GH_TOKEN = await this.token(login);
+    if (login !== this.selected) {
+      const ambient = await this.ambientLogin();
+
+      // Exactly the token that was verified, whatever else the environment holds.
+      if (ambient && ambient.login === login) {
+        env.GH_TOKEN = ambient.token;
+        delete env.GITHUB_TOKEN;
+
+        return env;
+      }
+    }
+
+    env.GH_TOKEN = await this.token(login).catch((error: unknown) => {
+      // A request for an account that is not the selected one cannot fall back to another's.
+      if (login !== this.selected && error instanceof GitHubError && error.outcome === 'auth')
+        throw new AccountUnavailable(login, null);
+
+      throw error;
+    });
     delete env.GITHUB_TOKEN;
 
     return env;
+  }
+
+  /**
+   * The login of the token in the server's environment, if there is one, verified with GitHub
+   * once per token. A failed check counts as unknown and is tried again next time.
+   */
+  private async ambientLogin(): Promise<{ token: string; login: string } | null> {
+    // gh's own order for github.com; the Enterprise variables are for other hosts.
+    const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+
+    if (!token) return null;
+    if (this.ambient?.token === token) {
+      const known = await this.ambient.login;
+
+      return known ? { token, login: known } : null;
+    }
+
+    // With only that token, so the answer is the token's and nothing else's.
+    const probe = baseGhEnvironment();
+
+    for (const name of AMBIENT_TOKENS) delete probe[name];
+    probe.GH_TOKEN = token;
+
+    const login = this.run(['api', 'user', '--hostname', 'github.com', '--jq', '.login'], probe)
+      .then((result) => (result.code === 0 ? result.stdout.trim() || null : null))
+      .catch(() => null);
+
+    this.ambient = { token, login };
+
+    const verified = await login;
+
+    if (verified === null && this.ambient?.login === login) this.ambient = null;
+
+    return verified ? { token, login: verified } : null;
   }
 
   /** Drops cached tokens, so the next call reads them again (after GitHub rejects one). */
@@ -183,9 +260,14 @@ export class GhCredentials implements GitHubAccounts {
       null,
       'auth',
     );
+    // Without the environment's tokens, so gh answers for the stored sign-in it is asked about.
+    const env = baseGhEnvironment();
+
+    for (const name of AMBIENT_TOKENS) delete env[name];
+
     const result = await this.run(
       ['auth', 'token', '--hostname', 'github.com', '--user', login],
-      baseGhEnvironment(),
+      env,
     ).catch(() => null);
     const token = result?.code === 0 ? result.stdout.trim() : '';
 

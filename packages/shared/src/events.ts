@@ -7,8 +7,9 @@ export type ServerEvent =
   | { type: 'hello'; bootId: string; account: string | null; demo: boolean }
   | { type: 'resync' }
   | { type: 'status'; status: SyncStatus }
-  | { type: 'pulls.changed'; ids: string[] }
-  | { type: 'triage.updated'; id: string }
+  /** `account` is whose stored PRs changed: an account other than the selected one can refresh. */
+  | { type: 'pulls.changed'; account: string; ids: string[] }
+  | { type: 'triage.updated'; account: string; id: string }
   | { type: 'draft.updated'; id: string }
   | {
       type: 'operation.updated';

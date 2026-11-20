@@ -1,3 +1,4 @@
+import { AccountUnavailable } from '@/forge/account.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { Store } from '@/db/store.js';
@@ -982,7 +983,9 @@ describe('GitLab merge request snapshots', () => {
     const { client, fake } = gitlab();
 
     // It says which revision and which diff of the file it marked, as a snapshot records them.
-    const marked = await client.setFileViewed('MR_7_12', 'src/app.ts', true);
+    const marked = await asAccount(VIEWER, () =>
+      client.setFileViewed('MR_7_12', 'src/app.ts', true),
+    );
 
     expect(marked).toEqual({ headOid: HEAD2, baseOid: START, fileKey: expect.any(String) });
 
@@ -1009,7 +1012,7 @@ describe('GitLab merge request snapshots', () => {
 
     expect(pr.files[0].viewerViewedState).toBe('DISMISSED');
 
-    await client.setFileViewed('MR_7_12', 'src/app.ts', false);
+    await asAccount(VIEWER, () => client.setFileViewed('MR_7_12', 'src/app.ts', false));
     pr = await client.snapshot('MR_7_12', VIEWER, []);
 
     expect(pr.files[0].viewerViewedState).toBe('UNVIEWED');
@@ -1054,7 +1057,9 @@ describe('GitLab merge request snapshots', () => {
     });
 
     // Succeeds, so the outbox never sends it again; the diff it marked is still known.
-    expect(await client.setFileViewed('MR_7_12', 'src/app.ts', true)).toMatchObject({
+    expect(
+      await asAccount(VIEWER, () => client.setFileViewed('MR_7_12', 'src/app.ts', true)),
+    ).toMatchObject({
       baseOid: null,
       fileKey: expect.any(String),
     });
@@ -1982,7 +1987,7 @@ describe('GitLab review follow-ups', () => {
     fake
       .on('POST', `${MR}/draft_notes`, { status: 201, data: { id: 70, note: 'Nothing to add.' } })
       .on('POST', `${MR}/draft_notes/bulk_publish`, { status: 204, data: '' });
-    await client.submitReview('MRR_7_12', 'COMMENT', 'Nothing to add.');
+    await asAccount(VIEWER, () => client.submitReview('MRR_7_12', 'COMMENT', 'Nothing to add.'));
     fake.on('GET', `${MR}/draft_notes`, { data: [] }).on('GET', `${MR}/discussions`, {
       data: [
         ...discussions(),
@@ -2126,6 +2131,38 @@ describe('GitLab safety, round three', () => {
     expect(
       withoutQuickActions('Looks fine.\n/merge\n  /close now\n```\n/approve\n```\nok /x'),
     ).toBe('Looks fine.\n&#47;merge\n  &#47;close now\n```\n/approve\n```\nok /x');
+  });
+
+  it('refuses a read for an account glab is not signed in as, and allows its own', async () => {
+    const { client, fake } = gitlab();
+
+    await expect(client.verifyAccount(VIEWER)).resolves.toBeUndefined();
+
+    fake.on('GET', 'user', { data: users.ana });
+
+    await expect(client.verifyAccount(VIEWER)).rejects.toBeInstanceOf(AccountUnavailable);
+    await expect(client.verifyAccount(VIEWER)).rejects.toMatchObject({
+      code: 'ACCOUNT_UNAVAILABLE',
+      signedInAs: `ana@${HOST}`,
+    });
+  });
+
+  it('checks glab’s sign-in without changing whose local state other reads use', async () => {
+    const { client, fake } = gitlab();
+
+    await client.identity();
+
+    // A check that finds someone else refuses, and leaves the last identity read as it was.
+    fake.on('GET', 'user', { data: users.ana });
+    await expect(client.verifyAccount(VIEWER)).rejects.toBeInstanceOf(AccountUnavailable);
+    fake.on('GET', 'user', { data: users.rev });
+
+    // So a mark kept outside any account's work is still rev's, as is a read for rev.
+    await client.setFileViewed('MR_7_12', 'src/app.ts', true);
+
+    const pr = await client.snapshot('MR_7_12', VIEWER, []);
+
+    expect(pr.files.find((file) => file.path === 'src/app.ts')?.viewerViewedState).toBe('VIEWED');
   });
 
   it('refuses to write when glab is signed in as someone else than the work runs as', async () => {

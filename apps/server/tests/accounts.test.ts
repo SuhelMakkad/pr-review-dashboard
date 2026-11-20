@@ -24,9 +24,20 @@ const tokens: Record<string, string> = {
   'home-me': 'home-token-0123456789',
 };
 
-/** Answers `gh auth status` and `gh auth token` the way the GitHub CLI does. */
-function fakeGh() {
-  return vi.fn(async (args: string[]) => {
+/**
+ * Answers `gh auth status`, `gh auth token` and `gh api user` the way the GitHub CLI does; the
+ * last as the token in the environment, `ambient` (null when the check fails).
+ */
+function fakeGh(ambient: () => string | null = () => null) {
+  return vi.fn(async (args: string[], _env?: NodeJS.ProcessEnv) => {
+    if (args[0] === 'api') {
+      const login = ambient();
+
+      return login
+        ? { code: 0, stdout: `${login}\n`, stderr: '' }
+        : { code: 1, stdout: '', stderr: 'HTTP 401: Bad credentials' };
+    }
+
     if (args[1] === 'status') {
       // One sign-in failed verification, so gh exits non-zero but still prints every account.
       return {
@@ -73,9 +84,10 @@ describe('GitHub CLI accounts', () => {
     ]);
   });
 
-  it("follows the GitHub CLI until an account is picked, then sends that account's token", async () => {
+  it("follows the GitHub CLI until an account is picked or named, then sends that account's token", async () => {
     const run = fakeGh();
     const credentials = new GhCredentials(run);
+    const tokenReads = () => run.mock.calls.filter(([args]) => args[1] === 'token').length;
 
     vi.stubEnv('GITHUB_TOKEN', 'environment-token-0123');
     vi.stubEnv('GH_DEBUG', 'api');
@@ -85,8 +97,12 @@ describe('GitHub CLI accounts', () => {
     expect(unpinned.GH_TOKEN).toBeUndefined();
     expect(unpinned.GITHUB_TOKEN).toBe('environment-token-0123');
     expect(unpinned.GH_DEBUG).toBeUndefined();
-    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBeUndefined();
     expect(run).not.toHaveBeenCalled();
+
+    // Work that names an account gets its token, even before anything is picked in the app.
+    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBe(
+      tokens['home-me'],
+    );
 
     credentials.select('work-me');
 
@@ -101,11 +117,94 @@ describe('GitHub CLI accounts', () => {
     );
 
     await credentials.environment();
-    expect(run).toHaveBeenCalledTimes(2);
+    expect(tokenReads()).toBe(2);
 
     credentials.forget();
     await credentials.environment();
-    expect(run).toHaveBeenCalledTimes(3);
+    expect(tokenReads()).toBe(3);
+  });
+
+  it("uses a token from the environment only for its own login, never for a picked sign-in's", async () => {
+    let ambient: string | null = 'work-me';
+    const run = fakeGh(() => ambient);
+    const credentials = new GhCredentials(run);
+    const probes = () => run.mock.calls.filter(([args]) => args[0] === 'api').length;
+
+    vi.stubEnv('GH_TOKEN', 'environment-token-0123');
+
+    // The environment's token is work-me's, verified once with GitHub.
+    const own = await asAccount('work-me', () => credentials.environment());
+
+    expect(own.GH_TOKEN).toBe('environment-token-0123');
+    expect(run.mock.calls.find(([args]) => args[0] === 'api')?.[0]).toEqual([
+      'api',
+      'user',
+      '--hostname',
+      'github.com',
+      '--jq',
+      '.login',
+    ]);
+
+    // Picked in the app, work-me keeps its stored sign-in's token: the two can differ in access.
+    credentials.select('work-me');
+    expect((await credentials.environment()).GH_TOKEN).toBe(tokens['work-me']);
+
+    // Another account never gets the environment's token, and its own is read without it.
+    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBe(
+      tokens['home-me'],
+    );
+
+    const read = run.mock.calls.find(([args]) => args.includes('home-me'));
+
+    expect(read?.[1]?.GH_TOKEN).toBeUndefined();
+    expect(read?.[1]?.GITHUB_TOKEN).toBeUndefined();
+
+    // A check that fails counts as unknown, never blocks a named account, and is tried again.
+    ambient = null;
+    vi.stubEnv('GH_TOKEN', 'another-environment-token');
+    credentials.forget();
+    credentials.select(null);
+
+    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBe(
+      tokens['home-me'],
+    );
+
+    const before = probes();
+
+    ambient = 'home-me';
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBe(
+      'another-environment-token',
+    );
+    expect(probes()).toBe(before + 1);
+  });
+
+  it('sends exactly the verified token from the environment, and never takes an Enterprise one for github.com', async () => {
+    const run = fakeGh(() => 'work-me');
+    const credentials = new GhCredentials(run);
+
+    // Only an Enterprise token: it is for another host, so nothing is probed and the account's own
+    // stored sign-in is used. (github.com's own variables cleared, as on any machine.)
+    vi.stubEnv('GH_TOKEN', '');
+    vi.stubEnv('GITHUB_TOKEN', '');
+    vi.stubEnv('GH_ENTERPRISE_TOKEN', 'enterprise-token-0123');
+
+    expect((await asAccount('work-me', () => credentials.environment())).GH_TOKEN).toBe(
+      tokens['work-me'],
+    );
+    expect(run.mock.calls.some(([args]) => args[0] === 'api')).toBe(false);
+
+    // GITHUB_TOKEN verified as work-me's: that very token goes out, as GH_TOKEN, and nothing else.
+    vi.stubEnv('GITHUB_TOKEN', 'environment-token-0123');
+
+    const env = await asAccount('work-me', () => credentials.environment());
+    const probe = run.mock.calls.find(([args]) => args[0] === 'api')?.[1];
+
+    expect(env.GH_TOKEN).toBe('environment-token-0123');
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(probe?.GH_TOKEN).toBe('environment-token-0123');
+    expect(probe?.GH_ENTERPRISE_TOKEN).toBeUndefined();
   });
 
   it('explains a missing sign-in and keeps tokens out of error messages', async () => {
