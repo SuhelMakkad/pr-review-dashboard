@@ -319,6 +319,8 @@ export class LogFile implements LogDestination {
       const size = await sizeOfAsync(this.path);
       const removed = size === null;
 
+      // A file that cannot be measured is left as it is; its stream may still be writing.
+      if (size === undefined) return;
       if (!removed && size + this.pending < this.rotateAt) return;
 
       this.rotating = true;
@@ -464,7 +466,11 @@ function sizeOf(path: string): number {
   }
 }
 
-/** The file's size, or null when there is no file. */
-async function sizeOfAsync(path: string): Promise<number | null> {
-  return (await stat(path).catch(() => null))?.size ?? null;
+/** The file's size, null when there is no file, or undefined when it cannot be measured. */
+async function sizeOfAsync(path: string): Promise<number | null | undefined> {
+  try {
+    return (await stat(path)).size;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined;
+  }
 }
