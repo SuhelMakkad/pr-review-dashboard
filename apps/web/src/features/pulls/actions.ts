@@ -8,25 +8,42 @@ import { numberSign } from '@/lib/pr-ref';
 import { runTriage, usePulls, type TriageVariables } from '@/lib/queries';
 import { shortDateTime } from '@/lib/time';
 
-type Undo = { label: string; account: string; run: () => void } | null;
+interface Undo {
+  label: string;
+  account: string;
+  run: () => void;
+}
 
-let lastUndo: Undo = null;
+/** Each account's most recent reversible action: a late reply for one never displaces another's. */
+const lastUndo = new Map<string, Undo>();
+
+const shownAccount = (client: QueryClient) =>
+  client.getQueryData<SyncStatus>(queryKeys.status)?.account?.login ?? null;
 
 /**
- * Undo for the most recent reversible triage action (bound to Z), only while the account it was
- * made for is on screen: after a switch it would change another account's queue than the one shown.
+ * Undoes `undo`, only while the account it was made for is on screen: after a switch it would
+ * change another account's queue than the one shown.
  */
-export function undoLast(client: QueryClient): boolean {
-  const undo = lastUndo;
-  const shown = client.getQueryData<SyncStatus>(queryKeys.status)?.account?.login;
+function runUndo(client: QueryClient, undo: Undo): boolean {
+  if (undo.account !== shownAccount(client)) {
+    toast.error(`Switch back to ${undo.account} to undo this.`);
+    return false;
+  }
 
-  if (!undo || undo.account !== shown) return false;
+  if (lastUndo.get(undo.account) === undo) lastUndo.delete(undo.account);
 
-  lastUndo = null;
   undo.run();
   toast(`Undone: ${undo.label}`);
 
   return true;
+}
+
+/** Undo for the most recent reversible triage action of the account shown (bound to Z). */
+export function undoLast(client: QueryClient): boolean {
+  const shown = shownAccount(client);
+  const undo = shown ? lastUndo.get(shown) : undefined;
+
+  return undo ? runUndo(client, undo) : false;
 }
 
 type Update = TriageVariables['update'];
@@ -45,22 +62,25 @@ export function usePullActions() {
         () => {
           if (!success) return;
 
-          const undo = success.undo;
-
-          lastUndo = undo
+          const reverse = success.undo;
+          const undo: Undo | null = reverse
             ? {
                 label: success.message,
                 account,
                 run: () =>
-                  void runTriage(client, { id: item.id, account, update: undo }).catch(
+                  void runTriage(client, { id: item.id, account, update: reverse }).catch(
                     (error: Error) => toast.error(error.message),
                   ),
               }
             : null;
 
+          if (undo) lastUndo.set(account, undo);
+          else lastUndo.delete(account);
+
+          // This toast's Undo is this action's, whatever has happened since.
           toast(success.message, {
             description: `${numberSign(item.url)}${item.number} ${item.title}`,
-            action: undo ? { label: 'Undo', onClick: () => undoLast(client) } : undefined,
+            action: undo ? { label: 'Undo', onClick: () => void runUndo(client, undo) } : undefined,
           });
         },
         (error: Error) => {

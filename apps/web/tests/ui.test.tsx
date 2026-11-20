@@ -2,7 +2,7 @@
 import { queryKeys } from '@/lib/query-keys';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router';
@@ -336,6 +336,55 @@ describe('inbox', () => {
 
     expect(writes.slice(before)).toEqual([]);
     expect(triage['me:follow']?.doneAt).not.toBeNull();
+  });
+
+  it("undoes each account's own last action, and a toast only its own", async () => {
+    const { user, router } = mount('/inbox/attention/acme/another/2');
+    /** Marking done moves on to the next PR; this comes back to it. */
+    const openFollow = async () => {
+      await act(() => router.history.push('/inbox/attention/acme/another/2'));
+      await screen.findByRole('heading', { name: /Follow up after code changes/ });
+    };
+    const switchTo = async (login: string) => {
+      screen.getByRole('button', { name: /^Switch GitHub account, now / }).focus();
+      await user.keyboard('{Enter}');
+      await user.click(await screen.findByRole('menuitemradio', { name: login }));
+      await screen.findByRole('button', {
+        name: new RegExp(`^Switch GitHub account, now ${login}\\b`),
+      });
+    };
+    const done = (login: string, value: boolean) => ({
+      id: 'follow',
+      body: { account: login, done: value },
+    });
+
+    await screen.findByRole('heading', { name: /Follow up after code changes/ });
+    await user.keyboard('e');
+    await waitFor(() => expect(writes).toContainEqual(done('me', true)));
+
+    // `other` marks the same PR done; Z then undoes `other`'s, not `me`'s.
+    await switchTo('other');
+    await openFollow();
+    await user.keyboard('e');
+    await waitFor(() => expect(writes).toContainEqual(done('other', true)));
+    await user.keyboard('z');
+    await waitFor(() => expect(writes).toContainEqual(done('other', false)));
+    expect(writes).not.toContainEqual(done('me', false));
+
+    // `me`'s toast, still showing (the oldest, so the last listed), does nothing while `other`
+    // is on screen. (A plain click: the toast's swipe handling needs pointer capture.)
+    const before = writes.length;
+    const undos = screen.getAllByRole('button', { name: 'Undo' });
+
+    fireEvent.click(undos.at(-1)!);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+    expect(writes.slice(before)).toEqual([]);
+
+    // Back on `me`, its own last action is still the one Z undoes.
+    await switchTo('me');
+    await openFollow();
+    await user.keyboard('z');
+    await waitFor(() => expect(writes).toContainEqual(done('me', false)));
   });
 
   it("shows the status's failure with a retry, and an empty queue with no account signed in", async () => {

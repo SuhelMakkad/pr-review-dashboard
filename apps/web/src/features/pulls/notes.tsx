@@ -43,6 +43,9 @@ export const Notes = forwardRef<
    * own fresher copy after a switch) is shown, never saved back over by the older text.
    */
   const edited = useRef(readDraft(key) !== null);
+  /** Saves in flight, in order; each starts once the one before it has settled. */
+  const saves = useRef<Promise<unknown>>(Promise.resolve());
+  const pending = useRef(0);
 
   latest.current = note;
 
@@ -51,7 +54,9 @@ export const Notes = forwardRef<
   }, [saved]);
 
   useEffect(() => {
-    if (note === saved) {
+    // Matching the saved note counts only once no save is in flight: an older one could still
+    // land after it and replace the text you went back to.
+    if (note === saved && pending.current === 0) {
       edited.current = false;
       writeDraft(key, null);
       setState((current) => (current === 'saving' || current === 'dirty' ? 'saved' : current));
@@ -65,10 +70,19 @@ export const Notes = forwardRef<
 
     const timer = setTimeout(() => {
       setState('saving');
-      onSave(note).then(
-        () => latest.current === note && setState('saved'),
-        () => setState('error'),
-      );
+      pending.current += 1;
+
+      // After the saves before it, so the last text you typed is the one the server keeps.
+      saves.current = saves.current
+        .catch(() => undefined)
+        .then(() => onSave(note))
+        .then(
+          () => latest.current === note && setState('saved'),
+          () => setState('error'),
+        )
+        .finally(() => {
+          pending.current -= 1;
+        });
     }, 800);
 
     return () => clearTimeout(timer);

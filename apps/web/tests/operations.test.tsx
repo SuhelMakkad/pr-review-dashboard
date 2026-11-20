@@ -9,7 +9,7 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Query, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DiffManifest } from '@review-desk/shared/diff';
@@ -403,6 +403,31 @@ it('shows only the saved switch from a save’s reply, so a late reply cannot un
 });
 
 describe('the private note', () => {
+  it('keeps the text you went back to while an older save is still on its way', async () => {
+    const sent: string[] = [];
+    let release: () => void = () => {};
+    const onSave = vi.fn(async (note: string) => {
+      sent.push(note);
+      if (note === 'B') await new Promise<void>((resolve) => (release = resolve));
+    });
+    const view = render(<Notes account="you" id="pr-two" saved="A" onSave={onSave} />);
+    const box = () => screen.getByRole('textbox', { name: 'Private note' });
+
+    // B is typed and its save is held; then A, the saved text, is typed back.
+    fireEvent.change(box(), { target: { value: 'B' } });
+    await waitFor(() => expect(sent).toEqual(['B']), { timeout: 2_000 });
+    fireEvent.change(box(), { target: { value: 'A' } });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+
+    // B lands, and the server's note becomes B: the editor keeps A, and saves it after B.
+    await act(async () => release());
+    view.rerender(<Notes account="you" id="pr-two" saved="B" onSave={onSave} />);
+
+    expect(box()).toHaveValue('A');
+    await waitFor(() => expect(sent.at(-1)).toBe('A'), { timeout: 2_000 });
+    expect(sent.indexOf('A')).toBeGreaterThan(sent.indexOf('B'));
+  });
+
   it('follows a newer saved note until you type, and saves only what you typed', async () => {
     const onSave = vi.fn(async () => undefined);
     const view = render(<Notes account="you" id="pr-one" saved="Older note" onSave={onSave} />);
@@ -423,6 +448,45 @@ describe('the private note', () => {
 });
 
 describe('the status shown', () => {
+  it('keeps a newer status adopted while a poll’s result is being committed', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const commit = Query.prototype.setData;
+    let interleaved = false;
+
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve(response(status({ account: { login: 'you' }, revision: 8 }))),
+    );
+    // Just before the poll's result is written into its query, a switch's status arrives.
+    const spy = vi.spyOn(Query.prototype, 'setData').mockImplementation(function (
+      this: Query,
+      ...args: Parameters<Query['setData']>
+    ) {
+      const polled = this.state.fetchStatus === 'fetching';
+
+      if (polled && !interleaved) {
+        interleaved = true;
+        adoptStatus(client, status({ account: { login: 'other' }, revision: 9 }));
+      }
+
+      return commit.apply(this, args);
+    });
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const hook = renderHook(() => useStatus(), { wrapper });
+
+    try {
+      await waitFor(() => expect(interleaved).toBe(true));
+      await waitFor(() => expect(client.isFetching()).toBe(0));
+
+      expect(hook.result.current.data).toMatchObject({ account: { login: 'other' }, revision: 9 });
+    } finally {
+      spy.mockRestore();
+      client.clear();
+    }
+  });
+
   it('is never moved back by a poll that left before a newer status', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     let answer: () => void = () => {};

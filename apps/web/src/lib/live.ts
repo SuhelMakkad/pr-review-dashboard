@@ -137,7 +137,8 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
 
       // Every connection reads the status again, the first included: another window may have
       // switched accounts between this page's first status and the stream opening.
-      if (firstHello.value) void client.invalidateQueries({ queryKey: ['status-poll'] });
+      // `refresh` reads again after a first read already on its way, which could predate a switch.
+      if (firstHello.value) refresh(client, ['status-poll']);
       else void client.invalidateQueries();
 
       firstHello.value = false;
