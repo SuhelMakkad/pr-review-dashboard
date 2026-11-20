@@ -324,8 +324,9 @@ export class AiRunner {
         // one, and it could remove the files itself.)
         const outcome = await removeWorkspace(directory, {
           waitMs: 0,
-          // Synchronous, with the removal started right after it: nothing runs in between, so a
-          // shutdown, a run that began, or a swapped root or workspace is always seen.
+          // Synchronous, with the removal started in the same JavaScript turn: nothing in this
+          // process runs in between, so a shutdown or a run that began is always seen. A root or
+          // workspace that another process swaps between these calls, or during `rm`'s walk, is not.
           stillAbandoned: () =>
             directoryIdentitySync(this.workRoot) === root &&
             directoryIdentitySync(directory) === identity &&

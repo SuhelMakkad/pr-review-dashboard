@@ -246,9 +246,9 @@ export async function pruneBackups(
   let failed = 0;
 
   for (const backup of backups.slice(keep)) {
-    // The folder and the file are checked and the file unlinked in one synchronous step, so
-    // nothing runs in between: a swapped folder, or a backup restored under the ranked name,
-    // is always seen, and the file is gone in a single call.
+    // The folder and the file are checked and the file unlinked in the same JavaScript turn, so
+    // nothing in this process runs in between: a swapped folder, or a backup restored under the
+    // ranked name, is seen unless another process changes it between those system calls.
     try {
       if (!same(directoryAt(folder), identity)) {
         failed += 1;
