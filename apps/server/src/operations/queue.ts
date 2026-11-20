@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+import { isoNow, type Cancel, type Clock } from '@/clock.js';
 import { createHash } from 'node:crypto';
 import { and, asc, desc, eq, inArray, lt, or } from 'drizzle-orm';
 import {
@@ -39,7 +41,6 @@ const MUTATIONS = new Set([
 ]);
 const CONTENT_ACTIONS = new Set(['review', 'comment', 'reply', 'discard', 'ai_review']);
 const TERMINAL = ['succeeded', 'cancelled'] as const;
-const now = () => new Date().toISOString();
 const fingerprint = (input: unknown) =>
   createHash('sha256').update(JSON.stringify(input)).digest('hex');
 
@@ -175,13 +176,14 @@ export interface QueueOptions {
 
 /** SQLite is the outbox. A step is committed before its remote call and after its receipt. */
 export class OperationQueue {
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private cancelWake: Cancel | null = null;
   private active: Promise<void> | null = null;
   private suspended = false;
   private opened = false;
   private closed = false;
   private holds = 0;
-  private lastMutationAt = 0;
+  /** When the last mutation was sent, on the monotonic clock; null before the first. */
+  private lastMutationAt: number | null = null;
   private readonly refreshes = new Set<Promise<unknown>>();
   private readonly interval: number;
   private readonly retryDelays: number[];
@@ -198,6 +200,11 @@ export class OperationQueue {
   ) {
     this.interval = options.mutationIntervalMs ?? 1000;
     this.retryDelays = options.retryDelaysMs ?? [5000, 15000, 45000];
+  }
+
+  /** The app's clock, shared with the sync. */
+  private get clock(): Clock {
+    return this.sync.clock;
   }
 
   /**
@@ -477,7 +484,7 @@ export class OperationQueue {
       .limit(1)
       .get()?.createdAt;
     const timestamp = new Date(
-      Math.max(Date.now(), lastCreatedAt ? Date.parse(lastCreatedAt) + 1 : 0),
+      Math.max(this.clock.now(), lastCreatedAt ? Date.parse(lastCreatedAt) + 1 : -Infinity),
     ).toISOString();
     const row: OperationRecord = {
       id,
@@ -574,7 +581,7 @@ export class OperationQueue {
   }
 
   private save(row: OperationRecord): OperationRecord {
-    const next = { ...row, updatedAt: now() };
+    const next = { ...row, updatedAt: isoNow(this.clock) };
 
     this.db
       .update(githubOperations)
@@ -658,13 +665,13 @@ export class OperationQueue {
         progress: 'Waiting to retry the remaining steps.',
       });
     } else if (command === 'dismiss') {
-      this.save({ ...row, dismissedAt: now() });
+      this.save({ ...row, dismissedAt: isoNow(this.clock) });
     } else {
       this.sync.store.transaction(() => {
         this.save({
           ...row,
           status: 'cancelled',
-          finishedAt: now(),
+          finishedAt: isoNow(this.clock),
           progress:
             command === 'reopen'
               ? 'Returned to your draft. Saved content is available here.'
@@ -699,7 +706,7 @@ export class OperationQueue {
       this.save({
         ...row,
         status: 'cancelled',
-        finishedAt: now(),
+        finishedAt: isoNow(this.clock),
         progress: 'Pending-review cleanup queued. Your content is preserved.',
       });
 
@@ -714,20 +721,24 @@ export class OperationQueue {
   /** Schedules the next send. Nothing is sent before `open()` has recovered interrupted actions. */
   wake(): void {
     if (!this.opened || this.closed || this.suspended || this.holds > 0) return;
-    if (this.active || this.timer) return;
+    if (this.active || this.cancelWake) return;
 
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      this.active = this.tick()
-        .catch(() => {
-          // A failed preflight is recorded on its operation. Keep the outbox alive after a local error.
-        })
-        .finally(() => {
-          this.active = null;
-          this.wake();
-        });
-    }, 100);
-    this.timer.unref();
+    // The one timer that does not keep the process alive, as before.
+    this.cancelWake = this.clock.after(
+      100,
+      () => {
+        this.cancelWake = null;
+        this.active = this.tick()
+          .catch(() => {
+            // A failed preflight is recorded on its operation. Keep the outbox alive after a local error.
+          })
+          .finally(() => {
+            this.active = null;
+            this.wake();
+          });
+      },
+      { unref: true },
+    );
   }
 
   private async tick(): Promise<void> {
@@ -738,16 +749,16 @@ export class OperationQueue {
     const cooldown = this.sync.store.getSetting<string>(`github-write-retry:${account}`);
     if (
       Math.max(
-        cooldown ? Date.parse(cooldown) : 0,
-        this.sync.status.retryAt ? Date.parse(this.sync.status.retryAt) : 0,
-      ) > Date.now()
+        cooldown ? Date.parse(cooldown) : -Infinity,
+        this.sync.status.retryAt ? Date.parse(this.sync.status.retryAt) : -Infinity,
+      ) > this.clock.now()
     )
       return;
 
     const row = rows.find(
       (candidate, index) =>
         ['queued', 'waiting', 'checking'].includes(candidate.status) &&
-        (!candidate.retryAt || Date.parse(candidate.retryAt) <= Date.now()) &&
+        (!candidate.retryAt || Date.parse(candidate.retryAt) <= this.clock.now()) &&
         !rows
           .slice(0, index)
           .some((prior) => prior.prId === candidate.prId && operationUnsettled(prior.status)),
@@ -856,7 +867,7 @@ export class OperationQueue {
         this.save({
           ...row,
           status: 'cancelled',
-          finishedAt: now(),
+          finishedAt: isoNow(this.clock),
           progress: pr
             ? 'Not posted: new commits arrived after this review. Run it again to review them.'
             : 'Not posted: this PR is no longer tracked.',
@@ -888,7 +899,7 @@ export class OperationQueue {
         this.save({
           ...row,
           status: 'cancelled',
-          finishedAt: now(),
+          finishedAt: isoNow(this.clock),
           progress: gone
             ? `Not marked viewed: ${action.path} is no longer part of this PR.`
             : `Not marked viewed: ${action.path} changed after you viewed it. Look at the new diff first.`,
@@ -986,8 +997,12 @@ export class OperationQueue {
             if (this.suspended || this.closed) throw new Suspended();
             if (this.row(row.account, row.id).status === 'cancelled') throw new Cancelled();
 
-            const wait = Math.max(0, this.lastMutationAt + this.interval - Date.now());
-            if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+            // Spacing is elapsed time, not wall time: a clock change cannot stall a send.
+            const wait =
+              this.lastMutationAt === null
+                ? 0
+                : Math.max(0, this.lastMutationAt + this.interval - performance.now());
+            if (wait) await new Promise<void>((resolve) => this.clock.after(wait, resolve));
             if (this.suspended || this.closed) throw new Suspended();
 
             const identity = await target.identity();
@@ -1026,7 +1041,7 @@ export class OperationQueue {
                 this.save({
                   ...row,
                   status: 'cancelled',
-                  finishedAt: now(),
+                  finishedAt: isoNow(this.clock),
                   progress: `Not marked viewed: ${String(args[1])} changed after you viewed it. Look at the new diff first.`,
                 });
                 throw new Cancelled();
@@ -1059,7 +1074,7 @@ export class OperationQueue {
             const step: MutationStep = {
               method,
               args,
-              startedAt: now(),
+              startedAt: isoNow(this.clock),
               completedAt: null,
               result: null,
               uncertain: true,
@@ -1067,7 +1082,7 @@ export class OperationQueue {
             const steps = [...row.steps];
             steps[index] = step;
             row = this.save({ ...row, steps, progress: this.stepLabel(method, row) });
-            this.lastMutationAt = Date.now();
+            this.lastMutationAt = performance.now();
 
             let result: unknown;
 
@@ -1085,7 +1100,7 @@ export class OperationQueue {
 
             steps[index] = {
               ...step,
-              completedAt: now(),
+              completedAt: isoNow(this.clock),
               result: result ?? null,
               uncertain: false,
               acknowledged: true,
@@ -1449,7 +1464,7 @@ export class OperationQueue {
   /** Holds every request to the forge until a rate limit it reported has passed. */
   private coolDown(error: unknown): void {
     if (error instanceof GitHubError && error.outcome === 'rate_limit')
-      this.sync.deferUntil(error.retryAt ?? new Date(Date.now() + 60_000).toISOString());
+      this.sync.deferUntil(error.retryAt ?? new Date(this.clock.now() + 60_000).toISOString());
   }
 
   /** Records why a post stops: skipped when nothing was sent yet, otherwise needing attention. */
@@ -1461,7 +1476,7 @@ export class OperationQueue {
       this.save({
         ...row,
         status: 'cancelled',
-        finishedAt: now(),
+        finishedAt: isoNow(this.clock),
         progress: `Not posted: ${problem.skipped}`,
       });
       throw new Cancelled();
@@ -1657,7 +1672,7 @@ export class OperationQueue {
         status: 'succeeded',
         result,
         error: null,
-        finishedAt: now(),
+        finishedAt: isoNow(this.clock),
         progress:
           row.action.type === 'discard'
             ? row.action.restoreOperationId
@@ -1706,17 +1721,17 @@ export class OperationQueue {
       error instanceof GitHubError &&
       ['rate_limit', 'unavailable', 'unknown'].includes(error.outcome);
     if (error instanceof GitHubError && error.outcome === 'rate_limit') {
-      this.sync.deferUntil(error.retryAt ?? new Date(Date.now() + 60_000).toISOString());
+      this.sync.deferUntil(error.retryAt ?? new Date(this.clock.now() + 60_000).toISOString());
     }
     if (retryable && row.attempts < this.retryDelays.length) {
       const retryAt = new Date(
         Math.max(
-          Date.now() + this.retryDelays[row.attempts],
+          this.clock.now() + this.retryDelays[row.attempts],
           error.retryAt
             ? Date.parse(error.retryAt)
             : error.outcome === 'rate_limit'
-              ? Date.now() + 60_000
-              : 0,
+              ? this.clock.now() + 60_000
+              : -Infinity,
         ),
       ).toISOString();
 
@@ -1888,7 +1903,7 @@ export class OperationQueue {
       }
 
       if (confirmed) {
-        step.completedAt = now();
+        step.completedAt = isoNow(this.clock);
         step.result = result;
         step.uncertain = false;
         this.save({
@@ -1924,8 +1939,8 @@ export class OperationQueue {
 
   async pause(): Promise<void> {
     this.suspended = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
+    this.cancelWake?.();
+    this.cancelWake = null;
 
     await this.active;
     await Promise.allSettled([...this.refreshes]);
@@ -1942,8 +1957,8 @@ export class OperationQueue {
    */
   async hold(): Promise<() => void> {
     this.holds++;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
+    this.cancelWake?.();
+    this.cancelWake = null;
 
     await this.active;
 

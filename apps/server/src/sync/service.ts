@@ -1,3 +1,4 @@
+import { isoNow, systemClock, type Cancel, type Clock } from '@/clock.js';
 import { deriveItem, sortItems } from '@review-desk/shared/attention';
 import { deriveAuthorItem, sortAuthorItems, type AuthorItem } from '@review-desk/shared/author';
 import { isLegacySnapshot } from '@review-desk/shared/snapshot';
@@ -85,7 +86,7 @@ const ordered = (sources: Iterable<Source>) =>
 export class SyncService {
   status: SyncStatus;
   private running: Promise<void> | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private stopSchedule: Cancel | null = null;
   private stopped = false;
   private readonly feedRuns = new Map<string, number>();
   private readonly teamsFetched = new Map<string, number>();
@@ -102,6 +103,8 @@ export class SyncService {
     readonly events = new EventBus(),
     /** Lets the app switch GitHub CLI accounts; null where the account is fixed. */
     readonly accounts: GitHubAccounts | null = null,
+    /** The app's one clock: the outbox, the AI runner and the auto reviewer read it too. */
+    readonly clock: Clock = systemClock,
   ) {
     const lastAccount = store.getSetting<string>('lastAccount');
     const selected = store.getSetting<string>(SELECTED_ACCOUNT_KEY);
@@ -109,7 +112,7 @@ export class SyncService {
     this.status =
       (lastAccount && store.getSetting<SyncStatus>(`status:${lastAccount}`)) || initialStatus();
     this.status.syncing = false;
-    this.snapshots = new SnapshotCoordinator(store, (account) => this.teamsOf(account));
+    this.snapshots = new SnapshotCoordinator(store, (account) => this.teamsOf(account), clock);
 
     if (selected) accounts?.select(selected);
   }
@@ -118,18 +121,19 @@ export class SyncService {
     if (this.stopped) return;
 
     void this.sync({ trigger: 'start' });
-    this.timer = setInterval(() => {
+    // A second start replaces the schedule instead of leaving the first one running.
+    this.stopSchedule?.();
+    this.stopSchedule = this.clock.every(SYNC_INTERVAL_MS, () => {
       void this.sync({ scheduled: true });
-    }, SYNC_INTERVAL_MS);
+    });
   }
 
   /** Stops the schedule and waits for a sync in progress; no sync starts after this. */
   async stop(): Promise<void> {
     this.stopped = true;
 
-    if (this.timer) clearInterval(this.timer);
-
-    this.timer = null;
+    this.stopSchedule?.();
+    this.stopSchedule = null;
 
     await this.running?.catch(() => undefined);
   }
@@ -140,7 +144,10 @@ export class SyncService {
     if (!account) return;
 
     const until = new Date(
-      Math.max(Date.parse(retryAt), this.status.retryAt ? Date.parse(this.status.retryAt) : 0),
+      Math.max(
+        Date.parse(retryAt),
+        this.status.retryAt ? Date.parse(this.status.retryAt) : -Infinity,
+      ),
     ).toISOString();
     this.store.setSetting(`github-write-retry:${account}`, until);
     this.status = { ...this.status, retryAt: until, nextSyncAt: until };
@@ -151,12 +158,13 @@ export class SyncService {
   private cooldown(): string | null {
     const account = this.status.account?.login;
     const saved = account ? this.store.getSetting<string>(`github-write-retry:${account}`) : null;
+    // A missing deadline is none at all, never the epoch, whatever the clock reads.
     const until = Math.max(
-      saved ? Date.parse(saved) : 0,
-      this.status.retryAt ? Date.parse(this.status.retryAt) : 0,
+      saved ? Date.parse(saved) : -Infinity,
+      this.status.retryAt ? Date.parse(this.status.retryAt) : -Infinity,
     );
 
-    return until > Date.now() ? new Date(until).toISOString() : null;
+    return until > this.clock.now() ? new Date(until).toISOString() : null;
   }
 
   /**
@@ -398,7 +406,7 @@ export class SyncService {
     );
     const sources = () => ordered(this.store.membership(login).get(resolved.id) ?? []);
     const snapshot = this.store.transaction(() => {
-      this.store.addManual(login, resolved.id, new Date().toISOString());
+      this.store.addManual(login, resolved.id, isoNow(this.clock));
 
       const outcome = this.snapshots.commit(observation, fetched, { fingerprint: null, sources });
 
@@ -499,7 +507,7 @@ export class SyncService {
       syncing: true,
       error: null,
       warnings: [],
-      lastAttemptAt: new Date().toISOString(),
+      lastAttemptAt: isoNow(this.clock),
     };
     this.emitStatus();
 
@@ -580,7 +588,7 @@ export class SyncService {
         cached?: PullRequestSnapshot;
         result: DetectResult | null;
       }[] = [];
-      const now = Date.now();
+      const now = this.clock.now();
 
       for (const id of ids) {
         const cached = previous.get(id);
@@ -689,8 +697,7 @@ export class SyncService {
         await this.afterSync(account.login).catch(() => undefined);
       }
 
-      if (this.status.warnings.length === 0)
-        this.status.lastSuccessfulSync = new Date().toISOString();
+      if (this.status.warnings.length === 0) this.status.lastSuccessfulSync = isoNow(this.clock);
       if (retryAt)
         this.status.error = this.worded(
           'GitHub rate limit reached. Refresh will resume automatically after the cooldown.',
@@ -700,7 +707,7 @@ export class SyncService {
       retryAt = error instanceof GitHubError ? error.retryAt : null;
       timing.outcome = error instanceof GitHubError ? error.outcome : 'error';
     } finally {
-      const now = new Date().toISOString();
+      const now = isoNow(this.clock);
       const ended = performance.now();
       const phase = (from: number, to: number) => (from && to ? to - from : undefined);
 
@@ -734,7 +741,7 @@ export class SyncService {
         syncing: false,
         lastCompletedAt: now,
         retryAt,
-        nextSyncAt: retryAt ?? new Date(Date.now() + SYNC_INTERVAL_MS).toISOString(),
+        nextSyncAt: retryAt ?? new Date(this.clock.now() + SYNC_INTERVAL_MS).toISOString(),
       };
       this.store.saveStatus(this.status);
       this.emitStatus();
@@ -754,13 +761,14 @@ export class SyncService {
   }
 
   private async refreshTeams(login: string, scheduled: boolean): Promise<void> {
-    const fetchedAt = this.teamsFetched.get(login) ?? 0;
+    // Never fetched is due now, whatever the clock reads.
+    const fetchedAt = this.teamsFetched.get(login) ?? -Infinity;
 
-    if (scheduled && Date.now() - fetchedAt < TEAMS_REFRESH_MS) return;
+    if (scheduled && this.clock.now() - fetchedAt < TEAMS_REFRESH_MS) return;
 
     try {
       this.status.teams = await this.github.teams();
-      this.teamsFetched.set(login, Date.now());
+      this.teamsFetched.set(login, this.clock.now());
     } catch (error) {
       if (error instanceof GitHubError && error.retryAt) throw error;
 
@@ -775,11 +783,11 @@ export class SyncService {
    * previous membership untouched, so a transient search failure never drops a PR's source.
    */
   private async discover(login: string, scheduled: boolean): Promise<string | null> {
-    const now = Date.now();
+    const now = this.clock.now();
     const due = FEED_SOURCES.filter(
       (source) =>
         !scheduled ||
-        now - (this.feedRuns.get(`${login}:${source}`) ?? 0) >= FEED_INTERVAL_MS[source],
+        now - (this.feedRuns.get(`${login}:${source}`) ?? -Infinity) >= FEED_INTERVAL_MS[source],
     );
     const feeds = await Promise.allSettled(
       due.map((source) => this.github.discover(login, source)),
@@ -790,7 +798,7 @@ export class SyncService {
       const source = due[index];
 
       if (feed.status === 'fulfilled') {
-        this.store.replaceFeed(login, source, feed.value, new Date().toISOString());
+        this.store.replaceFeed(login, source, feed.value, isoNow(this.clock));
         this.feedRuns.set(`${login}:${source}`, now);
         return;
       }
@@ -841,13 +849,13 @@ export class SyncService {
   private sampleQueue(login: string): void {
     const last = this.store.lastQueueSampleAt(login);
 
-    if (last && Date.now() - Date.parse(last) < QUEUE_SAMPLE_MS) return;
+    if (last && this.clock.now() - Date.parse(last) < QUEUE_SAMPLE_MS) return;
 
     const items = this.list().items;
     const attention = items.filter((item) => item.queue === 'attention');
 
     this.store.saveQueueSample(login, {
-      at: new Date().toISOString(),
+      at: isoNow(this.clock),
       attention: attention.length,
       waiting: items.filter((item) => item.queue === 'waiting').length,
       authoredBlocked: this.mine().items.filter((item) => item.group === 'needs_you').length,
@@ -874,7 +882,7 @@ export class SyncService {
 
     if (!account) return { account: null, items: [] };
 
-    const now = Date.now();
+    const now = this.clock.now();
     const items = this.openSnapshots(account)
       .filter((pr) => !isSameUser(pr.author.login, account))
       .filter(
@@ -883,7 +891,7 @@ export class SyncService {
       )
       .map((pr) => ({
         pr,
-        item: deriveItem(pr, this.store.triage(account, pr.id), account, this.status.teams),
+        item: deriveItem(pr, this.store.triage(account, pr.id), account, this.status.teams, now),
       }))
       .filter(({ pr, item }) => {
         const mentionOnly =
@@ -936,7 +944,7 @@ export class SyncService {
       account,
       snapshot,
       triage,
-      item: deriveItem(snapshot, triage, account, this.teamsOf(account)),
+      item: deriveItem(snapshot, triage, account, this.teamsOf(account), this.clock.now()),
     };
   }
 
@@ -995,7 +1003,7 @@ export class SyncService {
     }
 
     if (update.done !== undefined) {
-      triage.doneAt = update.done ? new Date().toISOString() : null;
+      triage.doneAt = update.done ? isoNow(this.clock) : null;
       triage.doneActivityKeys = update.done ? detail.item.activityKeys : [];
 
       if (update.done) {

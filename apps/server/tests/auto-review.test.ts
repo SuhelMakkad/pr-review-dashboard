@@ -10,6 +10,7 @@ import { AiRunner } from '@/ai/runner.js';
 import type { RepositoryExporter } from '@/ai/workspace.js';
 import { aiRuns, autoReviewLog } from '@/db/schema.js';
 import { AutoReviewer, autoReviewCandidates } from '@/ai/auto-review.js';
+import { TestClock } from '@/clock.js';
 import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { GitHubError } from '@/github/errors.js';
@@ -28,6 +29,17 @@ import { defaultNotificationSettings, type ReviewNotification } from '@review-de
 
 const cleanups: (() => unknown)[] = [];
 
+/** The app's clock in each test, moved by `later()`; the process's own clock is never touched. */
+let clock = new TestClock();
+/** A timestamp on the test clock, `offsetMs` from now. */
+const stamp = (offsetMs = 0) => new Date(clock.now() + offsetMs).toISOString();
+/** The fixture forge reads the same clock as the app. */
+const onClock = <T extends { world: { now: () => number } }>(scenario: T): T => {
+  scenario.world.now = () => clock.now();
+
+  return scenario;
+};
+
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 
@@ -38,10 +50,14 @@ const direct = { kind: 'user' as const, login: 'you', name: 'you' };
 const platformTeam = { kind: 'team' as const, login: 'acme/platform', name: 'Platform' };
 
 async function setup() {
+  clock = new TestClock();
+
   const store = new Store(':memory:');
-  const github = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
+  const github = new FixtureGitHub(() =>
+    onClock(defaultScenario(Date.parse('2026-11-05T10:00:00Z'))),
+  );
   const events = new EventBus();
-  const sync = new SyncService(store, github, events);
+  const sync = new SyncService(store, github, events, null, clock);
   const diffs = new DiffService(github);
   const reviews = new ReviewService(sync, github, diffs, events);
   const providers = { codex: new FixtureProvider('codex'), claude: new FixtureProvider('claude') };
@@ -101,7 +117,7 @@ async function setup() {
     changes: Partial<ScenarioPull['snapshot']>,
     feeds = ['requested'],
   ) => {
-    const now = new Date().toISOString();
+    const now = stamp();
     const added = structuredClone(pull(1839));
 
     added.feeds = feeds as ScenarioPull['feeds'];
@@ -123,7 +139,7 @@ async function setup() {
   };
   const requestEvent = (id: string, reviewer: typeof direct | typeof platformTeam) => ({
     id,
-    createdAt: new Date().toISOString(),
+    createdAt: stamp(),
     removed: false,
     reviewer,
   });
@@ -158,10 +174,9 @@ async function setup() {
   };
 
   /** Pushes a commit to the PR on GitHub. The app sees it on its next sync or refresh. */
-  const push = (number: number, label: string) => {
+  const push = (number: number, label: string, committedAt = stamp()) => {
     const snapshot = pull(number).snapshot;
     const oid = createHash('sha1').update(label).digest('hex');
-    const committedAt = new Date(Date.now()).toISOString();
 
     github.scenario.world.repos.derive(
       snapshot.repository,
@@ -172,18 +187,13 @@ async function setup() {
     );
     snapshot.headOid = oid;
     snapshot.headCommittedAt = committedAt;
-    snapshot.updatedAt = new Date().toISOString();
+    snapshot.updatedAt = stamp();
 
     return oid;
   };
 
-  /** Moves the clock the auto reviewer reads forward. */
-  const realNow = Date.now.bind(Date);
-  let offset = 0;
-  const later = (ms: number) => {
-    offset += ms;
-    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
-  };
+  /** Moves the app's clock, and the fixture forge's, forward. */
+  const later = (ms: number) => clock.advance(ms);
 
   return {
     store,
@@ -293,7 +303,7 @@ describe('automatic review', () => {
     const rerequested = pull(877).snapshot;
 
     rerequested.requestEvents.push(requestEvent('req-877-3', direct));
-    rerequested.updatedAt = new Date().toISOString();
+    rerequested.updatedAt = stamp();
 
     await sync.sync();
     await sync.sync();
@@ -319,7 +329,7 @@ describe('automatic review', () => {
     expect(runs(9003)).toEqual([]);
 
     pull(9003).snapshot.isDraft = false;
-    pull(9003).snapshot.updatedAt = new Date().toISOString();
+    pull(9003).snapshot.updatedAt = stamp();
     await sync.sync();
     await settled();
 
@@ -338,7 +348,7 @@ describe('automatic review', () => {
     runner.pause('you', manual.id);
 
     pull(877).snapshot.requestEvents.push(requestEvent('req-877-3', direct));
-    pull(877).snapshot.updatedAt = new Date().toISOString();
+    pull(877).snapshot.updatedAt = stamp();
     await sync.sync();
 
     expect(runs(877)).toEqual([
@@ -386,7 +396,7 @@ describe('automatic review', () => {
 
   it('treats requests made before it was turned on as backlog, even when found later', async () => {
     const { sync, addPull, requestEvent, enable, runs, logFor } = await setup();
-    const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+    const hourAgo = stamp(-3_600_000);
 
     enable();
     // Neither PR was cached when it was turned on: GitHub only returns them now.
@@ -444,7 +454,7 @@ describe('automatic review', () => {
 
     toDraft.mockRestore();
     pull(1846).snapshot.isDraft = false;
-    pull(1846).snapshot.updatedAt = new Date().toISOString();
+    pull(1846).snapshot.updatedAt = stamp();
     await sync.sync();
     await settled();
 
@@ -636,6 +646,60 @@ describe('automatic review after new commits', () => {
     await vi.waitFor(() =>
       expect(notified.filter((item) => item.kind === 'ai_review_ready')).toEqual([
         expect.objectContaining({ key: `ai:${fresh!.id}` }),
+      ]),
+    );
+  });
+
+  it('stamps a whole cycle from the app clock, never from the process clock', async () => {
+    const context = await setup();
+    const { github, sync, providers, enable, runs, logFor, settled, push, later, notified } =
+      context;
+
+    // Far from the process's own time, so a stamp taken from it would stand out.
+    later(30 * 86_400_000);
+    enable();
+    providers.codex.delayMs = 5_000;
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    push(1846, 'follow-up');
+    await sync.sync();
+
+    const waiting = logFor(1846);
+
+    providers.codex.delayMs = 5;
+    later(AUTO_REVIEW_QUIET_MS);
+    await sync.sync();
+    await settled();
+
+    const [first, fresh] = runs(1846);
+    const [restarted] = logFor(1846);
+    /** Set, and on the app's clock: a month past the process's own, at most a quiet period ahead. */
+    const onAppClock = (value: string | null | undefined) => {
+      expect(value).toEqual(expect.any(String));
+      expect(Date.parse(value!)).toBeGreaterThan(Date.now() + 29 * 86_400_000);
+      expect(Date.parse(value!)).toBeLessThanOrEqual(clock.now() + AUTO_REVIEW_QUIET_MS);
+    };
+
+    expect(waiting).toEqual([expect.objectContaining({ status: 'waiting', runId: first.id })]);
+    onAppClock(waiting[0].updatedAt);
+    onAppClock(waiting[0].restartAt);
+    onAppClock(waiting[0].waitingSince);
+
+    expect(restarted).toEqual(expect.objectContaining({ status: 'started', runId: fresh.id }));
+    onAppClock(restarted.updatedAt);
+
+    expect(first).toEqual(expect.objectContaining({ status: 'cancelled' }));
+    onAppClock(first.createdAt);
+    onAppClock(first.finishedAt);
+
+    expect(fresh).toEqual(expect.objectContaining({ trigger: 'auto', status: 'done' }));
+    onAppClock(fresh.createdAt);
+    onAppClock(fresh.finishedAt);
+    await vi.waitFor(() =>
+      expect(notified.filter((item) => item.kind === 'ai_review_ready')).toEqual([
+        expect.objectContaining({ key: `ai:${fresh.id}` }),
       ]),
     );
   });
@@ -845,7 +909,7 @@ describe('automatic review after new commits', () => {
 
     // Asked again while the review runs: the newer request waits on the same run.
     snapshot.requestEvents.push(requestEvent('req-1846-again', direct));
-    snapshot.updatedAt = new Date().toISOString();
+    snapshot.updatedAt = stamp();
     await sync.sync();
     expect(logFor(1846)).toContainEqual(
       expect.objectContaining({ status: 'skipped', runId: first.id }),
@@ -964,11 +1028,8 @@ describe('automatic review after new commits', () => {
     const [first] = runs(1846);
 
     // Pushed while it runs from a machine whose clock is ten minutes ahead.
-    later(10 * 60_000);
+    const head = push(1846, 'committed-in-the-future', stamp(10 * 60_000));
 
-    const head = push(1846, 'committed-in-the-future');
-
-    later(-10 * 60_000);
     await settled();
     await vi.waitFor(() =>
       expect(logFor(1846)).toEqual([
@@ -1006,7 +1067,7 @@ describe('automatic review after new commits', () => {
 
     // Asked again meanwhile: the request waits for the check instead of starting a review.
     pull(1846).snapshot.requestEvents.push(requestEvent('req-1846-during-check', direct));
-    pull(1846).snapshot.updatedAt = new Date().toISOString();
+    pull(1846).snapshot.updatedAt = stamp();
     await sync.sync();
     expect(runs(1846)).toHaveLength(1);
     expect(logFor(1846)).toEqual([expect.objectContaining({ status: 'checking' })]);
@@ -1050,7 +1111,7 @@ describe('automatic review after new commits', () => {
 
     // Asked again; while the plan is read for it, the PR moves on and the first review ends.
     pull(1846).snapshot.requestEvents.push(requestEvent('req-1846-while-ending', direct));
-    pull(1846).snapshot.updatedAt = new Date().toISOString();
+    pull(1846).snapshot.updatedAt = stamp();
 
     const syncing = sync.sync();
 
@@ -1369,7 +1430,7 @@ describe('automatic review after new commits', () => {
 
     vi.spyOn(sync, 'refresh').mockImplementationOnce(async (id) => {
       pull(1846).snapshot.headOid = reviewed;
-      pull(1846).snapshot.updatedAt = new Date().toISOString();
+      pull(1846).snapshot.updatedAt = stamp();
 
       return refresh(id);
     });
@@ -1467,8 +1528,12 @@ describe('automatic review after new commits', () => {
 describe('automatic review routes', () => {
   it('keeps `since` on the server and lists review status for the inbox', async () => {
     const store = new Store(':memory:');
-    const fixture = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
-    const sync = new SyncService(store, fixture, new EventBus());
+    clock = new TestClock();
+
+    const fixture = new FixtureGitHub(() =>
+      onClock(defaultScenario(Date.parse('2026-11-05T10:00:00Z'))),
+    );
+    const sync = new SyncService(store, fixture, new EventBus(), null, clock);
     const root = mkdtempSync(join(tmpdir(), 'review-desk-auto-review-app-'));
 
     cleanups.push(() => {
@@ -1553,7 +1618,7 @@ describe('automatic review routes', () => {
     const [waiting] = autoReviewCandidates(sync.list().items).filter(
       ({ item }) => item.number === 1839,
     );
-    const restartAt = new Date(Date.now() + 60_000).toISOString();
+    const restartAt = stamp(60_000);
     const headOid = sync.detail(waiting.item.id)!.snapshot.headOid;
 
     store.db
@@ -1565,7 +1630,7 @@ describe('automatic review routes', () => {
         status: 'waiting',
         headOid,
         restartAt,
-        updatedAt: new Date().toISOString(),
+        updatedAt: stamp(),
       })
       .onConflictDoUpdate({
         target: [autoReviewLog.account, autoReviewLog.key],

@@ -1,3 +1,4 @@
+import { systemClock } from '@/clock.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -80,7 +81,14 @@ const forges = fixture
   : new ForgeRouter(new GitHub(), ghCredentials, new GlabAccounts(), (host) =>
       GitLab.forHost(host, store),
     );
-const service = new SyncService(store, fixture ?? forges!, new EventBus(), fixture ?? forges);
+// Real forges turn Retry-After into deadlines with the system's wall time, so they share its clock.
+const service = new SyncService(
+  store,
+  fixture ?? forges!,
+  new EventBus(),
+  fixture ?? forges,
+  systemClock,
+);
 const sessionToken = createSessionToken();
 const bootId = randomUUID();
 const linearOAuth = fixture ? null : new LinearOAuth(new KeychainCredentialStore());

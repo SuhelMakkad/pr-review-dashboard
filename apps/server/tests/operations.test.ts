@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import type { GitHubAction, OperationReceipt } from '@review-desk/shared/operations';
+import { TestClock, type Clock } from '@/clock.js';
 import { Store } from '@/db/store.js';
 import { githubOperations } from '@/db/schema.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
@@ -25,11 +26,11 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function setup(path = ':memory:', fixture?: FixtureGitHub) {
+async function setup(path = ':memory:', fixture?: FixtureGitHub, clock?: Clock) {
   const store = new Store(path);
   const github =
     fixture ?? new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
-  const sync = new SyncService(store, github, new EventBus());
+  const sync = new SyncService(store, github, new EventBus(), null, clock);
 
   cleanups.push(() => store.close());
   await sync.sync();
@@ -530,6 +531,34 @@ describe('durable GitHub operations', () => {
     await completed(queue, operation.id, 'needs_attention');
     expect(identity).toHaveBeenCalledTimes(4);
     expect(github.writes).toEqual([]);
+  });
+
+  it('retries and stamps an action on the app clock, even one set before 1970', async () => {
+    const { queue, github, pr } = await setup(
+      ':memory:',
+      undefined,
+      new TestClock(Date.parse('1969-06-01T00:00:00Z')),
+    );
+    const identity = github.identity.bind(github);
+    const check = vi
+      .spyOn(github, 'identity')
+      .mockRejectedValueOnce(new GitHubError('Connection refused during the account check'))
+      .mockImplementation(identity);
+    const { operation } = queue.enqueue('you', pr().id, randomUUID(), {
+      type: 'viewed',
+      path: pr().files[0].path,
+      viewed: true,
+    });
+
+    queue.resume();
+    await completed(queue, operation.id);
+
+    const done = queue.get('you', operation.id);
+
+    // Retried after the failed check, not left waiting until 1970.
+    expect(check.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(done.createdAt.startsWith('1969-06-01')).toBe(true);
+    expect(Date.parse(done.createdAt)).toBeLessThanOrEqual(Date.parse(done.updatedAt));
   });
 
   it('honors rate-limit timing before sending another action', async () => {

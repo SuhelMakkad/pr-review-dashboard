@@ -1,3 +1,4 @@
+import { systemClock, type Clock } from '@/clock.js';
 import { deriveItem } from '@review-desk/shared/attention';
 import type { PullRequestSnapshot, Source } from '@review-desk/shared/types';
 import type { Store } from '@/db/store.js';
@@ -104,6 +105,7 @@ export class SnapshotCoordinator {
     private readonly store: Store,
     /** The teams of an account, for its activity and triage. */
     private readonly teams: (account: string) => string[],
+    private readonly clock: Clock = systemClock,
   ) {}
 
   /** Starts a read of a PR. Take it before reading the cached PR or asking the forge. */
@@ -326,7 +328,7 @@ export class SnapshotCoordinator {
 
   /** The snapshot with its sync bookkeeping, activity history and triage wake-ups. */
   private save(account: string, snapshot: PullRequestSnapshot, fingerprint: string | null): void {
-    const now = Date.now();
+    const now = this.clock.now();
     const jitter = Math.floor(Math.random() * RECONCILE_JITTER_MS);
     const teams = this.teams(account);
 
@@ -339,7 +341,7 @@ export class SnapshotCoordinator {
     this.store.recordActivity(account, extractActivity(snapshot, account, teams));
 
     const triage = this.store.triage(account, snapshot.id);
-    const item = deriveItem(snapshot, triage, account, teams);
+    const item = deriveItem(snapshot, triage, account, teams, now);
     const wokeFromSnooze = Boolean(triage.snoozedUntil && !item.snoozedUntil);
     const wokeFromDone = Boolean(triage.doneAt && !item.doneAt && !item.snoozedUntil);
 

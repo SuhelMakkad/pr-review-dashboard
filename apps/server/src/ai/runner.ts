@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+import { isoNow, type Clock } from '@/clock.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -107,6 +109,11 @@ export class AiRunner {
     private readonly exportRepository: RepositoryExporter = downloadRepository,
   ) {}
 
+  /** The app's clock, shared with the sync. */
+  private get clock(): Clock {
+    return this.sync.clock;
+  }
+
   /**
    * Settles runs a previous process left queued or running: resumable ones wait for `recover()`,
    * the rest are marked interrupted. Called once this process owns the data directory, never from
@@ -142,7 +149,7 @@ export class AiRunner {
             : {
                 status: 'interrupted',
                 progress: null,
-                finishedAt: new Date().toISOString(),
+                finishedAt: isoNow(this.clock),
               },
         )
         .where(eq(aiRuns.id, row.id))
@@ -217,7 +224,7 @@ export class AiRunner {
       ? null
       : previous.enabled && previous.since
         ? previous.since
-        : new Date().toISOString();
+        : isoNow(this.clock);
 
     this.sync.store.setSetting(SETTINGS_KEY, {
       ...settings,
@@ -253,7 +260,8 @@ export class AiRunner {
   }
 
   async providerStatuses(): Promise<AiProviderStatus[]> {
-    if (this.probes && Date.now() - this.probes.at < PROBE_TTL_MS) return this.probes.statuses;
+    if (this.probes && this.clock.now() - this.probes.at < PROBE_TTL_MS)
+      return this.probes.statuses;
 
     const statuses = await Promise.all(
       Object.values(this.providers).map(async (provider) => ({
@@ -264,7 +272,7 @@ export class AiRunner {
       })),
     );
 
-    this.probes = { at: Date.now(), statuses };
+    this.probes = { at: this.clock.now(), statuses };
 
     return statuses;
   }
@@ -274,7 +282,7 @@ export class AiRunner {
     const provider = this.providers.codex;
 
     if (!provider.status) return Promise.resolve(null);
-    if (this.codexAccount && Date.now() - this.codexAccount.at < ACCOUNT_TTL_MS)
+    if (this.codexAccount && this.clock.now() - this.codexAccount.at < ACCOUNT_TTL_MS)
       return this.codexAccount.status;
 
     const status = provider.status().catch((error: unknown): CodexAccountStatus => ({
@@ -287,7 +295,7 @@ export class AiRunner {
       problem: `Could not read the Codex sign-in: ${safeError(error)}`,
     }));
 
-    this.codexAccount = { at: Date.now(), status };
+    this.codexAccount = { at: this.clock.now(), status };
 
     return status;
   }
@@ -602,7 +610,7 @@ export class AiRunner {
         status: 'queued',
         progress: 'Waiting to start…',
         trigger: options.trigger ?? 'manual',
-        createdAt: new Date().toISOString(),
+        createdAt: isoNow(this.clock),
       })
       .run();
     const superseded = this.db
@@ -665,7 +673,8 @@ export class AiRunner {
 
     const controller = new AbortController();
     const workDir = join(this.workRoot, id);
-    let lastEmit = 0;
+    /** When progress was last sent to the app, on the monotonic clock; null before the first. */
+    let lastEmit: number | null = null;
     let validCheckpoint = true;
 
     this.active.set(id, controller);
@@ -745,8 +754,9 @@ export class AiRunner {
 
           this.update(id, { progress });
 
-          if (Date.now() - lastEmit > 400) {
-            lastEmit = Date.now();
+          // Paced by elapsed time: a wall-clock change cannot hold progress back.
+          if (lastEmit === null || performance.now() - lastEmit > 400) {
+            lastEmit = performance.now();
             this.emit(row);
           }
         },
@@ -773,7 +783,7 @@ export class AiRunner {
           model: result.model,
           result: redact(JSON.stringify(output)),
           usage: result.usage ? JSON.stringify(result.usage) : null,
-          finishedAt: new Date().toISOString(),
+          finishedAt: isoNow(this.clock),
           request: null,
         },
         saved.snapshot,
@@ -784,7 +794,7 @@ export class AiRunner {
           status: controller.signal.aborted ? 'cancelled' : 'failed',
           progress: null,
           error: controller.signal.aborted ? null : safeError(error),
-          finishedAt: new Date().toISOString(),
+          finishedAt: isoNow(this.clock),
           ...(controller.signal.aborted ||
           !validCheckpoint ||
           !this.providers[row.provider].supportsResume
@@ -887,7 +897,7 @@ export class AiRunner {
         pauseReason: null,
         progress: null,
         error: null,
-        finishedAt: new Date().toISOString(),
+        finishedAt: isoNow(this.clock),
       });
       active.abort();
       this.emit(row);
@@ -902,7 +912,7 @@ export class AiRunner {
         status: 'cancelled',
         request: null,
         progress: null,
-        finishedAt: new Date().toISOString(),
+        finishedAt: isoNow(this.clock),
       });
       rmSync(join(this.workRoot, id), { recursive: true, force: true });
       this.emit(row);
@@ -915,7 +925,7 @@ export class AiRunner {
         pauseReason: null,
         error: null,
         progress: null,
-        finishedAt: new Date().toISOString(),
+        finishedAt: isoNow(this.clock),
       });
       rmSync(join(this.workRoot, id), { recursive: true, force: true });
       this.emit(row);
@@ -1249,7 +1259,7 @@ export class AiRunner {
         event: hasBlockingFindings(result) ? 'COMMENT' : 'APPROVE',
         preparedReview: {
           runId: id,
-          preparedAt: new Date().toISOString(),
+          preparedAt: isoNow(this.clock),
           indices: [...new Set(indices)].sort((a, b) => a - b),
           content: { summary, comments: [] },
           ...(previousDrafts.length ? { previousDrafts } : {}),
