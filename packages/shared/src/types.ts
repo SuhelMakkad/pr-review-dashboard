@@ -257,6 +257,13 @@ export interface SyncStatus {
   retryAt: string | null;
   error: string | null;
   warnings: string[];
+  /**
+   * Set on every status the server sends, never stored: the server process that sent it, and how
+   * many status changes it had made by then. Of two statuses from one process, the higher
+   * revision is the newer, whichever arrived last.
+   */
+  bootId?: string;
+  revision?: number;
 }
 
 /**

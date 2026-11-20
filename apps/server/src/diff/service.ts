@@ -7,6 +7,7 @@ import {
 } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi, RemoteFile } from '@/github/api.js';
+import { asAccount } from '@/github/credentials.js';
 import { textPatch } from '@/diff/patch.js';
 
 const CACHE_LIMIT = 40;
@@ -22,6 +23,15 @@ const statuses: FileStatus[] = [
   'unchanged',
 ];
 const shortSha = (oid: string) => oid.slice(0, 7);
+
+/**
+ * One manifest build: the account it reads as, and the cache entries it may publish once its reads
+ * are known to have been that account's.
+ */
+interface Build {
+  account: string | null;
+  staged: [string, DiffManifest][];
+}
 
 export function toDiffFile(file: RemoteFile, viewed?: DiffFile['viewed']): DiffFile {
   const status = (
@@ -56,13 +66,25 @@ export class DiffService {
 
   constructor(private readonly github: GitHubApi) {}
 
-  private remember(key: string, manifest: DiffManifest): DiffManifest {
-    this.cache.delete(key);
-    this.cache.set(key, manifest);
+  /** A cache key for this build's account: one account's diff is never served to another. */
+  private key(build: Build, key: string): string {
+    return `${build.account ?? ''}\u0000${key}`;
+  }
 
-    if (this.cache.size > CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value!);
+  /** Staged with the build, published only when the build is (see `manifest`). */
+  private remember(build: Build, key: string, manifest: DiffManifest): DiffManifest {
+    build.staged.push([key, manifest]);
 
     return manifest;
+  }
+
+  private publish(build: Build): void {
+    for (const [key, manifest] of build.staged) {
+      this.cache.delete(key);
+      this.cache.set(key, manifest);
+
+      if (this.cache.size > CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value!);
+    }
   }
 
   /**
@@ -93,13 +115,17 @@ export class DiffService {
    * full diff could not be read, or not as this head's), the view still shows; those files just
    * cannot be marked viewed from it.
    */
-  private async withKeys(manifest: DiffManifest, pr: PullRequestSnapshot): Promise<DiffManifest> {
+  private async withKeys(
+    build: Build,
+    manifest: DiffManifest,
+    pr: PullRequestSnapshot,
+  ): Promise<DiffManifest> {
     // Nothing to key; or the full diff itself, shown because the reviewed commit is gone, whose
     // keys (or their absence) are its own.
     if (manifest.files.length === 0 || manifest.kind === 'unavailable') return manifest;
     if (!pr.files.some((file) => file.viewedKey)) return manifest;
 
-    const full = await this.full(pr).catch(() => null);
+    const full = await this.full(build, pr).catch(() => null);
     const keys = new Map(full?.files.map((file) => [file.path, file.viewedKey]) ?? []);
 
     return {
@@ -113,20 +139,52 @@ export class DiffService {
     };
   }
 
+  /**
+   * The PR's diff for `mode`, read as `account` (the account whose PR it is) when given. Every forge
+   * read of the build runs as that account. Where the forge cannot carry the account with each call
+   * (GitLab), its sign-in is checked before the build and after its last read, and nothing it read
+   * is cached or returned unless both checks pass.
+   */
   async manifest(
     pr: PullRequestSnapshot,
     mode: DiffMode,
     reviewOid: string | null,
+    account: string | null = null,
   ): Promise<DiffManifest> {
-    if (mode === 'full' || !reviewOid) return this.withViewed(await this.full(pr), pr);
+    const build: Build = { account, staged: [] };
+    const work = async () => {
+      if (mode === 'full' || !reviewOid) return this.withViewed(await this.full(build, pr), pr);
 
-    // A mark from this view is about the file's whole diff, so its key is the full diff's.
-    return this.withViewed(await this.withKeys(await this.sinceReview(pr, reviewOid), pr), pr);
+      // A mark from this view is about the file's whole diff, so its key is the full diff's.
+      return this.withViewed(
+        await this.withKeys(build, await this.sinceReview(build, pr, reviewOid), pr),
+        pr,
+      );
+    };
+
+    if (!account) {
+      const manifest = await work();
+
+      this.publish(build);
+
+      return manifest;
+    }
+
+    return asAccount(account, async () => {
+      await this.github.verifyAccount?.(account);
+
+      const manifest = await work();
+
+      await this.github.verifyAccount?.(account);
+      this.publish(build);
+
+      return manifest;
+    });
   }
 
-  private async full(pr: PullRequestSnapshot): Promise<DiffManifest> {
-    const key = `${pr.url}:${pr.baseOid}:${pr.headOid}:full`;
-    const cached = this.cache.get(key);
+  private async full(build: Build, pr: PullRequestSnapshot): Promise<DiffManifest> {
+    const key = this.key(build, `${pr.url}:${pr.baseOid}:${pr.headOid}:full`);
+    const cached = this.cache.get(key) ?? build.staged.find(([staged]) => staged === key)?.[1];
 
     if (cached) return cached;
 
@@ -156,10 +214,14 @@ export class DiffService {
     // for an empty list too.
     if (listing && !listing.pinned) return { ...manifest, unpinned: true };
 
-    return this.remember(key, manifest);
+    return this.remember(build, key, manifest);
   }
 
-  private async sinceReview(pr: PullRequestSnapshot, reviewOid: string): Promise<DiffManifest> {
+  private async sinceReview(
+    build: Build,
+    pr: PullRequestSnapshot,
+    reviewOid: string,
+  ): Promise<DiffManifest> {
     const base = {
       prId: pr.id,
       mode: 'since-review' as const,
@@ -169,7 +231,7 @@ export class DiffService {
 
     if (reviewOid === pr.headOid) return { ...base, kind: 'identical', files: [] };
 
-    const key = `${pr.url}:${reviewOid}:${pr.headOid}:since`;
+    const key = this.key(build, `${pr.url}:${reviewOid}:${pr.headOid}:since`);
     const cached = this.cache.get(key);
 
     if (cached) return cached;
@@ -177,7 +239,7 @@ export class DiffService {
     const comparison = await this.github.compare(pr.repository, reviewOid, pr.headOid);
 
     if (!comparison) {
-      const full = await this.full(pr);
+      const full = await this.full(build, pr);
 
       return {
         ...full,
@@ -188,7 +250,7 @@ export class DiffService {
     }
 
     if (comparison.status === 'identical')
-      return this.remember(key, { ...base, kind: 'identical', files: [] });
+      return this.remember(build, key, { ...base, kind: 'identical', files: [] });
 
     const prPaths = new Set(pr.files.flatMap((file) => [file.path]));
 
@@ -199,7 +261,7 @@ export class DiffService {
       const hidden = comparison.files.length - relevant.length;
       const merges = comparison.commits.filter((commit) => commit.parents.length > 1).length;
 
-      return this.remember(key, {
+      return this.remember(build, key, {
         ...base,
         kind: 'fast-forward',
         hiddenBaseFiles: hidden || undefined,
@@ -211,7 +273,7 @@ export class DiffService {
       });
     }
 
-    return this.remember(key, await this.rebased(pr, reviewOid, prPaths, base));
+    return this.remember(build, key, await this.rebased(pr, reviewOid, prPaths, base));
   }
 
   /** History was rewritten: diff each file as reviewed against its current content. */

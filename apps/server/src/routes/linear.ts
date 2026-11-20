@@ -1,3 +1,4 @@
+import { knownAccount, type AccountParams } from '@/routes/pulls.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { safeError } from '@/github/errors.js';
@@ -50,6 +51,22 @@ export function registerLinearRoutes(
     return linear.status();
   });
 
+  app.get<{ Params: AccountParams & { id: string } }>(
+    '/api/accounts/:account/pulls/:id/tickets',
+    async (request, reply) => {
+      const account = knownAccount(service, request.params, reply);
+
+      if (!account) return reply;
+
+      const detail = service.detailFor(account, request.params.id);
+
+      if (!detail) return reply.code(404).send({ error: 'This PR is no longer tracked.' });
+
+      return linear.ticketsFor(detail.snapshot);
+    },
+  );
+
+  // Legacy, for the selected account.
   app.get<{ Params: { id: string } }>('/api/pulls/:id/tickets', async (request, reply) => {
     const detail = service.detail(request.params.id);
 

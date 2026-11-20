@@ -8,7 +8,7 @@ import type {
   ReviewState,
   Source,
 } from '@review-desk/shared/types';
-import type { CliAccount, GitHubAccounts } from '@/github/credentials.js';
+import { scopedAccount, type CliAccount, type GitHubAccounts } from '@/github/credentials.js';
 import type { ThreadInput } from '@/github/write.js';
 import { createHash } from 'node:crypto';
 import type {
@@ -49,6 +49,13 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
   private stepIndex = 0;
   /** The account selected in the app; null acts as the scenario's viewer. */
   private selected: string | null = null;
+  /** Viewed marks of accounts other than the scenario's viewer, by `account` and PR. */
+  private readonly viewedByOthers = new Map<
+    string,
+    Map<string, 'VIEWED' | 'UNVIEWED' | 'DISMISSED'>
+  >();
+  /** Every snapshot read, with the account it was answered as: tests check whose a read was. */
+  readonly reads: { id: string; account: string }[] = [];
   private sequence = 0;
   /** Every write GitHub would have received, for assertions in tests. */
   readonly writes: FixtureWrite[] = [];
@@ -117,9 +124,22 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     this.selected = login;
   }
 
-  /** True while the second account is selected: no feed or search returns anything for it. */
+  /** The account a call is answered as: the one its work is scoped to, else the selected one. */
+  private effective(): string {
+    return scopedAccount() ?? this.selected ?? this.scenario.world.viewer.login;
+  }
+
+  /** True while the call is for the second account: no feed or search returns anything for it. */
   private get outsider(): boolean {
-    return this.selected === DEMO_SECOND_ACCOUNT;
+    return this.effective() === DEMO_SECOND_ACCOUNT;
+  }
+
+  /** An account's viewed marks on a PR: the scenario's own for its viewer. */
+  private viewedOf(account: string, prId: string) {
+    if (isSameUser(account, this.scenario.world.viewer.login))
+      return this.scenario.world.viewed.get(prId);
+
+    return this.viewedByOthers.get(`${account}\u0000${prId}`);
   }
 
   async identity(): Promise<Actor> {
@@ -181,6 +201,8 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     sources: Source[],
     previous?: PullRequestSnapshot,
   ): Promise<PullRequestSnapshot> {
+    // Whose read this is, decided when it starts: a switch during the delay cannot change it.
+    const account = this.effective();
     const pull = this.scenario.world.pulls.find((item) => item.snapshot.id === id);
 
     if (!pull)
@@ -189,10 +211,12 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
       );
     if (this.readDelayMs) await new Promise((resolve) => setTimeout(resolve, this.readDelayMs));
 
+    this.reads.push({ id, account });
+
     const now = new Date(this.scenario.world.now()).toISOString();
     const snapshot = structuredClone(pull.snapshot);
     const files = this.pullFilesSync(snapshot.repository, snapshot.number);
-    const viewed = this.scenario.world.viewed.get(id);
+    const viewed = this.viewedOf(account, id);
 
     snapshot.files = files.map((file) => ({
       path: file.path,
@@ -555,14 +579,19 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     path: string,
     viewed: boolean,
   ): Promise<{ headOid: string; baseOid: string | null } | null> {
+    // Whose mark this is, decided before any delay, as for reads.
+    const account = this.effective();
+
     await this.beforeWrite();
     const pull = this.pullById(prId);
     this.record(viewed ? 'MarkFileViewed' : 'UnmarkFileViewed', { prId, path });
 
-    const files = this.scenario.world.viewed.get(prId) ?? new Map();
+    const files = this.viewedOf(account, prId) ?? new Map();
 
     files.set(path, viewed ? 'VIEWED' : 'UNVIEWED');
-    this.scenario.world.viewed.set(prId, files);
+    if (isSameUser(account, this.scenario.world.viewer.login))
+      this.scenario.world.viewed.set(prId, files);
+    else this.viewedByOthers.set(`${account}\u0000${prId}`, files);
     this.receipt(viewed ? 'MarkFileViewed' : 'UnmarkFileViewed', undefined);
 
     return viewed

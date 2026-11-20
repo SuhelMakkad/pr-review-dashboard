@@ -1,3 +1,5 @@
+import { AccountUnavailable } from '@/forge/account.js';
+import { randomUUID } from 'node:crypto';
 import { isoNow, systemClock, type Cancel, type Clock } from '@/clock.js';
 import { deriveItem, sortItems } from '@review-desk/shared/attention';
 import { deriveAuthorItem, sortAuthorItems, type AuthorItem } from '@review-desk/shared/author';
@@ -27,7 +29,7 @@ import type { Store } from '@/db/store.js';
 import { log } from '@/log.js';
 import { EventBus } from '@/events.js';
 import type { DetectResult, GitHubApi } from '@/github/api.js';
-import { asAccount, type GitHubAccounts } from '@/github/credentials.js';
+import { asAccount, type GitHubAccounts, unscoped } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { GitHub } from '@/github/read.js';
 import type { ViewedRevision } from '@/github/write.js';
@@ -66,6 +68,17 @@ const FEED_INTERVAL_MS: Record<FeedSource, number> = {
 };
 
 const SYNC_INTERVAL_MS = 60_000;
+/** Snapshots a GitLab sync reads before checking glab's sign-in and saving them. */
+const GITLAB_SAVE_BATCH = 20;
+
+/** The latest of `deadlines` still ahead of `now`, or null. A missing one counts as none. */
+function laterDeadline(now: number, ...deadlines: (string | null | undefined)[]): string | null {
+  const latest = Math.max(
+    ...deadlines.map((deadline) => (deadline ? Date.parse(deadline) : -Infinity)),
+  );
+
+  return latest > now ? new Date(latest).toISOString() : null;
+}
 const TEAMS_REFRESH_MS = 30 * 60_000;
 const QUEUE_SAMPLE_MS = 60 * 60_000;
 const MENTION_WINDOW_MS = 14 * 24 * 60 * 60_000;
@@ -138,33 +151,57 @@ export class SyncService {
     await this.running?.catch(() => undefined);
   }
 
-  /** Share write cooldowns with reads so a manual/background sync cannot bypass GitHub's limit. */
-  deferUntil(retryAt: string): void {
-    const account = this.status.account?.login;
+  /**
+   * Share write cooldowns with reads so a manual/background sync cannot bypass the forge's limit.
+   * The deadline is the account's own; only the selected account's also shows in the status.
+   */
+  deferUntil(retryAt: string, account: string | null = this.status.account?.login ?? null): void {
     if (!account) return;
 
     const until = new Date(
-      Math.max(
-        Date.parse(retryAt),
-        this.status.retryAt ? Date.parse(this.status.retryAt) : -Infinity,
-      ),
+      Math.max(Date.parse(retryAt), Date.parse(this.cooldown(account) ?? '') || -Infinity),
     ).toISOString();
+
     this.store.setSetting(`github-write-retry:${account}`, until);
+
+    if (account !== this.status.account?.login) return;
+
     this.status = { ...this.status, retryAt: until, nextSyncAt: until };
     this.store.saveStatus(this.status);
     this.emitStatus();
   }
 
-  private cooldown(): string | null {
-    const account = this.status.account?.login;
-    const saved = account ? this.store.getSetting<string>(`github-write-retry:${account}`) : null;
+  /**
+   * The account's cooldown: the later unexpired one of a write's deadline and the deadline its
+   * last sync saved, or null.
+   */
+  private cooldown(account: string | null = this.status.account?.login ?? null): string | null {
+    // Before any account is known, the status's own deadline (from the identity read) applies.
+    if (!account) return laterDeadline(this.clock.now(), this.status.retryAt);
+
+    const saved = this.store.getSetting<string>(`github-write-retry:${account}`);
+    const synced =
+      account === this.status.account?.login
+        ? this.status.retryAt
+        : (this.store.getSetting<SyncStatus>(`status:${account}`)?.retryAt ?? null);
     // A missing deadline is none at all, never the epoch, whatever the clock reads.
     const until = Math.max(
       saved ? Date.parse(saved) : -Infinity,
-      this.status.retryAt ? Date.parse(this.status.retryAt) : -Infinity,
+      synced ? Date.parse(synced) : -Infinity,
     );
 
     return until > this.clock.now() ? new Date(until).toISOString() : null;
+  }
+
+  /**
+   * True for an account this app has worked as: the one identified now, or one with a saved
+   * status. Routes that name an account serve only these.
+   */
+  knows(account: string): boolean {
+    return (
+      account === this.status.account?.login ||
+      this.store.getSetting<SyncStatus>(`status:${account}`) !== null
+    );
   }
 
   /**
@@ -178,7 +215,8 @@ export class SyncService {
     if (this.stopped || this.cooldown()) return Promise.resolve();
 
     const trigger = options.scheduled ? 'interval' : (options.trigger ?? 'manual');
-    const run = this.perform(Boolean(options.scheduled), trigger).finally(() => {
+    // Always as the selected account, whatever account the caller's work is scoped to.
+    const run = unscoped(() => this.perform(Boolean(options.scheduled), trigger)).finally(() => {
       if (this.running === run) this.running = null;
     });
 
@@ -257,11 +295,11 @@ export class SyncService {
     await switching;
     void this.sync({ trigger: 'switch' });
 
-    return this.status;
+    return this.sentStatus;
   }
 
-  private assertNotCoolingDown(): void {
-    const retryAt = this.cooldown();
+  private assertNotCoolingDown(account: string | null = this.status.account?.login ?? null): void {
+    const retryAt = this.cooldown(account);
 
     if (retryAt)
       throw new GitHubError(
@@ -296,9 +334,9 @@ export class SyncService {
     id: string,
     account: string | null = this.status.account?.login ?? null,
   ): Promise<PullRequestDetail | null> {
-    this.assertNotCoolingDown();
-
     if (!account) return null;
+
+    this.assertNotCoolingDown(account);
 
     // A read is refused when the PR is removed or reduced after it started; the row left behind
     // can be older than the read, so read again rather than return it.
@@ -308,9 +346,26 @@ export class SyncService {
 
       if (!cached) return null;
 
+      // Where the forge cannot carry the account with each call (GitLab), its sign-in is checked
+      // before the read and again before its result is kept.
+      const verify = this.github.verifyAccount?.bind(this.github);
       const fetched = await asAccount(account, () =>
-        this.github.snapshot(id, account, cached.sources, cached),
-      );
+        verify
+          ? verify(account)
+              .then(() => this.github.snapshot(id, account, cached.sources, cached))
+              .then(async (snapshot) => {
+                await verify(account);
+
+                return snapshot;
+              })
+          : this.github.snapshot(id, account, cached.sources, cached),
+      ).catch((error: unknown) => {
+        // Saved before the caller hears of it, so the next request waits too.
+        if (error instanceof GitHubError && error.outcome === 'rate_limit' && error.retryAt)
+          this.deferUntil(error.retryAt, account);
+
+        throw error;
+      });
       // Keep the stored sources: a PR may have been added or removed by hand during the fetch.
       const outcome = this.snapshots.commit(observation, fetched, {
         fingerprint: null,
@@ -319,7 +374,8 @@ export class SyncService {
       });
 
       if (outcome.status === 'invalidated' && outcome.snapshot) continue;
-      if (outcome.status === 'committed') this.events.emit({ type: 'pulls.changed', ids: [id] });
+      if (outcome.status === 'committed')
+        this.events.emit({ type: 'pulls.changed', account, ids: [id] });
 
       return outcome.snapshot ? this.detailOf(account, outcome.snapshot) : null;
     }
@@ -380,6 +436,11 @@ export class SyncService {
         `That link is for another GitLab on ${host}, not the one ${login} is signed in to.`,
       );
     const label = `${repository}${forge === 'gitlab' ? '!' : '#'}${number}`;
+    // For GitLab, nothing is saved unless glab is this account before the reads and after them.
+    const verify = () => asAccount(login, async () => this.github.verifyAccount?.(login));
+
+    await verify();
+
     const resolved = await asAccount(login, () => this.github.resolvePull(repository, number));
 
     if (!resolved)
@@ -404,6 +465,9 @@ export class SyncService {
     const fetched = await asAccount(login, () =>
       this.github.snapshot(resolved.id, login, ordered([...feeds, 'manual']), cached),
     );
+
+    await verify();
+
     const sources = () => ordered(this.store.membership(login).get(resolved.id) ?? []);
     const snapshot = this.store.transaction(() => {
       this.store.addManual(login, resolved.id, isoNow(this.clock));
@@ -437,7 +501,7 @@ export class SyncService {
           }));
     });
 
-    this.events.emit({ type: 'pulls.changed', ids: [resolved.id] });
+    this.events.emit({ type: 'pulls.changed', account: login, ids: [resolved.id] });
 
     const detail = snapshot ? this.detailOf(login, snapshot) : null;
 
@@ -493,7 +557,7 @@ export class SyncService {
       else this.store.forgetPull(login, id);
     });
     this.forced.delete(id);
-    this.events.emit({ type: 'pulls.changed', ids: [id] });
+    this.events.emit({ type: 'pulls.changed', account: login, ids: [id] });
 
     return { tracked: remaining.length > 0 };
   }
@@ -532,8 +596,26 @@ export class SyncService {
 
     try {
       const account = await this.github.identity();
+      const chosen = this.store.getSetting<string>(SELECTED_ACCOUNT_KEY);
 
       timing.forge = forgeOf(account.login) === 'gitlab' ? 'gitlab' : 'github';
+
+      // glab signed in to the chosen GitLab account's host as someone else: read nothing as them.
+      if (chosen && forgeOf(chosen) === 'gitlab' && !sameAccount(account.login, chosen))
+        throw new AccountUnavailable(chosen, account.login);
+
+      /**
+       * For GitLab, whose CLI reads its own sign-in for each request, a phase writes only between two
+       * checks that glab is still signed in as this account: the one before its reads (the check
+       * above, then each previous phase's) and this one, after them. A sign-in change during a phase
+       * stops the sync before that phase writes anything. (A change and a change back inside one
+       * phase are not seen: Review Desk never reads the GitLab token.) GitHub calls each carry the
+       * account's own token, so they need no check.
+       */
+      const verify =
+        timing.forge === 'gitlab' && this.github.verifyAccount
+          ? () => this.github.verifyAccount!(account.login)
+          : null;
 
       if (account.login !== this.status.account?.login) {
         const saved = this.store.getSetting<SyncStatus>(`status:${account.login}`);
@@ -557,7 +639,7 @@ export class SyncService {
 
       await this.refreshTeams(account.login, scheduled);
 
-      retryAt = await this.discover(account.login, scheduled);
+      retryAt = await this.discover(account.login, scheduled, verify);
       timing.discovered = performance.now();
 
       const membership = this.store.membership(account.login);
@@ -578,6 +660,8 @@ export class SyncService {
       );
       const detected = await this.detect(ids, ciPending);
 
+      // Before detection writes anything: closures, merges and source changes included.
+      await verify?.();
       timing.detected = performance.now();
       timing.candidates = ids.length;
       if (detected.retryAt) retryAt = detected.retryAt;
@@ -638,30 +722,31 @@ export class SyncService {
         }
       }
 
-      let cursor = 0;
-      const worker = async () => {
-        while (cursor < fetches.length && !retryAt) {
-          const { id, sources, cached, result } = fetches[cursor++];
+      /** Reads one PR; the returned save is run at once or, for GitLab, with its batch. */
+      const read = async ({ id, sources, cached, result }: (typeof fetches)[number]) => {
+        try {
+          const observation = this.snapshots.observe(account.login, id);
+          const latest = this.store.snapshot(account.login, id) ?? undefined;
 
-          try {
-            const observation = this.snapshots.observe(account.login, id);
-            const latest = this.store.snapshot(account.login, id) ?? undefined;
+          // Removed from the queue since this sync read it: do not bring it back.
+          if (cached && !latest) return null;
 
-            // Removed from the queue since this sync read it: do not bring it back.
-            if (cached && !latest) continue;
+          const fetchStarted = performance.now();
 
-            const fetchStarted = performance.now();
+          timing.fetches += 1;
 
-            timing.fetches += 1;
+          const snapshot = await this.github
+            .snapshot(id, account.login, sources, latest)
+            .finally(() => {
+              const ms = performance.now() - fetchStarted;
 
-            const snapshot = await this.github
-              .snapshot(id, account.login, sources, latest)
-              .finally(() => {
-                const ms = performance.now() - fetchStarted;
+              timing.fetchSumMs += ms;
+              timing.fetchMaxMs = Math.max(timing.fetchMaxMs, ms);
+            });
 
-                timing.fetchSumMs += ms;
-                timing.fetchMaxMs = Math.max(timing.fetchMaxMs, ms);
-              });
+          return () => {
+            // The observation was taken when the read began, so a read that started later (such
+            // as a refresh) and was saved first still wins, however long this one waited.
             const outcome = this.snapshots.commit(observation, snapshot, {
               fingerprint: result?.fingerprint ?? null,
               // Removed from the queue while it was being fetched: do not bring it back.
@@ -670,24 +755,51 @@ export class SyncService {
               sources: () => this.withManual(account.login, id, snapshot.sources),
             });
 
-            // A read that started later (such as a refresh) was saved first, or the PR was
-            // removed: either way this read is older than what is stored.
-            if (outcome.status !== 'committed') continue;
+            // A later read was saved first, or the PR was removed: this read is older.
+            if (outcome.status !== 'committed') return;
 
             this.forced.delete(id);
             changed.add(id);
-          } catch (error) {
-            timing.failed += 1;
-            this.status.warnings.push(`${cached ? fullRef(cached) : id}: ${safeError(error)}`);
+          };
+        } catch (error) {
+          timing.failed += 1;
+          this.status.warnings.push(`${cached ? fullRef(cached) : id}: ${safeError(error)}`);
 
-            if (error instanceof GitHubError && error.retryAt) retryAt = error.retryAt;
-          }
+          if (error instanceof GitHubError && error.retryAt) retryAt = error.retryAt;
+
+          return null;
         }
       };
+      /** Reads `batch` three at a time, saving each read at once unless `deferred` collects it. */
+      const readAll = async (batch: typeof fetches, deferred?: (() => void)[]) => {
+        let cursor = 0;
+        const worker = async () => {
+          while (cursor < batch.length && !retryAt) {
+            const save = await read(batch[cursor++]);
 
-      // Every worker settles before the sync counts as done, so none still saves after it.
+            if (!save) continue;
+            if (deferred) deferred.push(save);
+            else save();
+          }
+        };
+
+        // Every worker settles before the batch counts as done, so none still saves after it.
+        await Promise.allSettled(Array.from({ length: Math.min(3, batch.length) }, () => worker()));
+      };
+
       timing.concurrency = Math.min(3, fetches.length);
-      await Promise.allSettled(Array.from({ length: timing.concurrency }, worker));
+
+      if (!verify) await readAll(fetches);
+      else
+        for (let start = 0; start < fetches.length && !retryAt; start += GITLAB_SAVE_BATCH) {
+          const saves: (() => void)[] = [];
+
+          await readAll(fetches.slice(start, start + GITLAB_SAVE_BATCH), saves);
+          await verify();
+
+          for (const save of saves) save();
+        }
+
       timing.fetched = performance.now();
 
       this.sampleQueue(account.login);
@@ -705,7 +817,12 @@ export class SyncService {
     } catch (error) {
       this.status.error = safeError(error);
       retryAt = error instanceof GitHubError ? error.retryAt : null;
-      timing.outcome = error instanceof GitHubError ? error.outcome : 'error';
+      timing.outcome =
+        error instanceof GitHubError
+          ? error.outcome
+          : error instanceof AccountUnavailable
+            ? error.code
+            : 'error';
     } finally {
       const now = isoNow(this.clock);
       const ended = performance.now();
@@ -736,17 +853,23 @@ export class SyncService {
         fetchMaxMs: timing.fetchMaxMs,
       });
 
+      const login = this.status.account?.login ?? null;
+      // A refresh or a write may have hit a limit while this ran: the later deadline stands.
+      const written = login ? this.store.getSetting<string>(`github-write-retry:${login}`) : null;
+      const deadline = laterDeadline(this.clock.now(), retryAt, written);
+
       this.status = {
         ...this.status,
         syncing: false,
         lastCompletedAt: now,
-        retryAt,
-        nextSyncAt: retryAt ?? new Date(this.clock.now() + SYNC_INTERVAL_MS).toISOString(),
+        retryAt: deadline,
+        nextSyncAt: deadline ?? new Date(this.clock.now() + SYNC_INTERVAL_MS).toISOString(),
       };
       this.store.saveStatus(this.status);
       this.emitStatus();
 
-      if (changed.size > 0) this.events.emit({ type: 'pulls.changed', ids: [...changed] });
+      if (login && changed.size > 0)
+        this.events.emit({ type: 'pulls.changed', account: login, ids: [...changed] });
     }
   }
 
@@ -782,7 +905,11 @@ export class SyncService {
    * Runs due discovery feeds. A successful feed replaces its membership; a failed feed leaves its
    * previous membership untouched, so a transient search failure never drops a PR's source.
    */
-  private async discover(login: string, scheduled: boolean): Promise<string | null> {
+  private async discover(
+    login: string,
+    scheduled: boolean,
+    verify: (() => Promise<void>) | null = null,
+  ): Promise<string | null> {
     const now = this.clock.now();
     const due = FEED_SOURCES.filter(
       (source) =>
@@ -793,6 +920,8 @@ export class SyncService {
       due.map((source) => this.github.discover(login, source)),
     );
     let retryAt: string | null = null;
+
+    await verify?.();
 
     feeds.forEach((feed, index) => {
       const source = due[index];
@@ -863,8 +992,19 @@ export class SyncService {
     });
   }
 
+  /** Identifies this server process in the statuses it sends; `createApp` sets the app's own. */
+  bootId: string = randomUUID();
+  /** Status changes made by this process, counted from its start, never loaded from storage. */
+  private revision = 0;
+
+  /** The status as sent to the browser: with this process's `bootId` and the current revision. */
+  get sentStatus(): SyncStatus {
+    return { ...structuredClone(this.status), bootId: this.bootId, revision: this.revision };
+  }
+
   private emitStatus(): void {
-    this.events.emit({ type: 'status', status: structuredClone(this.status) });
+    this.revision += 1;
+    this.events.emit({ type: 'status', status: this.sentStatus });
   }
 
   /** A message written for GitHub, worded for the current account's forge. */
@@ -876,12 +1016,16 @@ export class SyncService {
     return this.store.snapshots(account).filter((pr) => pr.state === 'OPEN');
   }
 
-  /** The reviewer inbox: PRs you review or were asked about, never your own. */
+  /** The selected account's inbox (see `listFor`). */
   list(): PullRequestList {
     const account = this.status.account?.login;
 
-    if (!account) return { account: null, items: [] };
+    return account ? this.listFor(account) : { account: null, items: [] };
+  }
 
+  /** `account`'s reviewer inbox: PRs it reviews or was asked about, never its own. */
+  listFor(account: string): PullRequestList {
+    const teams = this.teamsOf(account);
     const now = this.clock.now();
     const items = this.openSnapshots(account)
       .filter((pr) => !isSameUser(pr.author.login, account))
@@ -891,7 +1035,7 @@ export class SyncService {
       )
       .map((pr) => ({
         pr,
-        item: deriveItem(pr, this.store.triage(account, pr.id), account, this.status.teams, now),
+        item: deriveItem(pr, this.store.triage(account, pr.id), account, teams, now),
       }))
       .filter(({ pr, item }) => {
         const mentionOnly =
@@ -909,12 +1053,15 @@ export class SyncService {
     return { account, items: sortItems(items) };
   }
 
-  /** The author view: your own open PRs and what blocks each one. */
+  /** The selected account's own PRs (see `mineFor`). */
   mine(): MineList {
     const account = this.status.account?.login;
 
-    if (!account) return { account: null, items: [] };
+    return account ? this.mineFor(account) : { account: null, items: [] };
+  }
 
+  /** The author view: `account`'s own open PRs and what blocks each one. */
+  mineFor(account: string): MineList {
     return {
       account,
       items: sortAuthorItems(
@@ -927,11 +1074,18 @@ export class SyncService {
     };
   }
 
+  /** The PR as the selected account has it (see `detailFor`). */
   detail(id: string): PullRequestDetail | null {
     const account = this.status.account?.login;
-    const snapshot = account ? this.store.snapshot(account, id) : null;
 
-    return account && snapshot ? this.detailOf(account, snapshot) : null;
+    return account ? this.detailFor(account, id) : null;
+  }
+
+  /** The PR as `account` has it, with its triage, or null when it does not track it open. */
+  detailFor(account: string, id: string): PullRequestDetail | null {
+    const snapshot = this.store.snapshot(account, id);
+
+    return snapshot ? this.detailOf(account, snapshot) : null;
   }
 
   /** A stored snapshot with its triage, or null when the PR is no longer open. */
@@ -971,15 +1125,28 @@ export class SyncService {
   ): boolean {
     const saved = this.snapshots.markViewed(account, id, path, viewed, revision);
 
-    if (saved) this.events.emit({ type: 'pulls.changed', ids: [id] });
+    if (saved) this.events.emit({ type: 'pulls.changed', account, ids: [id] });
 
     return Boolean(saved);
   }
 
+  /**
+   * Triage from a request that names the account it was made for, which must be the selected
+   * one: a window still showing another account must not write to this one (see `updateFor`).
+   */
   update(id: string, update: TriageUpdate): PullRequestDetail | null {
     if (update.account !== this.status.account?.login) throw new Error('ACCOUNT_CHANGED');
 
-    const detail = this.detail(id);
+    return this.updateFor(update.account, id, update);
+  }
+
+  /** Triage of `account`'s PR, whichever account is selected. */
+  updateFor(
+    account: string,
+    id: string,
+    update: Omit<TriageUpdate, 'account'>,
+  ): PullRequestDetail | null {
+    const detail = this.detailFor(account, id);
 
     if (!detail) return null;
 
@@ -1012,9 +1179,9 @@ export class SyncService {
       }
     }
 
-    this.store.saveTriage(update.account, id, triage);
-    this.events.emit({ type: 'triage.updated', id });
+    this.store.saveTriage(account, id, triage);
+    this.events.emit({ type: 'triage.updated', account, id });
 
-    return this.detail(id);
+    return this.detailFor(account, id);
   }
 }

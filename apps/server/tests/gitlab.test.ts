@@ -1,3 +1,4 @@
+import { AccountUnavailable } from '@/forge/account.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { Store } from '@/db/store.js';
@@ -2126,6 +2127,20 @@ describe('GitLab safety, round three', () => {
     expect(
       withoutQuickActions('Looks fine.\n/merge\n  /close now\n```\n/approve\n```\nok /x'),
     ).toBe('Looks fine.\n&#47;merge\n  &#47;close now\n```\n/approve\n```\nok /x');
+  });
+
+  it('refuses a read for an account glab is not signed in as, and allows its own', async () => {
+    const { client, fake } = gitlab();
+
+    await expect(client.verifyAccount(VIEWER)).resolves.toBeUndefined();
+
+    fake.on('GET', 'user', { data: users.ana });
+
+    await expect(client.verifyAccount(VIEWER)).rejects.toBeInstanceOf(AccountUnavailable);
+    await expect(client.verifyAccount(VIEWER)).rejects.toMatchObject({
+      code: 'ACCOUNT_UNAVAILABLE',
+      signedInAs: `ana@${HOST}`,
+    });
   });
 
   it('refuses to write when glab is signed in as someone else than the work runs as', async () => {

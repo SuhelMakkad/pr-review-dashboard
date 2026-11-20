@@ -1,3 +1,4 @@
+import { AccountUnavailable } from '@/forge/account.js';
 import type {
   Actor,
   FeedSource,
@@ -200,7 +201,8 @@ export class GitLab implements GitHubApi {
 
   /** Per account once known (every sync and write reads the identity first), else per host. */
   private localKey(key: string): string {
-    return `gitlab:${this.login ?? this.host}:${key}`;
+    // The account the work runs as names its own state; the last identity read is the fallback.
+    return `gitlab:${scopedAccount() ?? this.login ?? this.host}:${key}`;
   }
 
   private release: Promise<GitLabVersion | null> | null = null;
@@ -298,6 +300,18 @@ export class GitLab implements GitHubApi {
         409,
         'rejected',
       );
+  }
+
+  /**
+   * Refuses a read for `account` while glab is signed in to this host as someone else. Called
+   * before a live read starts and again before its result is kept, so a sign-in change during it
+   * is caught. (glab reads its own token for each request, so a change and a change back inside
+   * one read are not: Review Desk never reads the GitLab token.)
+   */
+  async verifyAccount(account: string): Promise<void> {
+    const { login } = await this.identity();
+
+    if (login.toLowerCase() !== account.toLowerCase()) throw new AccountUnavailable(account, login);
   }
 
   /** The account key of the last identity read; local state is kept per account. */

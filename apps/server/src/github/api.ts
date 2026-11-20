@@ -105,6 +105,12 @@ export interface ReviewReceipt {
  */
 export interface GitHubApi extends GitHubWrites {
   /**
+   * Refuses (`AccountUnavailable`) when the forge is signed in as someone other than `account`.
+   * GitLab only: each GitHub call carries the named account's own token, so it needs no check.
+   */
+  verifyAccount?(account: string): Promise<void>;
+
+  /**
    * True where an approval carries its summary in one write (GitHub's review body). Where it
    * cannot (GitLab: an approval, then a note), the two are sent and checkpointed as separate
    * steps, so each has its own receipt.

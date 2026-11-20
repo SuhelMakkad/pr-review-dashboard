@@ -109,8 +109,9 @@ export class ReviewService {
     }
   }
 
-  private snapshot(prId: string): PullRequestSnapshot {
-    const detail = this.sync.detail(prId);
+  /** The PR as the account the request is for has it. */
+  private snapshot(account: string, prId: string): PullRequestSnapshot {
+    const detail = this.sync.detailFor(account, prId);
 
     if (!detail) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
 
@@ -137,16 +138,16 @@ export class ReviewService {
     this.events.emit({ type: 'draft.updated', id: prId });
   }
 
-  private async refreshQuietly(prId: string): Promise<void> {
+  private async refreshQuietly(account: string, prId: string): Promise<void> {
     try {
-      await this.sync.refresh(prId);
+      await this.sync.refresh(prId, account);
     } catch {
       // The write succeeded; the next sync will catch up.
     }
   }
 
   draft(account: string, prId: string): ReviewDraft {
-    const pr = this.snapshot(prId);
+    const pr = this.snapshot(account, prId);
     const draft = this.drafts.draft(account, prId);
 
     return {
@@ -169,7 +170,7 @@ export class ReviewService {
     changes: { body?: string; event?: ReviewEvent },
   ): Promise<ReviewDraft> {
     await this.guard(account);
-    this.snapshot(prId);
+    this.snapshot(account, prId);
     this.drafts.saveMeta(account, prId, changes);
     this.changed(prId);
 
@@ -180,7 +181,7 @@ export class ReviewService {
   private async assertCommentable(pr: PullRequestSnapshot, input: NewDraftComment): Promise<void> {
     if (input.line === null) return;
 
-    const full = await this.diffs.manifest(pr, 'full', null);
+    const full = await this.diffs.manifest(pr, 'full', null, input.account);
 
     // Its lines might be another revision's: a comment's line numbers would then land elsewhere.
     if (full.unpinned)
@@ -207,7 +208,7 @@ export class ReviewService {
   async addComment(prId: string, input: NewDraftComment): Promise<DraftComment> {
     await this.guard(input.account);
 
-    const pr = this.snapshot(prId);
+    const pr = this.snapshot(input.account, prId);
 
     // The line was picked in the diff of another revision than the PR has now.
     if (
@@ -394,7 +395,7 @@ export class ReviewService {
             `Could not check the PR before submitting: ${safeError(error)}`,
           );
         });
-    const pr = refreshed?.snapshot ?? this.snapshot(prId);
+    const pr = refreshed?.snapshot ?? this.snapshot(request.account, prId);
 
     if (pr.headOid !== request.expectedHeadOid && !request.allowNewHead) {
       throw new ReviewError(
@@ -481,7 +482,7 @@ export class ReviewService {
         this.drafts.clear(account, prId);
         this.changed(prId);
       }
-      if (!this.execution) await this.refreshQuietly(prId);
+      if (!this.execution) await this.refreshQuietly(account, prId);
 
       return { reviewUrl: review.url, submittedComments: comments.length };
     });
@@ -490,7 +491,7 @@ export class ReviewService {
   async commentNow(prId: string, input: NewDraftComment): Promise<{ url: string }> {
     await this.guard(input.account, true);
 
-    const pr = this.snapshot(prId);
+    const pr = this.snapshot(input.account, prId);
 
     if (input.path) {
       await this.assertCommentable(pr, input);
@@ -529,7 +530,7 @@ export class ReviewService {
           : this.github.addConversationComment(prId, input.body),
     );
 
-    if (!this.execution) await this.refreshQuietly(prId);
+    if (!this.execution) await this.refreshQuietly(input.account, prId);
 
     return { url: result.url };
   }
@@ -541,27 +542,27 @@ export class ReviewService {
     body: string,
   ): Promise<{ url: string; pending: boolean }> {
     await this.guard(account, true);
-    this.snapshot(prId);
+    this.snapshot(account, prId);
 
     const result = await this.write(() => this.github.replyToThread(threadId, body));
 
-    if (!this.execution) await this.refreshQuietly(prId);
+    if (!this.execution) await this.refreshQuietly(account, prId);
 
     return { url: result.url, pending: result.pending };
   }
 
   async resolve(account: string, prId: string, threadId: string, resolved: boolean): Promise<void> {
     await this.guard(account, true);
-    this.snapshot(prId);
+    this.snapshot(account, prId);
     await this.write(() => this.github.setThreadResolved(threadId, resolved));
-    if (!this.execution) await this.refreshQuietly(prId);
+    if (!this.execution) await this.refreshQuietly(account, prId);
   }
 
   /** Asks reviewers (again) on one of your own PRs. */
   async requestReviewers(account: string, prId: string, logins: string[]): Promise<void> {
     await this.guard(account, true);
 
-    const pr = this.snapshot(prId);
+    const pr = this.snapshot(account, prId);
 
     if (!isSameUser(pr.author.login, account)) {
       throw new ReviewError(
@@ -572,7 +573,7 @@ export class ReviewService {
     }
 
     await this.write(() => this.github.requestReviews(prId, logins));
-    if (!this.execution) await this.refreshQuietly(prId);
+    if (!this.execution) await this.refreshQuietly(account, prId);
   }
 
   async setViewed(
@@ -585,7 +586,7 @@ export class ReviewService {
     await this.guard(account, true);
 
     // Fails with NOT_FOUND before writing when the PR is not tracked.
-    this.snapshot(prId);
+    this.snapshot(account, prId);
 
     // Called with exactly the arguments it needs, so checkpoints of older actions still match.
     const revision = await this.write(() =>

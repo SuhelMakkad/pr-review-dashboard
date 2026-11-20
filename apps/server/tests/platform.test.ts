@@ -387,7 +387,7 @@ describe('live events', () => {
     const bus = new EventBus(3);
 
     for (let index = 0; index < 5; index++)
-      bus.emit({ type: 'pulls.changed', ids: [`pr-${index}`] });
+      bus.emit({ type: 'pulls.changed', account: 'you', ids: [`pr-${index}`] });
 
     expect(bus.since(4)?.map((stored) => stored.id)).toEqual([5]);
     expect(bus.since(2)?.map((stored) => stored.id)).toEqual([3, 4, 5]);
@@ -441,21 +441,21 @@ describe('live events', () => {
 
     expect(hello.event).toMatchObject({ type: 'hello', bootId: 'boot-sse', demo: false });
 
-    service.events.emit({ type: 'triage.updated', id: 'pr-1' });
+    service.events.emit({ type: 'triage.updated', account: 'you', id: 'pr-1' });
 
     const frames = await stream.next(3);
     const live = frames.at(-1)!;
 
-    expect(live.event).toEqual({ type: 'triage.updated', id: 'pr-1' });
+    expect(live.event).toEqual({ type: 'triage.updated', account: 'you', id: 'pr-1' });
     expect(live.id).toMatch(/^boot-sse:\d+$/);
     stream.close();
 
-    service.events.emit({ type: 'triage.updated', id: 'pr-2' });
+    service.events.emit({ type: 'triage.updated', account: 'you', id: 'pr-2' });
 
     const replay = await read({ 'last-event-id': live.id! });
     const replayed = await replay.next(3);
 
-    expect(replayed.at(-1)!.event).toEqual({ type: 'triage.updated', id: 'pr-2' });
+    expect(replayed.at(-1)!.event).toEqual({ type: 'triage.updated', account: 'you', id: 'pr-2' });
     replay.close();
 
     const foreign = await read({ 'last-event-id': 'another-boot:7' });

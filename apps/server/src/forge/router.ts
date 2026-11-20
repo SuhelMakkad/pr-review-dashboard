@@ -62,8 +62,10 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
 
     const { forge, host } = parseAccount(account);
 
-    if (forge === 'github') return this.github;
+    return forge === 'github' ? this.github : this.gitlabFor(host);
+  }
 
+  private gitlabFor(host: string): GitHubApi {
     let client = this.gitlabs.get(host);
 
     if (!client) {
@@ -72,6 +74,12 @@ export class ForgeRouter implements GitHubApi, GitHubAccounts {
     }
 
     return client;
+  }
+
+  async verifyAccount(account: string): Promise<void> {
+    const { forge, host } = parseAccount(account);
+
+    if (forge === 'gitlab') await this.gitlabFor(host).verifyAccount?.(account);
   }
 
   /** Works out the default account once, the first time one is needed with nothing picked. */
