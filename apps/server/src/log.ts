@@ -313,15 +313,20 @@ export class LogFile implements LogDestination {
 
     const rotation = (this.chain = this.chain.then(async () => {
       if (this.closed || this.failed || !this.stream) return;
-      // What is on disk and what is on its way there.
-      if ((await sizeOfAsync(this.path)) + this.pending < this.rotateAt) return;
+
+      // What is on disk and what is on its way there. A file removed from under the log is
+      // reopened, without shifting the old ones, so records stop going to the removed file.
+      const size = await sizeOfAsync(this.path);
+      const removed = size === null;
+
+      if (!removed && size + this.pending < this.rotateAt) return;
 
       this.rotating = true;
 
       try {
         await this.end(this.stream);
         this.stream = null;
-        await this.shift();
+        if (!removed) await this.shift();
         // Reopened even when closing has begun: the records accepted meanwhile are written to it,
         // and the close that waits behind this rotation then closes it.
         this.attach(this.openStream(this.path));
@@ -459,6 +464,7 @@ function sizeOf(path: string): number {
   }
 }
 
-async function sizeOfAsync(path: string): Promise<number> {
-  return (await stat(path).catch(() => null))?.size ?? 0;
+/** The file's size, or null when there is no file. */
+async function sizeOfAsync(path: string): Promise<number | null> {
+  return (await stat(path).catch(() => null))?.size ?? null;
 }

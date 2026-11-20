@@ -97,7 +97,7 @@ export class LogSummariser {
 
     for (const window of qualifying) {
       worst = Math.max(worst ?? 0, window.p99);
-      if (window.p99 > LOOP_P99_MS) over += 1;
+      if (window.p99 >= LOOP_P99_MS) over += 1;
     }
 
     // A window past the gate is a failure whatever was dropped; a pass could hide a worse one.

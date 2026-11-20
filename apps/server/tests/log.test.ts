@@ -272,7 +272,7 @@ describe('the log file', () => {
     // The rotation is now ending the first stream, which the disk does not let finish.
     const rotation = file.rotate();
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(disks[0].stream.writableEnded).toBe(true));
     expect(await file.close(50)).toBe('timeout');
 
     disks[0].release();
@@ -320,7 +320,7 @@ describe('the log file', () => {
     // The rotation is ending the first stream; records written now wait for the new file.
     const rotation = file.rotate();
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(first.stream.writableEnded).toBe(true));
     file.write('accepted while rotating\n');
 
     const closing = file.close(2000);
@@ -333,6 +333,24 @@ describe('the log file', () => {
     await rotation;
     expect(opened).toBe(2);
     expect(written.join('')).toContain('accepted while rotating');
+  });
+
+  it('reopens a file removed from under it, without shifting the old ones', async () => {
+    const dir = directory();
+    const path = join(dir, 'review-desk.log');
+    const file = new LogFile(path);
+
+    file.open();
+    file.write('before removal\n');
+    await vi.waitFor(() => expect(readFileSync(path, 'utf8')).toContain('before removal'));
+
+    rmSync(path);
+    await file.rotate();
+    file.write('after removal\n');
+
+    expect(await file.close()).toBe('closed');
+    expect(readFileSync(path, 'utf8')).toBe('after removal\n');
+    expect(existsSync(`${path}.1`)).toBe(false);
   });
 
   it('closes after a rotation in progress', async () => {
