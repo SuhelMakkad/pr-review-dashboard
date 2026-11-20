@@ -294,6 +294,10 @@ export class AiRunner {
 
       try {
         const identity = await directoryIdentity(directory);
+
+        // Not a real directory by the time it is looked at: never followed, never removed.
+        if (!identity) continue;
+
         const bytes = await sizeOf(directory, () => this.closing);
 
         if (!this.abandoned(entry.name)) {
@@ -309,11 +313,14 @@ export class AiRunner {
         // one, and it could remove the files itself.)
         const outcome = await removeWorkspace(directory, {
           waitMs: 0,
-          stillAbandoned: async () =>
-            !this.closing &&
-            this.abandoned(entry.name) &&
-            (await directoryIdentity(this.workRoot)) === root &&
-            (await directoryIdentity(directory)) === identity,
+          stillAbandoned: async () => {
+            const unchanged =
+              (await directoryIdentity(this.workRoot)) === root &&
+              (await directoryIdentity(directory)) === identity;
+
+            // After the last wait, so a shutdown or a run that began meanwhile is seen.
+            return unchanged && !this.closing && this.abandoned(entry.name);
+          },
         });
 
         if (outcome === 'busy') totals.deferred += 1;

@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   closeSync,
+  fstatSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -43,13 +44,17 @@ interface Identity {
   ino: number;
 }
 
-/** `path` as a real directory (not a symlink), with its identity; null otherwise. */
+/** `path` as a real directory (not a symlink), with its identity; null otherwise, or on error. */
 function directoryAt(path: string): Identity | null {
-  const stats = lstatSync(path, { throwIfNoEntry: false });
+  try {
+    const stats = lstatSync(path, { throwIfNoEntry: false });
 
-  return stats?.isDirectory() && !stats.isSymbolicLink()
-    ? { dev: stats.dev, ino: stats.ino }
-    : null;
+    return stats?.isDirectory() && !stats.isSymbolicLink()
+      ? { dev: stats.dev, ino: stats.ino }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 async function directoryAtAsync(path: string): Promise<Identity | null> {
@@ -124,15 +129,20 @@ export function writeBackup(db: DatabaseSync, databasePath: string, label: strin
   const folder = backupFolder(dirname(databasePath));
   const base = `backup-${label}`;
   let partial: string | null = null;
+  let reserved: Identity | null = null;
   let published: string | null = null;
 
-  // Reserve a staging name; VACUUM INTO accepts an empty file.
+  // Reserve a staging name; VACUUM INTO accepts an empty file and writes into it.
   for (let attempt = 0; attempt < 5 && !partial; attempt++) {
     const candidate = join(folder, `${base}.sqlite.${hex(4)}.partial`);
 
     try {
-      closeSync(openSync(candidate, 'wx', 0o600));
+      const descriptor = openSync(candidate, 'wx', 0o600);
+      const stats = fstatSync(descriptor);
+
+      closeSync(descriptor);
       partial = candidate;
+      reserved = { dev: stats.dev, ino: stats.ino };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
@@ -140,8 +150,21 @@ export function writeBackup(db: DatabaseSync, databasePath: string, label: strin
 
   if (!partial) throw new Error('No free staging name to back up the database under.');
 
+  /** The staging path still holds the file this call reserved, not one put there since. */
+  const ours = () => {
+    try {
+      const stats = lstatSync(partial!);
+
+      return stats.isFile() && stats.dev === reserved!.dev && stats.ino === reserved!.ino;
+    } catch {
+      return false;
+    }
+  };
+
   try {
     db.prepare('VACUUM INTO ?').run(partial);
+
+    if (!ours()) throw new Error('The database backup was replaced while it was being written.');
 
     for (let attempt = 0; attempt < 5 && !published; attempt++) {
       const name = attempt === 0 ? `${base}.sqlite` : `${base}-${Date.now()}-${hex(2)}.sqlite`;
@@ -154,13 +177,15 @@ export function writeBackup(db: DatabaseSync, databasePath: string, label: strin
       }
     }
   } finally {
-    // The reserved staging file is this call's own; one left behind is cleared next start.
+    // Only the file this call reserved is removed; one left behind is cleared next start.
     let left = false;
 
-    try {
-      unlinkSync(partial);
-    } catch (error) {
-      left = (error as NodeJS.ErrnoException).code !== 'ENOENT';
+    if (ours()) {
+      try {
+        unlinkSync(partial);
+      } catch (error) {
+        left = (error as NodeJS.ErrnoException).code !== 'ENOENT';
+      }
     }
 
     log.event(left ? 'warn' : 'info', 'backup.written', {
@@ -202,14 +227,15 @@ export async function pruneBackups(
 
   if (!names) return report({ kept: 0, removed: 0, failed: 1, managed: true });
 
-  const backups: { name: string; modified: number }[] = [];
+  const backups: { name: string; modified: number; dev: number; ino: number }[] = [];
 
   for (const name of names) {
     if (!BACKUP_NAME.test(name)) continue;
 
     const entry = await lstat(join(folder, name)).catch(() => null);
 
-    if (entry?.isFile()) backups.push({ name, modified: entry.mtimeMs });
+    if (entry?.isFile())
+      backups.push({ name, modified: entry.mtimeMs, dev: entry.dev, ino: entry.ino });
   }
 
   backups.sort(
@@ -219,14 +245,25 @@ export async function pruneBackups(
   let removed = 0;
   let failed = 0;
 
-  for (const { name } of backups.slice(keep)) {
+  for (const backup of backups.slice(keep)) {
     try {
       if (!same(await directoryAtAsync(folder), identity)) {
         failed += 1;
         break;
       }
 
-      await rm(join(folder, name));
+      // Still the very file that was ranked: one restored under its name meanwhile stays.
+      const current = await lstat(join(folder, backup.name)).catch(() => null);
+
+      if (
+        !current?.isFile() ||
+        current.dev !== backup.dev ||
+        current.ino !== backup.ino ||
+        current.mtimeMs !== backup.modified
+      )
+        continue;
+
+      await rm(join(folder, backup.name));
       removed += 1;
     } catch {
       failed += 1;
