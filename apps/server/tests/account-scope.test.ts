@@ -433,7 +433,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
     const retryAt = new Date(Date.now() + 300_000).toISOString();
     const limited = () => new GitHubError('Rate limited', retryAt, 429, 'rate_limit');
     let signedIn = ACCOUNT;
-    const pullFiles = vi.fn(async () => {
+    const pullFiles = vi.fn(async (): Promise<unknown[]> => {
       throw limited();
     });
     const verifyAccount = vi.fn(async (account: string) => {
@@ -465,6 +465,19 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
       outcome: 'rate_limit',
       retryAt,
     });
+
+    // A build that succeeds, then a closing check that is rate limited: no deadline, nothing kept.
+    pullFiles.mockImplementation(async () => []);
+    verifyAccount.mockResolvedValueOnce(undefined).mockRejectedValueOnce(limited());
+    await expect(diffs.manifest(pr, 'full', null, ACCOUNT)).rejects.toMatchObject({
+      outcome: 'unknown',
+      retryAt: null,
+    });
+
+    const reads = pullFiles.mock.calls.length;
+
+    await diffs.manifest(pr, 'full', null, ACCOUNT);
+    expect(pullFiles.mock.calls.length).toBe(reads + 1);
   });
 
   it('keeps the deadline of a checked phase when a later phase’s check fails', async () => {

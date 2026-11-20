@@ -469,7 +469,11 @@ export class SyncService {
       );
     const label = `${repository}${forge === 'gitlab' ? '!' : '#'}${number}`;
     // For GitLab, nothing is saved unless glab is this account before the reads and after them.
-    const verify = () => asAccount(login, async () => this.github.verifyAccount?.(login));
+    const verify = () =>
+      asAccount(login, async () => this.github.verifyAccount?.(login)).catch((error: unknown) =>
+        // A limit met by the check itself cannot be tied to the account.
+        Promise.reject(unattributed(error)),
+      );
 
     await verify();
 
@@ -729,7 +733,8 @@ export class SyncService {
       await verify?.();
       timing.detected = performance.now();
       timing.candidates = ids.length;
-      if (detected.retryAt) retryAt = detected.retryAt;
+      // The later deadline stands: detection's can be shorter than discovery's.
+      if (detected.retryAt) retryAt = laterDeadline(this.clock.now(), retryAt, detected.retryAt);
       // Detection was checked above, before this deadline was taken from it.
       confirm();
 
