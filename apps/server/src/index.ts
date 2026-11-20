@@ -2,6 +2,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '@/app.js';
+import { log, LogFile } from '@/log.js';
+import { watchEventLoop } from '@/http/loop.js';
 import { loadConfig } from '@/config.js';
 import { DataDirectoryLocked, lockDataDirectory, type DataDirectoryLock } from '@/db/lock.js';
 import { Store } from '@/db/store.js';
@@ -41,6 +43,29 @@ try {
 
   console.error(error.message);
   process.exit(1);
+}
+
+// The log file is this process's too: opened, rotated and closed only while it holds the lock.
+const logFile = new LogFile(join(config.dataDir, 'logs', 'review-desk.log'));
+
+logFile.open();
+log.open(logFile, process.env.REVIEW_DESK_LOG_LEVEL ?? 'info');
+
+const stopWatchingLoop = watchEventLoop();
+
+/**
+ * Closes the log, then gives up the data directory. A log file that cannot close in time may
+ * still be in use (a rename or a write), so the lock then goes only with the process.
+ */
+async function release(code: 0 | 1, clean: boolean): Promise<never> {
+  stopWatchingLoop();
+  log.event('info', 'server.stopped', { clean });
+
+  const closed = await logFile.close();
+
+  log.silence();
+  if (closed === 'closed') lock.release();
+  process.exit(closed === 'closed' ? code : 1);
 }
 
 const demoAnchor = process.env.REVIEW_DESK_DEMO_NOW
@@ -95,6 +120,7 @@ try {
   const label = config.mode === 'demo' ? 'Review Desk (demo)' : 'Review Desk';
 
   console.log(`${label}${config.viteDev ? ' API' : ''} → http://127.0.0.1:${config.port}`);
+  log.event('info', 'server.started', { mode: config.mode, port: config.port });
   if (fixture) seedDemoQueue(store, fixture.scenario.world.viewer.login, Date.now());
 
   service.start();
@@ -106,8 +132,7 @@ try {
   // Recovery may already have started work while the app got ready; stop it before closing.
   await app.close().catch(() => undefined);
   store.close();
-  lock.release();
-  process.exit(1);
+  await release(1, false);
 }
 
 let stopping = false;
@@ -145,10 +170,10 @@ async function shutdown() {
     process.exit(1);
   }
 
-  // Nothing can touch the database any more: close it, then give up the data directory.
+  // Nothing can touch the database any more: close it and the log, then give up the data
+  // directory.
   store.close();
-  lock.release();
-  process.exit(0);
+  await release(0, true);
 }
 
 process.on('SIGTERM', () => {

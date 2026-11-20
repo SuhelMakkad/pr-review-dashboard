@@ -1,4 +1,8 @@
+import { StringDecoder } from 'node:string_decoder';
 import { spawn } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
+import { gitlabOp } from '@/forge/ops.js';
+import { forgeRequest } from '@/forge/timing.js';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -126,12 +130,20 @@ export type GlabRunner = (args: string[], input: string | undefined) => Promise<
 export function spawnGlab(timeoutMs: number): GlabRunner {
   return (args, input) =>
     new Promise((resolve, reject) => {
+      const started = performance.now();
       const child = spawn('glab', args, {
         cwd: glabCwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: false,
         env: baseGlabEnvironment(),
       });
+      let spawned = started;
+
+      child.once('spawn', () => {
+        spawned = performance.now();
+      });
+      // The size limit and the log count raw bytes.
+      const decoder = new StringDecoder('utf8');
       let stdout = '';
       let stderr = '';
       let size = 0;
@@ -142,7 +154,9 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
         child.kill('SIGTERM');
       }, timeoutMs);
 
-      child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      // Bytes counted as they arrive, and decoded as they arrive: a character split across
+      // chunks is kept whole.
+      child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
 
         if (size > MAX_OUTPUT_BYTES) {
@@ -150,7 +164,7 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
           return;
         }
 
-        stdout += chunk;
+        stdout += decoder.write(chunk);
       });
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
         stderr += chunk;
@@ -161,7 +175,19 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
       });
       child.on('close', (code) => {
         clearTimeout(timeout);
-        resolve({ code, stdout, stderr, timedOut });
+
+        const ended = performance.now();
+
+        // glab reads its own token: there is no credential step to time.
+        forgeRequest('gitlab', () => gitlabOp(args.at(-1)), {
+          spawnMs: spawned - started,
+          childMs: ended - spawned,
+          totalMs: ended - started,
+          code: code ?? -1,
+          timedOut,
+          bytes: size,
+        });
+        resolve({ code, stdout: stdout + decoder.end(), stderr, timedOut });
       });
 
       child.stdin.on('error', () => undefined);

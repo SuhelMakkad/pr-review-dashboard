@@ -1,4 +1,8 @@
+import { StringDecoder } from 'node:string_decoder';
 import { spawn } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
+import { githubOp } from '@/forge/ops.js';
+import { forgeRequest } from '@/forge/timing.js';
 import { ghCredentials, type GhCredentials } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 
@@ -61,7 +65,9 @@ export class GhCli implements GitHubTransport {
   ) {}
 
   private async spawn(args: string[], input?: string): Promise<RunResult> {
+    const started = performance.now();
     const env = await this.credentials.environment();
+    const prepared = performance.now();
 
     return new Promise((resolve, reject) => {
       const child = spawn('gh', args, {
@@ -69,6 +75,13 @@ export class GhCli implements GitHubTransport {
         shell: false,
         env,
       });
+      let spawned = prepared;
+
+      child.once('spawn', () => {
+        spawned = performance.now();
+      });
+      // The size limit and the log count raw bytes.
+      const decoder = new StringDecoder('utf8');
       let stdout = '';
       let stderr = '';
       let size = 0;
@@ -79,7 +92,9 @@ export class GhCli implements GitHubTransport {
         child.kill('SIGTERM');
       }, this.timeoutMs);
 
-      child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      // Bytes counted as they arrive, and decoded as they arrive: a character split across
+      // chunks is kept whole.
+      child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
 
         if (size > MAX_OUTPUT_BYTES) {
@@ -87,7 +102,7 @@ export class GhCli implements GitHubTransport {
           return;
         }
 
-        stdout += chunk;
+        stdout += decoder.write(chunk);
       });
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
         stderr += chunk;
@@ -105,9 +120,23 @@ export class GhCli implements GitHubTransport {
       });
       child.on('close', (code) => {
         clearTimeout(timeout);
-        resolve({ code, stdout, stderr, timedOut });
+
+        const ended = performance.now();
+
+        forgeRequest('github', () => githubOp(args.at(-1), input), {
+          credentialMs: prepared - started,
+          spawnMs: spawned - prepared,
+          childMs: ended - spawned,
+          totalMs: ended - started,
+          code: code ?? -1,
+          timedOut,
+          bytes: size,
+        });
+        resolve({ code, stdout: stdout + decoder.end(), stderr, timedOut });
       });
 
+      // gh can exit before reading its input; the result is reported through `close`.
+      child.stdin.on('error', () => undefined);
       child.stdin.end(input);
     });
   }

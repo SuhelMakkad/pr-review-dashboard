@@ -1,4 +1,5 @@
 import Fastify, { type FastifyReply } from 'fastify';
+import { knownRoutes, log } from '@/log.js';
 import fastifyStatic from '@fastify/static';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -65,6 +66,25 @@ export interface AppOptions {
 
 export async function createApp(service: SyncService, options: AppOptions = {}) {
   const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
+
+  // Every route as declared, so a log record can name one without naming a request's own path.
+  app.addHook('onRoute', (route) => {
+    knownRoutes.add(route.url);
+  });
+  // How long each request took, by route: slow ones and server errors stand out.
+  app.addHook('onResponse', async (request, reply) => {
+    if (request.routeOptions.config.stream) return;
+
+    const ms = reply.elapsedTime;
+    const status = reply.statusCode;
+
+    log.event(status >= 500 ? 'warn' : ms > 500 ? 'info' : 'debug', 'http.request', {
+      route: request.routeOptions.url ?? 'unmatched',
+      method: request.method as never,
+      status,
+      ms,
+    });
+  });
   const sessionToken = options.sessionToken ?? createSessionToken();
   const bootId = options.bootId ?? randomUUID();
   const demo = Boolean(options.fixture);
