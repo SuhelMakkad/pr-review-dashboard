@@ -94,49 +94,6 @@ function approvedAlready(row: OperationRecord): boolean {
   return row.steps.some((step) => step.method === 'approveReview' && step.completedAt);
 }
 
-/**
- * An automatic approval queued before summaries were checked on their own, with the fingerprint
- * its summary is checked against: taken from the PR now, where the PR still matches what the
- * review read (this post's own resolutions aside). Otherwise unchanged: the approval's own check
- * then stops it before anything more is sent.
- */
-function withSummaryBasis(
-  row: OperationRecord,
-  action: AiReviewAction,
-  pr: PullRequestSnapshot | undefined,
-): AiReviewAction {
-  const basis = action.basis;
-
-  if (!basis || basis.summaryFingerprint || !pr) return action;
-
-  const resolved = new Set(
-    row.steps
-      .filter(
-        (step) => step.method === 'setThreadResolved' && step.completedAt && step.acknowledged,
-      )
-      .map((step) => String(step.args[0])),
-  );
-  const unchanged =
-    [...resolved].every((id) => pr.threads.find((thread) => thread.id === id)?.isResolved) &&
-    publicationFingerprint(pr, action.runId, row.account, resolved) === basis.fingerprint;
-
-  return unchanged
-    ? {
-        ...action,
-        basis: {
-          ...basis,
-          summaryFingerprint: publicationFingerprint(
-            pr,
-            action.runId,
-            row.account,
-            resolved,
-            false,
-          ),
-        },
-      }
-    : action;
-}
-
 /** True for the summary an automatic approval sends after it, where they are two steps. */
 function isSummary(action: AiReviewAction, method: string): boolean {
   return action.event === 'APPROVE' && method === 'addConversationComment';
@@ -660,7 +617,8 @@ export class OperationQueue {
         409,
         'This action is no longer available. Refresh Activity.',
       );
-    const uncertain = row.steps.some((step) => step.uncertain);
+    // A combined approval the forge refused may have approved without its summary.
+    const uncertain = row.steps.some((step) => step.uncertain) || this.refusedCombined(row);
 
     if (command === 'reopen' && uncertain && !confirmed)
       throw new ReviewError(
@@ -706,13 +664,15 @@ export class OperationQueue {
               ? 'Returned to your draft. Saved content is available here.'
               : row.action.type !== 'ai_review'
                 ? 'Cancelled before sending. Your draft is preserved.'
-                : uncertain && approvedAlready(row)
-                  ? 'Stopped. The PR was approved; check whether its summary was posted.'
-                  : uncertain
-                    ? 'Stopped. Check GitHub: this review may already be posted.'
-                    : approvedAlready(row)
-                      ? 'Cancelled. The PR was approved; its summary was not posted.'
-                      : 'Cancelled. Nothing was posted.',
+                : this.refusedCombined(row)
+                  ? 'Stopped. Check GitLab: the approval may have gone out without its summary.'
+                  : uncertain && approvedAlready(row)
+                    ? 'Stopped. The PR was approved; check whether its summary was posted.'
+                    : uncertain
+                      ? 'Stopped. Check GitHub: this review may already be posted.'
+                      : approvedAlready(row)
+                        ? 'Cancelled. The PR was approved; its summary was not posted.'
+                        : 'Cancelled. Nothing was posted.',
         });
         new DraftStore(this.sync.store).unlock(account, row.prId, id);
       });
@@ -1261,8 +1221,18 @@ export class OperationQueue {
 
     if (action.type !== 'ai_review' || action.event !== 'APPROVE' || row.plan === 2) return row;
     if (this.sync.github.approvalCarriesSummary) return row;
-    if (!row.steps.some((step) => step.method === 'approveReview'))
-      return this.save({ ...row, plan: 2, action: withSummaryBasis(row, action, pr) });
+    if (!row.steps.some((step) => step.method === 'approveReview')) {
+      // Queued by an earlier version, with nothing to check its summary against after
+      // approving: nothing more of it is sent.
+      if (action.basis && !action.basis.summaryFingerprint)
+        throw new ReviewError(
+          'LEGACY_APPROVAL',
+          409,
+          'This automatic approval was queued by an earlier version of Review Desk, which could not check its summary on GitLab. Nothing more is sent; check the PR, then approve it yourself if it still applies.',
+        );
+
+      return this.save({ ...row, plan: 2 });
+    }
     if (!this.refusedCombined(row)) return row;
 
     const approved = approvalOf(row, pr, false);
@@ -1363,17 +1333,17 @@ export class OperationQueue {
           ? compared
           : null;
 
-    this.stopFor(
-      row,
-      this.postProblem(
-        row,
-        action,
-        stored?.state === 'OPEN' ? stored : undefined,
-        mergeBase,
-        method,
-        args,
-      ),
-    );
+    const open = stored?.state === 'OPEN' ? stored : undefined;
+
+    this.stopFor(row, this.postProblem(row, action, open, mergeBase, method, args));
+
+    // The first check of a summary, right after its approval, records which approval that is:
+    // later attempts go only with it, never with one that replaced it.
+    if (isSummary(action, method) && !row.approvalId) {
+      const approval = approvalOf(row, open, this.sync.github.approvalCarriesSummary);
+
+      if (approval) row = this.save({ ...row, approvalId: approval.id });
+    }
 
     return row;
   }
@@ -1503,7 +1473,11 @@ export class OperationQueue {
     // reviewed commit, the summary waits for you.
     const summary = isSummary(action, method);
 
-    if (summary && !approvalOf(row, pr, this.sync.github.approvalCarriesSummary))
+    const approval = summary
+      ? approvalOf(row, pr, this.sync.github.approvalCarriesSummary)
+      : undefined;
+
+    if (summary && (!approval || (row.approvalId && approval.id !== row.approvalId)))
       return {
         skipped: 'your approval of the reviewed commit is no longer on the PR.',
         code: 'APPROVAL_WITHDRAWN',

@@ -25,4 +25,9 @@ export interface OperationRecord extends Omit<GitHubOperation, 'controls'> {
    * before plans were versioned, which sent both in one `approveReview` step.
    */
   plan?: 2;
+  /**
+   * Plan 2: the forge's id for the approval this post gave (GitLab: its note), recorded when its
+   * summary is first checked. The summary goes only with that approval, never a replacement.
+   */
+  approvalId?: string;
 }

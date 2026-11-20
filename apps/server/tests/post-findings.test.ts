@@ -1530,12 +1530,9 @@ describe('approvals whose summary is a separate write', () => {
     expect(github.writes.map((write) => write.op)).toEqual(['ApproveReview']);
   });
 
-  it.each([
-    ['still matches what the review read', false, ['ApproveReview', 'AddComment']],
-    ['changed since the review', true, []],
-  ])(
-    'gives a post queued before summaries were checked their check, when the PR %s',
-    async (_case, changed, writes) => {
+  it.each([false, true])(
+    'holds a post queued before summaries were checked, before any write (discussion changed: %s)',
+    async (changed) => {
       const context = await gitlabLike();
       const { github, queue, store, pull, review, posted } = context;
 
@@ -1546,19 +1543,60 @@ describe('approvals whose summary is a separate write', () => {
       const action = data.action as Extract<typeof data.action, { type: 'ai_review' }>;
       const { summaryFingerprint: _new, ...basis } = action.basis!;
 
-      // As the previous version queued it: no plan, no summary fingerprint.
+      // As the previous version queued it: no plan, no summary fingerprint, no summary tag.
       store.db
         .update(githubOperations)
-        .set({ data: { ...data, action: { ...action, basis } } })
+        .set({
+          data: {
+            ...data,
+            action: {
+              ...action,
+              basis,
+              body: action.body.replace('\n<!-- review-desk:approval-summary -->', ''),
+            },
+          },
+        })
         .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
         .run();
       if (changed) commentOn(pull(1839).snapshot, 'One more thing.');
       queue.resume();
 
-      await posted(run.id, changed ? 'cancelled' : 'succeeded');
-      expect(github.writes.map((write) => write.op)).toEqual(writes);
+      const held = await posted(run.id, 'needs_attention');
+
+      expect(held.error?.code).toBe('LEGACY_APPROVAL');
+      expect(held.controls).toEqual(['cancel', 'dismiss']);
+      expect(github.writes).toEqual([]);
     },
   );
+
+  it('does not post the summary with an approval that replaced the one this post gave', async () => {
+    const { github, queue, pull, review, posted } = await gitlabLike();
+    const add = github.addConversationComment.bind(github);
+    let attempts = 0;
+
+    // The summary is checked (recording this post's approval), then refused.
+    vi.spyOn(github, 'addConversationComment').mockImplementation(async (...args) => {
+      if (++attempts === 1)
+        throw new GitHubError('GitLab refused the note.', null, 400, 'rejected');
+
+      return add(...args);
+    });
+
+    const run = await review();
+    const failed = await posted(run.id, 'needs_attention');
+    const snapshot = pull(1839).snapshot;
+
+    // Withdrawn and given again by hand on the same head: another approval.
+    snapshot.verdicts = snapshot.verdicts.map((verdict) =>
+      verdict.login === 'you' ? { ...verdict, id: 'note-by-hand' } : verdict,
+    );
+    snapshot.updatedAt = new Date().toISOString();
+    await queue.control('you', failed.id, 'retry');
+    await expect
+      .poll(() => queue.get('you', failed.id).error?.code, { timeout: 2500, interval: 20 })
+      .toBe('APPROVAL_WITHDRAWN');
+    expect(attempts).toBe(1);
+  });
 
   it('can be stopped after a restart lost the summary’s response, keeping the approval', async () => {
     const context = await gitlabLike();
@@ -1886,6 +1924,22 @@ describe('approvals whose summary is a separate write', () => {
       }
     });
 
+    it('says the approval may have gone out when a refused one is stopped', async () => {
+      const { queue, posted, run, github } = await legacy({ approved: true, summary: false }, true);
+      const held = await posted(run.id, 'needs_attention');
+
+      await expect(queue.control('you', held.id, 'cancel')).rejects.toMatchObject({
+        code: 'CONFIRM_REQUIRED',
+      });
+
+      const { operation } = await queue.control('you', held.id, 'cancel', true);
+
+      expect(operation.progress).toBe(
+        'Stopped. Check GitLab: the approval may have gone out without its summary.',
+      );
+      expect(github.writes).toEqual([]);
+    });
+
     it('stays stopped when cancelled while the PR is checked', async () => {
       const context = await legacy(
         { approved: true, summary: false },
@@ -1894,7 +1948,8 @@ describe('approvals whose summary is a separate write', () => {
           vi.spyOn(github, 'markedComment').mockImplementationOnce(async () => {
             const row = queue.list('you').items.find((item) => item.action.type === 'ai_review')!;
 
-            await queue.control('you', row.id, 'cancel');
+            // Confirmed: the refused step may have approved.
+            await queue.control('you', row.id, 'cancel', true);
 
             return { id: 'posted', url: 'posted-url' };
           });
