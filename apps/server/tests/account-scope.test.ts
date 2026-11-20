@@ -236,14 +236,19 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
       onSnapshot: null as null | ((id: string) => void),
       /** MRs discovery also returns, beyond the `count` open ones. */
       discovered: [] as string[],
+      /** A deadline the `assigned` feed is rate limited with, if any. */
+      feedLimit: null as string | null,
     };
     const api = {
       identity: vi.fn(async () => ({ login: state.signedIn })),
       teams: vi.fn(async () => []),
       capabilities: vi.fn(async () => ({ requestChanges: true })),
-      discover: vi.fn(async (_login: string, source: string) =>
-        source === 'requested' ? [...ids, ...state.discovered] : [],
-      ),
+      discover: vi.fn(async (_login: string, source: string) => {
+        if (source === 'assigned' && state.feedLimit)
+          throw new GitHubError('Rate limited', state.feedLimit, 429, 'rate_limit');
+
+        return source === 'requested' ? [...ids, ...state.discovered] : [];
+      }),
       detect: vi.fn(async (list: string[]) => ({
         results: list.map((id) => ({
           id,
@@ -424,6 +429,62 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
     expect(pullFiles).toHaveBeenCalledTimes(2);
   });
 
+  it('passes on a GitLab diff’s unconfirmed limit with no deadline, and a confirmed one as is', async () => {
+    const retryAt = new Date(Date.now() + 300_000).toISOString();
+    const limited = () => new GitHubError('Rate limited', retryAt, 429, 'rate_limit');
+    let signedIn = ACCOUNT;
+    const pullFiles = vi.fn(async () => {
+      throw limited();
+    });
+    const verifyAccount = vi.fn(async (account: string) => {
+      if (signedIn !== account) throw new AccountUnavailable(account, signedIn);
+    });
+    const diffs = new DiffService({ pullFiles, verifyAccount } as unknown as GitHubApi);
+    const pr = snapshot({ id: 'mr-1', headOid: 'head-1', baseOid: 'base-1', files: [] });
+
+    // A check that is itself rate limited cannot say whose the limit is.
+    verifyAccount.mockRejectedValueOnce(limited());
+    await expect(diffs.manifest(pr, 'full', null, ACCOUNT)).rejects.toMatchObject({
+      outcome: 'unknown',
+      retryAt: null,
+    });
+
+    // A limit met while building, after glab became someone else: nobody's.
+    pullFiles.mockImplementationOnce(async () => {
+      signedIn = OTHER;
+      throw limited();
+    });
+    await expect(diffs.manifest(pr, 'full', null, ACCOUNT)).rejects.toMatchObject({
+      outcome: 'unknown',
+      retryAt: null,
+    });
+
+    // Confirmed as the account: its limit, as the forge reported it.
+    signedIn = ACCOUNT;
+    await expect(diffs.manifest(pr, 'full', null, ACCOUNT)).rejects.toMatchObject({
+      outcome: 'rate_limit',
+      retryAt,
+    });
+  });
+
+  it('keeps the deadline of a checked phase when a later phase’s check fails', async () => {
+    const { service, state } = gitlabSync(2);
+    const retryAt = new Date(Date.now() + 300_000).toISOString();
+
+    await service.sync();
+
+    // Discovery meets a limit on one feed and is checked; detection's check then finds someone
+    // else.
+    state.feedLimit = retryAt;
+    state.onCheck = (check) => {
+      if (check === 5) state.signedIn = OTHER;
+    };
+    await service.sync();
+
+    expect(service.status.error).toContain(`signed in as ${OTHER}`);
+    expect(service.status.retryAt).toBe(retryAt);
+  });
+
   it('saves a refresh’s rate limit for the account only while glab is still it', async () => {
     const { store, service, state, api } = gitlabSync(1);
     const retryAt = new Date(Date.now() + 300_000).toISOString();
@@ -588,6 +649,42 @@ describe('a sync that finds the CLI signed in as another account', () => {
 
     release();
     await syncing;
+  });
+});
+
+describe('a sync that adopts an account under a cooldown', () => {
+  it('shows the cooldown and reads nothing until it passes', async () => {
+    const store = new Store(':memory:');
+    let login = 'first-me';
+    const discover = vi.fn(async () => []);
+    const api = {
+      identity: vi.fn(async () => ({ login })),
+      teams: vi.fn(async () => []),
+      discover,
+      detect: vi.fn(async () => ({ results: [], budget: null })),
+      snapshot: vi.fn(),
+    } as unknown as GitHubApi;
+    const service = new SyncService(store, api);
+    const retryAt = new Date(Date.now() + 300_000).toISOString();
+
+    cleanups.push(() => store.close());
+    await service.sync();
+
+    // second-me met a limit while first-me was in use (a refresh scoped to it).
+    store.setSetting('github-write-retry:second-me', retryAt);
+    discover.mockClear();
+
+    // Nothing was picked in the app, and the CLI now says second-me.
+    login = 'second-me';
+    await service.sync();
+
+    expect(service.status).toMatchObject({
+      account: { login: 'second-me' },
+      retryAt,
+      nextSyncAt: retryAt,
+    });
+    expect(service.sentStatus.retryAt).toBe(retryAt);
+    expect(discover).not.toHaveBeenCalled();
   });
 });
 

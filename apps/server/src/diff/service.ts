@@ -7,6 +7,7 @@ import {
 } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi, RemoteFile } from '@/github/api.js';
+import { AccountUnavailable, unattributed } from '@/forge/account.js';
 import { asAccount } from '@/github/credentials.js';
 import { textPatch } from '@/diff/patch.js';
 
@@ -170,12 +171,41 @@ export class DiffService {
       return manifest;
     }
 
+    const verify = this.github.verifyAccount?.bind(this.github);
+
+    if (!verify)
+      return asAccount(account, async () => {
+        const manifest = await work();
+
+        this.publish(build);
+
+        return manifest;
+      });
+
     return asAccount(account, async () => {
-      await this.github.verifyAccount?.(account);
+      // A limit met by a check itself cannot be tied to the account: it is nobody's cooldown.
+      const check = () =>
+        verify(account).catch((error: unknown) => Promise.reject(unattributed(error)));
 
-      const manifest = await work();
+      await check();
 
-      await this.github.verifyAccount?.(account);
+      let manifest: DiffManifest;
+
+      try {
+        manifest = await work();
+      } catch (error) {
+        if (error instanceof AccountUnavailable) throw error;
+
+        // A limit met while building is the account's only if glab is still signed in as it.
+        const confirmed = await verify(account).then(
+          () => true,
+          () => false,
+        );
+
+        throw confirmed ? error : unattributed(error);
+      }
+
+      await check();
       this.publish(build);
 
       return manifest;

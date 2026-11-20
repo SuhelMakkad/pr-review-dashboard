@@ -1,4 +1,4 @@
-import { AccountUnavailable } from '@/forge/account.js';
+import { AccountUnavailable, unattributed } from '@/forge/account.js';
 import { randomUUID } from 'node:crypto';
 import { isoNow, systemClock, type Cancel, type Clock } from '@/clock.js';
 import { deriveItem, sortItems } from '@review-desk/shared/attention';
@@ -70,22 +70,6 @@ const FEED_INTERVAL_MS: Record<FeedSource, number> = {
 const SYNC_INTERVAL_MS = 60_000;
 /** Snapshots a GitLab sync reads before checking glab's sign-in and saving them. */
 const GITLAB_SAVE_BATCH = 20;
-
-/**
- * A rate limit that cannot be tied to the account it was met for (glab may have been signed in as
- * someone else): passed on as an ordinary failure with no deadline, so no caller saves it as that
- * account's cooldown.
- */
-function unattributed(error: unknown): unknown {
-  if (!(error instanceof GitHubError) || error.outcome !== 'rate_limit') return error;
-
-  return new GitHubError(
-    `${error.message} Review Desk could not confirm which GitLab account it was for, so it will try again.`,
-    null,
-    error.status,
-    'unknown',
-  );
-}
 
 /** The latest of `deadlines` still ahead of `now`, or null. A missing one counts as none. */
 function laterDeadline(now: number, ...deadlines: (string | null | undefined)[]): string | null {
@@ -624,6 +608,11 @@ export class SyncService {
     this.emitStatus();
 
     let retryAt: string | null = null;
+    /** Deadlines from phases whose reads were confirmed as this account's (GitHub: all of them). */
+    let confirmedRetryAt: string | null = null;
+    const confirm = () => {
+      confirmedRetryAt = laterDeadline(this.clock.now(), confirmedRetryAt, retryAt);
+    };
     const changed = new Set<string>();
     // Wall time per phase, and the fetches' own durations (they overlap: concurrent work, not a
     // share of the phase).
@@ -679,9 +668,29 @@ export class SyncService {
           warnings: [],
           lastAttemptAt: this.status.lastAttemptAt,
         };
+        // A cooldown this account met while it was not in use (a scoped refresh, a write) holds:
+        // the check this sync started with was the previous account's.
+        const waiting = this.cooldown(account.login);
+
+        if (waiting) {
+          this.status.retryAt = waiting;
+          this.status.nextSyncAt = waiting;
+        }
+
         // Published at once, with a new revision: the routes that follow the account in use serve
         // this account from now on, and the status must say so before they do.
         this.emitStatus();
+
+        if (waiting) {
+          retryAt = waiting;
+          confirm();
+          timing.outcome = 'rate_limit';
+          this.status.error = this.worded(
+            'GitHub rate limit reached. Refresh will resume automatically after the cooldown.',
+          );
+
+          return;
+        }
       } else {
         this.status.account = account;
       }
@@ -694,6 +703,8 @@ export class SyncService {
       await this.refreshTeams(account.login, scheduled);
 
       retryAt = await this.discover(account.login, scheduled, verify);
+      // Discovery checked its reads before writing them: its deadline is the account's.
+      confirm();
       timing.discovered = performance.now();
 
       const membership = this.store.membership(account.login);
@@ -719,6 +730,8 @@ export class SyncService {
       timing.detected = performance.now();
       timing.candidates = ids.length;
       if (detected.retryAt) retryAt = detected.retryAt;
+      // Detection was checked above, before this deadline was taken from it.
+      confirm();
 
       const fetches: {
         id: string;
@@ -849,13 +862,16 @@ export class SyncService {
 
       timing.concurrency = Math.min(3, fetches.length);
 
-      if (!verify) await readAll(fetches);
-      else
+      if (!verify) {
+        await readAll(fetches);
+        confirm();
+      } else
         for (let start = 0; start < fetches.length && !retryAt; start += GITLAB_SAVE_BATCH) {
           const saves: (() => void)[] = [];
 
           await readAll(fetches.slice(start, start + GITLAB_SAVE_BATCH), saves);
           await verify();
+          confirm();
 
           for (const save of saves) save();
         }
@@ -876,7 +892,12 @@ export class SyncService {
         );
     } catch (error) {
       this.status.error = safeError(error);
-      retryAt = error instanceof GitHubError ? error.retryAt : null;
+      // A failed phase's own deadline goes with it; those of phases checked before it stand.
+      retryAt = laterDeadline(
+        this.clock.now(),
+        confirmedRetryAt,
+        error instanceof GitHubError ? error.retryAt : null,
+      );
       timing.outcome =
         error instanceof GitHubError
           ? error.outcome
