@@ -761,7 +761,8 @@ export class SyncService {
   }
 
   private async refreshTeams(login: string, scheduled: boolean): Promise<void> {
-    const fetchedAt = this.teamsFetched.get(login) ?? 0;
+    // Never fetched is due now, whatever the clock reads.
+    const fetchedAt = this.teamsFetched.get(login) ?? -Infinity;
 
     if (scheduled && this.clock.now() - fetchedAt < TEAMS_REFRESH_MS) return;
 
@@ -786,7 +787,7 @@ export class SyncService {
     const due = FEED_SOURCES.filter(
       (source) =>
         !scheduled ||
-        now - (this.feedRuns.get(`${login}:${source}`) ?? 0) >= FEED_INTERVAL_MS[source],
+        now - (this.feedRuns.get(`${login}:${source}`) ?? -Infinity) >= FEED_INTERVAL_MS[source],
     );
     const feeds = await Promise.allSettled(
       due.map((source) => this.github.discover(login, source)),

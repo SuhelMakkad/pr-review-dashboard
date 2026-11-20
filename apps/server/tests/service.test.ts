@@ -222,19 +222,22 @@ describe('sync and local persistence', () => {
     await app.close();
   });
 
-  it('reads a missing cooldown as none, even on a clock set before 1970', async () => {
+  it('reads a missing cooldown or fetch as none, even on a clock set before 1970', async () => {
+    const github = fakeGitHub();
     const service = new SyncService(
       store(),
-      fakeGitHub(),
+      github,
       undefined,
       null,
       new TestClock(Date.parse('1969-06-01T00:00:00Z')),
     );
 
-    await service.sync();
+    // A scheduled sync runs every feed and the teams that have never been fetched.
+    await service.sync({ scheduled: true });
 
     expect(service.status.retryAt).toBeNull();
     expect(service.list().items).toHaveLength(1);
+    expect(github.teams).toHaveBeenCalled();
   });
 
   it('permanently wakes a snoozed PR on new activity, even after that activity is reviewed', async () => {

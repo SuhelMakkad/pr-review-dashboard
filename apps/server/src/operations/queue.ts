@@ -484,7 +484,7 @@ export class OperationQueue {
       .limit(1)
       .get()?.createdAt;
     const timestamp = new Date(
-      Math.max(this.clock.now(), lastCreatedAt ? Date.parse(lastCreatedAt) + 1 : 0),
+      Math.max(this.clock.now(), lastCreatedAt ? Date.parse(lastCreatedAt) + 1 : -Infinity),
     ).toISOString();
     const row: OperationRecord = {
       id,
@@ -1731,7 +1731,7 @@ export class OperationQueue {
             ? Date.parse(error.retryAt)
             : error.outcome === 'rate_limit'
               ? this.clock.now() + 60_000
-              : 0,
+              : -Infinity,
         ),
       ).toISOString();
 
