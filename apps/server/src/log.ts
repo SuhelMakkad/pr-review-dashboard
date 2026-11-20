@@ -322,7 +322,9 @@ export class LogFile implements LogDestination {
         await this.end(this.stream);
         this.stream = null;
         await this.shift();
-        if (!this.closed) this.attach(this.openStream(this.path));
+        // Reopened even when closing has begun: the records accepted meanwhile are written to it,
+        // and the close that waits behind this rotation then closes it.
+        this.attach(this.openStream(this.path));
       } catch {
         this.fail();
       } finally {
@@ -415,7 +417,10 @@ export class LogFile implements LogDestination {
     for (let index = this.keep - 1; index >= 1; index--)
       await rename(`${this.path}.${index}`, `${this.path}.${index + 1}`).catch(() => undefined);
 
-    await rename(this.path, `${this.path}.1`);
+    // A file removed from under the log is started afresh, not a reason to stop logging.
+    await rename(this.path, `${this.path}.1`).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
   }
 
   /** The same, before the server serves anything. */

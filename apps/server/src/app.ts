@@ -73,6 +73,8 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   });
   // How long each request took, by route: slow ones and server errors stand out.
   app.addHook('onResponse', async (request, reply) => {
+    if (request.routeOptions.config.stream) return;
+
     const ms = reply.elapsedTime;
     const status = reply.statusCode;
 

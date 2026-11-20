@@ -20,10 +20,17 @@ export function parseEventId(value: unknown, bootId: string): number | null {
   return boot === bootId && Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
+declare module 'fastify' {
+  interface FastifyContextConfig {
+    /** A long-lived stream: its lifetime is not a response time, so it is not timed. */
+    stream?: boolean;
+  }
+}
+
 export function registerEventStream(app: FastifyInstance, options: SseOptions): void {
   const streams = new Set<ServerResponse>();
 
-  app.get('/api/events', (request, reply) => {
+  app.get('/api/events', { config: { stream: true } }, (request, reply) => {
     reply.hijack();
 
     const stream = reply.raw;

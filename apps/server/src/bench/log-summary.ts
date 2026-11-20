@@ -28,84 +28,115 @@ export interface LogSummary {
 }
 
 /**
- * Summarises a log written at `debug` (every request, every delay window): each route's p50
- * and p95 against the route gate, and the event loop's windows against the loop gate. A route
- * with too few requests, or no window with enough samples, cannot be decided.
+ * A route's verdict against its gate. `missing` records were dropped, and any of them could have
+ * been this route's: a pass stands only if that many slow requests could not sink it, and a
+ * failure only if that many fast ones could not lift it.
  */
-export function summariseLog(lines: Iterable<string>): LogSummary {
-  const requests = new Map<string, { method: string; route: string; ms: number[] }>();
-  const windows: { p99: number; max: number; count: number }[] = [];
-  let dropped = 0;
+function routeVerdict(ms: number[], missing: number): Verdict {
+  if (ms.length < MIN_ROUTE_SAMPLES) return 'insufficient samples';
 
-  for (const line of lines) {
+  // The nearest-rank p95 is under the gate when that many requests are.
+  const needed = (count: number) => Math.ceil(0.95 * count);
+  const fast = ms.filter((value) => value < ROUTE_P95_MS).length;
+
+  if (fast >= needed(ms.length)) return fast >= needed(ms.length + missing) ? 'pass' : 'incomplete';
+
+  return fast + missing >= needed(ms.length + missing) ? 'incomplete' : 'fail';
+}
+
+/**
+ * Summarises a log written at `debug` (every request, every delay window), one line at a time:
+ * each route's p50 and p95 against the route gate, and the event loop's windows against the loop
+ * gate. A route with too few requests, or no window with enough samples, cannot be decided.
+ */
+export class LogSummariser {
+  private readonly requests = new Map<string, { method: string; route: string; ms: number[] }>();
+  private readonly windows: { p99: number; max: number; count: number }[] = [];
+  private dropped = 0;
+
+  add(line: string): void {
     let record: Record<string, unknown>;
 
     try {
       record = JSON.parse(line);
     } catch {
-      continue;
+      return;
     }
 
     if (record.event === 'http.request' && typeof record.ms === 'number') {
       const method = String(record.method);
       const route = String(record.route);
       const key = `${method} ${route}`;
-      const entry = requests.get(key) ?? { method, route, ms: [] };
+      const entry = this.requests.get(key) ?? { method, route, ms: [] };
 
       entry.ms.push(record.ms);
-      requests.set(key, entry);
+      this.requests.set(key, entry);
     } else if (record.event === 'loop.delay') {
-      windows.push({
+      this.windows.push({
         p99: Number(record.p99),
         max: Number(record.max),
         count: Number(record.count),
       });
     } else if (record.event === 'log.dropped' && typeof record.count === 'number') {
-      dropped += record.count;
+      this.dropped += record.count;
     }
   }
 
-  const decide = (enough: boolean, passes: boolean): Verdict =>
-    !enough ? 'insufficient samples' : !passes ? 'fail' : dropped > 0 ? 'incomplete' : 'pass';
+  summary(): LogSummary {
+    const { windows, dropped } = this;
+    const qualifying = windows.filter((window) => window.count >= MIN_WINDOW_SAMPLES);
+    let worst: number | null = null;
+    let maxStall: number | null = null;
+    let over = 0;
+    let samples = 0;
 
-  const qualifying = windows.filter((window) => window.count >= MIN_WINDOW_SAMPLES);
-  let worst: number | null = null;
-  let maxStall: number | null = null;
-  let over = 0;
-  let samples = 0;
+    for (const window of windows) {
+      samples += window.count;
+      maxStall = Math.max(maxStall ?? 0, window.max);
+    }
 
-  for (const window of windows) {
-    samples += window.count;
-    maxStall = Math.max(maxStall ?? 0, window.max);
-  }
+    for (const window of qualifying) {
+      worst = Math.max(worst ?? 0, window.p99);
+      if (window.p99 > LOOP_P99_MS) over += 1;
+    }
 
-  for (const window of qualifying) {
-    worst = Math.max(worst ?? 0, window.p99);
-    if (window.p99 > LOOP_P99_MS) over += 1;
-  }
+    // A window past the gate is a failure whatever was dropped; a pass could hide a worse one.
+    const loopVerdict: Verdict =
+      worst === null
+        ? 'insufficient samples'
+        : worst >= LOOP_P99_MS
+          ? 'fail'
+          : dropped > 0
+            ? 'incomplete'
+            : 'pass';
 
-  return {
-    routes: [...requests.values()]
-      .map(({ method, route, ms }) => {
-        const summary = stats(ms);
-
-        return {
+    return {
+      routes: [...this.requests.values()]
+        .map(({ method, route, ms }) => ({
           route,
           method,
-          stats: summary,
-          verdict: decide(summary.n >= MIN_ROUTE_SAMPLES, summary.p95 < ROUTE_P95_MS),
-        };
-      })
-      .sort((a, b) => b.stats.p95 - a.stats.p95),
-    loop: {
-      windows: windows.length,
-      qualifying: qualifying.length,
-      samples,
-      worstWindowP99: worst,
-      maxStall,
-      overGate: qualifying.length ? over / qualifying.length : null,
-      verdict: decide(worst !== null, worst !== null && worst < LOOP_P99_MS),
-    },
-    dropped,
-  };
+          stats: stats(ms),
+          verdict: routeVerdict(ms, dropped),
+        }))
+        .sort((a, b) => b.stats.p95 - a.stats.p95),
+      loop: {
+        windows: windows.length,
+        qualifying: qualifying.length,
+        samples,
+        worstWindowP99: worst,
+        maxStall,
+        overGate: qualifying.length ? over / qualifying.length : null,
+        verdict: loopVerdict,
+      },
+      dropped,
+    };
+  }
+}
+
+export function summariseLog(lines: Iterable<string>): LogSummary {
+  const summariser = new LogSummariser();
+
+  for (const line of lines) summariser.add(line);
+
+  return summariser.summary();
 }

@@ -63,6 +63,34 @@ function world(options: SyntheticOptions): World {
   return { scenario, github, store, service };
 }
 
+/** The reads a diff makes; a real forge computes their patches remotely, as the fixture does here. */
+const RECORDED = new Set(['pinnedFiles', 'pullFiles', 'compare', 'blobs']);
+
+/**
+ * The forge with its diff reads answered once and then replayed as fresh copies, so a timed diff
+ * measures the server's own work (the copy standing in for parsing the CLI's JSON), not the
+ * fixture building patches that a real forge sends ready-made.
+ */
+function replaying<T extends object>(forge: T): T {
+  const answers = new Map<string, Promise<unknown>>();
+
+  return new Proxy(forge, {
+    get(target, key, receiver) {
+      const value: unknown = Reflect.get(target, key, receiver);
+
+      if (typeof value !== 'function' || !RECORDED.has(String(key))) return value;
+
+      return async (...args: unknown[]) => {
+        const id = `${String(key)}:${JSON.stringify(args)}`;
+
+        if (!answers.has(id)) answers.set(id, value.apply(target, args));
+
+        return structuredClone(await answers.get(id));
+      };
+    },
+  });
+}
+
 function close({ store, service }: World): void {
   service.stop();
   store.close();
@@ -130,8 +158,20 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
     'x-review-desk': '1',
     'x-review-desk-session': 'bench',
   };
-  const expected = populated.service.list().items.length;
   const list = () => app.inject({ method: 'GET', url: '/api/pulls', headers });
+
+  // The inbox the fixture implies: every PR asking for your review that you did not write.
+  const inbox = populated.scenario.world.pulls
+    .filter(({ snapshot, feeds }) => snapshot.author.login !== 'you' && feeds.includes('requested'))
+    .map(({ snapshot }) => snapshot.id)
+    .sort();
+  const listed = (await list()).json() as { items: { id: string }[] };
+  const expected = inbox.length;
+
+  if (JSON.stringify(listed.items.map(({ id }) => id).sort()) !== JSON.stringify(inbox))
+    throw new Error(
+      `/api/pulls lists ${listed.items.length} PRs, not the ${expected} in the inbox.`,
+    );
 
   add({
     name: `/api/pulls, ${largest} PRs, idle`,
@@ -186,7 +226,7 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
     gate: {
       limit: `p95 < ${ROUTE_P95_MS} ms`,
       verdict:
-        wrongSize > 0 || synced !== pushed.length
+        wrongSize > 0 || pushed.length !== changing || synced !== changing
           ? 'insufficient samples'
           : route.n < (smoke ? 1 : MIN_ROUTE_SAMPLES)
             ? 'insufficient samples'
@@ -214,14 +254,14 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
   });
 
   const large = populated.store.snapshot('you', LARGE_PR)!;
+  const forge = replaying(populated.github);
 
-  // A new service each time: its cache would otherwise answer.
+  // Recorded once, untimed; then a new service each time, as its cache would otherwise answer.
+  await new DiffService(forge).manifest(large, 'full', null);
   add({
     name: `full diff of a ${shape(largest).largeFiles}-file PR, cold`,
     stats: stats(
-      await timed(iterations, () =>
-        new DiffService(populated.github).manifest(large, 'full', null),
-      ),
+      await timed(iterations, () => new DiffService(forge).manifest(large, 'full', null)),
     ),
   });
 
@@ -231,6 +271,8 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
   const stalls: number[] = [];
   let diffed = 0;
   const histogram = monitorEventLoopDelay({ resolution: 10 });
+
+  await new DiffService(forge).manifest(rebased, 'since-review', reviewed);
 
   histogram.enable();
 
@@ -246,8 +288,8 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
     }, 5);
     const started = performance.now();
 
-    diffed = (await new DiffService(populated.github).manifest(rebased, 'since-review', reviewed))
-      .files.length;
+    diffed = (await new DiffService(forge).manifest(rebased, 'since-review', reviewed)).files
+      .length;
     builds.push(performance.now() - started);
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setTimeout(resolve, 10));

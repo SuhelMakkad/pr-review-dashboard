@@ -298,6 +298,43 @@ describe('the log file', () => {
     disk.finish();
   });
 
+  it('writes what it accepted during a rotation that a close waits for, then closes', async () => {
+    const dir = directory();
+    const written: string[] = [];
+    const first = stalled();
+    const second = new Writable({
+      write(chunk, _encoding, callback) {
+        written.push(String(chunk));
+        callback();
+      },
+    });
+    let opened = 0;
+    const file = new LogFile(join(dir, 'review-desk.log'), {
+      rotateAtBytes: 10,
+      openStream: () => (opened++ === 0 ? first.stream : second),
+    });
+
+    file.open();
+    file.write('past the threshold\n');
+
+    // The rotation is ending the first stream; records written now wait for the new file.
+    const rotation = file.rotate();
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    file.write('accepted while rotating\n');
+
+    const closing = file.close(2000);
+
+    // The disk recovers well within the deadline.
+    first.release();
+    first.finish();
+
+    expect(await closing).toBe('closed');
+    await rotation;
+    expect(opened).toBe(2);
+    expect(written.join('')).toContain('accepted while rotating');
+  });
+
   it('closes after a rotation in progress', async () => {
     const dir = directory();
     const path = join(dir, 'review-desk.log');
@@ -409,6 +446,33 @@ describe('what is measured', () => {
     expect(requests[1]).toMatchObject({ route: '/api/pulls/:id' });
     expect(JSON.stringify(requests)).not.toContain('secret');
     expect(JSON.stringify(requests)).not.toContain('ghp_');
+  });
+
+  it('does not time the event stream, whose lifetime is not a response time', async () => {
+    const store = new Store(':memory:');
+    const fixture = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
+    const service = new SyncService(store, fixture, new EventBus());
+    const app = await createApp(service, { sessionToken: 'test-session', fixture });
+
+    cleanups.push(() => store.close());
+
+    const { records } = captured();
+    const stream = app.inject({
+      method: 'GET',
+      url: '/api/events',
+      headers: {
+        host: '127.0.0.1:4317',
+        'x-review-desk': '1',
+        'x-review-desk-session': 'test-session',
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Closing ends the stream gracefully, as a shutdown does.
+    await app.close();
+
+    expect((await stream).statusCode).toBe(200);
+    expect(records().filter((record) => record.event === 'http.request')).toEqual([]);
   });
 
   it('logs one record per sync, by phase and count', async () => {

@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder';
 import { spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { gitlabOp } from '@/forge/ops.js';
@@ -141,9 +142,9 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
       child.once('spawn', () => {
         spawned = performance.now();
       });
-      // Raw bytes, decoded once at the end: the size limit and the log count bytes, and a
-      // character split across two chunks stays whole.
-      const chunks: Buffer[] = [];
+      // The size limit and the log count raw bytes.
+      const decoder = new StringDecoder('utf8');
+      let stdout = '';
       let stderr = '';
       let size = 0;
       let timedOut = false;
@@ -153,6 +154,8 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
         child.kill('SIGTERM');
       }, timeoutMs);
 
+      // Bytes counted as they arrive, and decoded as they arrive: a character split across
+      // chunks is kept whole.
       child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
 
@@ -161,7 +164,7 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
           return;
         }
 
-        chunks.push(chunk);
+        stdout += decoder.write(chunk);
       });
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
         stderr += chunk;
@@ -184,7 +187,7 @@ export function spawnGlab(timeoutMs: number): GlabRunner {
           timedOut,
           bytes: size,
         });
-        resolve({ code, stdout: Buffer.concat(chunks).toString('utf8'), stderr, timedOut });
+        resolve({ code, stdout: stdout + decoder.end(), stderr, timedOut });
       });
 
       child.stdin.on('error', () => undefined);

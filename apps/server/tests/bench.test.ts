@@ -113,24 +113,40 @@ describe('the log summary', () => {
     expect(summary.dropped).toBe(0);
   });
 
-  it('calls a pass incomplete when the log dropped records, while a failure still stands', () => {
+  it('leaves undecided a verdict that the dropped records could change, and no other', () => {
+    const requests = (route: string, fast: number, slow: number) =>
+      Array.from({ length: fast + slow }, (_, index) =>
+        line({ event: 'http.request', route, method: 'GET', ms: index < fast ? 10 : 300 }),
+      );
     const summary = summariseLog([
-      ...Array.from({ length: 30 }, () =>
-        line({ event: 'http.request', route: '/api/pulls', method: 'GET', ms: 10 }),
-      ),
-      ...Array.from({ length: 30 }, () =>
-        line({ event: 'http.request', route: '/api/pulls/:id', method: 'GET', ms: 300 }),
-      ),
+      // Clear either way with 40 records missing.
+      ...requests('/api/pulls', 1000, 0),
+      ...requests('/api/pulls/:id', 60, 40),
+      // 94 of 100 fast fails, but 40 more fast ones would make 134 of 140 a pass.
+      ...requests('/api/status', 94, 6),
+      // 96 of 100 fast passes, but 40 more slow ones would make 96 of 140 a failure.
+      ...requests('/api/notes', 96, 4),
       line({ event: 'loop.delay', p50: 1, p99: 2, max: 3, count: 500 }),
-      line({ event: 'log.dropped', count: 7 }),
+      line({ event: 'log.dropped', count: 40 }),
     ]);
 
-    expect(summary.dropped).toBe(7);
-    expect(summary.routes.map(({ route, verdict }) => [route, verdict])).toEqual([
-      ['/api/pulls/:id', 'fail'],
-      ['/api/pulls', 'incomplete'],
-    ]);
+    expect(summary.dropped).toBe(40);
+    expect(
+      Object.fromEntries(summary.routes.map(({ route, verdict }) => [route, verdict])),
+    ).toEqual({
+      '/api/pulls': 'pass',
+      '/api/pulls/:id': 'fail',
+      '/api/status': 'incomplete',
+      '/api/notes': 'incomplete',
+    });
+    // A window that passed could have hidden a worse one; one past the gate fails regardless.
     expect(summary.loop.verdict).toBe('incomplete');
+    expect(
+      summariseLog([
+        line({ event: 'loop.delay', p50: 1, p99: 80, max: 90, count: 500 }),
+        line({ event: 'log.dropped', count: 7 }),
+      ]).loop.verdict,
+    ).toBe('fail');
   });
 
   it('says when no window had enough samples', () => {

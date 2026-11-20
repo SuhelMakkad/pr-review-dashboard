@@ -1,7 +1,7 @@
 import { createReadStream } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { summariseLog } from '@/bench/log-summary.js';
+import { LogSummariser } from '@/bench/log-summary.js';
 import { LOOP_P99_MS, MIN_ROUTE_SAMPLES, ROUTE_P95_MS } from '@/bench/stats.js';
 
 // `pnpm log:summary <log file>…`: a session recorded with REVIEW_DESK_LOG_LEVEL=debug, checked
@@ -14,15 +14,13 @@ if (files.length === 0) {
   process.exit(2);
 }
 
-async function* lines(): AsyncGenerator<string> {
-  for (const file of files) yield* createInterface({ input: createReadStream(file) });
-}
+// Each line is summarised as it is read: only the values the statistics need are kept.
+const summariser = new LogSummariser();
 
-const collected: string[] = [];
+for (const file of files)
+  for await (const line of createInterface({ input: createReadStream(file) })) summariser.add(line);
 
-for await (const line of lines()) collected.push(line);
-
-const summary = summariseLog(collected);
+const summary = summariser.summary();
 
 console.log(`Routes (p95 < ${ROUTE_P95_MS} ms, at least ${MIN_ROUTE_SAMPLES} requests)`);
 for (const { method, route, stats, verdict } of summary.routes)
@@ -45,5 +43,5 @@ console.log(
 
 if (summary.dropped > 0)
   console.log(
-    `\nThe log dropped ${summary.dropped} records, so a pass here is incomplete: rerun with the disk keeping up.`,
+    `\nThe log dropped ${summary.dropped} records: a verdict they could change is reported as incomplete.`,
   );

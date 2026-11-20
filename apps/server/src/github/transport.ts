@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder';
 import { spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { githubOp } from '@/forge/ops.js';
@@ -79,9 +80,9 @@ export class GhCli implements GitHubTransport {
       child.once('spawn', () => {
         spawned = performance.now();
       });
-      // Raw bytes, decoded once at the end: the size limit and the log count bytes, and a
-      // character split across two chunks stays whole.
-      const chunks: Buffer[] = [];
+      // The size limit and the log count raw bytes.
+      const decoder = new StringDecoder('utf8');
+      let stdout = '';
       let stderr = '';
       let size = 0;
       let timedOut = false;
@@ -91,6 +92,8 @@ export class GhCli implements GitHubTransport {
         child.kill('SIGTERM');
       }, this.timeoutMs);
 
+      // Bytes counted as they arrive, and decoded as they arrive: a character split across
+      // chunks is kept whole.
       child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
 
@@ -99,7 +102,7 @@ export class GhCli implements GitHubTransport {
           return;
         }
 
-        chunks.push(chunk);
+        stdout += decoder.write(chunk);
       });
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
         stderr += chunk;
@@ -129,7 +132,7 @@ export class GhCli implements GitHubTransport {
           timedOut,
           bytes: size,
         });
-        resolve({ code, stdout: Buffer.concat(chunks).toString('utf8'), stderr, timedOut });
+        resolve({ code, stdout: stdout + decoder.end(), stderr, timedOut });
       });
 
       // gh can exit before reading its input; the result is reported through `close`.
