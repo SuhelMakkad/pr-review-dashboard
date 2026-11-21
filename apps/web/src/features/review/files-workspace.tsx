@@ -15,6 +15,7 @@ import type { DraftComment } from '@review-desk/shared/review';
 import type { ReviewThread } from '@review-desk/shared/types';
 import type { GitHubAction } from '@review-desk/shared/operations';
 import { operationInProgress, operationUnsettled } from '@review-desk/shared/operations';
+import { CommandBanner } from '@/features/review/command-banner';
 import { refOf } from '@/lib/pr-ref';
 import { inQueue } from '@/features/pulls/meta';
 import { openActivity } from '@/features/activity/use-operations';
@@ -960,6 +961,10 @@ function Workspace() {
         )}
       </Group>
 
+      <div className="px-4 empty:hidden">
+        <CommandBanner writer={review.writer} />
+      </div>
+
       <PendingTray
         draft={draft}
         viewed={viewedCount}
@@ -967,7 +972,10 @@ function Workspace() {
         onFinish={() => setFinishOpen(true)}
         onDiscard={() => {
           if (window.confirm('Discard your pending review and all its comments?')) {
-            review.discard.mutate(undefined, { onError: (error) => toast.error(error.message) });
+            // What it carries is read at the click, as the confirmation shows it.
+            review.discard.mutate(review.writer.carry(draft), {
+              onError: (error) => toast.error(error.message),
+            });
           }
         }}
       />

@@ -148,8 +148,10 @@ export function useAi(prId: string | null, account: string) {
       // The summary is written from the verdict and text as you left them in the writer: started
       // once every save queued before it settled, and not on a draft that refused them.
       if (task === 'draft_summary') {
-        const refusal = await writer.settled(['body', 'event']);
+        // `settled` checks the writer's gate before it waits, and behind the saves it waits on.
+        const refusal = (await writer.settled(['body', 'event'])) ?? writer.blocked();
 
+        // Checked again just before it is sent: a submit or discard asked for meanwhile wins.
         if (refusal) throw new Error(refusal);
       }
 

@@ -136,8 +136,19 @@ export function refresh(client: QueryClient, target: QueryKey | ((query: Query) 
   void client.invalidateQueries(filters);
 }
 
+const eventListeners = new Set<(event: ServerEvent) => void>();
+
+/** Hears every server event as it is applied: a draft writer looks its commands up on them. */
+export function onServerEvent(listener: (event: ServerEvent) => void): () => void {
+  eventListeners.add(listener);
+
+  return () => eventListeners.delete(listener);
+}
+
 /** Applies one server event to the cache. Exported for tests. */
 export function handle(client: QueryClient, event: ServerEvent, firstHello: { value: boolean }) {
+  for (const listener of eventListeners) listener(event);
+
   switch (event.type) {
     case 'hello': {
       const expected = session.bootId();

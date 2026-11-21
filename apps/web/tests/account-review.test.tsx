@@ -68,6 +68,259 @@ describe('action IDs across the move to account routes', () => {
     expect(scopedKey('not json')).toBe('not json');
   });
 
+  it('never brings back an id another tab forgot, however their changes interleave', async () => {
+    const key = (id: string) =>
+      JSON.stringify({ path: `/api/accounts/me/pulls/${id}/review`, body: {}, method: 'POST' });
+
+    // An earlier version's shared map, holding A and B.
+    localStorage.setItem(
+      'review-desk-pending-command-ids',
+      JSON.stringify([
+        [key('a'), 'a'],
+        [key('b'), 'b'],
+      ]),
+    );
+    vi.resetModules();
+
+    const first = await import('@/lib/operation-command');
+
+    vi.resetModules();
+
+    const second = await import('@/lib/operation-command');
+    const left = () =>
+      ['a', 'b'].flatMap((id) => first.legacyIds(`/api/accounts/me/pulls/${id}/review`, 'POST'));
+
+    // One tab forgets A while the other forgets B and keeps, then clears, an id of its own.
+    vi.stubGlobal('fetch', async () => reply({ operation: { id: 'c' } }, 202));
+    expect(first.forgetLegacy(key('a'), 'a')).toBe(true);
+
+    const sending = second.githubCommand('/api/accounts/me/pulls/c/viewed', {});
+
+    expect(second.forgetLegacy(key('b'), 'b')).toBe(true);
+    await sending;
+
+    expect(left()).toEqual([]);
+  });
+
+  it.each([
+    ['its retirement saved', false],
+    ['its retirement kept only in this tab, storage full', true],
+  ])('never sends an earlier version’s id again once it was retired: %s', async (_case, full) => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Same reply' };
+    const sent: string[] = [];
+
+    // An earlier version kept this reply's id in its shared map.
+    localStorage.setItem(
+      'review-desk-pending-command-ids',
+      JSON.stringify([[JSON.stringify({ path, body, method: 'POST' }), 'legacy']]),
+    );
+    vi.resetModules();
+
+    const { githubCommand, legacyIds } = await import('@/lib/operation-command');
+
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+
+    if (full)
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('Quota exceeded');
+      });
+
+    // Its own retry, then the same reply sent twice more, on purpose.
+    await githubCommand(path, body);
+    await githubCommand(path, body);
+    await githubCommand(path, body);
+
+    expect(sent[0]).toBe('legacy');
+    expect(sent.slice(1)).not.toContain('legacy');
+    expect(new Set(sent).size).toBe(3);
+    expect(legacyIds(path, 'POST')).toEqual([]);
+    vi.restoreAllMocks();
+  });
+
+  it('retries an unsettled request with its own id, though another tab retired it meanwhile', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Sent once' };
+    const key = JSON.stringify({ path, body, method: 'POST' });
+    const sent: string[] = [];
+
+    localStorage.setItem('review-desk-pending-command-ids', JSON.stringify([[key, 'legacy']]));
+    vi.resetModules();
+
+    const first = await import('@/lib/operation-command');
+
+    vi.resetModules();
+
+    const second = await import('@/lib/operation-command');
+
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      // This tab's first answer is lost; the server accepted it.
+      if (sent.length === 1) throw new TypeError('Failed to fetch');
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+
+    await expect(first.githubCommand(path, body)).rejects.toThrow();
+    // Another tab replays it, and retires it once its receipt answers.
+    await second.githubCommand(path, body);
+    // This tab's own retry: the same request, never a second reply.
+    await first.githubCommand(path, body);
+
+    expect(sent).toEqual(['legacy', 'legacy', 'legacy']);
+  });
+
+  it('retires a legacy id it settled though the earlier versions’ map became unreadable meanwhile', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Once' };
+    const key = JSON.stringify({ path, body, method: 'POST' });
+
+    localStorage.setItem('review-desk-pending-command-ids', JSON.stringify([[key, 'legacy']]));
+    vi.resetModules();
+
+    const { githubCommand } = await import('@/lib/operation-command');
+    const getItem = Storage.prototype.getItem;
+    let reads = 0;
+
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, name) {
+      if (name === 'review-desk-pending-command-ids' && ++reads > 1) throw new Error('Unreadable');
+
+      return getItem.call(this, name);
+    });
+    vi.stubGlobal('fetch', async () => reply({ operation: { id: 'legacy' } }, 202));
+    await githubCommand(path, body);
+
+    vi.restoreAllMocks();
+    expect(localStorage.getItem('review-desk-retired-command:legacy')).not.toBeNull();
+  });
+
+  it('never reuses a settled id whose cleanup could not read its entry', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Sent on purpose twice' };
+    const entry = `review-desk-pending-command:${JSON.stringify({ path, body, method: 'POST' })}`;
+    const { githubCommand } = await import('@/lib/operation-command');
+    const getItem = Storage.prototype.getItem;
+    const sent: string[] = [];
+    let reads = 0;
+
+    // Its entry reads as usual, except once: as the first reply's cleanup reads it.
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, name) {
+      if (name === entry && ++reads === 2) throw new Error('Unreadable');
+
+      return getItem.call(this, name);
+    });
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+
+    await githubCommand(path, body);
+    await githubCommand(path, body);
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).not.toBe(sent[0]);
+    vi.restoreAllMocks();
+  });
+
+  it('falls back past a retired entry to an id an earlier build saved since for the action', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Accepted under B' };
+    const key = JSON.stringify({ path, body, method: 'POST' });
+    const sent: string[] = [];
+
+    localStorage.setItem(
+      `review-desk-pending-command:${key}`,
+      JSON.stringify({ id: 'A', legacy: true }),
+    );
+    localStorage.setItem('review-desk-retired-command:A', '1');
+    localStorage.setItem('review-desk-pending-command-ids', JSON.stringify([[key, 'B']]));
+    vi.resetModules();
+
+    const { githubCommand } = await import('@/lib/operation-command');
+
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+    await githubCommand(path, body);
+
+    expect(sent).toEqual(['B']);
+  });
+
+  it('never reuses a live copy of an id another tab retired', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'New reply' };
+    const key = JSON.stringify({ path, body, method: 'POST' });
+    const sent: string[] = [];
+
+    // Saved by one tab just after another retired it.
+    localStorage.setItem('review-desk-retired-command:old', '1');
+    localStorage.setItem(`review-desk-pending-command:${key}`, 'old');
+    vi.resetModules();
+
+    const { githubCommand } = await import('@/lib/operation-command');
+
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+    await githubCommand(path, body);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toBe('old');
+  });
+
+  it('retires a forgotten legacy id though the earlier versions’ map cannot be read', async () => {
+    const { forgetLegacy } = await import('@/lib/operation-command');
+    const getItem = Storage.prototype.getItem;
+
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, name) {
+      if (name === 'review-desk-pending-command-ids') throw new Error('Unreadable');
+
+      return getItem.call(this, name);
+    });
+
+    expect(forgetLegacy(JSON.stringify({ path: '/x', body: {}, method: 'POST' }), 'kept')).toBe(
+      true,
+    );
+
+    vi.restoreAllMocks();
+    expect(localStorage.getItem('review-desk-retired-command:kept')).not.toBeNull();
+  });
+
+  it('sends a retry with the id it was first sent with, though storage could not keep it', async () => {
+    const { githubCommand } = await import('@/lib/operation-command');
+    const sent: string[] = [];
+
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('Quota exceeded');
+    });
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      if (sent.length === 1) throw new TypeError('Failed to fetch');
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+
+    await expect(githubCommand(path, { prId: 'p1', body: 'Once' })).rejects.toThrow();
+    await githubCommand(path, { prId: 'p1', body: 'Once' });
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toBe(sent[0]);
+    vi.restoreAllMocks();
+  });
+
   it('sends an ID saved by an earlier version again on the account’s route', async () => {
     localStorage.setItem(
       'review-desk-pending-command-ids',
@@ -347,11 +600,11 @@ describe('drafts and Activity per account', () => {
       'POST /api/accounts/me/pulls/p1/review',
       'saved',
     ],
-    // Discarded, its cleanup yet to come: your text is kept, unsent, until you edit it.
+    // Discarded, its cleanup yet to come: your text is held, unsent, until it is final.
     [
       'a discard dropped into the draft it discarded',
       'DELETE /api/accounts/me/pulls/p1/draft',
-      'error',
+      'saving',
     ],
   ])('never autosaves the summary %s', async (_case, sentAs, state) => {
     const { useReview } = await import('@/features/review/use-review');
@@ -366,7 +619,9 @@ describe('drafts and Activity per account', () => {
       return Promise.resolve(
         method === 'POST' || method === 'DELETE'
           ? reply({ operation: { id: JSON.parse(String(options?.body)).operationId } }, 202)
-          : reply({ items: [], nextCursor: null }),
+          : path.endsWith('/receipt-epoch')
+            ? reply({ epoch: 0 })
+            : reply({ items: [], nextCursor: null }),
       );
     });
     client.setQueryData(queryKeys.status, as('me'));
@@ -382,8 +637,9 @@ describe('drafts and Activity per account', () => {
             body: 'Typed just before',
             expectedHeadOid: 'abc',
             carried: hook.result.current.writer.carry(undefined).versions,
+            expectedPendingReviewId: null,
           })
-        : hook.result.current.discard.mutateAsync(),
+        : hook.result.current.discard.mutateAsync(hook.result.current.writer.carry(undefined)),
     );
     await new Promise((resolve) => setTimeout(resolve, 900));
 
@@ -393,7 +649,7 @@ describe('drafts and Activity per account', () => {
     client.clear();
   });
 
-  it('retires, once a submit is accepted, only the versions it was sent with', async () => {
+  it('retires, once a submit is accepted, only the versions it was sent with, keeping what you typed after', async () => {
     const { useReview } = await import('@/features/review/use-review');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const saved: string[] = [];
@@ -409,7 +665,9 @@ describe('drafts and Activity per account', () => {
           ? reply({ operation: { id: body.operationId } }, 202)
           : method === 'PUT'
             ? reply({ error: 'Locked.', code: 'DRAFT_LOCKED' }, 409)
-            : reply({ items: [], nextCursor: null }),
+            : _path.endsWith('/receipt-epoch')
+              ? reply({ epoch: 0 })
+              : reply({ items: [], nextCursor: null }),
       );
     });
     client.setQueryData(queryKeys.status, as('me'));
@@ -423,7 +681,8 @@ describe('drafts and Activity per account', () => {
 
     expect(carried.body).toBe('Sent');
 
-    // Typed on before the submit ran: it stays yours to save, not retired with the review.
+    // Typed on before the submit ran: never saved into the draft it submits, nor retired with
+    // the review: kept for you to confirm.
     act(() => hook.result.current.writer.edit('body', 'Typed after'));
     await act(() =>
       hook.result.current.submit.mutateAsync({
@@ -431,10 +690,156 @@ describe('drafts and Activity per account', () => {
         body: carried.body,
         expectedHeadOid: 'abc',
         carried: carried.versions,
+        expectedPendingReviewId: null,
       }),
     );
-    await waitFor(() => expect(saved).toEqual(['Typed after']));
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    expect(saved).toEqual([]);
+    expect(hook.result.current.writer.value('body', undefined)).toBe('Typed after');
+    expect(hook.result.current.writer.failure('body')).toMatch(/after you submitted/);
     client.clear();
+  });
+
+  it('adopts a submit id an earlier version kept for the draft, forgetting it there once recorded', async () => {
+    localStorage.setItem(
+      'review-desk-pending-command-ids',
+      JSON.stringify([
+        [
+          JSON.stringify({
+            path: '/api/accounts/me/pulls/p1/review',
+            body: { event: 'COMMENT', body: 'Old', expectedHeadOid: 'abc' },
+            method: 'POST',
+          }),
+          'kept-before',
+        ],
+      ]),
+    );
+    vi.resetModules();
+
+    const { useReview } = await import('@/features/review/use-review');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve(
+        reply({ error: 'Nothing was received with this id.', code: 'NOT_FOUND' }, 404),
+      ),
+    );
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    expect(hook.result.current.writer.commandViews()).toMatchObject([
+      { id: 'kept-before', kind: 'submit', legacy: true, canSendAgain: false },
+    ]);
+    // Forgotten there once recorded: never offered for adoption again.
+    expect(
+      (await import('@/lib/operation-command')).legacyIds(
+        '/api/accounts/me/pulls/p1/review',
+        'POST',
+      ),
+    ).toEqual([]);
+    client.clear();
+  });
+
+  it('looks an unconfirmed submit up as soon as its operation changes', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const { handle } = await import('@/lib/live');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let received = false;
+    let id = '';
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+
+      if (method === 'POST') {
+        id = JSON.parse(String(options?.body)).operationId;
+
+        return Promise.reject(new TypeError('Failed to fetch'));
+      }
+
+      if (path.endsWith('/receipt-epoch')) return Promise.resolve(reply({ epoch: 0 }));
+      if (path.includes('/receipt'))
+        return Promise.resolve(
+          received
+            ? reply({ kind: 'forge', prId: 'p1', type: 'review', status: 'queued' })
+            : reply({ error: 'Nothing was received with this id.', code: 'NOT_FOUND' }, 404),
+        );
+
+      return Promise.resolve(reply({ items: [], nextCursor: null }));
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    await act(() =>
+      hook.result.current.submit
+        .mutateAsync({
+          event: 'COMMENT',
+          body: '',
+          expectedHeadOid: 'abc',
+          carried: hook.result.current.writer.carry(undefined).versions,
+          expectedPendingReviewId: null,
+        })
+        .catch(() => {}),
+    );
+
+    expect(hook.result.current.writer.commandViews()).toMatchObject([{ phase: 'unknown' }]);
+
+    received = true;
+    act(() =>
+      handle(
+        client,
+        { type: 'operation.updated', account: 'me', prId: 'p1', operationId: id, status: 'queued' },
+        { value: false },
+      ),
+    );
+
+    await waitFor(() => expect(hook.result.current.writer.commandViews()).toEqual([]));
+    client.clear();
+  });
+
+  it('discards with what was shown at the click, offline too, never text typed after it', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const { onlineManager } = await import('@tanstack/react-query');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const paths: string[] = [];
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+
+      paths.push(`${method} ${path}`);
+
+      return Promise.resolve(
+        method === 'DELETE'
+          ? reply({ operation: { id: JSON.parse(String(options?.body)).operationId } }, 202)
+          : path.endsWith('/receipt-epoch')
+            ? reply({ epoch: 0 })
+            : reply({ kind: 'forge', prId: 'p1', type: 'discard', status: 'running' }),
+      );
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+    onlineManager.setOnline(false);
+
+    try {
+      const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+      const writer = () => hook.result.current.writer;
+
+      act(() => writer().edit('body', 'At the click'));
+
+      const carried = writer().carry(undefined);
+
+      act(() => hook.result.current.discard.mutate(carried));
+      act(() => writer().edit('body', 'Typed after'));
+
+      await waitFor(() => expect(paths).toContain('DELETE /api/accounts/me/pulls/p1/draft'));
+      await waitFor(() => expect(writer().commandViews()).toMatchObject([{ phase: 'admitted' }]));
+
+      expect(writer().commandViews()[0]!.carried?.body).toBe('At the click');
+    } finally {
+      onlineManager.setOnline(true);
+      client.clear();
+    }
   });
 
   it('keeps the newer draft whatever is published into its query, as it is published', async () => {

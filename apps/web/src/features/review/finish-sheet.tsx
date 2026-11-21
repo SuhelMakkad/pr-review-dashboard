@@ -71,9 +71,12 @@ export interface FinishSheetProps {
     /** The writer's versions of `body` and `event`, read with them: required, so a submit never
      * retires text it did not send. */
     carried: Record<Field, number>;
-  }) => Promise<OperationReceipt>;
+    /** The pending review this sheet showed: admission refuses the submit if it is another. */
+    expectedPendingReviewId: string | null;
+  }) => Promise<OperationReceipt | null>;
   busy: boolean;
-  onSubmitted: (result: OperationReceipt) => void;
+  /** Admitted: its receipt, or null when its receipt was read before its own answer came. */
+  onSubmitted: (result: OperationReceipt | null) => void;
   onReviewNewCommits: () => void;
 }
 
@@ -133,6 +136,9 @@ export function FinishSheet({
     writer.edit('event', next);
   };
 
+  // The pending review this submits: the draft's own, else the one the forge shows.
+  const pendingReviewId = draft.githubReviewId ?? draft.githubPendingReview?.id ?? null;
+
   const send = async (allowNewHead = false) => {
     if (busy || applying || locked || stale.length > 0) return;
 
@@ -147,6 +153,7 @@ export function FinishSheet({
         expectedHeadOid: viewedHeadOid,
         allowNewHead,
         carried: carried.versions,
+        expectedPendingReviewId: pendingReviewId,
       });
 
       submitted.current = true;
@@ -164,11 +171,18 @@ export function FinishSheet({
     ...(event === 'REQUEST_CHANGES' && pending.length === 0 && !body.trim()
       ? ['Say what needs to change: add a summary or comments.']
       : []),
-    ...(draft.githubPendingReview && draft.githubPendingReview.commentCount > 0
-      ? [
-          `You already have ${draft.githubPendingReview.commentCount} ${draft.githubPendingReview.commentCount === 1 ? 'comment' : 'comments'} in a pending review on ${forge.name}; they will be submitted with this review.`,
-        ]
-      : []),
+    // Its count is shown only when the forge's part names the very review this submits.
+    ...(pendingReviewId && draft.githubPendingReview?.id === pendingReviewId
+      ? draft.githubPendingReview.commentCount > 0
+        ? [
+            `You already have ${draft.githubPendingReview.commentCount} ${draft.githubPendingReview.commentCount === 1 ? 'comment' : 'comments'} in a pending review on ${forge.name}; they will be submitted with this review.`,
+          ]
+        : []
+      : pendingReviewId
+        ? [
+            `You have a pending review on ${forge.name}. Its comments could not be counted; any it has will be submitted with this review.`,
+          ]
+        : []),
   ];
 
   return (
