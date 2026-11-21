@@ -64,7 +64,12 @@ export interface JsonRoute<
   query?: Q;
   body?: B;
   responses: R;
+  /** An outbox action: sent with an ID kept across a lost answer (`command`). */
+  queued?: true;
 }
+
+/** A route whose request is a queued action. */
+export type QueuedRoute = JsonRoute & { queued: true };
 
 /** The event stream: frames, not a JSON reply. */
 export interface StreamRoute<P extends string = string> {
@@ -79,6 +84,8 @@ export interface RedirectRoute<P extends string = string> {
   method: 'GET';
   path: P;
   status: 303;
+  /** Checked by the handler, which redirects either way. */
+  query?: z.ZodType;
 }
 
 export type Route = JsonRoute | StreamRoute | RedirectRoute;
@@ -118,6 +125,24 @@ const json = <
   path: P,
   spec: { responses: R; query?: Q; body?: B },
 ): JsonRoute<M, P, Q, B, R> => ({ kind: 'json', method, path, ...spec });
+
+/** An outbox action's route. */
+const queued = <
+  M extends Method,
+  P extends string,
+  R extends Record<number, As<unknown>>,
+  B extends Body,
+>(
+  method: M,
+  path: P,
+  spec: { responses: R; body: B },
+): JsonRoute<M, P, undefined, B, R> & { queued: true } => ({
+  kind: 'json',
+  method,
+  path,
+  ...spec,
+  queued: true,
+});
 
 // Shared pieces --------------------------------------------------------------------------------
 
@@ -370,6 +395,22 @@ export interface AiOverview {
   codex: CodexAccountStatus | null;
 }
 
+/** A body these routes treat as empty when it is missing, or `null`, as they always have. */
+const orEmpty = <S extends z.ZodType>(schema: S) =>
+  z.preprocess((value) => value ?? {}, schema) as unknown as z.ZodType<
+    z.output<S>,
+    z.input<S> | undefined
+  >;
+
+/** What Linear sends back after sign-in. */
+export const linearCallbackQuery = z.object({
+  state: z.string().max(200).optional(),
+  code: z.string().max(2000).optional(),
+  error: z.string().max(200).optional(),
+  error_description: z.string().max(500).optional(),
+  iss: z.string().max(200).optional(),
+});
+
 const ok = as<{ ok: true }>();
 const receipt = as<OperationReceipt>();
 const pulls = '/api/accounts/:account/pulls' as const;
@@ -416,7 +457,7 @@ export const routes = {
   untrack: json('DELETE', `${pulls}/:id/track`, {
     // Remove sends no body at all.
     body: {
-      schema: untrackBody.default({}),
+      schema: orEmpty(untrackBody),
       invalid: { error: 'Invalid request.', details: true },
     },
     responses: { 200: as<{ tracked: boolean }>() },
@@ -434,7 +475,7 @@ export const routes = {
     body: { canonical: reviewRequests.draft },
     responses: { 200: as<ReviewDraft>() },
   }),
-  discard: json('DELETE', `${pulls}/:id/draft`, {
+  discard: queued('DELETE', `${pulls}/:id/draft`, {
     body: { canonical: reviewRequests.discard },
     // Cleared at once when nothing is on the forge; queued otherwise, or replayed.
     responses: { 200: ok, 202: receipt },
@@ -451,27 +492,27 @@ export const routes = {
     body: { canonical: reviewRequests.accountOnly },
     responses: { 200: ok },
   }),
-  submit: json('POST', `${pulls}/:id/review`, {
+  submit: queued('POST', `${pulls}/:id/review`, {
     body: { canonical: reviewRequests.submit },
     responses: { 202: receipt },
   }),
-  commentNow: json('POST', `${pulls}/:id/comments`, {
+  commentNow: queued('POST', `${pulls}/:id/comments`, {
     body: { canonical: reviewRequests.now },
     responses: { 202: receipt },
   }),
-  viewed: json('POST', `${pulls}/:id/viewed`, {
+  viewed: queued('POST', `${pulls}/:id/viewed`, {
     body: { canonical: reviewRequests.viewed },
     responses: { 202: receipt },
   }),
-  reviewers: json('POST', `${pulls}/:id/reviewers`, {
+  reviewers: queued('POST', `${pulls}/:id/reviewers`, {
     body: { canonical: reviewRequests.reviewers },
     responses: { 202: receipt },
   }),
-  reply: json('POST', '/api/accounts/:account/threads/:threadId/replies', {
+  reply: queued('POST', '/api/accounts/:account/threads/:threadId/replies', {
     body: { canonical: reviewRequests.reply },
     responses: { 202: receipt },
   }),
-  resolve: json('POST', '/api/accounts/:account/threads/:threadId/resolution', {
+  resolve: queued('POST', '/api/accounts/:account/threads/:threadId/resolution', {
     body: { canonical: reviewRequests.resolve },
     responses: { 202: receipt },
   }),
@@ -486,7 +527,7 @@ export const routes = {
   }),
   operationCommand: json('POST', '/api/accounts/:account/operations/:id/:command', {
     body: {
-      schema: z.object({ confirm: z.boolean().optional() }).strict().default({}),
+      schema: orEmpty(z.object({ confirm: z.boolean().optional() }).strict()),
       invalid: { error: 'Invalid operation command.' },
     },
     responses: { 200: receipt },
@@ -546,7 +587,7 @@ export const routes = {
     responses: { 200: as<InsightsResponse>() },
   }),
   backfill: json('POST', '/api/accounts/:account/insights/backfill', {
-    body: { schema: z.strictObject({}).default({}), invalid: { error: 'Invalid request.' } },
+    body: { schema: orEmpty(z.strictObject({})), invalid: { error: 'Invalid request.' } },
     responses: { 202: as<{ started: true }>() },
   }),
   insightsSettings: json('PUT', '/api/insights/settings', {
@@ -581,6 +622,7 @@ export const routes = {
     method: 'GET',
     path: '/api/linear/callback',
     status: 303,
+    query: linearCallbackQuery,
   } as RedirectRoute<'/api/linear/callback'>,
   linearDisconnect: json('POST', '/api/linear/disconnect', {
     responses: { 200: as<LinearStatus>() },
@@ -593,14 +635,67 @@ export const devRoutes = {
   writes: json('GET', '/api/dev/writes', {
     responses: { 200: as<{ writes: { op: string; details: Record<string, unknown> }[] }>() },
   }),
-  fail: json('POST', '/api/dev/fail', { responses: { 200: as<{ failNext: string | null }>() } }),
+  fail: json('POST', '/api/dev/fail', {
+    // Each field checked on its own by the control, as the e2e helpers send them; none is fine.
+    body: { schema: z.unknown() },
+    responses: { 200: as<{ failNext: string | null }>() },
+  }),
   operations: json('POST', '/api/dev/operations', {
+    body: { schema: z.unknown() },
     responses: { 200: as<{ delayMs: number }>() },
   }),
   reset: json('POST', '/api/dev/reset', { responses: { 200: ok } }),
 } as const;
 
 // The event stream's frames ----------------------------------------------------------------------
+
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+/** A sync status as the server sends it, checked so a malformed one is never shown. */
+const syncStatus = z.object({
+  account: z
+    .object({ login: z.string(), avatarUrl: z.string().optional(), webUrl: z.string().optional() })
+    .nullable(),
+  capabilities: z.object({ requestChanges: z.boolean() }).optional(),
+  teams: z.array(z.string()),
+  syncing: z.boolean(),
+  lastAttemptAt: z.string().nullable(),
+  lastCompletedAt: z.string().nullable(),
+  lastSuccessfulSync: z.string().nullable(),
+  nextSyncAt: z.string().nullable(),
+  retryAt: z.string().nullable(),
+  error: z.string().nullable(),
+  warnings: z.array(z.string()),
+  bootId: z.string().optional(),
+  revision: z.number().optional(),
+});
+
+const reviewNotification = z.object({
+  key: z.string(),
+  kind: z.enum([
+    'first_review',
+    'changed',
+    'requested_again',
+    'reply',
+    'mention',
+    'dismissed',
+    'changes_requested',
+    'approved',
+    'ci_failing',
+    'ai_review_ready',
+  ]),
+  prId: z.string(),
+  title: z.string(),
+  body: z.string(),
+  path: z.string(),
+});
+
+/** The schemas and the types say the same: a new field must be added to both. */
+export const statusInStep: Same<z.infer<typeof syncStatus>, SyncStatus> = true;
+export const notificationInStep: Same<
+  z.infer<typeof reviewNotification>,
+  ReviewNotification
+> = true;
 
 const operationStatus = z.enum([
   'queued',
@@ -623,7 +718,7 @@ export const serverEvent = z.discriminatedUnion('type', [
   z.object({ type: z.literal('resync') }),
   z.object({
     type: z.literal('status'),
-    status: z.custom<SyncStatus>((value) => typeof value === 'object' && value !== null),
+    status: syncStatus,
   }),
   z.object({ type: z.literal('pulls.changed'), account: z.string(), ids: z.array(z.string()) }),
   z.object({ type: z.literal('triage.updated'), account: z.string(), id: z.string() }),
@@ -643,14 +738,10 @@ export const serverEvent = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('notify'),
-    notifications: z.array(
-      z.custom<ReviewNotification>((value) => typeof value === 'object' && value !== null),
-    ),
+    notifications: z.array(reviewNotification),
   }),
   z.object({ type: z.literal('insights.updated'), account: z.string().nullable() }),
 ]);
-
-type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 /** The schema and the type say the same: a new event must be added to both. */
 export const eventsInStep: Same<z.infer<typeof serverEvent>, ServerEvent> = true;

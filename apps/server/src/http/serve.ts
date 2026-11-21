@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type {
   As,
+  ErrorBody,
   JsonRoute,
   Method,
   PathParams,
@@ -12,18 +13,21 @@ import { knownAccount, type AccountParams } from '@/routes/pulls.js';
 import { input, type ScopedRequest } from '@/routes/scoped.js';
 import type { SyncService } from '@/sync/service.js';
 
+/** The statuses a refusal can have: never a success, which only `ok` sends, as declared. */
+export type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 502 | 503;
+
 /** A refusal a handler returns, or an area's error mapper makes of what a handler threw. */
 export interface Failed {
   failed: true;
-  status: number;
-  body: Record<string, unknown>;
+  status: ErrorStatus;
+  body: ErrorBody;
 }
 
-export const failed = (status: number, body: Record<string, unknown>): Failed => ({
-  failed: true,
-  status,
-  body,
-});
+export const failed = (status: number, body: ErrorBody): Failed => {
+  if (status < 400) throw new Error(`A refusal cannot be a success (${status}).`);
+
+  return { failed: true, status: status as ErrorStatus, body };
+};
 
 /** A success the route declares: this status, with the body it carries. */
 export const ok = <S extends number, B>(status: S, body: B) => ({ status, body });

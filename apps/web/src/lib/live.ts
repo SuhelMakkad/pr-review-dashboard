@@ -226,10 +226,11 @@ let warned = false;
 /**
  * Reads the frames of the event stream, checked against the contract (`serverEvent`). A frame
  * that cannot be read, malformed or of an unknown shape, may have announced a change that is
- * now never applied: while the stream is up nothing polls, so everything is read again. Once,
- * after the last such frame within `UNREADABLE_WINDOW_MS`, so a burst makes one refresh that
- * comes after all of it. The refresh stays due across the stream's own reconnects, since a replay
- * may skip a frame already received; only closing the stream cancels it.
+ * now never applied: while the stream is up nothing polls, so everything is read again. The first
+ * such frame schedules that refresh for `UNREADABLE_WINDOW_MS` later; those after it, until then,
+ * join it, since it comes after them all. However long a burst lasts, a refresh comes every
+ * window. It stays due across the stream's own reconnects, since a replay may skip a frame already
+ * received; only closing the stream cancels it.
  */
 export function frameReader(client: QueryClient) {
   const firstHello = { value: true };
@@ -241,7 +242,7 @@ export function frameReader(client: QueryClient) {
       console.warn('Review Desk could not read an update from the server; reading again.', problem);
     }
 
-    if (due) clearTimeout(due);
+    if (due) return;
 
     due = setTimeout(() => {
       due = null;

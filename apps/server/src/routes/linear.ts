@@ -1,18 +1,9 @@
-import { routes } from '@review-desk/shared/contract';
+import { linearCallbackQuery, routes } from '@review-desk/shared/contract';
 import { failed, ok, serve, serveRedirect } from '@/http/serve.js';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
 import { safeError } from '@/github/errors.js';
 import type { LinearService } from '@/linear/service.js';
 import type { SyncService } from '@/sync/service.js';
-
-const callbackQuery = z.object({
-  state: z.string().max(200).optional(),
-  code: z.string().max(2000).optional(),
-  error: z.string().max(200).optional(),
-  error_description: z.string().max(500).optional(),
-  iss: z.string().max(200).optional(),
-});
 
 export function registerLinearRoutes(
   app: FastifyInstance,
@@ -47,7 +38,7 @@ export function registerLinearRoutes(
   // Linear sends the browser here after sign-in. The one-time state from /connect is what ties the
   // response to a sign-in this app started, so a forged link cannot connect another account.
   serveRedirect(app, routes.linearCallback, async (request) => {
-    const query = callbackQuery.safeParse(request.query);
+    const query = linearCallbackQuery.safeParse(request.query);
     const connected = query.success ? await linear.callback(query.data) : false;
 
     return `/settings/linear?linear=${connected ? 'connected' : 'failed'}`;

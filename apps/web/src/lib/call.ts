@@ -2,6 +2,7 @@ import type {
   BodyOf,
   JsonRoute,
   PathParams,
+  QueuedRoute,
   ResponseOf,
   Route,
 } from '@review-desk/shared/contract';
@@ -61,7 +62,7 @@ export function call<R extends JsonRoute>(route: R, options: Options<R>): Promis
  * (`githubCommand`), under the same key as before: the same address and the body as given, the
  * ID added after.
  */
-export function command<R extends JsonRoute>(
+export function command<R extends QueuedRoute>(
   route: R,
   params: PathParams<R['path']>,
   body: Omit<Declared<R>['body'], 'operationId'>,

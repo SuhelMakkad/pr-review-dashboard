@@ -46,7 +46,8 @@ export function registerAiRoutes(
 
       return ok(200, { settings: runner.settings(), providers, codex });
     },
-    serving,
+    // A probe that fails is the server's own failure, as it always was.
+    { sync },
   );
 
   serve(

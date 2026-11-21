@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { buildSchema, parse, validate } from 'graphql';
 import { describe, expect, it } from 'vitest';
+import type { z } from 'zod';
 import { devRoutes, routes } from '@review-desk/shared/contract';
 import { createApp } from '@/app.js';
 import { Store } from '@/db/store.js';
@@ -37,7 +38,7 @@ describe('the HTTP contract', () => {
       sessionToken: 'test-session',
       ...(demo ? { fixture } : {}),
       onRoute: ({ method, url }) => {
-        for (const one of [method].flat()) if (one !== 'HEAD') seen.push(`${one} ${url}`);
+        for (const one of [method].flat()) seen.push(`${one} ${url}`);
       },
     });
 
@@ -46,7 +47,15 @@ describe('the HTTP contract', () => {
     service.stop();
     store.close();
 
-    return seen.filter((route) => route.includes(' /api/')).sort();
+    // Fastify adds a `HEAD` for each `GET`; only those are left out, never one declared itself.
+    const gets = new Set(
+      seen.filter((route) => route.startsWith('GET ')).map((route) => route.slice(4)),
+    );
+
+    return seen
+      .filter((route) => route.includes(' /api/'))
+      .filter((route) => !(route.startsWith('HEAD ') && gets.has(route.slice(5))))
+      .sort();
   }
 
   const declared = (entries: Record<string, { method: string; path: string }>) =>
@@ -58,5 +67,86 @@ describe('the HTTP contract', () => {
 
   it('adds only the demo controls in demo mode', async () => {
     expect(await registered(true)).toEqual([...declared(routes), ...declared(devRoutes)].sort());
+  });
+});
+
+describe('queued actions on the wire', () => {
+  // The order of the parsed request is the outbox fingerprint's, and must never change: an action
+  // accepted before is replayed by it. The account comes first, then the fields as declared.
+  const operationId = 'op-12345678';
+  const oid = '0123456789abcdef';
+
+  it.each([
+    [routes.discard, { operationId }, ['account', 'operationId']],
+    [
+      routes.submit,
+      { event: 'COMMENT', body: '', expectedHeadOid: oid, operationId },
+      ['account', 'event', 'body', 'expectedHeadOid', 'operationId'],
+    ],
+    [
+      routes.commentNow,
+      { path: '', line: null, body: 'Now', operationId, expectedHeadOid: oid },
+      ['account', 'path', 'line', 'body', 'operationId', 'expectedHeadOid'],
+    ],
+    [
+      routes.viewed,
+      { path: 'a.ts', viewed: true, operationId },
+      ['account', 'path', 'viewed', 'operationId'],
+    ],
+    [routes.reviewers, { operationId, logins: ['ann'] }, ['account', 'operationId', 'logins']],
+    [
+      routes.reply,
+      { prId: 'p1', body: 'Yes', operationId },
+      ['account', 'prId', 'body', 'operationId'],
+    ],
+    [
+      routes.resolve,
+      { prId: 'p1', resolved: true, operationId },
+      ['account', 'prId', 'resolved', 'operationId'],
+    ],
+  ] as const)('%#: keeps its fields in order', (route, body, keys) => {
+    const parsed = (route.body as { canonical: z.ZodType }).canonical.parse({
+      ...body,
+      account: 'me',
+    }) as object;
+
+    expect(Object.keys(parsed)).toEqual(keys);
+  });
+});
+
+describe('routes that take an empty body', () => {
+  it('take a JSON null as empty, as they always did', async () => {
+    const store = new Store(':memory:');
+    const fixture = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
+    const service = new SyncService(store, fixture, new EventBus(), fixture);
+
+    await service.sync();
+
+    const app = await createApp(service, { sessionToken: 'test-session' });
+    const send = (method: 'POST' | 'DELETE', url: string) =>
+      app.inject({
+        method,
+        url,
+        headers: {
+          host: '127.0.0.1:4317',
+          'content-type': 'application/json',
+          'x-review-desk': '1',
+          'x-review-desk-session': 'test-session',
+        },
+        payload: 'null',
+      });
+
+    try {
+      // Each reaches its handler, which answers for what it finds.
+      expect((await send('DELETE', '/api/accounts/you/pulls/none/track')).statusCode).not.toBe(400);
+      expect((await send('POST', '/api/accounts/you/operations/none/dismiss')).statusCode).toBe(
+        404,
+      );
+      expect((await send('POST', '/api/accounts/you/insights/backfill')).statusCode).toBe(202);
+    } finally {
+      await app.close();
+      service.stop();
+      store.close();
+    }
   });
 });

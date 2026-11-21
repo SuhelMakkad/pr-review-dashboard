@@ -31,8 +31,13 @@ export function registerDiffRoutes(
 
       if (!detail) return failed(404, { error: 'This PR is no longer tracked.' });
 
-      return ok(200, await diff(detail, query.mode ?? 'full'));
+      // Only the diff's own reads answer as failed reads; anything else is the server's own failure.
+      try {
+        return ok(200, await diff(detail, query.mode ?? 'full'));
+      } catch (error) {
+        return readFailure(error);
+      }
     },
-    { sync: service, errors: readFailure },
+    { sync: service },
   );
 }

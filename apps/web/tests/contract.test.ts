@@ -50,7 +50,7 @@ describe('addresses from the contract', () => {
 });
 
 describe('frames the page cannot read', () => {
-  it('read everything again once, after the last of a burst, and not once closed', () => {
+  it('read everything again after the first of them, once per window, and not once closed', () => {
     vi.useFakeTimers();
 
     const client = new QueryClient();
@@ -60,8 +60,9 @@ describe('frames the page cannot read', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     frames.read('not json');
     vi.advanceTimersByTime(UNREADABLE_WINDOW_MS - 50);
+    // Joins the refresh already due, which comes after it.
     frames.read(JSON.stringify({ type: 'pulls.changed', account: 'me' }));
-    vi.advanceTimersByTime(UNREADABLE_WINDOW_MS - 1);
+    vi.advanceTimersByTime(49);
     expect(invalidate).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(1);
@@ -79,6 +80,79 @@ describe('frames the page cannot read', () => {
     vi.advanceTimersByTime(UNREADABLE_WINDOW_MS * 2);
     expect(invalidate).not.toHaveBeenCalled();
     client.clear();
+  });
+
+  it('keep refreshing through a burst that never stops', () => {
+    vi.useFakeTimers();
+
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    const frames = frameReader(client);
+
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    // One unreadable frame every 200 ms for a second: windows at 0, 400 and 800 ms.
+    for (let at = 0; at <= 800; at += 200) {
+      frames.read('not json');
+      vi.advanceTimersByTime(200);
+    }
+
+    vi.advanceTimersByTime(UNREADABLE_WINDOW_MS);
+    expect(invalidate).toHaveBeenCalledTimes(3);
+    frames.close();
+    client.clear();
+  });
+
+  it('read again rather than show a status or notification of the wrong shape', () => {
+    vi.useFakeTimers();
+
+    const client = new QueryClient();
+    const frames = frameReader(client);
+
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    frames.read(JSON.stringify({ type: 'status', status: {} }));
+    frames.read(JSON.stringify({ type: 'notify', notifications: [{}] }));
+
+    expect(client.getQueryData(queryKeys.status)).toBeUndefined();
+    frames.close();
+    client.clear();
+  });
+});
+
+describe('saved command IDs', () => {
+  it('sends the ID saved for an action again through the contract', async () => {
+    const { pathOf: built } = await import('@/lib/call');
+    const params = { account: 'me', id: 'p1' };
+
+    localStorage.setItem(
+      'review-desk-pending-command-ids',
+      JSON.stringify([
+        [
+          JSON.stringify({
+            path: built(routes.viewed, params),
+            body: { path: 'a.ts', viewed: true },
+            method: 'POST',
+          }),
+          'saved-id',
+        ],
+      ]),
+    );
+    vi.resetModules();
+
+    const { command } = await import('@/lib/call');
+    const { routes: fresh } = await import('@review-desk/shared/contract');
+    const sent: string[] = [];
+
+    vi.stubGlobal('fetch', async (_path: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)).operationId);
+
+      return { ok: true, status: 202, json: async () => ({ operation: { id: sent.at(-1) } }) };
+    });
+
+    await command(fresh.viewed, params, { path: 'a.ts', viewed: true });
+
+    expect(sent).toEqual(['saved-id']);
+    localStorage.clear();
   });
 });
 
