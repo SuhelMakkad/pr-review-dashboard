@@ -71,7 +71,11 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
    * GitHub's traits; tests can change them, for example to send an approval and its summary as
    * GitLab does.
    */
-  traits: ForgeTraits = { ...forgeTraits.github };
+  traits: ForgeTraits = {
+    ...forgeTraits.github,
+    // Its own copy all the way down: a test that changes one leaves every other fixture alone.
+    reference: { ...forgeTraits.github.reference },
+  };
   /** How long each PR read takes, so a benchmark can watch the server while a sync runs. */
   readDelayMs = 0;
   /** The next write with this op name fails once (failure injection for tests). */
@@ -708,6 +712,7 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
           : pull.author.login === login,
       )
       .filter((pull) => Date.parse(pull[field]) >= from && Date.parse(pull[field]) < to)
+      .filter((pull) => !query.repositories || query.repositories.includes(pull.repository))
       .map((pull) => pull.id);
   }
 

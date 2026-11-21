@@ -103,9 +103,20 @@ describe('GitHub data retrieval', () => {
     expect(await github.searchPullIds({ kind: 'reviewed', ...window })).toEqual(['PR_1']);
     await github.searchPullIds({ kind: 'authored', ...window });
 
+    // Named repositories narrow it, any one of them matching.
+    await github.searchPullIds({
+      kind: 'reviewed',
+      ...window,
+      repositories: ['acme/api', 'acme/web'],
+    });
+
     expect(graphql.mock.calls.map((call) => call[1])).toEqual([
       { query: 'is:pr reviewed-by:octo updated:2026-10-01..2026-10-31', cursor: null },
       { query: 'is:pr author:octo created:2026-10-01..2026-10-31', cursor: null },
+      {
+        query: 'is:pr reviewed-by:octo updated:2026-10-01..2026-10-31 repo:acme/api repo:acme/web',
+        cursor: null,
+      },
     ]);
   });
 

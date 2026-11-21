@@ -40,11 +40,12 @@ export class ForgeError extends Error {
 
 /**
  * One history search, for one inclusive window of days (`YYYY-MM-DD`): the PRs `login` reviewed,
- * by when they were last updated, or those it authored, by when they were created.
+ * by when they were last updated, or those it authored, by when they were created. With
+ * `repositories`, only PRs in those (GitHub `owner/repo`, GitLab `group/project`); otherwise any.
  */
 export type HistoryQuery =
-  | { kind: 'reviewed'; login: string; from: string; to: string }
-  | { kind: 'authored'; login: string; from: string; to: string };
+  | { kind: 'reviewed'; login: string; from: string; to: string; repositories?: string[] }
+  | { kind: 'authored'; login: string; from: string; to: string; repositories?: string[] };
 
 /** The forge's writes used by the review workspace and enabled automations. */
 export interface ForgeWrites {

@@ -1320,6 +1320,25 @@ describe('GitLab merge request snapshots', () => {
     expect(fake.calls.at(-1)?.path).toBe(
       'merge_requests?scope=all&state=all&author_username=rev&created_after=2026-10-01T00%3A00%3A00Z&created_before=2026-11-01T00%3A00%3A00.000Z&per_page=100',
     );
+
+    // Named projects are listed one at a time: GitLab's merge request list takes no project filter.
+    fake
+      .on('GET', 'projects/acme%2Fplatform%2Fweb/merge_requests', { data: [mergeRequest()] })
+      .on('GET', 'projects/acme%2Fother/merge_requests', { data: [] });
+
+    expect(
+      await client.searchPullIds({
+        kind: 'reviewed',
+        login: VIEWER,
+        from: '2026-10-01',
+        to: '2026-10-31',
+        repositories: ['acme/platform/web', 'acme/other'],
+      }),
+    ).toEqual(['MR_7_12']);
+    expect(fake.calls.slice(-2).map((call) => call.path)).toEqual([
+      'projects/acme%2Fplatform%2Fweb/merge_requests?state=all&reviewer_username=rev&updated_after=2026-10-01T00%3A00%3A00Z&updated_before=2026-11-01T00%3A00%3A00.000Z&per_page=100',
+      'projects/acme%2Fother/merge_requests?state=all&reviewer_username=rev&updated_after=2026-10-01T00%3A00%3A00Z&updated_before=2026-11-01T00%3A00%3A00.000Z&per_page=100',
+    ]);
   });
 });
 

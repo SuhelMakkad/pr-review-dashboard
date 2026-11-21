@@ -18,7 +18,7 @@ import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
 import { DiffService } from '@/diff/service.js';
 import type { GitHubApi, ReviewReceipt } from '@/github/api.js';
-import { accountCheck, bindForge } from '@/forge/bind.js';
+import { accountCheck, bindForge, declaredTraits } from '@/forge/bind.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { DraftStore } from '@/db/drafts.js';
 import { ReviewError, ReviewService } from '@/review/service.js';
@@ -1359,7 +1359,7 @@ export class OperationQueue {
       action.type === 'ai_review' &&
       action.event === 'APPROVE' &&
       !row.plan &&
-      !this.forge(row.account).traits.approvalCarriesSummary &&
+      !declaredTraits(this.forge(row.account)).approvalCarriesSummary &&
       step &&
       !step.completedAt &&
       !step.uncertain,
@@ -1383,7 +1383,7 @@ export class OperationQueue {
     const action = row.action;
 
     if (action.type !== 'ai_review' || action.event !== 'APPROVE') return row;
-    if (forge.traits.approvalCarriesSummary) return row;
+    if (declaredTraits(forge).approvalCarriesSummary) return row;
 
     const unsent = !row.steps.some((step) => step.method === 'approveReview');
     // Not given yet: never sent, or refused as a split step (a refused combined step is checked
@@ -1573,7 +1573,7 @@ export class OperationQueue {
     }
 
     const pr = this.sync.store.snapshot(row.account, row.prId) ?? undefined;
-    const approval = approvalOf(row, pr, forge.traits.approvalCarriesSummary);
+    const approval = approvalOf(row, pr, declaredTraits(forge).approvalCarriesSummary);
     const current = this.row(row.account, row.id);
 
     return approval ? this.save({ ...current, approvalId: approval.id }) : current;
@@ -1660,7 +1660,7 @@ export class OperationQueue {
     const summary = isSummary(action, method);
 
     const approval = summary
-      ? approvalOf(row, pr, this.forge(row.account).traits.approvalCarriesSummary)
+      ? approvalOf(row, pr, declaredTraits(this.forge(row.account)).approvalCarriesSummary)
       : undefined;
 
     if (summary && !row.approvalId)
@@ -1941,7 +1941,7 @@ export class OperationQueue {
 
         const action = row.action;
         const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
-        const carries = forge.traits.approvalCarriesSummary;
+        const carries = declaredTraits(forge).approvalCarriesSummary;
 
         // An approval sent alone (plan 2) is confirmed by your approval of the head (see
         // `approvalOf`). One that carries its summary (GitHub) by the review with its text. A

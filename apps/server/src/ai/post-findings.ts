@@ -13,7 +13,7 @@ import type { AiRunner } from '@/ai/runner.js';
 import type { AiRunRow } from '@/db/ai-runs.js';
 import type { OperationQueue } from '@/operations/queue.js';
 import type { SyncService } from '@/sync/service.js';
-import { bindForge } from '@/forge/bind.js';
+import { bindForge, declaredTraits } from '@/forge/bind.js';
 import { traitsOf } from '@review-desk/shared/traits';
 
 /** GitHub refuses comments longer than 65,536 characters; stay clear of the limit. */
@@ -140,7 +140,9 @@ export class FindingsPublisher {
     const result = JSON.parse(row.result) as FullReviewResult;
     const blocking = hasBlockingFindings(result);
     // The run's own account's forge, whatever is selected now: GitLab's approvals carry no text.
-    const carriesSummary = bindForge(this.sync.github, row.account).traits.approvalCarriesSummary;
+    const carriesSummary = declaredTraits(
+      bindForge(this.sync.github, row.account),
+    ).approvalCarriesSummary;
     const reason = blocking
       ? undefined
       : !row.inputs.complete

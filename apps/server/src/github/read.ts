@@ -554,10 +554,12 @@ export class GitHub implements GitHubApi {
 
   async searchPullIds(history: HistoryQuery): Promise<string[]> {
     // GitHub's own search syntax: by update date for reviews, by creation date for authored PRs.
+    // Several `repo:` qualifiers match any one of them.
+    const scope = (history.repositories ?? []).map((repository) => ` repo:${repository}`).join('');
     const query =
-      history.kind === 'reviewed'
+      (history.kind === 'reviewed'
         ? `is:pr reviewed-by:${history.login} updated:${history.from}..${history.to}`
-        : `is:pr author:${history.login} created:${history.from}..${history.to}`;
+        : `is:pr author:${history.login} created:${history.from}..${history.to}`) + scope;
     const ids: string[] = [];
     let cursor: string | null = null;
 

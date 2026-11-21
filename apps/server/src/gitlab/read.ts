@@ -136,18 +136,26 @@ interface RawTodo {
 }
 
 /** GitHub search qualifiers the insights backfill uses, as GitLab list filters. */
-/** The merge requests a history search lists: reviewed by update date, authored by creation. */
-function searchFilters(history: HistoryQuery): string {
+/**
+ * The lists a history search reads: reviewed by update date, authored by creation. Across every
+ * project at once, or one list per project when the search names projects (GitLab's merge request
+ * list takes no project filter).
+ */
+function searchFilters(history: HistoryQuery): string[] {
   const [filter, field] =
     history.kind === 'reviewed'
       ? (['reviewer_username', 'updated'] as const)
       : (['author_username', 'created'] as const);
   // `to` is an inclusive day; GitLab's `_before` is exclusive.
   const end = new Date(Date.parse(`${history.to}T00:00:00Z`) + 86_400_000).toISOString();
+  const filters =
+    `state=all&${filter}=${encodeURIComponent(accountHandle(history.login))}` +
+    `&${field}_after=${encodeURIComponent(`${history.from}T00:00:00Z`)}&${field}_before=${encodeURIComponent(end)}`;
 
-  return (
-    `merge_requests?scope=all&state=all&${filter}=${encodeURIComponent(accountHandle(history.login))}` +
-    `&${field}_after=${encodeURIComponent(`${history.from}T00:00:00Z`)}&${field}_before=${encodeURIComponent(end)}`
+  if (!history.repositories) return [`merge_requests?scope=all&${filters}`];
+
+  return history.repositories.map(
+    (project) => `projects/${encodeURIComponent(project)}/merge_requests?${filters}`,
   );
 }
 
@@ -910,13 +918,12 @@ export class GitLab implements GitHubApi {
 
   /** Merge request ids for the GitHub-style search the insights backfill sends. */
   async searchPullIds(history: HistoryQuery): Promise<string[]> {
-    const path = searchFilters(history);
-    const mrs = await paginate<RawMergeRequest>(
-      this.transport,
-      path,
-      'Could not search GitLab',
-      10,
-    );
+    const mrs: RawMergeRequest[] = [];
+
+    for (const path of searchFilters(history))
+      mrs.push(
+        ...(await paginate<RawMergeRequest>(this.transport, path, 'Could not search GitLab', 10)),
+      );
 
     return [...new Set(mrs.map((mr) => mergeRequestId(mr.project_id, mr.iid)))];
   }

@@ -169,6 +169,17 @@ describe('archive access', () => {
 });
 
 describe('the router', () => {
+  it('declares GitHub’s traits for a client that declares none, as every reader does', () => {
+    const forges = new ForgeRouter(
+      {} as GitHubApi,
+      { list: async () => [], select: () => undefined },
+      { list: async () => [] },
+      () => ({}) as GitHubApi,
+    );
+
+    expect(forges.traits).toEqual(forgeTraits.github);
+  });
+
   /** A client that answers `identity` as `login`, and names itself in `teams`. */
   const client = (login: string, failing = false) =>
     ({

@@ -7,6 +7,7 @@ import { GitHubError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
 import type { GlabAccounts } from '@/gitlab/accounts.js';
 import type { HistoryQuery } from '@/forge/port.js';
+import { declaredTraits } from '@/forge/bind.js';
 
 type AccountLister = Pick<GitHubAccounts, 'list' | 'select'>;
 
@@ -97,7 +98,7 @@ abstract class ForgeView implements GitHubApi {
   }
 
   get traits() {
-    return this.target().traits;
+    return declaredTraits(this.target());
   }
 
   approveReview(prId: string, commitOid: string, body: string) {

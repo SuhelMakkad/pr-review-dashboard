@@ -30,8 +30,12 @@ export interface ForgeTraits {
   signIn(host: string): string;
 }
 
+/** Frozen, nested objects included: a forge's traits are the same for every reader. */
+const frozen = (traits: ForgeTraits): ForgeTraits =>
+  Object.freeze({ ...traits, reference: Object.freeze({ ...traits.reference }) });
+
 export const forgeTraits: Record<Forge, ForgeTraits> = {
-  github: {
+  github: frozen({
     approvalCarriesSummary: true,
     checksAccount: false,
     pinnedFiles: false,
@@ -40,8 +44,8 @@ export const forgeTraits: Record<Forge, ForgeTraits> = {
     reference: { separator: '#', nestedPaths: false },
     teams: true,
     signIn: () => 'gh auth login',
-  },
-  gitlab: {
+  }),
+  gitlab: frozen({
     approvalCarriesSummary: false,
     checksAccount: true,
     pinnedFiles: true,
@@ -50,7 +54,7 @@ export const forgeTraits: Record<Forge, ForgeTraits> = {
     reference: { separator: '!', nestedPaths: true },
     teams: false,
     signIn: (host) => `glab auth login --hostname ${host}`,
-  },
+  }),
 };
 
 /** The traits of `account`'s forge (`alice` on GitHub, `alice@gitlab.example` on GitLab). */

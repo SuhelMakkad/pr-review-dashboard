@@ -138,3 +138,41 @@ describe('history backfill', () => {
     expect(backfill.state('you')).toMatchObject({ lastError: 'rate limited', finishedAt: null });
   });
 });
+
+describe("the demo fixture's history search", () => {
+  it('keeps to the repositories it is given', async () => {
+    const fixture = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
+    const window = { login: 'you', from: '2020-01-01', to: '2030-12-31' };
+    const repositoryOf = async (ids: string[]) =>
+      new Set((await fixture.history(ids)).map((pull) => pull.repository));
+    const all = await fixture.searchPullIds({ kind: 'authored', ...window });
+    const repositories = await repositoryOf(all);
+
+    // The scenario spans more than one repository, so narrowing it to one leaves the rest out.
+    expect(repositories.size).toBeGreaterThan(1);
+
+    const [first] = repositories;
+    const scoped = await fixture.searchPullIds({
+      kind: 'authored',
+      ...window,
+      repositories: [first],
+    });
+
+    expect(scoped.length).toBeGreaterThan(0);
+    expect(scoped.length).toBeLessThan(all.length);
+    expect(await repositoryOf(scoped)).toEqual(new Set([first]));
+  });
+});
+
+describe("the demo fixture's traits", () => {
+  it("are its own, so one test's change never reaches another fixture", () => {
+    const changed = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
+    const other = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
+
+    changed.traits.reference.separator = '!';
+    changed.traits.approvalCarriesSummary = false;
+
+    expect(other.traits.reference.separator).toBe('#');
+    expect(other.traits.approvalCarriesSummary).toBe(true);
+  });
+});
