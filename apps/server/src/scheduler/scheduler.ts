@@ -5,8 +5,14 @@ import type { Store } from '@/db/store.js';
 import { log } from '@/log.js';
 import { safeError } from '@/redact.js';
 
-/** How many runs of each class go at once. */
-export const CLASS_LIMITS = { automation: 1, history: 1 } as const;
+/**
+ * How many runs of each class go at once: in all, or for each account (`per: 'account'`), so one
+ * account's work never waits on another's.
+ */
+export const CLASS_LIMITS = {
+  automation: { limit: 1 },
+  history: { limit: 1, per: 'account' },
+} as const satisfies Record<string, { limit: number; per?: 'account' }>;
 
 export type WorkClass = keyof typeof CLASS_LIMITS;
 
@@ -41,6 +47,8 @@ export interface WorkHandler {
    * or null. Rejects with `Defer` to wait for a time, `Aborted` once `signal` aborts.
    */
   run(work: Work, signal: AbortSignal): Promise<{ next: string | null }>;
+  /** Told once a run's end is saved and its slot freed, a retried save included. Never throws. */
+  settled?(work: Work): void;
 }
 
 type Outcome =
@@ -51,6 +59,7 @@ type Outcome =
 
 interface Run {
   work: Work;
+  handler: WorkHandler;
   class: WorkClass;
   controller: AbortController;
   /** The handler, then the first attempt to settle its row. */
@@ -86,7 +95,8 @@ const gated = (notBefore: string | null, now: number) =>
  */
 export class Scheduler {
   private readonly handlers = new Map<string, WorkHandler>();
-  private readonly runs = new Map<string, Run>();
+  /** The runs of this process, by kind and key, until each is settled. */
+  private readonly active = new Map<string, Run>();
   private opened = false;
   private closed = false;
   private cancelWake: Cancel | null = null;
@@ -110,12 +120,13 @@ export class Scheduler {
 
   /**
    * Asks for the work by `at`, not before `notBefore`, in the caller's transaction: the earliest
-   * ask wins, a gate is only ever raised, and the timer is armed once it commits.
+   * ask wins, a gate is only ever raised, and the timer is armed once it commits. One that `join`s
+   * a run in progress asks nothing more of it.
    */
   request(
     kind: string,
     key: string,
-    ask: { account: string | null; at: string; notBefore?: string | null },
+    ask: { account: string | null; at: string; notBefore?: string | null; join?: boolean },
   ): void {
     const handler = this.handlers.get(kind);
 
@@ -154,6 +165,16 @@ export class Scheduler {
     this.wake();
   }
 
+  /** Open, and not closed: taking work. */
+  get accepting(): boolean {
+    return this.opened && !this.closed;
+  }
+
+  /** This process is running the work now, or saving how it ended. */
+  running(kind: string, key: string): boolean {
+    return this.active.has(idOf({ kind, key }));
+  }
+
   /**
    * Starts nothing more, tells every run to stop, and waits for each to end and try to settle.
    * A settlement still failing is left: the next start releases its claim.
@@ -162,13 +183,13 @@ export class Scheduler {
     this.closed = true;
     this.disarm();
 
-    for (const run of this.runs.values()) {
+    for (const run of this.active.values()) {
       run.controller.abort();
       run.retry?.();
       run.retry = null;
     }
 
-    await Promise.allSettled([...this.runs.values()].map((run) => run.done));
+    await Promise.allSettled([...this.active.values()].map((run) => run.done));
   }
 
   /** Arms the timer for the earliest row that could run. Never throws. */
@@ -236,17 +257,23 @@ export class Scheduler {
     return Math.min(MAX_SLEEP_MS, Math.max(MIN_WAKE_MS, earliest - now));
   }
 
-  /** Run here, and its class has room. */
+  /** Run here, and its class has room: in all, or for its account. */
   private startable(row: WorkRow): boolean {
     const handler = this.handlers.get(row.kind);
 
     if (!handler) return false;
 
+    const limits: { limit: number; per?: 'account' } = CLASS_LIMITS[handler.class];
     let busy = 0;
 
-    for (const run of this.runs.values()) if (run.class === handler.class) busy++;
+    for (const run of this.active.values())
+      if (
+        run.class === handler.class &&
+        (limits.per !== 'account' || run.work.account === row.account)
+      )
+        busy++;
 
-    return busy < CLASS_LIMITS[handler.class];
+    return busy < limits.limit;
   }
 
   /** Starts every due row its class has room for, earliest first, then arms for the next. */
@@ -278,13 +305,14 @@ export class Scheduler {
 
     const run: Run = {
       work,
+      handler,
       class: handler.class,
       controller,
       done: Promise.resolve(),
       retry: null,
     };
 
-    this.runs.set(idOf(work), run);
+    this.active.set(idOf(work), run);
     run.done = Promise.resolve()
       .then(() => {
         // Closed between its claim and now: released, never started.
@@ -330,8 +358,14 @@ export class Scheduler {
       return;
     }
 
-    this.runs.delete(idOf(run.work));
+    this.active.delete(idOf(run.work));
     this.wake();
+
+    try {
+      run.handler.settled?.(run.work);
+    } catch {
+      // Told after the save committed: nothing about it is undone or retried.
+    }
   }
 
   private apply(work: Work, outcome: Outcome): void {

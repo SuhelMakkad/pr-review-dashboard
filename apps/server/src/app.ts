@@ -175,7 +175,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   registerLinearRoutes(app, service, linear);
 
   const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);
-  // Background work run at its due time: restarts of automatic reviews, for now.
+  // Background work run at its due time: restarts of automatic reviews, and history imports.
   const scheduler = new Scheduler(service.store, service.clock, bootId);
   const autoReviewer = new AutoReviewer(service, runner, notifier, scheduler);
   const publisher = new FindingsPublisher(service, runner, operations);
@@ -186,7 +186,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   operations.posting = () => runner.settings();
   registerAiRoutes(app, runner, autoReviewer, service);
 
-  const backfill = new Backfill(service, service.events);
+  const backfill = new Backfill(service, service.events, scheduler);
 
   service.afterSync = async (login) => {
     await notifier.afterSync(login, service.listFor(login).items, service.mineFor(login).items);
@@ -198,7 +198,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     const pass = autoReviewer.afterSync(login);
 
     // History fills in the background; it never delays a sync.
-    void backfill.start(login);
+    backfill.request(login);
 
     return { pass };
   };
@@ -219,6 +219,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     operations.open();
     scheduler.open();
     autoReviewer.open();
+    backfill.open();
   });
 
   // One shutdown. Every part stops taking new work in the same tick, before anything is awaited,
@@ -236,6 +237,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
       service.stop(),
       scheduler.close(),
       autoReviewer.close(),
+      // Stops asking on a switch; its imports stop with the scheduler.
       backfill.close(),
       operations.close(),
       runner.close(),

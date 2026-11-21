@@ -3,7 +3,7 @@ import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { EventBus } from '@/events.js';
-import { Backfill } from '@/insights/backfill.js';
+import { historyImporter } from './history-importer.js';
 import { SyncService } from '@/sync/index.js';
 import {
   computeInsights,
@@ -87,10 +87,10 @@ describe('turnaround', () => {
 });
 
 describe('history backfill', () => {
-  const stores: Store[] = [];
+  const cleanups: (() => unknown)[] = [];
 
-  afterEach(() => {
-    for (const store of stores.splice(0)) store.close();
+  afterEach(async () => {
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
     vi.restoreAllMocks();
   });
 
@@ -99,17 +99,21 @@ describe('history backfill', () => {
     const github = new FixtureGitHub(() => defaultScenario());
     const sync = new SyncService(store, github, new EventBus());
 
-    stores.push(store);
+    cleanups.push(() => store.close());
     await sync.sync();
 
-    return { store, github, sync, backfill: new Backfill(sync, sync.events) };
+    const importer = historyImporter(sync);
+
+    cleanups.push(importer.close);
+
+    return { store, github, sync, ...importer };
   }
 
   it('fills 90 days of review history and resumes without refetching', async () => {
-    const { store, github, sync, backfill } = await setup();
+    const { store, github, sync, backfill, imported } = await setup();
     const history = vi.spyOn(github, 'history');
 
-    await backfill.start('you');
+    await imported('you');
 
     const insights = computeInsights(store.activity('you'), [], { days: 90, slaHours: 24 });
 
@@ -124,16 +128,16 @@ describe('history backfill', () => {
 
     const fetched = history.mock.calls.flatMap(([ids]) => ids).length;
 
-    await backfill.start('you');
+    await imported('you');
     expect(history.mock.calls.slice(-3).flatMap(([ids]) => ids).length).toBeLessThan(fetched);
     expect(sync.status.account?.login).toBe('you');
   });
 
   it('records the error and keeps what it already had when GitHub fails', async () => {
-    const { github, backfill } = await setup();
+    const { github, backfill, imported } = await setup();
 
     vi.spyOn(github, 'searchPullIds').mockRejectedValue(new Error('rate limited'));
-    await backfill.start('you');
+    await imported('you');
 
     expect(backfill.state('you')).toMatchObject({ lastError: 'rate limited', finishedAt: null });
   });

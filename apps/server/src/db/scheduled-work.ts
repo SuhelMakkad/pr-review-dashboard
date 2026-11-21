@@ -47,15 +47,24 @@ export class ScheduledWork {
 
   /**
    * Asks for the work by `at`. The earliest ask wins; one made while it runs waits as `rearmAt`,
-   * for when that run settles. `notBefore` only ever raises its gate.
+   * for when that run settles, unless it `join`s that run, which then covers it. `notBefore`
+   * only ever raises its gate.
    */
   request(
     kind: string,
     key: string,
-    ask: { account: string | null; class: string; at: string; notBefore?: string | null },
+    ask: {
+      account: string | null;
+      class: string;
+      at: string;
+      notBefore?: string | null;
+      join?: boolean;
+    },
     now: string,
   ): void {
     const row = this.get(kind, key);
+
+    if (row?.claimedBy && ask.join) return;
 
     if (!row) {
       this.db

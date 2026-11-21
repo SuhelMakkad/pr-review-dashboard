@@ -12,7 +12,7 @@ import { defaultScenario } from '@/demo/scenario.js';
 import { EventBus } from '@/events.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import { GitHubError } from '@/github/errors.js';
-import { Backfill } from '@/insights/backfill.js';
+import { historyImporter } from './history-importer.js';
 import { extractActivity } from '@/insights/extract.js';
 import { activityEvents } from '@/db/schema.js';
 import { AiRunner } from '@/ai/runner.js';
@@ -337,13 +337,15 @@ describe('history imports per account', () => {
       if (event.type === 'insights.updated') updates.push(event.account);
     });
 
-    const backfill = new Backfill(service, events);
+    const importer = historyImporter(service);
 
-    return { store, fixture, service, backfill, updates };
+    cleanups.push(importer.close);
+
+    return { store, fixture, service, updates, ...importer };
   }
 
   it("runs each account's import on its own, and drains them all on close", async () => {
-    const { fixture, service, backfill, updates } = await imports();
+    const { fixture, service, backfill, clock, scheduler, row, updates } = await imports();
     const held = new Map<string, () => void>();
     // Once an account's reads are let go, the rest of its import reads at once.
     const free = new Set<string>();
@@ -362,27 +364,30 @@ describe('history imports per account', () => {
       return [];
     });
 
-    const first = backfill.start('you');
+    backfill.request('you');
 
-    // Shown as running at once, before its first read returns.
+    // Shown as running at once, before it starts.
     expect(updates).toEqual(['you']);
     expect(backfill.state('you').running).toBe(true);
 
+    clock.fire();
+    await vi.waitFor(() => expect([...held.keys()]).toEqual(['you']));
     await service.switchAccount('you', DEMO_SECOND_ACCOUNT);
+    backfill.request(DEMO_SECOND_ACCOUNT);
+    // One import for each account: the second starts beside the first.
+    clock.fire();
 
-    const second = backfill.start(DEMO_SECOND_ACCOUNT);
-
-    expect(second).not.toBe(first);
     expect(backfill.state(DEMO_SECOND_ACCOUNT).running).toBe(true);
     await vi.waitFor(() => expect([...held.keys()].sort()).toEqual(['you', DEMO_SECOND_ACCOUNT]));
 
-    const closed = backfill.close();
+    const closed = scheduler.close();
     let done = false;
 
     void closed.then(() => (done = true));
     held.get('you')!();
-    await first;
+    await vi.waitFor(() => expect(row('you')?.claimedBy ?? null).toBe(null));
 
+    // Its window finished, it stopped, and the next start resumes it.
     expect(backfill.state('you').running).toBe(false);
     expect(backfill.state(DEMO_SECOND_ACCOUNT).running).toBe(true);
     expect(done).toBe(false);
@@ -390,10 +395,11 @@ describe('history imports per account', () => {
     held.get(DEMO_SECOND_ACCOUNT)!();
     await closed;
     expect(backfill.state(DEMO_SECOND_ACCOUNT).running).toBe(false);
+    expect(row('you')).toMatchObject({ claimedBy: null, attempts: 0 });
   });
 
   it('saves nothing from a window during which glab signed in as someone else', async () => {
-    const { store, fixture, service, backfill } = await imports();
+    const { store, fixture, service, backfill, imported } = await imports();
     let signedIn = 'you';
     let reads = 0;
     const eventsOf = (id: string) =>
@@ -421,7 +427,7 @@ describe('history imports per account', () => {
       return reads <= 2 ? [first.id] : [second.id];
     });
 
-    await backfill.start('you');
+    await imported('you');
 
     const state = backfill.state('you');
 
@@ -432,7 +438,7 @@ describe('history imports per account', () => {
   });
 
   it('never counts a window whose save rolled back as done', async () => {
-    const { store, fixture, backfill } = await imports();
+    const { store, fixture, backfill, imported } = await imports();
     let windows = 0;
 
     vi.spyOn(fixture, 'searchPullIds').mockResolvedValue([]);
@@ -450,7 +456,7 @@ describe('history imports per account', () => {
       return set(setting, value);
     });
 
-    await backfill.start('you');
+    await imported('you');
 
     const state = backfill.state('you');
 
@@ -459,8 +465,8 @@ describe('history imports per account', () => {
     expect(state.doneWindows).toEqual([]);
   });
 
-  it('keeps a confirmed limit as the cooldown, and keeps saved progress through a refused import', async () => {
-    const { store, fixture, service, backfill } = await imports();
+  it('keeps a confirmed limit as the cooldown, resumes after it, and keeps saved progress through a refused import', async () => {
+    const { store, fixture, service, backfill, row, ran, imported } = await imports();
     const retryAt = new Date(Date.now() + 60 * 60_000).toISOString();
 
     const verifyAccount = vi.fn(async () => undefined);
@@ -475,19 +481,28 @@ describe('history imports per account', () => {
       new GitHubError('Rate limited.', retryAt, 403, 'rate_limit'),
     );
 
-    await backfill.start('you', { force: true });
+    await imported('you', { force: true });
 
     expect(backfill.state('you').doneWindows).toEqual(['2026-08-07..2026-09-06']);
     expect(() => service.assertNotCoolingDown('you')).toThrow();
+    // Resumed once the cooldown ends, the refresh still to finish.
+    expect(row('you')).toMatchObject({ notBefore: service.cooldown('you'), attempts: 0 });
+    expect(store.settings.get(BACKFILL.of('you'))?.force).toEqual(
+      expect.objectContaining({ windows: [] }),
+    );
 
-    // Under the cooldown, a forced import asks the forge nothing, not even who it is, and loses
-    // nothing.
+    // An import that starts under the cooldown asks the forge nothing, not even who it is, and
+    // loses nothing.
     vi.mocked(fixture.searchPullIds).mockClear();
     verifyAccount.mockClear();
-    await backfill.start('you', { force: true });
+    store.scheduledWork.delete({ kind: 'insights.backfill', key: 'you' });
+    backfill.request('you');
+    await ran('you');
 
     expect(fixture.searchPullIds).not.toHaveBeenCalled();
     expect(verifyAccount).not.toHaveBeenCalled();
+    // Put off until the cooldown ends.
+    expect(row('you')).toMatchObject({ notBefore: service.cooldown('you'), attempts: 0 });
     expect(backfill.state('you')).toMatchObject({
       doneWindows: ['2026-08-07..2026-09-06'],
       lastError: expect.stringContaining('rate limited'),

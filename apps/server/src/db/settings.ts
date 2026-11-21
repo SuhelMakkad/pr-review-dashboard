@@ -354,16 +354,33 @@ export const REVIEW_SLA_HOURS = setting(
 
 // Background work ---------------------------------------------------------------------------------
 
+/** A refresh you asked for: its id, when its windows end, and the windows it has read so far. */
+export interface ForcedBackfill {
+  id: string;
+  at: string;
+  windows: string[];
+}
+
 export interface SavedBackfill {
   doneWindows: string[];
   finishedAt: string | null;
   lastError: string | null;
+  /** A refresh still to finish; absent in what was saved before refreshes were kept. */
+  force?: ForcedBackfill | null;
 }
+
+const forcedBackfill = z.strictObject({
+  id: z.string(),
+  // Its windows are counted from it: an unreadable time would read none and call that done.
+  at: time,
+  windows: z.array(z.string()),
+}) satisfies z.ZodType<ForcedBackfill>;
 
 const savedBackfill = z.strictObject({
   doneWindows: z.array(z.string()),
   finishedAt: nullableString,
   lastError: nullableString,
+  force: forcedBackfill.nullable().optional(),
 }) satisfies z.ZodType<SavedBackfill>;
 
 function readBackfill(raw: unknown): Decoded<SavedBackfill | null> {
@@ -374,6 +391,7 @@ function readBackfill(raw: unknown): Decoded<SavedBackfill | null> {
     doneWindows: fields.take('doneWindows', z.array(z.string()), () => []),
     finishedAt: fields.take('finishedAt', nullableString, () => null),
     lastError: fields.take('lastError', nullableString, () => null),
+    force: fields.take('force', forcedBackfill.nullable(), () => null),
   };
 
   return { value, invalid: fields.invalid };
