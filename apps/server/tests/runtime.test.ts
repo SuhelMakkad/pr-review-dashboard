@@ -22,7 +22,7 @@ import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { EventBus } from '@/events.js';
-import { Backfill } from '@/insights/backfill.js';
+import { historyImporter } from './history-importer.js';
 import type { Notifier } from '@/notify/notifier.js';
 import { SyncService } from '@/sync/service.js';
 import { BACKFILL } from '@/db/settings.js';
@@ -605,25 +605,35 @@ describe('shutdown order', () => {
 
     await service.sync();
 
-    const backfill = new Backfill(service, service.events);
+    const { backfill, clock, close } = historyImporter(service);
     const { gated, release, counter } = gate(fixture.searchPullIds.bind(fixture));
 
     fixture.searchPullIds = gated;
-
-    const running = backfill.start('you');
-
+    backfill.request('you');
+    clock.fire();
     await vi.waitFor(() => expect(counter.calls).toBe(1));
 
-    const closing = backfill.close();
+    const closing = close();
 
     release();
-    await Promise.all([closing, running]);
+    await closing;
 
     // The window in progress finished (two searches); later windows never started.
     expect(counter.calls).toBe(2);
     expect(backfill.state('you')).toMatchObject({ finishedAt: null, running: false });
 
-    await backfill.start('you');
+    // Closed: nothing more starts, and what it asked for waits for the next start.
+    backfill.request('you');
+    expect(clock.wakes()).toEqual([]);
     expect(counter.calls).toBe(2);
+
+    const next = historyImporter(service, 'boot-2');
+
+    cleanups.push(next.close);
+    next.clock.fire();
+    await vi.waitFor(() => expect(counter.calls).toBeGreaterThan(2));
+    await vi.waitFor(() =>
+      expect(next.backfill.state('you').finishedAt).toEqual(expect.any(String)),
+    );
   });
 });

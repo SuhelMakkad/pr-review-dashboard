@@ -114,6 +114,11 @@ export class SyncService {
     return this.runner.syncOwn(account, signal);
   }
 
+  /** The account's teams, in use or not (see `AccountState.teamsOf`). */
+  teamsOf(account: string): string[] {
+    return this.state.teamsOf(account);
+  }
+
   /** The account's cooldown, in use or not, or null (see `AccountState.cooldown`). */
   cooldown(account: string): string | null {
     return this.state.cooldown(account);

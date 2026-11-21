@@ -61,7 +61,7 @@ export function registerInsightsRoutes(
         });
       }
 
-      void backfill.start(account, { force: true });
+      backfill.refresh(account);
 
       return ok(202, { started: true as const });
     },
