@@ -5,7 +5,6 @@ import { dirname } from 'node:path';
 import { and, asc, eq, gte, max } from 'drizzle-orm';
 import { drizzle, type NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite';
 import { emptyTriage } from '@review-desk/shared/attention';
-import { normalizeSnapshot } from '@review-desk/shared/snapshot';
 import type {
   FeedSource,
   LocalTriageState,
@@ -14,6 +13,7 @@ import type {
   SyncStatus,
 } from '@review-desk/shared/types';
 import type { ActivityEvent } from '@/insights/extract.js';
+import { snapshotCodec, triageCodec } from '@/db/codecs.js';
 import { migrateDatabase } from '@/db/migrate.js';
 import { LAST_ACCOUNT, Settings, STATUS } from '@/db/settings.js';
 import {
@@ -142,7 +142,7 @@ export class Store {
       .where(eq(snapshots.account, account))
       .orderBy(asc(snapshots.id))
       .all()
-      .map((row) => normalizeSnapshot(row.data));
+      .map((row) => snapshotCodec.decode(row.data));
   }
 
   /**
@@ -156,7 +156,7 @@ export class Store {
       .where(and(eq(snapshots.account, account), eq(snapshots.state, 'OPEN')))
       .orderBy(asc(snapshots.id))
       .all()
-      .map((row) => normalizeSnapshot(row.data));
+      .map((row) => snapshotCodec.decode(row.data));
   }
 
   snapshot(account: string, id: string): PullRequestSnapshot | null {
@@ -166,7 +166,7 @@ export class Store {
       .where(and(eq(snapshots.account, account), eq(snapshots.id, id)))
       .get();
 
-    return row ? normalizeSnapshot(row.data) : null;
+    return row ? snapshotCodec.decode(row.data) : null;
   }
 
   saveSnapshot(account: string, snapshot: PullRequestSnapshot): void {
@@ -184,7 +184,7 @@ export class Store {
       .where(and(eq(triage.account, account), eq(triage.id, id)))
       .get();
 
-    return row ? { ...emptyTriage(), ...row.data } : emptyTriage();
+    return row ? triageCodec.decode(row.data) : emptyTriage();
   }
 
   saveTriage(account: string, id: string, state: LocalTriageState): void {

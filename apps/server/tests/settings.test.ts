@@ -42,6 +42,13 @@ function captured() {
 }
 
 const later = new Date(Date.now() + 60 * 60_000).toISOString();
+
+/** The text stored under `key`, or null. */
+const stored = (store: Store, key: string) =>
+  (
+    store.db.$client.prepare('SELECT data FROM settings WHERE key = ?').get(key) as
+      { data: string } | undefined
+  )?.data ?? null;
 const saved = (overrides: Record<string, unknown>) => ({
   ...initialStatus(),
   account: { login: 'ann' },
@@ -88,6 +95,21 @@ describe('saved status', () => {
       expect.objectContaining({ level: 'warn', event: 'settings.invalid', setting: 'status' }),
     ]);
     expect(JSON.stringify(records())).not.toContain('ann');
+  });
+
+  it('reads a deadline that is not a time as none, so a write cooldown still holds', () => {
+    const store = memoryStore();
+    const state = new AccountState(store, new EventBus(), null, systemClock);
+
+    storeRaw(store, 'status:ann', saved({ retryAt: 'soon', nextSyncAt: 'soon' }));
+    store.settings.set(WRITE_COOLDOWN.of('ann'), later);
+
+    expect(store.settings.get(STATUS.of('ann'))).toMatchObject({
+      account: { login: 'ann' },
+      retryAt: null,
+      nextSyncAt: null,
+    });
+    expect(state.cooldown('ann')).toBe(later);
   });
 
   it('rebuilds a value that is not an object, or not JSON, whole', () => {
@@ -221,13 +243,34 @@ describe('writes', () => {
     expect(store.settings.get(WRITE_COOLDOWN.of('ann'))).toBeNull();
   });
 
-  it('store a canonical value as given', () => {
+  it('refuse a field the canonical shape does not have, at any depth', () => {
+    const store = memoryStore();
+    const defaults = defaultAiSettings();
+
+    expect(() => store.settings.set(AI_SETTINGS, { ...defaults, extra: true } as never)).toThrow();
+    expect(() =>
+      store.settings.set(AI_SETTINGS, {
+        ...defaults,
+        tasks: { ...defaults.tasks, brief: { ...defaults.tasks.brief, extra: true } },
+      } as never),
+    ).toThrow();
+    expect(() =>
+      store.settings.set(STATUS.of('ann'), {
+        ...saved({}),
+        account: { login: 'ann', name: 'Ann' },
+      } as never),
+    ).toThrow();
+    expect(stored(store, 'ai-settings')).toBeNull();
+    expect(stored(store, 'status:ann')).toBeNull();
+  });
+
+  it('store a canonical value exactly as given', () => {
     const store = memoryStore();
     const settings = { ...defaultAiSettings(), postFindings: true };
 
     store.settings.set(AI_SETTINGS, settings);
 
-    expect(store.settings.get(AI_SETTINGS)).toEqual(settings);
+    expect(stored(store, 'ai-settings')).toBe(JSON.stringify(settings));
   });
 });
 
@@ -243,6 +286,12 @@ describe("GitLab's own state", () => {
     expect(local.getSetting('gitlab:ann@gitlab.com:viewed:pr-1')).toBeNull();
 
     store.settings.set(WRITE_COOLDOWN.of('ann'), later);
+
+    // A corrupt review head or submission must never read as none at all.
+    store.db.$client
+      .prepare('INSERT INTO settings (key, data) VALUES (?, ?)')
+      .run('gitlab:ann@gitlab.com:head:review-1', '{"oid": ');
+    expect(() => local.getSetting('gitlab:ann@gitlab.com:head:review-1')).toThrow(SyntaxError);
 
     expect(() => local.getSetting('github-write-retry:ann')).toThrow();
     expect(() => local.setSetting('github-write-retry:ann', 'soon')).toThrow();

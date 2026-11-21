@@ -148,22 +148,26 @@ export const initialStatus = (): SyncStatus => ({
 /** Shown for an account whose saved status had to be rebuilt; the next sync replaces it. */
 export const STATUS_RECOVERED = 'Saved status could not be read; the next sync refreshes it.';
 
-const actor = z.object({
+// Read leniently, so a saved object with a field since dropped still reads; written strictly.
+const actorFields = {
   login: z.string(),
   avatarUrl: z.string().optional(),
   webUrl: z.string().optional(),
-});
+};
+const actor = z.object(actorFields);
 const capabilities = z.object({ requestChanges: z.boolean() });
-const syncStatus = z.object({
-  account: actor.nullable(),
-  capabilities: capabilities.optional(),
+/** A deadline or a sync time: a time `Date.parse` reads, or none. */
+const nullableTime = time.nullable();
+const syncStatus = z.strictObject({
+  account: z.strictObject(actorFields).nullable(),
+  capabilities: z.strictObject({ requestChanges: z.boolean() }).optional(),
   teams: z.array(z.string()),
   syncing: z.boolean(),
-  lastAttemptAt: nullableString,
-  lastCompletedAt: nullableString,
-  lastSuccessfulSync: nullableString,
-  nextSyncAt: nullableString,
-  retryAt: nullableString,
+  lastAttemptAt: nullableTime,
+  lastCompletedAt: nullableTime,
+  lastSuccessfulSync: nullableTime,
+  nextSyncAt: nullableTime,
+  retryAt: nullableTime,
   error: nullableString,
   warnings: z.array(z.string()),
 }) satisfies z.ZodType<SyncStatus>;
@@ -191,11 +195,12 @@ function readStatus(raw: unknown, account: string): Decoded<SyncStatus> {
     account: identity ?? { login: account },
     teams: fields.take('teams', z.array(z.string()), () => base.teams),
     syncing: fields.take('syncing', z.boolean(), () => base.syncing),
-    lastAttemptAt: fields.take('lastAttemptAt', nullableString, () => null),
-    lastCompletedAt: fields.take('lastCompletedAt', nullableString, () => null),
-    lastSuccessfulSync: fields.take('lastSuccessfulSync', nullableString, () => null),
-    nextSyncAt: fields.take('nextSyncAt', nullableString, () => null),
-    retryAt: fields.take('retryAt', nullableString, () => null),
+    // A deadline that is not a time would read as NaN, and hide a valid write cooldown.
+    lastAttemptAt: fields.take('lastAttemptAt', nullableTime, () => null),
+    lastCompletedAt: fields.take('lastCompletedAt', nullableTime, () => null),
+    lastSuccessfulSync: fields.take('lastSuccessfulSync', nullableTime, () => null),
+    nextSyncAt: fields.take('nextSyncAt', nullableTime, () => null),
+    retryAt: fields.take('retryAt', nullableTime, () => null),
     error: usable ? fields.take('error', nullableString, () => null) : STATUS_RECOVERED,
     warnings: fields.take('warnings', z.array(z.string()), () => base.warnings),
   };
@@ -218,16 +223,16 @@ export const WRITE_COOLDOWN = family('writeCooldown', 'github-write-retry', time
 
 const provider = z.enum(['codex', 'claude']);
 const effort = z.enum(['low', 'medium', 'high', 'xhigh']);
-const taskSettings = z.object({
+const taskSettings = z.strictObject({
   provider: provider.nullable(),
   effort,
   model: z.string().nullable(),
 });
 const aiTasks = Object.keys(defaultAiSettings().tasks) as AiTask[];
-const aiSettings = z.object({
+const aiSettings = z.strictObject({
   defaultProvider: provider,
-  tasks: z.object(Object.fromEntries(aiTasks.map((task) => [task, taskSettings]))),
-  autoReview: z.object({ enabled: z.boolean(), since: nullableString }),
+  tasks: z.strictObject(Object.fromEntries(aiTasks.map((task) => [task, taskSettings]))),
+  autoReview: z.strictObject({ enabled: z.boolean(), since: nullableString }),
   postFindings: z.boolean(),
   approveFindings: z.boolean(),
   resolveThreads: z.boolean(),
@@ -297,10 +302,11 @@ function readAiSettings(raw: unknown): Decoded<AiSettings | null> {
 
 const notificationKinds = Object.keys(defaultNotificationSettings().kinds) as NotificationKind[];
 const clockTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
-const quietHours = z.object({ start: clockTime, end: clockTime }).nullable();
-const notificationSettings = z.object({
-  kinds: z.object(Object.fromEntries(notificationKinds.map((kind) => [kind, z.boolean()]))),
-  quietHours,
+const quietHoursFields = { start: clockTime, end: clockTime };
+const quietHours = z.object(quietHoursFields).nullable();
+const notificationSettings = z.strictObject({
+  kinds: z.strictObject(Object.fromEntries(notificationKinds.map((kind) => [kind, z.boolean()]))),
+  quietHours: z.strictObject(quietHoursFields).nullable(),
   macosWhenClosed: z.boolean(),
   badgeIncludesMine: z.boolean(),
 }) as unknown as z.ZodType<NotificationSettings>;
@@ -354,7 +360,7 @@ export interface SavedBackfill {
   lastError: string | null;
 }
 
-const savedBackfill = z.object({
+const savedBackfill = z.strictObject({
   doneWindows: z.array(z.string()),
   finishedAt: nullableString,
   lastError: nullableString,
@@ -421,7 +427,9 @@ export class Settings {
     getSetting: <T>(key: string): T | null => {
       const text = this.text(forgeLocalKey(key));
 
-      return text === null ? null : (parse(text) as T);
+      // Malformed state throws, as it always has: a corrupt review head or submission must
+      // never look like none at all.
+      return text === null ? null : (JSON.parse(text) as T);
     },
     setSetting: (key: string, value: unknown): void => this.put(forgeLocalKey(key), value),
     deleteSetting: (key: string): void => this.remove(forgeLocalKey(key)),
