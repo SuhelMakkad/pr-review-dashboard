@@ -1,5 +1,3 @@
-import { eq } from 'drizzle-orm';
-import { activityEvents } from '@/db/schema.js';
 import type { EventBus } from '@/events.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
 import { asAccount } from '@/github/credentials.js';
@@ -84,14 +82,7 @@ export class Backfill {
     // Windows saved as complete, kept whatever this import does; `force` only reads them again.
     const saved = new Set(state.doneWindows);
     const now = Date.now();
-    const known = new Set(
-      this.sync.store.db
-        .selectDistinct({ prId: activityEvents.prId })
-        .from(activityEvents)
-        .where(eq(activityEvents.account, login))
-        .all()
-        .map((row) => row.prId),
-    );
+    const known = new Set(this.sync.store.activityPullIds(login));
     const save = (patch: Partial<Omit<BackfillState, 'running'>>, windows = saved) =>
       this.sync.store.settings.set(BACKFILL.of(login), {
         doneWindows: [...windows],

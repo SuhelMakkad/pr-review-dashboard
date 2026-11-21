@@ -10,7 +10,7 @@ import { EventBus } from '@/events.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import { GitHubError } from '@/github/errors.js';
 import { OperationQueue } from '@/operations/queue.js';
-import { DraftStore } from '@/review/drafts.js';
+import { DraftStore } from '@/db/drafts.js';
 import { ReviewService } from '@/review/service.js';
 import { SyncService } from '@/sync/service.js';
 

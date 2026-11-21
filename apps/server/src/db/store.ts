@@ -17,6 +17,7 @@ import { AiRuns, AutoReviewLog } from '@/db/ai-runs.js';
 import { batches } from '@/db/batches.js';
 import { snapshotCodec, triageCodec } from '@/db/codecs.js';
 import { migrateDatabase } from '@/db/migrate.js';
+import { NotificationLog } from '@/db/notifications.js';
 import { LAST_ACCOUNT, Settings, STATUS } from '@/db/settings.js';
 import {
   activityEvents,
@@ -60,6 +61,8 @@ export class Store {
   readonly aiRuns: AiRuns;
   /** The requests automatic review has handled. */
   readonly autoReviewLog: AutoReviewLog;
+  /** Notifications already delivered (`db/notifications.ts`). */
+  readonly notificationLog: NotificationLog;
   private transactionDepth = 0;
   /** Effects waiting for the outermost transaction to commit. */
   private committed: (() => void)[] = [];
@@ -74,6 +77,7 @@ export class Store {
     this.settings = new Settings(this.db);
     this.aiRuns = new AiRuns(this.db);
     this.autoReviewLog = new AutoReviewLog(this.db);
+    this.notificationLog = new NotificationLog(this.db);
     migrateDatabase(this.db, path);
   }
 
@@ -370,6 +374,16 @@ export class Store {
       .where(and(eq(activityEvents.account, account), gte(activityEvents.at, since)))
       .orderBy(asc(activityEvents.at))
       .all();
+  }
+
+  /** Every PR the account has recorded activity for. */
+  activityPullIds(account: string): string[] {
+    return this.db
+      .selectDistinct({ prId: activityEvents.prId })
+      .from(activityEvents)
+      .where(eq(activityEvents.account, account))
+      .all()
+      .map((row) => row.prId);
   }
 
   lastQueueSampleAt(account: string): string | null {
