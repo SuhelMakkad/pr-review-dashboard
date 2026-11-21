@@ -514,13 +514,17 @@ describe('manual memberships across the upgrade that names them', () => {
     const directory = mkdtempSync(join(tmpdir(), 'review-desk-membership-'));
     const path = join(directory, 'state.sqlite');
     const before = join(directory, 'migrations');
-    const latest = readMigrationFiles({ migrationsFolder }).at(-1)!.name;
+    // The migration that adds the ID, and every one after it, are this version's.
+    const adding = '20261120224938_manual_membership';
+    const names = readMigrationFiles({ migrationsFolder }).map((migration) => migration.name);
 
     try {
-      // The database as the version before: every migration but the one that adds the ID.
+      expect(names).toContain(adding);
+
+      // The database as the version before: every migration that came before the ID.
       cpSync(migrationsFolder, before, { recursive: true });
-      rmSync(join(before, latest), { recursive: true });
-      expect(latest).toContain('manual_membership');
+      for (const name of names.filter((candidate) => candidate >= adding))
+        rmSync(join(before, name), { recursive: true });
 
       const old = drizzle({ client: new DatabaseSync(path) });
 
@@ -553,6 +557,7 @@ describe('manual memberships across the upgrade that names them', () => {
       // Added again: already there, so nothing to undo; Remove still takes it off.
       expect((await service.track('me', 'acme/repo', 2)).membershipId).toBeNull();
       expect(service.untrack('me', 'pr-2')).toEqual({ tracked: false });
+      expect(store.manualAddedAt('me', 'pr-2')).toBeNull();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

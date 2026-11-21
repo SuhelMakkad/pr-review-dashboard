@@ -511,6 +511,42 @@ describe('adding by hand, per account', () => {
     client.clear();
   });
 
+  it('adds for the account shown when you added, even when the add waited past a switch', async () => {
+    const { onlineManager } = await import('@tanstack/react-query');
+    const { AddToQueueButton } = await import('@/features/pulls/use-track');
+    const { render, screen, fireEvent } = await import('@testing-library/react');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const posts: string[] = [];
+
+    vi.stubGlobal('fetch', async (path: string, options?: RequestInit) => {
+      if (options?.method === 'POST') posts.push(path);
+
+      return reply(options?.method === 'POST' ? added(null) : { account: 'me', items: [] });
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+    render(
+      <QueryClientProvider client={client}>
+        <AddToQueueButton pullRef={{ owner: 'acme', repo: 'web', number: 9 }} />
+      </QueryClientProvider>,
+    );
+
+    // Offline, the add waits; meanwhile the page comes to show another account.
+    onlineManager.setOnline(false);
+
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Add to review queue' }));
+      await waitFor(() => expect(client.getMutationCache().getAll()[0]?.state.isPaused).toBe(true));
+      act(() => {
+        client.setQueryData(queryKeys.status, as('other'));
+      });
+    } finally {
+      onlineManager.setOnline(true);
+    }
+
+    await waitFor(() => expect(posts).toEqual(['/api/accounts/me/pulls/track']));
+    client.clear();
+  });
+
   it('opens an added PR only while its account is still shown', async () => {
     const { useAddAndOpen } = await import('@/features/pulls/use-track');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
