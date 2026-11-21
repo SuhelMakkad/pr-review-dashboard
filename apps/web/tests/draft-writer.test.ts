@@ -3348,6 +3348,59 @@ describe('the summary start', () => {
     expect(writer.startViews()).toEqual([]);
   });
 
+  it('reads nothing more of a resent start settled while its lookup slept', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, () => 1_000, NEVER);
+    let admit: () => void = () => {};
+
+    writer.observe(draft(1));
+    answers.push(
+      (request) =>
+        new Promise((resolve) => {
+          admit = () =>
+            resolve({
+              id: 'run-1',
+              attempt: { id: request.body.attemptId, state: 'committed', revision: 1 },
+            });
+        }),
+    );
+
+    const unknown = expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'SUMMARY_START_UNKNOWN',
+    });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    // The resend is answered without its outcome: its claim is looked up after a backoff.
+    answers.push(async (request) => ({
+      pending: true,
+      attempt: { id: request.body.attemptId, state: 'pending' },
+    }));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent).toHaveLength(2);
+
+    const reads = vi.mocked(transport.lookup).mock.calls.length;
+
+    // Settled by the first send's late answer while the lookup sleeps.
+    admit();
+    await again;
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(vi.mocked(transport.lookup).mock.calls).toHaveLength(reads);
+    expect(writer.startViews()).toEqual([]);
+  });
+
   it('is held back by a submit not known, as any write is', async () => {
     const { sent, commands, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);

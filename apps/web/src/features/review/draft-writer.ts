@@ -1860,7 +1860,14 @@ export class DraftWriter {
 
       const envelope = record.attempt;
 
-      if (!envelope || Date.now() >= deadline) break;
+      // Settled while it slept, or out of time: nothing more to read.
+      if (
+        !envelope ||
+        Date.now() >= deadline ||
+        !this.starts.includes(record) ||
+        record.phase !== 'sending'
+      )
+        break;
 
       const expected = { writeId: envelope.writeId, base: envelope.base };
       const looked = await beforeDeadline(
