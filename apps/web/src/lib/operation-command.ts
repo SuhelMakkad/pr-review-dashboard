@@ -77,12 +77,8 @@ function legacyMap(): Map<string, string> {
 /** Whether a shared-map id was retired: its own mark, read directly, or this tab's record. */
 const retired = (id: string) => retiredHere.has(id) || read(RETIRED + id) !== null;
 
-/** What an action's own entry holds: its id and where it came from. */
-function own(key: string): Chosen | null {
-  const text = read(PREFIX + key);
-
-  if (text === null) return null;
-
+/** An entry's text as it reads: its id and where it came from. */
+function parse(text: string): Chosen {
   try {
     const saved = JSON.parse(text) as Partial<Chosen>;
 
@@ -94,6 +90,13 @@ function own(key: string): Chosen | null {
   return { id: text, legacy: false };
 }
 
+/** What an action's own entry holds: its id and where it came from; null when none, or unreadable. */
+function own(key: string): Chosen | null {
+  const text = read(PREFIX + key);
+
+  return text === null ? null : parse(text);
+}
+
 /**
  * The id saved in storage for `key` now: its own entry's, else the shared map's, either only
  * unless retired (a tab may have saved a copy of an id another had just retired).
@@ -101,7 +104,8 @@ function own(key: string): Chosen | null {
 function savedChoice(key: string): Chosen | undefined {
   const entry = own(key);
 
-  if (entry) return retired(entry.id) ? undefined : entry;
+  // A retired entry hides nothing: an id an earlier build saved since for the action still counts.
+  if (entry && !retired(entry.id)) return entry;
 
   const legacy = legacyMap().get(key);
 
@@ -132,9 +136,14 @@ function forget(key: string, id: string, retire: boolean): boolean {
 
   let saved = true;
 
+  // Its own entry removed while it is still that id. If it cannot even be read, it may still be
+  // there: kept retired in this tab, so it is never reused here.
   try {
-    if (own(key)?.id === id) localStorage.removeItem(PREFIX + key);
+    const text = localStorage.getItem(PREFIX + key);
+
+    if (text !== null && parse(text).id === id) localStorage.removeItem(PREFIX + key);
   } catch {
+    retiredHere.add(id);
     saved = false;
   }
 

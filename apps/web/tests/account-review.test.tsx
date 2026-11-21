@@ -199,6 +199,61 @@ describe('action IDs across the move to account routes', () => {
     expect(localStorage.getItem('review-desk-retired-command:legacy')).not.toBeNull();
   });
 
+  it('never reuses a settled id whose cleanup could not read its entry', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Sent on purpose twice' };
+    const entry = `review-desk-pending-command:${JSON.stringify({ path, body, method: 'POST' })}`;
+    const { githubCommand } = await import('@/lib/operation-command');
+    const getItem = Storage.prototype.getItem;
+    const sent: string[] = [];
+    let reads = 0;
+
+    // Its entry reads as usual, except once: as the first reply's cleanup reads it.
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, name) {
+      if (name === entry && ++reads === 2) throw new Error('Unreadable');
+
+      return getItem.call(this, name);
+    });
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+
+    await githubCommand(path, body);
+    await githubCommand(path, body);
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).not.toBe(sent[0]);
+    vi.restoreAllMocks();
+  });
+
+  it('falls back past a retired entry to an id an earlier build saved since for the action', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Accepted under B' };
+    const key = JSON.stringify({ path, body, method: 'POST' });
+    const sent: string[] = [];
+
+    localStorage.setItem(
+      `review-desk-pending-command:${key}`,
+      JSON.stringify({ id: 'A', legacy: true }),
+    );
+    localStorage.setItem('review-desk-retired-command:A', '1');
+    localStorage.setItem('review-desk-pending-command-ids', JSON.stringify([[key, 'B']]));
+    vi.resetModules();
+
+    const { githubCommand } = await import('@/lib/operation-command');
+
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+    await githubCommand(path, body);
+
+    expect(sent).toEqual(['B']);
+  });
+
   it('never reuses a live copy of an id another tab retired', async () => {
     const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
     const body = { prId: 'p1', body: 'New reply' };
