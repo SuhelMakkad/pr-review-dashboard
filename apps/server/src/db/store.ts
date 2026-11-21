@@ -13,6 +13,8 @@ import type {
   SyncStatus,
 } from '@review-desk/shared/types';
 import type { ActivityEvent } from '@/insights/extract.js';
+import { AiRuns, AutoReviewLog } from '@/db/ai-runs.js';
+import { batches } from '@/db/batches.js';
 import { snapshotCodec, triageCodec } from '@/db/codecs.js';
 import { migrateDatabase } from '@/db/migrate.js';
 import { LAST_ACCOUNT, Settings, STATUS } from '@/db/settings.js';
@@ -48,19 +50,16 @@ export interface QueueSample {
   oldestAttentionAt: string | null;
 }
 
-/** Rows per multi-row INSERT, well under SQLite's limit on bound parameters. */
-const BATCH_SIZE = 200;
-
-export function* batches<T>(rows: T[]): Generator<T[]> {
-  for (let start = 0; start < rows.length; start += BATCH_SIZE) {
-    yield rows.slice(start, start + BATCH_SIZE);
-  }
-}
+export { batches } from '@/db/batches.js';
 
 export class Store {
   readonly db: Database;
   /** Every setting, typed through its declaration in `db/settings.ts`. */
   readonly settings: Settings;
+  /** AI task runs (`db/ai-runs.ts`). */
+  readonly aiRuns: AiRuns;
+  /** The requests automatic review has handled. */
+  readonly autoReviewLog: AutoReviewLog;
   private transactionDepth = 0;
   /** Effects waiting for the outermost transaction to commit. */
   private committed: (() => void)[] = [];
@@ -73,6 +72,8 @@ export class Store {
     client.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.db = drizzle({ client });
     this.settings = new Settings(this.db);
+    this.aiRuns = new AiRuns(this.db);
+    this.autoReviewLog = new AutoReviewLog(this.db);
     migrateDatabase(this.db, path);
   }
 

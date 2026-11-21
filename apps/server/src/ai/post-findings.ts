@@ -10,7 +10,7 @@ import {
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { approvalSummaryTag, postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
 import type { AiRunner } from '@/ai/runner.js';
-import type { AiRunRow } from '@/db/schema.js';
+import type { AiRunRow } from '@/db/ai-runs.js';
 import type { OperationQueue } from '@/operations/queue.js';
 import type { SyncService } from '@/sync/service.js';
 
