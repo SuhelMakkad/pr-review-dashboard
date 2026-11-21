@@ -7,6 +7,7 @@ import { defaultScenario } from '@/demo/scenario.js';
 import { EventBus } from '@/events.js';
 import { AccountState, initialStatus } from '@/sync/accounts.js';
 import { SyncService } from '@/sync/service.js';
+import { STATUS, WRITE_COOLDOWN } from '@/db/settings.js';
 
 const cleanups: (() => unknown)[] = [];
 
@@ -94,8 +95,8 @@ describe('AccountState', () => {
     const { clock, published, store, state } = accountState();
     const until = new Date(clock.now() + 10 * 60_000).toISOString();
 
-    store.setSetting('status:other', { ...initialStatus(), account: { login: 'other' } });
-    store.setSetting('github-write-retry:other', until);
+    store.settings.set(STATUS.of('other'), { ...initialStatus(), account: { login: 'other' } });
+    store.settings.set(WRITE_COOLDOWN.of('other'), until);
     state.beginSync();
 
     expect(state.adoptIdentity({ login: 'other' })).toBe(until);

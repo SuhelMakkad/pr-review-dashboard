@@ -83,7 +83,7 @@ await pruneBackups(config.dataDir);
 const forges = fixture
   ? null
   : new ForgeRouter(new GitHub(), ghCredentials, new GlabAccounts(), (host) =>
-      GitLab.forHost(host, store),
+      GitLab.forHost(host, store.settings.forgeLocal),
     );
 // Real forges turn Retry-After into deadlines with the system's wall time, so they share its clock.
 const service = new SyncService(

@@ -25,6 +25,7 @@ import { EventBus } from '@/events.js';
 import { Backfill } from '@/insights/backfill.js';
 import type { Notifier } from '@/notify/notifier.js';
 import { SyncService } from '@/sync/service.js';
+import { BACKFILL } from '@/db/settings.js';
 
 const serverRoot = fileURLToPath(new URL('..', import.meta.url));
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -211,11 +212,7 @@ describe('shutdown order', () => {
     await app.ready();
     await service.sync();
     // The first sync starts reading history; let it finish.
-    await vi.waitFor(() =>
-      expect(
-        store.getSetting<{ finishedAt: string | null }>('backfill:you')?.finishedAt,
-      ).toBeTruthy(),
-    );
+    await vi.waitFor(() => expect(store.settings.get(BACKFILL.of('you'))?.finishedAt).toBeTruthy());
 
     const historyReads = searches.mock.calls.length;
     const { gated, release, counter } = gate(fixture.discover.bind(fixture));

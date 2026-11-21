@@ -6,6 +6,7 @@ import { asAccount } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import { extractActivity } from '@/insights/extract.js';
+import { BACKFILL } from '@/db/settings.js';
 
 const DAY = 24 * 60 * 60_000;
 const WINDOW_DAYS = 30;
@@ -35,12 +36,8 @@ export class Backfill {
     private readonly events: EventBus,
   ) {}
 
-  private key(login: string) {
-    return `backfill:${login}`;
-  }
-
   state(login: string): BackfillState {
-    const saved = this.sync.store.getSetting<Omit<BackfillState, 'running'>>(this.key(login));
+    const saved = this.sync.store.settings.get(BACKFILL.of(login));
 
     return {
       doneWindows: saved?.doneWindows ?? [],
@@ -96,7 +93,7 @@ export class Backfill {
         .map((row) => row.prId),
     );
     const save = (patch: Partial<Omit<BackfillState, 'running'>>, windows = saved) =>
-      this.sync.store.setSetting(this.key(login), {
+      this.sync.store.settings.set(BACKFILL.of(login), {
         doneWindows: [...windows],
         finishedAt: state.finishedAt,
         lastError: null,

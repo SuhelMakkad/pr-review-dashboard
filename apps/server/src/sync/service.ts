@@ -17,7 +17,7 @@ import { PullReads, type MineList } from '@/sync/reads.js';
 import { SyncRunner } from '@/sync/runner.js';
 import { SnapshotCoordinator } from '@/sync/snapshots.js';
 
-export { initialStatus, SELECTED_ACCOUNT_KEY } from '@/sync/accounts.js';
+export { initialStatus } from '@/sync/accounts.js';
 export type { MineList } from '@/sync/reads.js';
 
 /**

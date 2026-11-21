@@ -30,6 +30,7 @@ import type { FullReviewResult, ReviewInputs } from '@review-desk/shared/ai';
 import type { DiffFile } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubOperation, OperationList } from '@review-desk/shared/operations';
+import { storeRaw } from './raw-settings.js';
 
 const cleanups: (() => unknown)[] = [];
 
@@ -630,7 +631,7 @@ describe('posting finished reviews', () => {
     runner.saveSettings(older);
     expect(runner.settings().postFindings).toBe(true);
 
-    store.setSetting('ai-settings', older);
+    storeRaw(store, 'ai-settings', older);
     expect(runner.settings().postFindings).toBe(false);
   });
 });
@@ -1340,10 +1341,10 @@ describe('what an automatic post rests on', () => {
   it('reads settings saved before approving and resolving had their own switches as on', async () => {
     const { store, runner } = await setup();
 
-    store.setSetting('ai-settings', { postFindings: true });
+    storeRaw(store, 'ai-settings', { postFindings: true });
     expect(runner.settings()).toMatchObject({ approveFindings: true, resolveThreads: true });
 
-    store.setSetting('ai-settings', { postFindings: false });
+    storeRaw(store, 'ai-settings', { postFindings: false });
     expect(runner.settings()).toMatchObject({ approveFindings: false, resolveThreads: false });
   });
 });

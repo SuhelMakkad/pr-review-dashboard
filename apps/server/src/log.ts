@@ -16,6 +16,19 @@ type Schema = Record<string, Field>;
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
 const FORGES = ['github', 'gitlab'] as const;
+/** The settings the registry declares (`db/settings.ts`), by name: never a key or a value. */
+export const SETTING_NAMES = [
+  'lastAccount',
+  'selectedAccount',
+  'status',
+  'writeCooldown',
+  'aiSettings',
+  'notificationSettings',
+  'reviewSlaHours',
+  'backfill',
+  'autoReviewPrimed',
+] as const;
+export type SettingName = (typeof SETTING_NAMES)[number];
 /**
  * Routes as the server declares them (`/api/pulls/:id`), collected as they are registered: a
  * route field is one of these or `other`, never a request's own path.
@@ -131,6 +144,7 @@ const schemas = {
     extractMs: 'number',
   },
   'log.dropped': { count: 'number' },
+  'settings.invalid': { setting: SETTING_NAMES },
   'backup.written': { published: 'boolean', stagingLeft: 'boolean' },
   'retention.backups': {
     kept: 'number',

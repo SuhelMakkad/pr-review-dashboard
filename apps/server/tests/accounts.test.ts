@@ -9,6 +9,7 @@ import { EventBus } from '@/events.js';
 import { asAccount, GhCredentials, GitHubError, safeError } from '@/github/index.js';
 import { OperationQueue } from '@/operations/queue.js';
 import { SyncService } from '@/sync/service.js';
+import { SELECTED_ACCOUNT } from '@/db/settings.js';
 
 const cleanups: (() => unknown)[] = [];
 
@@ -290,7 +291,7 @@ describe('switching accounts', () => {
       code: 'SIGN_IN_FAILED',
     });
     expect(service.status.account?.login).toBe('you');
-    expect(store.getSetting('selectedAccount')).toBeNull();
+    expect(store.settings.get(SELECTED_ACCOUNT)).toBeNull();
 
     const fixed = new SyncService(store, fixture, new EventBus());
 

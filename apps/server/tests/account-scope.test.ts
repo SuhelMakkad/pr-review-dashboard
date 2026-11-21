@@ -10,8 +10,9 @@ import { AccountUnavailable } from '@/forge/account.js';
 import type { GitHubApi } from '@/github/api.js';
 import { GitHubError } from '@/github/errors.js';
 import { DiffService } from '@/diff/service.js';
-import { SELECTED_ACCOUNT_KEY, SyncService } from '@/sync/service.js';
+import { SyncService } from '@/sync/service.js';
 import { snapshot } from '@test/fixtures.js';
+import { LAST_ACCOUNT, SELECTED_ACCOUNT, STATUS, WRITE_COOLDOWN } from '@/db/settings.js';
 
 const cleanups: (() => unknown)[] = [];
 
@@ -140,10 +141,10 @@ describe('routes that name an account', () => {
 
     expect(limited.statusCode).toBe(429);
     expect(limited.json()).toMatchObject({ code: 'RATE_LIMITED', retryAt });
-    expect(store.getSetting('github-write-retry:you')).toBe(retryAt);
+    expect(store.settings.get(WRITE_COOLDOWN.of('you'))).toBe(retryAt);
     // The selected account's status, and the account restored on restart, are untouched.
     expect(service.status.retryAt).toBeNull();
-    expect(store.getSetting('lastAccount')).toBe(DEMO_SECOND_ACCOUNT);
+    expect(store.settings.get(LAST_ACCOUNT)).toBe(DEMO_SECOND_ACCOUNT);
 
     // The next refresh of that account waits without asking the forge.
     const reads = fixture.reads.length;
@@ -279,7 +280,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
       }),
     } as unknown as GitHubApi;
 
-    store.setSetting(SELECTED_ACCOUNT_KEY, ACCOUNT);
+    store.settings.set(SELECTED_ACCOUNT, ACCOUNT);
 
     const service = new SyncService(store, api);
 
@@ -517,7 +518,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
       outcome: 'unknown',
       retryAt: null,
     });
-    expect(store.getSetting(`github-write-retry:${ACCOUNT}`)).toBeNull();
+    expect(store.settings.get(WRITE_COOLDOWN.of(ACCOUNT))).toBeNull();
 
     // Nor is a limit met by the check itself, which cannot say whose it is.
     state.signedIn = ACCOUNT;
@@ -526,7 +527,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
       outcome: 'unknown',
       retryAt: null,
     });
-    expect(store.getSetting(`github-write-retry:${ACCOUNT}`)).toBeNull();
+    expect(store.settings.get(WRITE_COOLDOWN.of(ACCOUNT))).toBeNull();
 
     // Still the account: its limit is saved before the caller hears of it.
     state.signedIn = ACCOUNT;
@@ -534,7 +535,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
       throw limited();
     });
     await expect(service.refresh('mr-1', ACCOUNT)).rejects.toThrow('Rate limited');
-    expect(store.getSetting(`github-write-retry:${ACCOUNT}`)).toBe(retryAt);
+    expect(store.settings.get(WRITE_COOLDOWN.of(ACCOUNT))).toBe(retryAt);
   });
 
   it('sends the last published status between publications, so a revision is one state', async () => {
@@ -616,7 +617,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
     await service.sync();
 
     expect(service.status.retryAt).toBeNull();
-    expect(store.getSetting<{ retryAt: string | null }>(`status:${ACCOUNT}`)?.retryAt).toBeNull();
+    expect(store.settings.get(STATUS.of(ACCOUNT))?.retryAt).toBeNull();
   });
 });
 
@@ -686,7 +687,7 @@ describe('a sync that adopts an account under a cooldown', () => {
     await service.sync();
 
     // second-me met a limit while first-me was in use (a refresh scoped to it).
-    store.setSetting('github-write-retry:second-me', retryAt);
+    store.settings.set(WRITE_COOLDOWN.of('second-me'), retryAt);
     discover.mockClear();
 
     // Nothing was picked in the app, and the CLI now says second-me.

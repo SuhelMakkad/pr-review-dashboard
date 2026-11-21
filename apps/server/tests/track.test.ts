@@ -20,6 +20,7 @@ import { ReviewError } from '@/review/errors.js';
 import { SyncService } from '@/sync/index.js';
 import type { FeedSource } from '@review-desk/shared/types';
 import { snapshot } from '@test/fixtures.js';
+import { STATUS } from '@/db/settings.js';
 
 const stores: Store[] = [];
 
@@ -411,7 +412,7 @@ describe('adding by hand for an account not in use', () => {
       ({ ...service.status, account: { login, webUrl } }) as unknown as SyncStatus;
 
     stores.push(store);
-    store.setSetting(`status:${ANN}`, account(ANN, 'https://git.a.example/gitlab/ann'));
+    store.settings.set(STATUS.of(ANN), account(ANN, 'https://git.a.example/gitlab/ann'));
     service.status = account(BOB, 'https://git.b.example/bob');
 
     const track = () => service.track(ANN, 'gitlab/team/app', 5, 'git.a.example', true);

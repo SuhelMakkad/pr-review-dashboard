@@ -2,27 +2,21 @@ import { randomUUID } from 'node:crypto';
 import { isoNow, type Clock } from '@/clock.js';
 import { forForge } from '@review-desk/shared/accounts';
 import type { Actor, ForgeCapabilities, SyncStatus } from '@review-desk/shared/types';
+import {
+  initialStatus,
+  LAST_ACCOUNT,
+  SELECTED_ACCOUNT,
+  STATUS,
+  STATUS_RECOVERED,
+  WRITE_COOLDOWN,
+} from '@/db/settings.js';
 import type { Store } from '@/db/store.js';
 import type { EventBus } from '@/events.js';
 import type { GitHubAccounts } from '@/github/credentials.js';
 import { GitHubError } from '@/github/errors.js';
 import { ReviewError } from '@/review/errors.js';
 
-export const initialStatus = (): SyncStatus => ({
-  account: null,
-  teams: [],
-  syncing: false,
-  lastAttemptAt: null,
-  lastCompletedAt: null,
-  lastSuccessfulSync: null,
-  nextSyncAt: null,
-  retryAt: null,
-  error: null,
-  warnings: [],
-});
-
-/** The account picked in the app; when absent, the GitHub CLI's active account is used. */
-export const SELECTED_ACCOUNT_KEY = 'selectedAccount';
+export { initialStatus } from '@/db/settings.js';
 
 /** Account keys match exactly (ignoring case): `alice` on GitHub is not `alice@gitlab.com`. */
 export const sameAccount = (left: string, right: string) =>
@@ -62,11 +56,10 @@ export class AccountState {
     private readonly accounts: GitHubAccounts | null,
     private readonly clock: Clock,
   ) {
-    const lastAccount = store.getSetting<string>('lastAccount');
-    const selected = store.getSetting<string>(SELECTED_ACCOUNT_KEY);
+    const lastAccount = store.settings.get(LAST_ACCOUNT);
+    const selected = store.settings.get(SELECTED_ACCOUNT);
 
-    this.status =
-      (lastAccount && store.getSetting<SyncStatus>(`status:${lastAccount}`)) || initialStatus();
+    this.status = (lastAccount && store.settings.get(STATUS.of(lastAccount))) || initialStatus();
     this.status.syncing = false;
 
     if (selected) accounts?.select(selected);
@@ -83,7 +76,7 @@ export class AccountState {
       Math.max(Date.parse(retryAt), Date.parse(this.cooldown(account) ?? '') || -Infinity),
     ).toISOString();
 
-    this.store.setSetting(`github-write-retry:${account}`, until);
+    this.store.settings.set(WRITE_COOLDOWN.of(account), until);
 
     if (account !== this.status.account?.login) return;
 
@@ -100,11 +93,11 @@ export class AccountState {
     // Before any account is known, the status's own deadline (from the identity read) applies.
     if (!account) return laterDeadline(this.clock.now(), this.status.retryAt);
 
-    const saved = this.store.getSetting<string>(`github-write-retry:${account}`);
+    const saved = this.store.settings.get(WRITE_COOLDOWN.of(account));
     const synced =
       account === this.status.account?.login
         ? this.status.retryAt
-        : (this.store.getSetting<SyncStatus>(`status:${account}`)?.retryAt ?? null);
+        : (this.store.settings.get(STATUS.of(account))?.retryAt ?? null);
     // A missing deadline is none at all, never the epoch, whatever the clock reads.
     const until = Math.max(
       saved ? Date.parse(saved) : -Infinity,
@@ -120,8 +113,7 @@ export class AccountState {
    */
   knows(account: string): boolean {
     return (
-      account === this.status.account?.login ||
-      this.store.getSetting<SyncStatus>(`status:${account}`) !== null
+      account === this.status.account?.login || this.store.settings.get(STATUS.of(account)) !== null
     );
   }
 
@@ -150,7 +142,7 @@ export class AccountState {
   accountOf(login: string): SyncStatus['account'] {
     return login === this.status.account?.login
       ? this.status.account
-      : (this.store.getSetting<SyncStatus>(`status:${login}`)?.account ?? null);
+      : (this.store.settings.get(STATUS.of(login))?.account ?? null);
   }
 
   /**
@@ -167,23 +159,24 @@ export class AccountState {
       );
 
     this.accounts?.select(login);
-    this.store.setSetting(SELECTED_ACCOUNT_KEY, login);
+    this.store.settings.set(SELECTED_ACCOUNT, login);
 
     if (login === from) return;
 
-    const saved = this.store.getSetting<SyncStatus>(`status:${login}`);
+    const saved = this.store.settings.get(STATUS.of(login));
     // A refresh or write made while it was not selected may have hit a limit since.
     const deadline = laterDeadline(
       this.clock.now(),
       saved?.retryAt,
-      this.store.getSetting<string>(`github-write-retry:${login}`),
+      this.store.settings.get(WRITE_COOLDOWN.of(login)),
     );
 
     this.status = {
       ...(saved ?? initialStatus()),
       account: saved?.account ?? { login },
       syncing: false,
-      error: null,
+      // A stale sync error goes; a rebuilt saved status still says so until a sync replaces it.
+      error: saved?.error === STATUS_RECOVERED ? STATUS_RECOVERED : null,
       warnings: [],
       retryAt: deadline,
       nextSyncAt: deadline ?? saved?.nextSyncAt ?? null,
@@ -209,7 +202,7 @@ export class AccountState {
    * at once. Returns its cooldown, during which the sync reads nothing.
    */
   adoptIdentity(account: Actor): string | null {
-    const saved = this.store.getSetting<SyncStatus>(`status:${account.login}`);
+    const saved = this.store.settings.get(STATUS.of(account.login));
 
     this.status = {
       ...(saved ?? initialStatus()),
@@ -293,7 +286,7 @@ export class AccountState {
   }): string | null {
     const login = this.status.account?.login ?? null;
     // A refresh or a write may have hit a limit while this ran: the later deadline stands.
-    const written = login ? this.store.getSetting<string>(`github-write-retry:${login}`) : null;
+    const written = login ? this.store.settings.get(WRITE_COOLDOWN.of(login)) : null;
     const deadline = laterDeadline(this.clock.now(), retryAt, written);
 
     this.status = {
@@ -337,6 +330,6 @@ export class AccountState {
   teamsOf(account: string): string[] {
     if (sameAccount(account, this.status.account?.login ?? '')) return this.status.teams;
 
-    return this.store.getSetting<SyncStatus>(`status:${account}`)?.teams ?? [];
+    return this.store.settings.get(STATUS.of(account))?.teams ?? [];
   }
 }
