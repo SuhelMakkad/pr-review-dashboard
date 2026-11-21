@@ -452,7 +452,12 @@ describe('adding by hand, per account', () => {
 
     const hook = renderHook(() => useTrackPull(), { wrapper: wrapper(client) });
 
-    await act(() => hook.result.current.mutateAsync({ owner: 'acme', repo: 'web', number: 9 }));
+    await act(() =>
+      hook.result.current.mutateAsync({
+        ref: { owner: 'acme', repo: 'web', number: 9 },
+        account: 'me',
+      }),
+    );
 
     const [, options] = toasts.success.mock.calls.at(-1)!;
 
@@ -470,9 +475,39 @@ describe('adding by hand, per account', () => {
     answer = added(null);
     client.setQueryData(queryKeys.status, as('me'));
     hook.rerender();
-    await act(() => hook.result.current.mutateAsync({ owner: 'acme', repo: 'web', number: 9 }));
+    await act(() =>
+      hook.result.current.mutateAsync({
+        ref: { owner: 'acme', repo: 'web', number: 9 },
+        account: 'me',
+      }),
+    );
 
     expect(toasts.success.mock.calls.at(-1)![1]).toBeUndefined();
+    client.clear();
+  });
+
+  it("says an add's Undo left the PR in the queue when a feed still lists it", async () => {
+    const { useTrackPull } = await import('@/features/pulls/use-track');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    vi.stubGlobal('fetch', async (_path: string, options?: RequestInit) =>
+      reply(options?.method === 'DELETE' ? { tracked: true } : added('membership-3')),
+    );
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useTrackPull(), { wrapper: wrapper(client) });
+
+    await act(() =>
+      hook.result.current.mutateAsync({
+        ref: { owner: 'acme', repo: 'web', number: 9 },
+        account: 'me',
+      }),
+    );
+    await act(async () => toasts.success.mock.calls.at(-1)![1].action.onClick());
+
+    await waitFor(() =>
+      expect(toasts.info).toHaveBeenCalledWith(expect.stringContaining('stays in your queue')),
+    );
     client.clear();
   });
 

@@ -123,13 +123,13 @@ describe('secrets never leave the server', () => {
     const id = pr(2041).id;
     const paths = [
       '/api/status',
-      '/api/pulls',
-      '/api/mine',
-      `/api/pulls/${id}`,
-      `/api/pulls/${id}/diff?mode=full`,
-      `/api/pulls/${id}/draft?account=you`,
-      `/api/pulls/${id}/tickets`,
-      `/api/pulls/${id}/ai?account=you`,
+      '/api/accounts/you/pulls',
+      '/api/accounts/you/mine',
+      `/api/accounts/you/pulls/${id}`,
+      `/api/accounts/you/pulls/${id}/diff?mode=full`,
+      `/api/accounts/you/pulls/${id}/draft`,
+      `/api/accounts/you/pulls/${id}/tickets`,
+      `/api/accounts/you/pulls/${id}/ai`,
       '/api/ai',
       '/api/linear/status',
     ];
@@ -138,10 +138,15 @@ describe('secrets never leave the server', () => {
     for (const path of paths) {
       const response = await app.inject({ method: 'GET', url: path, headers: host });
 
+      // Each answered as it is in use, so its text is what the browser would show.
+      expect({ path, status: response.statusCode }).toEqual({ path, status: 200 });
       bodies.push(
         `${path} ${response.statusCode} ${response.body} ${JSON.stringify(response.headers)}`,
       );
     }
+
+    // The tickets themselves carry the failure, redacted: not just the shared status.
+    expect(bodies.find((body) => body.includes('/tickets'))).toContain('[redacted]');
 
     sync.events.emit({ type: 'status', status: sync.status });
     bodies.push(JSON.stringify(sync.events.since(0)));

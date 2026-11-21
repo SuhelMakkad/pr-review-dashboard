@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { eq } from 'drizzle-orm';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
+import { drizzle } from 'drizzle-orm/node-sqlite';
+import { migrateDatabase, migrationsFolder } from '@/db/migrate.js';
 import type { SyncStatus } from '@review-desk/shared/types';
 import { createApp } from '@/app.js';
 import { feedMembership } from '@/db/schema.js';
@@ -432,6 +439,27 @@ describe('adding by hand for an account not in use', () => {
     expect(api.resolvePull).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a limit met while adding as that account’s cooldown, once glab is confirmed', async () => {
+    const { service, api, state, track } = inactive();
+    const retryAt = new Date(Date.now() + 3_600_000).toISOString();
+    const limited = () => new GitHubError('Rate limited', retryAt, 429, 'rate_limit');
+
+    // glab is someone else by the time the limit comes back: it cannot be tied to Ann.
+    vi.mocked(api.resolvePull).mockImplementationOnce(async () => {
+      state.signedIn = 'eve@git.a.example';
+      throw limited();
+    });
+    await expect(track()).rejects.toMatchObject({ outcome: 'rate_limit' });
+    expect(() => service.assertNotCoolingDown(ANN)).not.toThrow();
+
+    // Still Ann: the limit is hers, and only hers.
+    state.signedIn = ANN;
+    vi.mocked(api.resolvePull).mockRejectedValueOnce(limited());
+    await expect(track()).rejects.toMatchObject({ outcome: 'rate_limit' });
+    expect(() => service.assertNotCoolingDown(ANN)).toThrow();
+    expect(() => service.assertNotCoolingDown(BOB)).not.toThrow();
+  });
+
   it('saves nothing when glab signs in as someone else during the reads', async () => {
     const { store, state, track } = inactive();
 
@@ -478,5 +506,55 @@ describe('adding by hand for an account not in use', () => {
 
     expect((await track()).membershipId).toBeNull();
     expect(service.untrack(ANN, 'mr-5')).toEqual({ tracked: false });
+  });
+});
+
+describe('manual memberships across the upgrade that names them', () => {
+  it('keeps a PR added before the upgrade, with no Undo and Remove still working', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'review-desk-membership-'));
+    const path = join(directory, 'state.sqlite');
+    const before = join(directory, 'migrations');
+    const latest = readMigrationFiles({ migrationsFolder }).at(-1)!.name;
+
+    try {
+      // The database as the version before: every migration but the one that adds the ID.
+      cpSync(migrationsFolder, before, { recursive: true });
+      rmSync(join(before, latest), { recursive: true });
+      expect(latest).toContain('manual_membership');
+
+      const old = drizzle({ client: new DatabaseSync(path) });
+
+      migrateDatabase(old, path, before);
+      old.$client
+        .prepare(
+          "INSERT INTO feed_membership (account, id, feed, seen_at) VALUES (?, ?, 'manual', ?)",
+        )
+        .run('me', 'pr-2', '2026-11-01T00:00:00.000Z');
+      old.$client.close();
+
+      // Opened by this version: migrated, the row kept, with no ID.
+      const store = new Store(path);
+
+      stores.push(store);
+      expect(store.manualAddedAt('me', 'pr-2')).toBe('2026-11-01T00:00:00.000Z');
+      expect(
+        store.db
+          .select({ membershipId: feedMembership.membershipId })
+          .from(feedMembership)
+          .where(eq(feedMembership.id, 'pr-2'))
+          .get(),
+      ).toEqual({ membershipId: null });
+
+      const { github } = setup();
+      const service = new SyncService(store, github);
+
+      await service.sync();
+
+      // Added again: already there, so nothing to undo; Remove still takes it off.
+      expect((await service.track('me', 'acme/repo', 2)).membershipId).toBeNull();
+      expect(service.untrack('me', 'pr-2')).toEqual({ tracked: false });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

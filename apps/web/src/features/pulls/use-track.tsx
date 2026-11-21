@@ -76,7 +76,13 @@ async function trackPull(client: QueryClient, account: string, ref: PrRef): Prom
             // Runs after the caller may have unmounted, so it does not use a hook.
             onClick: () =>
               void untrackPull(client, account, detail.snapshot, membershipId).then(
-                () => toast(`Removed ${added} from your review queue`),
+                // A feed may list it too: then it stays, without the add.
+                ({ tracked }) =>
+                  toast(
+                    tracked
+                      ? `${added} stays in your queue`
+                      : `Removed ${added} from your review queue`,
+                  ),
                 (error: Error) => toast.error(error.message),
               ),
           },
@@ -87,14 +93,17 @@ async function trackPull(client: QueryClient, account: string, ref: PrRef): Prom
   return detail;
 }
 
-/** Adds a PR to the review queue of the account shown. Callers decide how to show a failure. */
+/**
+ * Adds a PR to an account's review queue: the account travels with the request, so it is the one
+ * shown when the add began, whatever is shown when it runs. Callers decide how to show a failure.
+ */
 export function useTrackPull() {
   const client = useQueryClient();
-  const account = useAccount() ?? '';
 
   return useMutation({
     mutationKey: ['track'],
-    mutationFn: (ref: PrRef) => trackPull(client, account, ref),
+    mutationFn: ({ ref, account }: { ref: PrRef; account: string }) =>
+      trackPull(client, account, ref),
   });
 }
 
@@ -148,7 +157,7 @@ export function useAddAndOpen() {
   const account = useAccount() ?? '';
 
   const add = async (ref: PrRef) => {
-    const detail = await track.mutateAsync(ref);
+    const detail = await track.mutateAsync({ ref, account });
 
     if (shownAccount(client) !== account) {
       toast(`Added for ${account}.`);
@@ -207,13 +216,16 @@ export function NotTrackedActions({ pullRef }: { pullRef: PrRef }) {
 /** The action on a "not tracked" screen: the PR then appears in place. */
 export function AddToQueueButton({ pullRef }: { pullRef: PrRef }) {
   const track = useTrackPull();
+  const account = useAccount() ?? '';
 
   return (
     <Button
       variant="primary"
       icon={<Plus size={14} />}
       disabled={track.isPending}
-      onClick={() => track.mutate(pullRef, { onError: (error) => toast.error(error.message) })}
+      onClick={() =>
+        track.mutate({ ref: pullRef, account }, { onError: (error) => toast.error(error.message) })
+      }
     >
       {track.isPending ? 'Adding…' : 'Add to review queue'}
     </Button>
