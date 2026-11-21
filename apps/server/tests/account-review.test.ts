@@ -8,6 +8,7 @@ import { DEMO_SECOND_ACCOUNT, FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { EventBus } from '@/events.js';
 import { AccountUnavailable } from '@/forge/account.js';
+import { GitHubError } from '@/github/errors.js';
 import { OperationQueue } from '@/operations/queue.js';
 import { DraftStore } from '@/review/drafts.js';
 import { ReviewService } from '@/review/service.js';
@@ -278,16 +279,31 @@ describe('drafts, review actions and Activity for an account not in use', () => 
       code: 'ACCOUNT_NOT_ACTIVE',
     });
 
-    // A read that fails answers as a failed read does; one that succeeds without the thread, 404.
+    // A read that fails answers as a failed read does: the account unavailable, or rate limited
+    // until when. One that succeeds without the thread is a 404.
     const failed = reply();
 
     await vi.waitFor(() => expect(reads()).toBe(3));
     release(new AccountUnavailable('you', 'someone-else'));
-    expect((await failed).json()).toMatchObject({ code: 'ACCOUNT_UNAVAILABLE' });
+
+    const unavailable = await failed;
+
+    expect([unavailable.statusCode, unavailable.json().code]).toEqual([409, 'ACCOUNT_UNAVAILABLE']);
+
+    const retryAt = new Date(Date.now() + 60_000).toISOString();
+    const limited = reply();
+
+    await vi.waitFor(() => expect(reads()).toBe(4));
+    release(new GitHubError('Rate limited', retryAt, 429, 'rate_limit'));
+
+    const cooling = await limited;
+
+    expect(cooling.statusCode).toBe(429);
+    expect(cooling.json()).toMatchObject({ code: 'RATE_LIMITED', retryAt });
 
     const missing = reply();
 
-    await vi.waitFor(() => expect(reads()).toBe(4));
+    await vi.waitFor(() => expect(reads()).toBe(5));
     release();
     expect((await missing).statusCode).toBe(404);
     expect((await call('GET', scoped('/operations'))).json().items).toEqual([]);
@@ -298,7 +314,7 @@ describe('drafts, review actions and Activity for an account not in use', () => 
     const operationId = randomUUID();
     const raced = reply(operationId);
 
-    await vi.waitFor(() => expect(reads()).toBe(5));
+    await vi.waitFor(() => expect(reads()).toBe(6));
 
     const accepted = new OperationQueue(service).enqueue(
       'you',

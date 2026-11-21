@@ -1,16 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import type { DiffManifest, DiffMode } from '@review-desk/shared/diff';
-import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
-import {
-  showsViewedTarget,
-  type OperationReceipt,
-  type ViewedTarget,
-} from '@review-desk/shared/operations';
-import { api, ApiError } from '@/lib/api';
-import { accountPath } from '@/lib/queries';
+import type { ReviewEvent, Side } from '@review-desk/shared/review';
+import { showsViewedTarget, type ViewedTarget } from '@review-desk/shared/operations';
+import { ApiError } from '@/lib/api';
+import { routes } from '@review-desk/shared/contract';
+import { call, command } from '@/lib/call';
 import { queryKeys } from '@/lib/query-keys';
-import { githubCommand } from '@/lib/operation-command';
 import { useOperations } from '@/features/activity/use-operations';
 
 const viewedVersions = new Map<string, number>();
@@ -105,15 +101,14 @@ export function viewShows(manifest: DiffManifest, path: string, target: ViewedTa
  */
 export function useReview(prId: string | null, account: string) {
   const client = useQueryClient();
-  const enc = encodeURIComponent(prId ?? '');
-  const route = (rest: string) => accountPath(account, `/pulls/${enc}${rest}`);
+  const pr = { account, id: prId ?? '' };
   const operations = useOperations(account);
   const refreshOperations = () =>
     client.invalidateQueries({ queryKey: queryKeys.operations(account) });
 
   const draft = useQuery({
     queryKey: queryKeys.draft(account, prId ?? 'none'),
-    queryFn: () => api<ReviewDraft>(route('/draft')),
+    queryFn: ({ signal }) => call(routes.draft, { params: pr, signal }),
     enabled: Boolean(prId && account),
   });
 
@@ -127,28 +122,25 @@ export function useReview(prId: string | null, account: string) {
         origin?: 'user' | 'ai';
         revision?: { headOid: string; baseOid: string | null };
       },
-    ) => api<DraftComment>(route('/draft/comments'), { method: 'POST', body: input }),
+    ) => call(routes.addComment, { params: pr, body: input }),
     onSuccess: refreshDraft,
   });
 
   const editComment = useMutation({
     mutationFn: ({ id, body }: { id: string; body: string }) =>
-      api<DraftComment>(route(`/draft/comments/${encodeURIComponent(id)}`), {
-        method: 'PATCH',
-        body: { body },
-      }),
+      call(routes.editComment, { params: { ...pr, cid: id }, body: { body } }),
     onSuccess: refreshDraft,
   });
 
   const deleteComment = useMutation({
     mutationFn: (id: string) =>
-      api(route(`/draft/comments/${encodeURIComponent(id)}`), { method: 'DELETE', body: {} }),
+      call(routes.deleteComment, { params: { ...pr, cid: id }, body: {} }),
     onSuccess: refreshDraft,
   });
 
   const saveMeta = useMutation({
     mutationFn: (changes: { body?: string; event?: ReviewEvent }) =>
-      api<ReviewDraft>(route('/draft'), { method: 'PUT', body: changes }),
+      call(routes.saveDraft, { params: pr, body: changes }),
     // Refetch rather than applying an old autosave response over a newly queued/finished review.
     onSuccess: refreshDraft,
     // An autosave can land after its sheet closed (a switch away): say why it was not kept.
@@ -156,7 +148,7 @@ export function useReview(prId: string | null, account: string) {
   });
 
   const discard = useMutation({
-    mutationFn: () => githubCommand<OperationReceipt | { ok: true }>(route('/draft'), {}, 'DELETE'),
+    mutationFn: () => command(routes.discard, pr, {}),
     onSuccess: () => {
       void refreshDraft();
       void refreshOperations();
@@ -169,7 +161,7 @@ export function useReview(prId: string | null, account: string) {
       body: string;
       expectedHeadOid: string;
       allowNewHead?: boolean;
-    }) => githubCommand(route('/review'), input),
+    }) => command(routes.submit, pr, input),
     onSettled: refreshDraft,
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.pulls(account) });
@@ -180,25 +172,19 @@ export function useReview(prId: string | null, account: string) {
 
   const commentNow = useMutation({
     mutationFn: (input: CommentTarget & { body: string; expectedHeadOid: string }) =>
-      githubCommand(route('/comments'), { ...input }),
+      command(routes.commentNow, pr, { ...input }),
     onSuccess: refreshOperations,
   });
 
   const reply = useMutation({
     mutationFn: ({ threadId, body }: { threadId: string; body: string }) =>
-      githubCommand(accountPath(account, `/threads/${encodeURIComponent(threadId)}/replies`), {
-        prId,
-        body,
-      }),
+      command(routes.reply, { account, threadId }, { prId: prId!, body }),
     onSuccess: refreshOperations,
   });
 
   const resolve = useMutation({
     mutationFn: ({ threadId, resolved }: { threadId: string; resolved: boolean }) =>
-      githubCommand(accountPath(account, `/threads/${encodeURIComponent(threadId)}/resolution`), {
-        prId,
-        resolved,
-      }),
+      command(routes.resolve, { account, threadId }, { prId: prId!, resolved }),
     onSuccess: refreshOperations,
   });
 
@@ -215,12 +201,7 @@ export function useReview(prId: string | null, account: string) {
       path: string;
       viewed: boolean;
       target?: ViewedTarget;
-    }) =>
-      githubCommand(route('/viewed'), {
-        path,
-        viewed,
-        ...(target ? { target } : {}),
-      }),
+    }) => command(routes.viewed, pr, { path, viewed, ...(target ? { target } : {}) }),
     onMutate: ({ path, viewed, target }) => {
       const versionKey = `${account}:${prId}:${path}`;
       const version = (viewedVersions.get(versionKey) ?? 0) + 1;

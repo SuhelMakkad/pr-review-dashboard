@@ -1,61 +1,44 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { routes } from '@review-desk/shared/contract';
+import { ok, serve } from '@/http/serve.js';
 import type { Notifier } from '@/notify/notifier.js';
 import type { SyncService } from '@/sync/service.js';
-
-const time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
-const kinds = z.strictObject({
-  first_review: z.boolean(),
-  changed: z.boolean(),
-  requested_again: z.boolean(),
-  reply: z.boolean(),
-  mention: z.boolean(),
-  dismissed: z.boolean(),
-  changes_requested: z.boolean(),
-  approved: z.boolean(),
-  ci_failing: z.boolean(),
-  ai_review_ready: z.boolean(),
-});
-const settingsSchema = z.strictObject({
-  account: z.string().min(1),
-  settings: z.strictObject({
-    kinds,
-    quietHours: z.strictObject({ start: time, end: time }).nullable(),
-    macosWhenClosed: z.boolean(),
-    badgeIncludesMine: z.boolean(),
-  }),
-});
 
 export function registerNotifyRoutes(
   app: FastifyInstance,
   service: SyncService,
   notifier: Notifier,
 ): void {
-  app.get('/api/notifications/settings', async () => notifier.settings());
+  const serving = { sync: service };
 
-  app.put('/api/notifications/settings', async (request, reply) => {
-    const parsed = settingsSchema.safeParse(request.body);
+  serve(app, routes.notificationSettings, () => ok(200, notifier.settings()), serving);
+  serve(
+    app,
+    routes.saveNotificationSettings,
+    ({ body }) => ok(200, notifier.saveSettings(body.settings)),
+    serving,
+  );
 
-    if (!parsed.success) return reply.code(400).send({ error: 'Invalid notification settings.' });
+  serve(
+    app,
+    routes.testNotification,
+    () => {
+      service.events.emit({
+        type: 'notify',
+        notifications: [
+          {
+            key: `test:${Date.now()}`,
+            kind: 'first_review',
+            prId: 'test',
+            title: 'Review Desk',
+            body: 'Notifications are working.',
+            path: '/inbox/attention',
+          },
+        ],
+      });
 
-    return notifier.saveSettings(parsed.data.settings);
-  });
-
-  app.post('/api/notifications/test', async () => {
-    service.events.emit({
-      type: 'notify',
-      notifications: [
-        {
-          key: `test:${Date.now()}`,
-          kind: 'first_review',
-          prId: 'test',
-          title: 'Review Desk',
-          body: 'Notifications are working.',
-          path: '/inbox/attention',
-        },
-      ],
-    });
-
-    return { ok: true };
-  });
+      return ok(200, { ok: true as const });
+    },
+    serving,
+  );
 }

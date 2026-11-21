@@ -1,3 +1,5 @@
+import { call } from '@/lib/call';
+import { routes } from '@review-desk/shared/contract';
 import { useEffect, useRef } from 'react';
 import { useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
@@ -8,15 +10,13 @@ import {
   operationLabels,
   type GitHubOperation,
   type OperationControl,
-  type OperationReceipt,
 } from '@review-desk/shared/operations';
 import { forgeTerms } from '@review-desk/shared/accounts';
 import type { SyncStatus } from '@review-desk/shared/types';
-import { api } from '@/lib/api';
 import { numberSign, refOf } from '@/lib/pr-ref';
 import { storage } from '@/lib/storage';
 import { dateTime, relativePhrase } from '@/lib/time';
-import { accountPath, useStatus } from '@/lib/queries';
+import { useStatus } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 import { Button, IconButton } from '@/ui/button';
 import { DialogClose, DialogDescription, DialogTitle, Drawer } from '@/ui/dialog';
@@ -147,22 +147,16 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
   const navigate = useNavigate();
   const control = useMutation({
     mutationFn: (command: OperationControl) =>
-      api<OperationReceipt>(
-        accountPath(
-          operation.account,
-          `/operations/${encodeURIComponent(operation.id)}/${command}`,
-        ),
-        {
-          method: 'POST',
-          body: {
-            // Only once you were asked: stopping what may be on the forge needs your yes.
-            confirm:
-              command === 'restore' ||
-              ((command === 'reopen' || command === 'cancel') &&
-                Boolean(operation.confirmStop || operation.error?.code === 'UNCONFIRMED')),
-          },
+      call(routes.operationCommand, {
+        params: { account: operation.account, id: operation.id, command },
+        body: {
+          // Only once you were asked: stopping what may be on the forge needs your yes.
+          confirm:
+            command === 'restore' ||
+            ((command === 'reopen' || command === 'cancel') &&
+              Boolean(operation.confirmStop || operation.error?.code === 'UNCONFIRMED')),
         },
-      ),
+      }),
     // The receipt names the action the server changed: its account and PR are the ones to refresh
     // and, for a reopen, to recover.
     onSuccess: ({ operation: changed }, command) => {

@@ -1,42 +1,10 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { z } from 'zod';
+import { routes } from '@review-desk/shared/contract';
+import { failed, ok, serve, type Failed } from '@/http/serve.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { ReviewError } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
-
-const updateSchema = z
-  .object({
-    account: z.string().min(1).max(100),
-    note: z.string().max(30_000).optional(),
-    seenReplyKeys: z.array(z.string().max(250)).max(10_000).optional(),
-    snoozeUntil: z.iso.datetime().nullable().optional(),
-    done: z.boolean().optional(),
-  })
-  .strict();
-
-/** Undo names the membership its add made; Remove names none, and removes the current one. */
-const untrackSchema = z.object({ membershipId: z.uuid().optional() }).strict();
-
-/** Adding by hand for the account the path names. */
-const scopedTrackSchema = z
-  .object({
-    repository: z
-      .string()
-      .max(400)
-      .regex(/^[\w.-]+(?:\/[\w.-]+)+$/),
-    number: z.number().int().positive().max(1_000_000_000),
-    host: z
-      .string()
-      .max(255)
-      .regex(/^[\w.-]+(?::\d{1,5})?$/)
-      .optional(),
-    gitlab: z.boolean().optional(),
-  })
-  .strict();
-
-/** Triage for the account the path names, so the body carries no account of its own. */
-const scopedUpdateSchema = updateSchema.omit({ account: true });
 
 /** `:account` in a scoped path: an account key, GitHub `login` or GitLab `user@host`. */
 export interface AccountParams {
@@ -63,166 +31,116 @@ export function knownAccount(
   return null;
 }
 
-/** Maps a failed live read to its response: the account unavailable, rate limited, or the forge. */
-export function readError(reply: FastifyReply, error: unknown) {
+/** What a failed live read answers: the account unavailable, rate limited, or the forge. */
+export function readFailure(error: unknown): Failed {
   if (error instanceof AccountUnavailable)
-    return reply.code(409).send({ error: error.message, code: error.code });
+    return failed(409, { error: error.message, code: error.code });
 
   if (error instanceof ReviewError)
-    return reply.code(error.status).send({ error: error.message, code: error.code });
+    return failed(error.status, { error: error.message, code: error.code });
 
   if (error instanceof GitHubError && error.outcome === 'rate_limit')
-    return reply
-      .code(429)
-      .send({ error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
+    return failed(429, { error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
 
-  return reply.code(502).send({ error: safeError(error) });
+  return failed(502, { error: safeError(error) });
 }
 
-/** Maps queue-change failures to `{ error, code }` responses. */
-function queueError(reply: FastifyReply, error: unknown) {
+/** Sends what a failed live read answers. */
+export function readError(reply: FastifyReply, error: unknown) {
+  const answer = readFailure(error);
+
+  return reply.code(answer.status).send(answer.body);
+}
+
+/** What a failed queue change answers; anything else is not its to answer. */
+function queueFailure(error: unknown): Failed {
   if (error instanceof AccountUnavailable)
-    return reply.code(409).send({ error: error.message, code: error.code });
+    return failed(409, { error: error.message, code: error.code });
 
   if (error instanceof ReviewError)
-    return reply.code(error.status).send({ error: error.message, code: error.code });
+    return failed(error.status, { error: error.message, code: error.code });
 
   if (error instanceof GitHubError && error.outcome === 'rate_limit')
-    return reply
-      .code(429)
-      .send({ error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
+    return failed(429, { error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
 
   if (error instanceof GitHubError)
-    return reply.code(502).send({ error: safeError(error), code: 'GITHUB_ERROR' });
+    return failed(502, { error: safeError(error), code: 'GITHUB_ERROR' });
 
   throw error;
 }
 
 export function registerPullRoutes(app: FastifyInstance, service: SyncService): void {
-  // Scoped: each serves exactly the account in its path, whichever account is selected, so a
-  // request finishes for the account it was made for even if another window switches meanwhile.
-  app.get<{ Params: AccountParams }>('/api/accounts/:account/pulls', async (request, reply) => {
-    const account = knownAccount(service, request.params, reply);
+  // Each serves exactly the account in its path, whichever account is selected, so a request
+  // finishes for the account it was made for even if another window switches meanwhile.
+  const serving = { sync: service };
 
-    return account ? service.listFor(account) : reply;
-  });
+  serve(app, routes.pulls, ({ account }) => ok(200, service.listFor(account)), serving);
+  serve(app, routes.mine, ({ account }) => ok(200, service.mineFor(account)), serving);
 
-  app.get<{ Params: AccountParams }>('/api/accounts/:account/mine', async (request, reply) => {
-    const account = knownAccount(service, request.params, reply);
+  serve(
+    app,
+    routes.detail,
+    ({ account, params }) => {
+      const detail = service.detailFor(account, params.id);
 
-    return account ? service.mineFor(account) : reply;
-  });
-
-  app.get<{ Params: AccountParams & { id: string } }>(
-    '/api/accounts/:account/pulls/:id',
-    async (request, reply) => {
-      const account = knownAccount(service, request.params, reply);
-
-      if (!account) return reply;
-
-      return (
-        service.detailFor(account, request.params.id) ??
-        reply.code(404).send({ error: 'This PR is no longer tracked for this account.' })
-      );
+      return detail
+        ? ok(200, detail)
+        : failed(404, { error: 'This PR is no longer tracked for this account.' });
     },
+    serving,
   );
 
-  app.post<{ Params: AccountParams & { id: string } }>(
-    '/api/accounts/:account/pulls/:id/refresh',
-    async (request, reply) => {
-      const account = knownAccount(service, request.params, reply);
+  serve(
+    app,
+    routes.refresh,
+    async ({ account, params }) => {
+      const detail = await service.refresh(params.id, account);
 
-      if (!account) return reply;
-
-      try {
-        return (
-          (await service.refresh(request.params.id, account)) ??
-          reply.code(404).send({ error: 'PR not found.' })
-        );
-      } catch (error) {
-        return readError(reply, error);
-      }
+      return detail ? ok(200, detail) : failed(404, { error: 'PR not found.' });
     },
+    { ...serving, errors: readFailure },
   );
 
-  app.patch<{ Params: AccountParams & { id: string } }>(
-    '/api/accounts/:account/pulls/:id/triage',
-    async (request, reply) => {
-      const account = knownAccount(service, request.params, reply);
+  serve(
+    app,
+    routes.triage,
+    ({ account, params, body }) => {
+      if (body.snoozeUntil && Date.parse(body.snoozeUntil) <= service.clock.now())
+        return failed(400, { error: 'Choose a snooze time in the future.' });
 
-      if (!account) return reply;
+      const detail = service.updateFor(account, params.id, body);
 
-      const parsed = scopedUpdateSchema.safeParse(request.body);
-
-      if (!parsed.success)
-        return reply
-          .code(400)
-          .send({ error: 'Invalid triage update.', details: z.flattenError(parsed.error) });
-
-      if (parsed.data.snoozeUntil && Date.parse(parsed.data.snoozeUntil) <= service.clock.now())
-        return reply.code(400).send({ error: 'Choose a snooze time in the future.' });
-
-      return (
-        service.updateFor(account, request.params.id, parsed.data) ??
-        reply.code(404).send({ error: 'PR not found.' })
-      );
+      return detail ? ok(200, detail) : failed(404, { error: 'PR not found.' });
     },
+    serving,
   );
 
-  app.post<{ Params: AccountParams }>(
-    '/api/accounts/:account/pulls/track',
-    async (request, reply) => {
-      const account = knownAccount(service, request.params, reply);
-
-      if (!account) return reply;
-
-      const parsed = scopedTrackSchema.safeParse(request.body);
-
-      if (!parsed.success)
-        return reply.code(400).send({
-          error:
-            'Enter a PR as owner/repo#123, a GitLab MR as group/project!123, or a link to either.',
-          details: z.flattenError(parsed.error),
-        });
-
-      const { repository, number, host, gitlab } = parsed.data;
-
-      try {
-        return await service.track(account, repository, number, host, gitlab);
-      } catch (error) {
-        return queueError(reply, error);
-      }
-    },
+  serve(
+    app,
+    routes.track,
+    async ({ account, body }) =>
+      ok(200, await service.track(account, body.repository, body.number, body.host, body.gitlab)),
+    { ...serving, errors: queueFailure },
   );
 
-  app.delete<{ Params: AccountParams & { id: string } }>(
-    '/api/accounts/:account/pulls/:id/track',
-    async (request, reply) => {
-      const account = knownAccount(service, request.params, reply);
-
-      if (!account) return reply;
-
-      const parsed = untrackSchema.safeParse(request.body ?? {});
-
-      if (!parsed.success)
-        return reply
-          .code(400)
-          .send({ error: 'Invalid request.', details: z.flattenError(parsed.error) });
-
-      try {
-        return service.untrack(account, request.params.id, parsed.data.membershipId);
-      } catch (error) {
-        return queueError(reply, error);
-      }
-    },
+  serve(
+    app,
+    routes.untrack,
+    ({ account, params, body }) => ok(200, service.untrack(account, params.id, body.membershipId)),
+    { ...serving, errors: queueFailure },
   );
 
   // Not any one account's: the selected account's sync, and the status every window shows.
-  app.get('/api/status', async () => service.sentStatus);
+  serve(app, routes.status, () => ok(200, service.sentStatus), serving);
 
-  app.post('/api/sync', async (_request, reply) => {
-    void service.sync();
+  serve(
+    app,
+    routes.sync,
+    () => {
+      void service.sync();
 
-    return reply.code(202).send(service.sentStatus);
-  });
+      return ok(202, service.sentStatus);
+    },
+    serving,
+  );
 }

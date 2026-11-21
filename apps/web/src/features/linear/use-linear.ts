@@ -1,13 +1,13 @@
+import { call } from '@/lib/call';
+import { routes } from '@review-desk/shared/contract';
 import { useQuery } from '@tanstack/react-query';
-import type { LinearIssue, LinearStatus } from '@review-desk/shared/tickets';
-import { api } from '@/lib/api';
-import { accountPath, useAccount } from '@/lib/queries';
+import { useAccount } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 
 export function useLinearStatus() {
   return useQuery({
     queryKey: ['linear-status'],
-    queryFn: () => api<LinearStatus>('/api/linear/status'),
+    queryFn: ({ signal }) => call(routes.linearStatus, { params: {}, signal }),
     staleTime: 5 * 60_000,
   });
 }
@@ -18,10 +18,8 @@ export function useTickets(prId: string | null) {
 
   return useQuery({
     queryKey: queryKeys.tickets(account, prId ?? 'none'),
-    queryFn: () =>
-      api<{ identifiers: string[]; issues: LinearIssue[]; error: string | null }>(
-        accountPath(account!, `/pulls/${encodeURIComponent(prId!)}/tickets`),
-      ),
+    queryFn: ({ signal }) =>
+      call(routes.tickets, { params: { account: account!, id: prId! }, signal }),
     enabled: Boolean(prId) && account !== null,
     staleTime: 5 * 60_000,
   });

@@ -1,4 +1,5 @@
-import { knownAccount, type AccountParams } from '@/routes/pulls.js';
+import { routes } from '@review-desk/shared/contract';
+import { failed, ok, serve, serveRedirect } from '@/http/serve.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { safeError } from '@/github/errors.js';
@@ -18,51 +19,61 @@ export function registerLinearRoutes(
   service: SyncService,
   linear: LinearService,
 ): void {
-  app.get('/api/linear/status', async () => linear.status());
+  const serving = { sync: service };
 
-  app.post('/api/linear/connect', async (request, reply) => {
-    // Linear must send the browser back to the address it is using now. That is its Origin: in
-    // development Vite proxies the API with the API port as Host. The security hook already
-    // limited both headers to this machine's allowed ports.
-    const origin = request.headers.origin;
-    const port = new URL(origin && origin !== 'null' ? origin : `http://${request.headers.host}`)
-      .port;
-    const redirectUri = `http://127.0.0.1:${port}/api/linear/callback`;
+  serve(app, routes.linearStatus, async () => ok(200, await linear.status()), serving);
 
-    try {
-      return { url: await linear.connect(redirectUri) };
-    } catch (error) {
-      return reply.code(502).send({ error: safeError(error) });
-    }
-  });
+  serve(
+    app,
+    routes.linearConnect,
+    async ({ request }) => {
+      // Linear must send the browser back to the address it is using now. That is its Origin: in
+      // development Vite proxies the API with the API port as Host. The security hook already
+      // limited both headers to this machine's allowed ports.
+      const origin = request.headers.origin;
+      const port = new URL(origin && origin !== 'null' ? origin : `http://${request.headers.host}`)
+        .port;
+      const redirectUri = `http://127.0.0.1:${port}/api/linear/callback`;
+
+      try {
+        return ok(200, { url: await linear.connect(redirectUri) });
+      } catch (error) {
+        return failed(502, { error: safeError(error) });
+      }
+    },
+    serving,
+  );
 
   // Linear sends the browser here after sign-in. The one-time state from /connect is what ties the
   // response to a sign-in this app started, so a forged link cannot connect another account.
-  app.get('/api/linear/callback', async (request, reply) => {
+  serveRedirect(app, routes.linearCallback, async (request) => {
     const query = callbackQuery.safeParse(request.query);
     const connected = query.success ? await linear.callback(query.data) : false;
 
-    return reply.redirect(`/settings/linear?linear=${connected ? 'connected' : 'failed'}`, 303);
+    return `/settings/linear?linear=${connected ? 'connected' : 'failed'}`;
   });
 
-  app.post('/api/linear/disconnect', async () => {
-    await linear.disconnect();
+  serve(
+    app,
+    routes.linearDisconnect,
+    async () => {
+      await linear.disconnect();
 
-    return linear.status();
-  });
-
-  app.get<{ Params: AccountParams & { id: string } }>(
-    '/api/accounts/:account/pulls/:id/tickets',
-    async (request, reply) => {
-      const account = knownAccount(service, request.params, reply);
-
-      if (!account) return reply;
-
-      const detail = service.detailFor(account, request.params.id);
-
-      if (!detail) return reply.code(404).send({ error: 'This PR is no longer tracked.' });
-
-      return linear.ticketsFor(detail.snapshot);
+      return ok(200, await linear.status());
     },
+    serving,
+  );
+
+  serve(
+    app,
+    routes.tickets,
+    async ({ account, params }) => {
+      const detail = service.detailFor(account, params.id);
+
+      if (!detail) return failed(404, { error: 'This PR is no longer tracked.' });
+
+      return ok(200, await linear.ticketsFor(detail.snapshot));
+    },
+    serving,
   );
 }

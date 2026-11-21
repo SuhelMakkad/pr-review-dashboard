@@ -15,6 +15,9 @@
     "typecheck": "tsc --noEmit",
     "test": "pnpm --filter @review-desk/shared build && vitest run --root ../.. --config vitest.config.ts --project shared"
   },
+  "dependencies": {
+    "zod": "^4.1.0"
+  },
   "devDependencies": {
     "concurrently": "^9.2.0",
     "tsc-alias": "^1.9.10",

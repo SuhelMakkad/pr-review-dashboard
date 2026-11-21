@@ -13,15 +13,19 @@ export class ApiError extends Error {
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
-/** Calls the local API. Writes carry the per-launch session token; an expired session reloads. */
+/**
+ * Calls the local API. Writes carry the per-launch session token; an expired session reloads. A
+ * cancelled request (`signal`) rejects with its abort, never as an unreachable server.
+ */
 export async function api<T>(
   path: string,
-  options: { method?: Method; body?: unknown } = {},
+  options: { method?: Method; body?: unknown; signal?: AbortSignal } = {},
 ): Promise<T> {
   const method = options.method ?? (options.body === undefined ? 'GET' : 'POST');
+  const signal = options.signal;
   const init: RequestInit =
     method === 'GET'
-      ? {}
+      ? { ...(signal ? { signal } : {}) }
       : {
           method,
           headers: {
@@ -30,17 +34,24 @@ export async function api<T>(
             'X-Review-Desk-Session': session.token(),
           },
           body: JSON.stringify(options.body ?? {}),
+          ...(signal ? { signal } : {}),
         };
 
   let response: Response;
 
   try {
     response = await fetch(path, init);
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
+
     throw new ApiError('Review Desk is not reachable. Is `pnpm start` still running?', 0);
   }
 
-  const result = (await response.json().catch(() => ({}))) as Record<string, unknown> & {
+  const result = (await response.json().catch((error: unknown) => {
+    if (signal?.aborted) throw error;
+
+    return {};
+  })) as Record<string, unknown> & {
     error?: string;
     code?: string;
   };

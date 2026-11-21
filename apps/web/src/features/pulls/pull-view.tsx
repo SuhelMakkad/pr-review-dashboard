@@ -1,3 +1,5 @@
+import { call } from '@/lib/call';
+import { routes } from '@review-desk/shared/contract';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -23,9 +25,8 @@ import type {
   ReviewThread,
   Source,
 } from '@review-desk/shared/types';
-import { api } from '@/lib/api';
 import { filesUrl, numberSign, refOf } from '@/lib/pr-ref';
-import { accountPath, runTriage, usePullDetail, useTriage } from '@/lib/queries';
+import { runTriage, usePullDetail } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { dateTime, relativePhrase, shortDateTime } from '@/lib/time';
 import { Avatar } from '@/ui/avatar';
@@ -241,7 +242,6 @@ function PullDetailView({
   const forge = forgeTerms(account);
   const client = useQueryClient();
   const actions = usePullActions();
-  const triage = useTriage();
   const inbox = useInboxNavigation();
   const untrack = useUntrackPull();
   const [snoozeOpen, setSnoozeOpen] = useState(false);
@@ -259,9 +259,9 @@ function PullDetailView({
   useEffect(() => {
     if (Date.now() - Date.parse(pr.fetchedAt) > 120_000) {
       // For the account whose PR this is, whichever account is on screen when it lands.
-      void api(accountPath(detail.account, `/pulls/${encodeURIComponent(item.id)}/refresh`), {
-        method: 'POST',
-      }).catch(() => undefined);
+      void call(routes.refresh, { params: { account: detail.account, id: item.id } }).catch(
+        () => undefined,
+      );
     }
   }, [item.id]);
   const files = showAllFiles ? pr.files : pr.files.slice(0, 12);

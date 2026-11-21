@@ -6,7 +6,6 @@ import {
   type QueryClient,
 } from '@tanstack/react-query';
 import type {
-  GitHubAccountList,
   PullRequestDetail,
   PullRequestItem,
   PullRequestList,
@@ -14,24 +13,23 @@ import type {
   TriageUpdate,
 } from '@review-desk/shared/types';
 import { forgeTerms, type ForgeTerms } from '@review-desk/shared/accounts';
-import type { AuthorItem } from '@review-desk/shared/author';
-import type { NotificationSettings } from '@review-desk/shared/notify';
-import type { DiffManifest, DiffMode } from '@review-desk/shared/diff';
+import type { DiffMode } from '@review-desk/shared/diff';
 
-export interface MineList {
-  account: string | null;
-  items: AuthorItem[];
-}
-import { api } from '@/lib/api';
+export type { MineList } from '@review-desk/shared/contract';
+import { routes, type ResponseOf } from '@review-desk/shared/contract';
+import { call } from '@/lib/call';
 import { adoptStatus, fallbackInterval, useLive } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
 
 /** Polls the server's status under its own key; what it reads is shown only by `adoptStatus`. */
 const statusPoll = (client: QueryClient) => ({
   queryKey: ['status-poll'] as const,
-  queryFn: async () => {
-    const status = await api<SyncStatus>('/api/status');
+  queryFn: async ({ signal }: { signal: AbortSignal }) => {
+    const status = await call(routes.status, { params: {}, signal });
 
+    // Its fetch and decoding can both finish before the cancellation reaches this turn: a
+    // cancelled poll writes nothing.
+    signal.throwIfAborted();
     adoptStatus(client, status);
 
     return status.revision ?? 0;
@@ -66,11 +64,6 @@ export function useAccount(): string | null {
   return useStatus().data?.account?.login ?? null;
 }
 
-/** A route of one account's PRs: `/api/accounts/<account><path>`. */
-export function accountPath(account: string, path: string): string {
-  return `/api/accounts/${encodeURIComponent(account)}${path}`;
-}
-
 /** Names for the current account's forge (GitHub or GitLab, PR or MR), for labels and messages. */
 export function useForge(): ForgeTerms {
   return forgeTerms(useStatus().data?.account?.login);
@@ -82,13 +75,18 @@ export function useForge(): ForgeTerms {
  * status is known its account's list loads under that account's key; with no account at all (no
  * sign-in) the list is empty, as the server's own answer for no account is.
  */
-async function listFor<T>(
+async function listFor<R extends typeof routes.pulls | typeof routes.mine>(
   client: QueryClient,
   account: string | null,
-  path: string,
-  none: T,
-): Promise<T> {
-  if (account) return api<T>(accountPath(account, path));
+  route: R,
+  none: ResponseOf<R>,
+  signal: AbortSignal,
+): Promise<ResponseOf<R>> {
+  // Both routes take the account alone.
+  if (account)
+    return call(route as typeof routes.pulls, { params: { account }, signal }) as Promise<
+      ResponseOf<R>
+    >;
   if (!client.getQueryData(queryKeys.status)) await readStatus(client);
 
   return none;
@@ -101,8 +99,8 @@ export function usePulls() {
 
   return useQuery({
     queryKey: queryKeys.pulls(account),
-    queryFn: () =>
-      listFor<PullRequestList>(client, account, '/pulls', { account: null, items: [] }),
+    queryFn: ({ signal }) =>
+      listFor(client, account, routes.pulls, { account: null, items: [] }, signal),
     refetchInterval: fallbackInterval(live),
     staleTime: live.connected ? Infinity : 0,
   });
@@ -115,7 +113,8 @@ export function useMine() {
 
   return useQuery({
     queryKey: queryKeys.mine(account),
-    queryFn: () => listFor<MineList>(client, account, '/mine', { account: null, items: [] }),
+    queryFn: ({ signal }) =>
+      listFor(client, account, routes.mine, { account: null, items: [] }, signal),
     refetchInterval: fallbackInterval(live),
     staleTime: live.connected ? Infinity : 0,
   });
@@ -127,8 +126,8 @@ export function usePullDetail(id: string | null) {
 
   return useQuery({
     queryKey: queryKeys.detail(account, id ?? 'none'),
-    queryFn: () =>
-      api<PullRequestDetail>(accountPath(account!, `/pulls/${encodeURIComponent(id!)}`)),
+    queryFn: ({ signal }) =>
+      call(routes.detail, { params: { account: account!, id: id! }, signal }),
     enabled: Boolean(id) && account !== null,
     refetchInterval: fallbackInterval(live),
     staleTime: live.connected ? Infinity : 0,
@@ -140,10 +139,8 @@ export function useDiff(id: string | null, mode: DiffMode) {
 
   return useQuery({
     queryKey: queryKeys.diff(account, id ?? 'none', mode),
-    queryFn: () =>
-      api<DiffManifest>(
-        accountPath(account!, `/pulls/${encodeURIComponent(id!)}/diff?mode=${mode}`),
-      ),
+    queryFn: ({ signal }) =>
+      call(routes.diff, { params: { account: account!, id: id! }, query: { mode }, signal }),
     enabled: Boolean(id) && account !== null,
     staleTime: 30_000,
   });
@@ -152,7 +149,7 @@ export function useDiff(id: string | null, mode: DiffMode) {
 export function useNotificationSettings() {
   return useQuery({
     queryKey: ['notify-settings'],
-    queryFn: () => api<NotificationSettings>('/api/notifications/settings'),
+    queryFn: ({ signal }) => call(routes.notificationSettings, { params: {}, signal }),
     staleTime: 60_000,
   });
 }
@@ -161,7 +158,7 @@ export function useNotificationSettings() {
 export function useAccounts(enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.accounts,
-    queryFn: () => api<GitHubAccountList>('/api/accounts'),
+    queryFn: ({ signal }) => call(routes.accounts, { params: {}, signal }),
     enabled,
     staleTime: 60_000,
   });
@@ -173,7 +170,7 @@ export function useSwitchAccount() {
 
   return useMutation({
     mutationFn: (variables: { from: string | null; to: string }) =>
-      api<SyncStatus>('/api/accounts/switch', { body: variables }),
+      call(routes.switchAccount, { params: {}, body: variables }),
     onSuccess: (status) => adoptStatus(client, status),
   });
 }
@@ -182,7 +179,7 @@ export function useSyncNow() {
   const client = useQueryClient();
 
   return useMutation({
-    mutationFn: () => api<SyncStatus>('/api/sync', { method: 'POST' }),
+    mutationFn: () => call(routes.sync, { params: {} }),
     // Ordered by its revision like every status: a reply older than the status shown is ignored.
     onSuccess: (status) => adoptStatus(client, status),
   });
@@ -259,10 +256,7 @@ export async function runTriage(
   }
 
   try {
-    const detail = await api<PullRequestDetail>(
-      accountPath(account, `/pulls/${encodeURIComponent(id)}/triage`),
-      { method: 'PATCH', body: update },
-    );
+    const detail = await call(routes.triage, { params: { account, id }, body: update });
 
     // The triage as this change left it shows at once (a saved note, say), unless the PR was read
     // again meanwhile with another triage: that read is as new as this reply, or newer. Only the

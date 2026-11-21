@@ -1,24 +1,10 @@
 import { useEffect, useRef } from 'react';
 import { useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
-import type {
-  AiProvider,
-  AiProviderStatus,
-  AiReviewStatus,
-  AiRun,
-  AiRunsResponse,
-  AiSettings,
-  AiTask,
-  CodexAccountStatus,
-} from '@review-desk/shared/ai';
-import type {
-  DraftComment,
-  PrepareReviewOptions,
-  ReviewDraft,
-  ReviewEvent,
-} from '@review-desk/shared/review';
-import { api } from '@/lib/api';
+import type { AiProvider, AiSettings, AiTask } from '@review-desk/shared/ai';
+import type { PrepareReviewOptions, ReviewDraft, ReviewEvent } from '@review-desk/shared/review';
 import { accountSwitches } from '@/lib/live';
-import { accountPath } from '@/lib/queries';
+import { routes } from '@review-desk/shared/contract';
+import { call } from '@/lib/call';
 import { queryKeys } from '@/lib/query-keys';
 
 /** Every account's AI runs and latest reviews: settings are shared, and change what they show. */
@@ -28,12 +14,7 @@ const isAiQuery = (query: { queryKey: readonly unknown[] }) =>
 export function useAiOverview() {
   return useQuery({
     queryKey: ['ai-overview'],
-    queryFn: () =>
-      api<{
-        settings: AiSettings;
-        providers: AiProviderStatus[];
-        codex: CodexAccountStatus | null;
-      }>('/api/ai'),
+    queryFn: ({ signal }) => call(routes.ai, { params: {}, signal }),
     staleTime: 60_000,
   });
 }
@@ -43,7 +24,7 @@ export function useAiSettings(account: string) {
 
   return useMutation({
     mutationFn: (settings: AiSettings) =>
-      api<AiSettings>('/api/ai/settings', { method: 'PUT', body: { account, settings } }),
+      call(routes.aiSettings, { params: {}, body: { account, settings } }),
     // Turning automatic review off drops pending restarts, which lists and panels show.
     onSuccess: () =>
       Promise.all([
@@ -67,7 +48,7 @@ export function useAutomationSettings(account: string) {
 
   return useMutation({
     mutationFn: (changes: AutomationChanges) =>
-      api<AiSettings>('/api/ai/automation', { method: 'PUT', body: { account, changes } }),
+      call(routes.aiAutomation, { params: {}, body: { account, changes } }),
     // Turning automatic review off drops pending restarts, which lists and panels show.
     onSuccess: () =>
       Promise.all([
@@ -81,7 +62,7 @@ export function useAutomationSettings(account: string) {
 export function useAiReviewStatuses(account: string | null | undefined) {
   return useQuery({
     queryKey: queryKeys.aiReviews(account ?? null),
-    queryFn: () => api<{ reviews: AiReviewStatus[] }>(accountPath(account!, '/ai/reviews')),
+    queryFn: ({ signal }) => call(routes.aiReviews, { params: { account: account! }, signal }),
     enabled: Boolean(account),
     select: (data) => new Map(data.reviews.map((review) => [review.prId, review])),
     staleTime: 30_000,
@@ -92,8 +73,8 @@ export function useAiReviewStatuses(account: string | null | undefined) {
 export function useAi(prId: string | null, account: string) {
   const client = useQueryClient();
   const key = queryKeys.ai(account, prId ?? 'none');
-  const run = (runId: string, rest = '') =>
-    accountPath(account, `/ai/runs/${encodeURIComponent(runId)}${rest}`);
+  const run = (runId: string) => ({ account, runId });
+  const pr = { account, id: prId ?? '' };
   const draftKey = queryKeys.draft(account, prId ?? 'none');
   /**
    * Shows the draft a write answered with, unless the account shown changed while it was on its
@@ -139,8 +120,7 @@ export function useAi(prId: string | null, account: string) {
 
   const runs = useQuery({
     queryKey: key,
-    queryFn: () =>
-      api<AiRunsResponse>(accountPath(account, `/pulls/${encodeURIComponent(prId!)}/ai`)),
+    queryFn: ({ signal }) => call(routes.aiRuns, { params: pr, signal }),
     enabled: Boolean(prId && account),
     refetchInterval: (query) =>
       query.state.data?.runs.some((run) => run.status === 'queued' || run.status === 'running')
@@ -175,37 +155,36 @@ export function useAi(prId: string | null, account: string) {
     }) => {
       if (task === 'draft_summary' && draftEvent) {
         const since = accountSwitches();
-        const draft = await api<ReviewDraft>(
-          accountPath(account, `/pulls/${encodeURIComponent(prId!)}/draft`),
-          { method: 'PUT', body: { event: draftEvent, body: draftBody } },
-        );
+        const draft = await call(routes.saveDraft, {
+          params: pr,
+          body: { event: draftEvent, body: draftBody },
+        });
 
         seedDraft(draft, since);
       }
 
-      return api<AiRun>(accountPath(account, `/pulls/${encodeURIComponent(prId!)}/ai`), {
-        method: 'POST',
-        body: { task, provider, force },
-      });
+      return call(routes.startAi, { params: pr, body: { task, provider, force } });
     },
     onSuccess: () => client.invalidateQueries({ queryKey: key }),
   });
 
   const cancel = useMutation({
-    mutationFn: (runId: string) => api(run(runId), { method: 'DELETE', body: {} }),
+    mutationFn: (runId: string) => call(routes.cancelAi, { params: run(runId), body: {} }),
     onSuccess: () => client.invalidateQueries({ queryKey: key }),
   });
 
   const control = useMutation({
     mutationKey: controlKey,
     mutationFn: ({ runId, operation }: { runId: string; operation: 'pause' | 'resume' }) =>
-      api(run(runId, `/${operation}`), { method: 'POST', body: {} }),
+      (operation === 'pause'
+        ? call(routes.pauseAi, { params: run(runId), body: {} })
+        : call(routes.resumeAi, { params: run(runId), body: {} })) as Promise<unknown>,
     onSettled: () => client.invalidateQueries({ queryKey: key }),
   });
 
   const accept = useMutation({
     mutationFn: ({ runId, index, body }: { runId: string; index: number; body?: string }) =>
-      api<DraftComment>(run(runId, '/accept'), { method: 'POST', body: { index, body } }),
+      call(routes.acceptAi, { params: run(runId), body: { index, body } }),
     onSuccess: () => client.invalidateQueries({ queryKey: draftKey }),
   });
 
@@ -215,7 +194,7 @@ export function useAi(prId: string | null, account: string) {
       runId,
       ...options
     }: { runId: string; indices: number[] } & PrepareReviewOptions) =>
-      api<ReviewDraft>(run(runId, '/draft'), { method: 'POST', body: options }),
+      call(routes.prepareAi, { params: run(runId), body: options }),
     onMutate: () => ({ since: accountSwitches() }),
     onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
     onSettled: () =>
@@ -227,8 +206,7 @@ export function useAi(prId: string | null, account: string) {
 
   const applySummary = useMutation({
     mutationKey: applyKey,
-    mutationFn: (runId: string) =>
-      api<ReviewDraft>(run(runId, '/summary'), { method: 'POST', body: {} }),
+    mutationFn: (runId: string) => call(routes.applyAi, { params: run(runId), body: {} }),
     onMutate: () => ({ since: accountSwitches() }),
     onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
     onSettled: () => client.invalidateQueries({ queryKey: key }),
