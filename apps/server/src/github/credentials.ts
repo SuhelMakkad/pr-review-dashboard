@@ -1,7 +1,7 @@
 import type { CliAccount } from '@/forge/types.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import { spawn } from 'node:child_process';
-import { GITHUB_HOST, type Forge } from '@review-desk/shared/accounts';
+import { GITHUB_HOST } from '@review-desk/shared/accounts';
 import { GitHubError, registerSecret, safeError } from '@/github/errors.js';
 
 export type { CliAccount };

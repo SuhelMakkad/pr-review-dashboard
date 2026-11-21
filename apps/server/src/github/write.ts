@@ -1,5 +1,4 @@
 import type { ThreadInput, ViewedRevision } from '@/forge/types.js';
-import type { Side } from '@review-desk/shared/review';
 import type { ForgeWrites } from '@/forge/port.js';
 import { GitHubError } from '@/github/errors.js';
 import { mutations } from '@/github/queries.js';
