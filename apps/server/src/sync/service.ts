@@ -14,7 +14,7 @@ import type { ViewedRevision } from '@/github/write.js';
 import { AccountState } from '@/sync/accounts.js';
 import { PullQueue } from '@/sync/queue.js';
 import { PullReads, type MineList } from '@/sync/reads.js';
-import { SyncRunner } from '@/sync/runner.js';
+import { SyncRunner, type AfterSync, type SyncRun } from '@/sync/runner.js';
 import { SnapshotCoordinator } from '@/sync/snapshots.js';
 
 export { initialStatus } from '@/sync/accounts.js';
@@ -35,7 +35,7 @@ export class SyncService {
   private readonly queue: PullQueue;
   private readonly runner: SyncRunner;
   /** Runs after every sync with the active login (used for notifications), as this object's method. */
-  afterSync: ((login: string) => Promise<unknown>) | null = null;
+  afterSync: ((login: string) => Promise<AfterSync | void>) | null = null;
 
   constructor(
     readonly store: Store,
@@ -107,6 +107,16 @@ export class SyncService {
   /** Runs one sync, or joins the one in progress (see `SyncRunner.sync`). */
   sync(options?: { scheduled?: boolean; trigger?: 'start' | 'switch' | 'manual' }): Promise<void> {
     return this.runner.sync(options);
+  }
+
+  /** Runs a sync of the account's own, and says how it went (see `SyncRunner.syncOwn`). */
+  syncOwn(account: string, signal: AbortSignal): Promise<SyncRun> {
+    return this.runner.syncOwn(account, signal);
+  }
+
+  /** The account's cooldown, in use or not, or null (see `AccountState.cooldown`). */
+  cooldown(account: string): string | null {
+    return this.state.cooldown(account);
   }
 
   /** Switches to another account signed in to the CLI (see `SyncRunner.switchAccount`). */

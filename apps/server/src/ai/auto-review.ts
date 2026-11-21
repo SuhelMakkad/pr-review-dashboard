@@ -35,6 +35,8 @@ import { bindForge } from '@/forge/bind.js';
 import { safeError } from '@/github/errors.js';
 import type { Notifier } from '@/notify/notifier.js';
 import type { SyncService } from '@/sync/service.js';
+import type { PassOutcome } from '@/sync/runner.js';
+import { Aborted, Defer, type Scheduler, type Work } from '@/scheduler/scheduler.js';
 import { AUTO_REVIEW_PRIMED } from '@/db/settings.js';
 
 type LogRow = AutoReviewEntry;
@@ -65,6 +67,40 @@ function readyCopy(row: AiRunRow): string {
   }
 }
 
+/** A sync's restart that reached no pass, while a wait is overdue: tried again after a backoff. */
+class SyncMissed extends Error {
+  constructor() {
+    super('The sync for a restart did not reach automatic review.');
+    this.name = 'SyncMissed';
+  }
+}
+
+/** The pass a call made during another will get: the follow-up for its account. */
+interface FollowUp {
+  account: string;
+  promise: Promise<PassOutcome>;
+  resolve: (outcome: PassOutcome) => void;
+}
+
+const followUp = (account: string): FollowUp => {
+  let resolve!: (outcome: PassOutcome) => void;
+  const promise = new Promise<PassOutcome>((done) => (resolve = done));
+
+  return { account, promise, resolve };
+};
+
+/** `promise`, or `Aborted` once `signal` aborts. */
+const unlessAborted = <T>(promise: Promise<T>, signal: AbortSignal): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    if (signal.aborted) return reject(new Aborted());
+
+    signal.addEventListener('abort', () => reject(new Aborted()), { once: true });
+    promise.then(resolve, reject);
+  });
+
+/** The kind of `scheduled_work` row that restarts an account's waiting reviews on time. */
+export const RESTART_WORK = 'auto-review.restart';
+
 /**
  * Starts a full review when your review is requested. It stops at the finished report, so nothing
  * here can reach GitHub: posting the report is FindingsPublisher's job, and only when Settings asks
@@ -76,9 +112,11 @@ function readyCopy(row: AiRunRow): string {
  * during the wait takes its place.
  */
 export class AutoReviewer {
-  private running: Promise<void> | null = null;
-  private pending: string | null = null;
+  private running: Promise<PassOutcome> | null = null;
+  private pending: FollowUp | null = null;
   private closed = false;
+  /** Stops listening for the account in use changing; set once open. */
+  private unsubscribe: (() => void) | null = null;
   /** Finished runs being checked against GitHub right now; passes leave them alone. */
   private readonly verifying = new Set<string>();
   /** Work started when a run finishes (its check and announcement), which shutdown waits for. */
@@ -88,7 +126,14 @@ export class AutoReviewer {
     private readonly sync: SyncService,
     private readonly runner: AiRunner,
     private readonly notifier: Notifier,
-  ) {}
+    /** Starts restarts at their time; without it they wait for the next sync's pass. */
+    private readonly scheduler: Scheduler | null = null,
+  ) {
+    scheduler?.register(RESTART_WORK, {
+      class: 'automation',
+      run: (work, signal) => this.restart(work, signal),
+    });
+  }
 
   /** The app's clock, shared with the sync. */
   private get clock(): Clock {
@@ -107,36 +152,76 @@ export class AutoReviewer {
    */
   async close(): Promise<void> {
     this.closed = true;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.pending?.resolve({ account: this.pending.account, cutoff: null });
     this.pending = null;
 
     await Promise.all([this.running, ...this.completions]);
   }
 
   /**
-   * Called after each sync. Passes run one at a time; a call during a pass schedules one more, so
-   * requests that arrive mid-pass are not missed. Never throws.
+   * Seeds the restart of the account in use, an overdue one included, and again whenever another
+   * account comes into use: a restart is never scheduled for an account not in use. Called once
+   * the scheduler is open.
    */
-  afterSync(account: string): Promise<void> {
-    if (this.closed) return Promise.resolve();
+  open(): void {
+    if (!this.scheduler || this.closed || this.unsubscribe) return;
+
+    let active = this.sync.status.account?.login ?? null;
+
+    this.seed(active);
+    this.unsubscribe = this.sync.events.subscribe(({ event }) => {
+      if (event.type !== 'status') return;
+
+      const now = event.status.account?.login ?? null;
+
+      if (now === active) return;
+
+      active = now;
+      this.seed(now);
+    });
+  }
+
+  /**
+   * Called after each sync. Passes run one at a time; a call during a pass schedules one more, so
+   * requests that arrive mid-pass are not missed. Resolves with what the pass for this call came
+   * to: the one it started, or the follow-up. Never throws.
+   */
+  afterSync(account: string): Promise<PassOutcome> {
+    if (this.closed) return Promise.resolve({ account, cutoff: null });
 
     if (this.running) {
-      this.pending = account;
+      // One follow-up, the latest account's: another account's call takes its place.
+      if (this.pending?.account !== account) {
+        this.pending?.resolve({ account: this.pending.account, cutoff: null });
+        this.pending = followUp(account);
+      }
 
-      return this.running;
+      return this.pending.promise;
     }
 
-    this.running = this.pass(account)
-      .catch(() => undefined)
+    const run: Promise<PassOutcome> = this.pass(account)
+      .then(
+        (cutoff) => {
+          this.rearm(account, cutoff);
+
+          return { account, cutoff };
+        },
+        () => ({ account, cutoff: null }),
+      )
       .finally(() => {
         this.running = null;
 
         const next = this.pending;
 
         this.pending = null;
-        if (next) void this.afterSync(next);
+        if (next) void this.afterSync(next.account).then(next.resolve);
       });
 
-    return this.running;
+    this.running = run;
+
+    return run;
   }
 
   /** After settings are saved: record the waiting backlog at once, so it is never reviewed. */
@@ -230,6 +315,105 @@ export class AutoReviewer {
     }
 
     return restarts;
+  }
+
+  /** The earliest restart still coming for the account, or only after `after`; null for none. */
+  private earliestRestart(account: string, after?: number): string | null {
+    let earliest: string | null = null;
+
+    for (const at of this.waitingRestarts(account).values()) {
+      if (after !== undefined && !(Date.parse(at) > after)) continue;
+      if (earliest === null || Date.parse(at) < Date.parse(earliest)) earliest = at;
+    }
+
+    return earliest;
+  }
+
+  /** Asks for the account's restarts to be looked at by `at`, in the caller's transaction. */
+  private requestRestart(account: string, at: string, notBefore?: string | null): void {
+    this.scheduler?.request(RESTART_WORK, account, { account, at, notBefore });
+  }
+
+  /**
+   * After a pass that read its restarts at `cutoff`: asks for the earliest one it did not look
+   * at, one that fell due while it ran included. Those it looked at and could not start (Codex
+   * unavailable) are the next sync's.
+   */
+  private rearm(account: string, cutoff: number | null): void {
+    if (!this.scheduler || cutoff === null) return;
+
+    try {
+      const at = this.earliestRestart(account, cutoff);
+
+      if (at) this.sync.store.transaction(() => this.requestRestart(account, at));
+    } catch {
+      // A pass never throws; the next one, or the next start, asks again.
+    }
+  }
+
+  /** Asks for the earliest restart of the account now in use, an overdue one included. */
+  private seed(account: string | null): void {
+    if (!this.scheduler || !account || !this.current(account)) return;
+
+    try {
+      const at = this.earliestRestart(account);
+
+      if (at)
+        this.sync.store.transaction(() =>
+          this.requestRestart(account, at, this.sync.cooldown(account)),
+        );
+    } catch {
+      // Never breaks a status change; the next pass asks again.
+    }
+  }
+
+  /**
+   * Runs the account's restarts on time (`RESTART_WORK`): when one is due, syncs as the account
+   * so a pass runs on fresh data, then says when the next is due. A restart whose wait moved
+   * later is put off without a sync; an account not in use is left until it is in use again.
+   */
+  private async restart(work: Work, signal: AbortSignal): Promise<{ next: string | null }> {
+    const account = work.key;
+
+    if (!this.current(account)) return { next: null };
+
+    const earliest = this.earliestRestart(account);
+
+    if (earliest === null) return { next: null };
+    if (Date.parse(earliest) > this.clock.now()) return { next: earliest };
+
+    const run = await this.sync.syncOwn(account, signal);
+
+    if (run.kind === 'aborted' || run.kind === 'stopped') throw new Aborted();
+    if (run.kind === 'cooling') throw new Defer(run.until);
+    if (run.kind === 'inactive') return { next: null };
+
+    const pass = run.kind === 'synced' && run.hooked ? run.hooked.pass : undefined;
+    const outcome = pass ? await unlessAborted(pass, signal) : null;
+
+    return this.afterRestart(account, outcome?.cutoff ?? null);
+  }
+
+  /** When the account's next restart is due, once its sync and pass (if any) are done. */
+  private afterRestart(account: string, cutoff: number | null): { next: string | null } {
+    if (!this.current(account)) return { next: null };
+
+    const cooldown = this.sync.cooldown(account);
+    const earliest = this.earliestRestart(account);
+    const overdue = earliest !== null && Date.parse(earliest) <= this.clock.now();
+
+    if (cutoff !== null) {
+      // Its pass ran before the sync saved a rate limit it met: the cooldown holds what is left.
+      if (cooldown && overdue) throw new Defer(cooldown);
+
+      return { next: this.earliestRestart(account, cutoff) };
+    }
+
+    // No pass looked at the restarts: the sync missed it, or another account's took its place.
+    if (cooldown) throw new Defer(cooldown);
+    if (overdue) throw new SyncMissed();
+
+    return { next: earliest };
   }
 
   private async announce(row: AiRunRow): Promise<void> {
@@ -328,17 +512,22 @@ export class AutoReviewer {
     began?: string | null,
   ): void {
     const now = this.clock.now();
+    const restartAt = new Date(now + AUTO_REVIEW_QUIET_MS).toISOString();
 
-    this.record(account, entry, {
-      status: 'waiting',
-      runId: entry.runId,
-      attempts: entry.attempts,
-      headOid,
-      restartAt: new Date(now + AUTO_REVIEW_QUIET_MS).toISOString(),
-      waitingSince:
-        (entry.status === 'waiting' ? entry.waitingSince : null) ??
-        began ??
-        new Date(now).toISOString(),
+    // The wait and its restart's wake-up, together or neither.
+    this.sync.store.transaction(() => {
+      this.record(account, entry, {
+        status: 'waiting',
+        runId: entry.runId,
+        attempts: entry.attempts,
+        headOid,
+        restartAt,
+        waitingSince:
+          (entry.status === 'waiting' ? entry.waitingSince : null) ??
+          began ??
+          new Date(now).toISOString(),
+      });
+      this.requestRestart(account, restartAt);
     });
     this.changed(account, entry.prId, entry.runId ?? null);
   }
@@ -610,20 +799,21 @@ export class AutoReviewer {
     );
   }
 
-  private async pass(account: string): Promise<void> {
-    if (!this.current(account)) return;
+  /** One pass; resolves with the cutoff it read its due restarts at, or null if it read none. */
+  private async pass(account: string): Promise<number | null> {
+    if (!this.current(account)) return null;
 
     // Just primed: everything waiting is backlog.
-    if (this.prime(account)) return;
+    if (this.prime(account)) return null;
 
     const since = this.runner.settings().autoReview.since;
 
-    if (!since) return;
+    if (!since) return null;
 
     this.followPushes(account);
     await this.verifyPending(account);
 
-    if (!this.current(account, since)) return;
+    if (!this.current(account, since)) return null;
 
     const log = this.log(account);
     // The clock, read before the list, as the cutoff for this pass's restarts.
@@ -635,7 +825,7 @@ export class AutoReviewer {
       const waiting = previous?.status === 'waiting' ? previous : null;
 
       try {
-        if (!(await this.review(account, since, candidate, previous, waiting))) return;
+        if (!(await this.review(account, since, candidate, previous, waiting))) return now;
       } finally {
         const settled = this.log(account).get(candidate.key);
 
@@ -646,6 +836,8 @@ export class AutoReviewer {
         if (waiting) this.changed(account, candidate.item.id, waiting.runId);
       }
     }
+
+    return now;
   }
 
   /** Starts or records one due request. False when the pass must stop. */
@@ -688,6 +880,8 @@ export class AutoReviewer {
           waitingSince: pending.waitingSince,
         });
         this.closeWaits(account, entry.prId, entry.key);
+
+        if (pending.restartAt) this.requestRestart(account, pending.restartAt);
       });
       this.changed(account, entry.prId, pending.runId);
 

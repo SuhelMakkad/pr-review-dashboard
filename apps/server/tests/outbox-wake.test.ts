@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Cancel, Clock } from '@/clock.js';
 import { WRITE_COOLDOWN } from '@/db/settings.js';
 import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
@@ -10,52 +9,7 @@ import { GitHubError } from '@/github/errors.js';
 import { log } from '@/log.js';
 import { OperationQueue } from '@/operations/queue.js';
 import { SyncService } from '@/sync/service.js';
-
-interface Timer {
-  ms: number;
-  run: () => void;
-  unref: boolean;
-  done: boolean;
-}
-
-/** Wall time moved by hand, and timers that fire only when a test fires them. */
-class RecordingClock implements Clock {
-  wall = Date.parse('2026-11-05T10:00:00Z');
-  readonly timers: Timer[] = [];
-
-  now(): number {
-    return this.wall;
-  }
-
-  after(ms: number, run: () => void, options?: { unref?: boolean }): Cancel {
-    const timer = { ms, run, unref: Boolean(options?.unref), done: false };
-
-    this.timers.push(timer);
-
-    return () => {
-      timer.done = true;
-    };
-  }
-
-  every(): Cancel {
-    return () => undefined;
-  }
-
-  /** The delays of the outbox's wakes still armed (its only unref'd timers). */
-  wakes(): number[] {
-    return this.timers.filter((timer) => timer.unref && !timer.done).map((timer) => timer.ms);
-  }
-
-  /** Fires the outbox's armed wake. */
-  fire(): void {
-    const armed = this.timers.filter((timer) => timer.unref && !timer.done);
-
-    expect(armed).toHaveLength(1);
-
-    armed[0].done = true;
-    armed[0].run();
-  }
-}
+import { RecordingClock } from '@test/fixtures/recording-clock.js';
 
 const cleanups: (() => unknown)[] = [];
 

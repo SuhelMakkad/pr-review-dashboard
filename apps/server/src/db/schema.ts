@@ -347,6 +347,37 @@ export const abandonedCommands = sqliteTable(
   (table) => [primaryKey({ columns: [table.account, table.id] })],
 );
 
+/**
+ * When background work next looks at something (see `scheduler/scheduler.ts`): a durable wake-up,
+ * never the work's own state, which stays with its domain. One row per kind and key.
+ */
+export const scheduledWork = sqliteTable(
+  'scheduled_work',
+  {
+    kind: text('kind').notNull(),
+    key: text('key').notNull(),
+    account: text('account'),
+    /** Its concurrency class: how many of the class run at once. */
+    class: text('class').notNull(),
+    /** When it was asked for, the earliest ask winning; null for a row kept only for its gate. */
+    requestedAt: text('requested_at'),
+    /** Not before then (a cooldown, or backoff after a failure); a request never lowers it. */
+    notBefore: text('not_before'),
+    /** The process running it: its boot id. */
+    claimedBy: text('claimed_by'),
+    claimedAt: text('claimed_at'),
+    /** Asked for again while it ran: folded into `requestedAt` once the run settles. */
+    rearmAt: text('rearm_at'),
+    /** Failed runs since it last succeeded. */
+    attempts: integer('attempts').notNull().default(0),
+    /** The last failure, redacted. */
+    lastError: text('last_error'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.kind, table.key] })],
+);
+
 /** Durable GitHub outbox. The document includes immutable input and per-mutation receipts. */
 export const githubOperations = sqliteTable(
   'github_operations',
