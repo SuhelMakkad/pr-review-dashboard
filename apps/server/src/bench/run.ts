@@ -192,8 +192,12 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
 
   const withClosed = (await list()).json() as { items: { id: string }[] };
 
-  if (JSON.stringify(withClosed.items.map(({ id }) => id).sort()) !== JSON.stringify(inbox))
-    throw new Error(`With closed PRs cached, the PR list has ${withClosed.items.length} PRs.`);
+  // The same items in the same order as without them, ties included.
+  if (
+    JSON.stringify(withClosed.items.map(({ id }) => id)) !==
+    JSON.stringify(listed.items.map(({ id }) => id))
+  )
+    throw new Error('With closed PRs cached, the PR list differs from the list without them.');
 
   add({
     name: `PR list, ${largest} PRs and ${closedCount} closed, idle`,

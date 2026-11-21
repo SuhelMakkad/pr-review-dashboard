@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { drizzle } from 'drizzle-orm/node-sqlite';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { migrateDatabase, migrationsFolder } from '@/db/migrate.js';
 import { Store } from '@/db/store.js';
@@ -65,16 +65,49 @@ describe('open snapshots', () => {
     expect(ids(store.openSnapshots('me'))).toEqual(['pr-1']);
   });
 
-  it('reads through the state index, already in ID order', () => {
+  it('runs its read through the state index, already in ID order', () => {
     const store = memoryStore();
-    const plan = store.db.$client
-      .prepare(
-        'EXPLAIN QUERY PLAN SELECT "data" FROM "snapshots" WHERE ("snapshots"."account" = ? AND "snapshots"."state" = ?) ORDER BY "snapshots"."id" ASC',
-      )
-      .all('me', 'OPEN') as { detail: string }[];
+    const client = store.db.$client;
+    const prepare = client.prepare.bind(client);
+    const ran: { sql: string; params: unknown[] }[] = [];
+
+    for (let index = 0; index < 60; index++)
+      store.saveSnapshot(
+        index % 2 ? 'me' : 'other',
+        pull(`pr-${index}`, index % 3 ? 'CLOSED' : 'OPEN'),
+      );
+
+    client.exec('ANALYZE');
+
+    // The statement the store runs, with its parameters, as the driver receives them.
+    vi.spyOn(client, 'prepare').mockImplementation((sql: string) => {
+      const statement = prepare(sql);
+      const all = statement.all.bind(statement);
+
+      statement.all = (...params: never[]) => {
+        ran.push({ sql, params });
+
+        return all(...params);
+      };
+
+      return statement;
+    });
+
+    const open = store.openSnapshots('me');
+
+    vi.mocked(client.prepare).mockRestore();
+
+    expect(open.length).toBeGreaterThan(0);
+    expect(ran).toHaveLength(1);
+
+    const [{ sql, params }] = ran;
+    const plan = client.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...(params as never[])) as {
+      detail: string;
+    }[];
     const details = plan.map((step) => step.detail).join('\n');
 
-    expect(details).toContain('snapshots_by_state');
+    expect(params).toEqual(['me', 'OPEN']);
+    expect(details).toContain('USING INDEX snapshots_by_state (account=? AND state=?)');
     // No separate sort: the index already holds each state's rows in ID order.
     expect(details).not.toContain('TEMP B-TREE');
   });
@@ -83,16 +116,14 @@ describe('open snapshots', () => {
     const directory = mkdtempSync(join(tmpdir(), 'review-desk-open-'));
     const earlier = join(directory, 'earlier');
     const path = join(directory, 'state.sqlite');
-    const newest = readdirSync(migrationsFolder)
-      .filter((name) => /^\d/.test(name))
-      .sort()
-      .at(-1)!;
+    // The migration this covers: every one before it builds the database it upgrades.
+    const covered = '20261121014659_open_snapshots';
 
     cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
 
     // Every migration before this change, then rows written by that version.
     for (const name of readdirSync(migrationsFolder))
-      if (name !== newest)
+      if (!/^\d/.test(name) || name < covered)
         cpSync(join(migrationsFolder, name), join(earlier, name), { recursive: true });
 
     const before = drizzle({ client: new DatabaseSync(path) });
@@ -117,5 +148,23 @@ describe('open snapshots', () => {
       rows: 3,
     });
     expect(() => store.snapshots('me')).toThrow();
+
+    // The copy taken before upgrading has the old schema and the rows as they were.
+    const backups = readdirSync(join(directory, 'backups')).filter(
+      (name) => name.startsWith('backup-') && name.endsWith('.sqlite'),
+    );
+
+    expect(backups).toHaveLength(1);
+
+    const backup = new DatabaseSync(join(directory, 'backups', backups[0]));
+    const columns = backup.prepare('SELECT name FROM pragma_table_xinfo(?)').all('snapshots') as {
+      name: string;
+    }[];
+
+    cleanups.push(() => backup.close());
+    expect(columns.map((column) => column.name)).toEqual(['account', 'id', 'data']);
+    expect(backup.prepare('SELECT data FROM snapshots WHERE id = ?').get('pr-3')).toEqual({
+      data: '{not json',
+    });
   });
 });
