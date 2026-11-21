@@ -356,9 +356,9 @@ export class OperationQueue {
     return this.public(this.row(account, id));
   }
 
-  /** Any account's action by ID, or null when there is none. */
+  /** Any account's forge action by ID, or null when there is none; never a local receipt. */
   find(account: string, id: string): GitHubOperation | null {
-    const row = this.existing(account, id);
+    const row = this.log.visible(account, id);
 
     return row ? this.public(row) : null;
   }
@@ -424,18 +424,18 @@ export class OperationQueue {
       if (!write()) return false;
 
       const at = isoNow(this.clock);
-      const pr = this.sync.detailFor(account, prId)?.snapshot;
 
       this.log.insert({
         id,
         account,
         prId,
         kind: 'local',
-        // A draft can be cleared with no cached PR: Activity never shows a receipt anyway.
-        repository: pr?.repository ?? '',
-        number: pr?.number ?? 0,
-        title: pr?.title ?? '',
-        prUrl: pr?.url ?? '',
+        // Never read from the PR cache: a draft clears even when its cached PR is unreadable, or
+        // gone. Activity never shows a receipt, so nothing needs these.
+        repository: '',
+        number: 0,
+        title: '',
+        prUrl: '',
         action: structuredClone(action),
         status: 'succeeded',
         progress: 'Done here; nothing was sent.',

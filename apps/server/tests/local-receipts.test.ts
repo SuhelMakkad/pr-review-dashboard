@@ -7,6 +7,7 @@ import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { EventBus } from '@/events.js';
+import { OperationQueue } from '@/operations/queue.js';
 import { SyncService } from '@/sync/service.js';
 
 const cleanups: (() => unknown)[] = [];
@@ -67,6 +68,107 @@ async function demo() {
 }
 
 describe('local receipts', () => {
+  it('clear a draft whose cached PR cannot be read, never reading it for the receipt', async () => {
+    const { store, pr, call, discard, drafts } = await demo();
+
+    await call('PUT', `/api/accounts/you/pulls/${pr.id}/draft`, { body: 'Kept' });
+    store.db.$client
+      .prepare('UPDATE snapshots SET data = ? WHERE account = ? AND id = ?')
+      .run('{not json', 'you', pr.id);
+
+    const local = await discard(pr.id, randomUUID());
+
+    expect(local.statusCode).toBe(200);
+    expect(drafts.draft('you', pr.id)).toBeNull();
+  });
+
+  it('refuse a receipt’s ID for a forge request with the very same content, and the reverse', async () => {
+    const { service, threaded, call, discard } = await demo();
+    const queue = new OperationQueue(service, { mutationIntervalMs: 0 });
+    const id = randomUUID();
+    // Exactly what the discard route keys its receipt on.
+    const same = {
+      prId: threaded.id,
+      request: { account: 'you', operationId: id },
+      type: 'discard' as const,
+    };
+
+    expect((await discard(threaded.id, id)).statusCode).toBe(200);
+    expect(queue.replayedLocally('you', id, same)).toBe(true);
+    expect(() => queue.replay('you', id, same)).toThrow(
+      expect.objectContaining({ code: 'OPERATION_CONFLICT' }),
+    );
+    expect(() =>
+      queue.enqueue('you', threaded.id, id, { type: 'discard', reviewId: 'PRR_x' }, same.request),
+    ).toThrow(expect.objectContaining({ code: 'OPERATION_CONFLICT' }));
+
+    // A forge operation's ID is never written locally: the write does not even run.
+    const forge = randomUUID();
+    const write = vi.fn(() => true);
+
+    expect(
+      (
+        await call('POST', `/api/accounts/you/threads/${threaded.threads[0].id}/replies`, {
+          prId: threaded.id,
+          body: 'Thanks',
+          operationId: forge,
+        })
+      ).statusCode,
+    ).toBe(202);
+    expect(() =>
+      queue.writeLocally(
+        'you',
+        threaded.id,
+        forge,
+        { type: 'discard', reviewId: '' },
+        { account: 'you', operationId: forge },
+        write,
+      ),
+    ).toThrow(expect.objectContaining({ code: 'OPERATION_CONFLICT' }));
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('never move the timeline of visible actions', async () => {
+    const { store, service, threaded } = await demo();
+    const queue = new OperationQueue(service, { mutationIntervalMs: 0 });
+    const later = new Date(Date.now() + 24 * 3_600_000).toISOString();
+
+    // A receipt timed a day ahead, as a clock set back afterwards would leave it.
+    store.operations.insert({
+      id: 'ahead',
+      account: 'you',
+      prId: threaded.id,
+      kind: 'local',
+      repository: '',
+      number: 0,
+      title: '',
+      prUrl: '',
+      action: { type: 'discard', reviewId: '' },
+      status: 'succeeded',
+      progress: 'Done here; nothing was sent.',
+      createdAt: later,
+      updatedAt: later,
+      finishedAt: later,
+      retryAt: null,
+      dismissedAt: null,
+      error: null,
+      result: null,
+      steps: [],
+      attempts: 0,
+      requestKey: 'ahead',
+    });
+
+    const { operation } = queue.enqueue(
+      'you',
+      threaded.id,
+      randomUUID(),
+      { type: 'reply', threadId: threaded.threads[0].id, body: 'Now' },
+      { body: 'Now' },
+    );
+
+    expect(Date.parse(operation.createdAt)).toBeLessThan(Date.parse(later));
+  });
+
   it('answer a retried local discard as the first time, even after the draft is made again', async () => {
     const { pr, call, discard, drafts } = await demo();
     const id = randomUUID();

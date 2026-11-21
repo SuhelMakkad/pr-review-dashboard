@@ -102,13 +102,16 @@ export class OperationLog {
       .map((row) => row.data);
   }
 
-  /** When the account's newest row was created, so the next one sorts after it. */
+  /**
+   * When the account's newest forge operation was created, so the next one sorts after it. Local
+   * receipts take no part: an invisible discard never moves the visible timeline.
+   */
   latestCreatedAt(account: string): string | null {
     return (
       this.db
         .select({ createdAt: githubOperations.createdAt })
         .from(githubOperations)
-        .where(eq(githubOperations.account, account))
+        .where(and(eq(githubOperations.account, account), forgeRow))
         .orderBy(desc(githubOperations.createdAt))
         .limit(1)
         .get()?.createdAt ?? null
