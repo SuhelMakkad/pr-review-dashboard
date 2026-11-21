@@ -162,9 +162,18 @@ describe("the demo fixture's history search", () => {
     expect(scoped.length).toBeLessThan(all.length);
     expect(await repositoryOf(scoped)).toEqual(new Set([first]));
 
-    // The history is its viewer's alone: anyone else's search finds nothing, of either kind.
-    for (const kind of ['reviewed', 'authored'] as const)
+    // The history is its viewer's alone: any other account's search finds nothing, of either
+    // kind, a GitLab account of the same name included. The viewer's in other case is theirs.
+    for (const kind of ['reviewed', 'authored'] as const) {
+      const own = await fixture.searchPullIds({ kind, ...window });
+
+      expect(own.length).toBeGreaterThan(0);
       expect(await fixture.searchPullIds({ kind, ...window, login: 'someone-else' })).toEqual([]);
+      expect(await fixture.searchPullIds({ kind, ...window, login: 'you@gitlab.example' })).toEqual(
+        [],
+      );
+      expect(await fixture.searchPullIds({ kind, ...window, login: 'YOU' })).toEqual(own);
+    }
 
     // An empty list names no repository, so it matches none.
     expect(await fixture.searchPullIds({ kind: 'authored', ...window, repositories: [] })).toEqual(

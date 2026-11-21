@@ -693,12 +693,13 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
 
   /**
    * Answers the backfill's searches from the scenario plus fictional history. Both are its viewer's
-   * alone, so a search for anyone else finds nothing.
+   * alone, so a search for any other account finds nothing: the whole account key is compared,
+   * ignoring case, so a GitLab account of the same name is another account.
    */
   async searchPullIds(query: HistoryQuery): Promise<string[]> {
-    if (this.outsider || !isSameUser(query.login, this.scenario.world.viewer.login)) return [];
+    const login = this.scenario.world.viewer.login;
 
-    const login = query.login;
+    if (this.outsider || query.login.toLowerCase() !== login.toLowerCase()) return [];
     const from = Date.parse(query.from);
     const to = Date.parse(query.to) + 24 * 3_600_000;
     const field = query.kind === 'authored' ? 'createdAt' : 'updatedAt';
