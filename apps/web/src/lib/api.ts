@@ -19,7 +19,16 @@ type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
  */
 export async function api<T>(
   path: string,
-  options: { method?: Method; body?: unknown; signal?: AbortSignal } = {},
+  options: {
+    method?: Method;
+    body?: unknown;
+    signal?: AbortSignal;
+    /**
+     * An answer that cannot be read is an error (`UNREADABLE`), never an empty success: a draft
+     * write's outcome is only what its answer says.
+     */
+    strict?: boolean;
+  } = {},
 ): Promise<T> {
   const method = options.method ?? (options.body === undefined ? 'GET' : 'POST');
   const signal = options.signal;
@@ -49,6 +58,8 @@ export async function api<T>(
 
   const result = (await response.json().catch((error: unknown) => {
     if (signal?.aborted) throw error;
+    if (options.strict)
+      throw new ApiError('The answer could not be read.', response.status, 'UNREADABLE');
 
     return {};
   })) as Record<string, unknown> & {

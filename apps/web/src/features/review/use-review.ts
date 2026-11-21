@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { toast } from 'sonner';
 import type { DiffManifest, DiffMode } from '@review-desk/shared/diff';
-import type { ReviewEvent, Side } from '@review-desk/shared/review';
+import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
 import { showsViewedTarget, type ViewedTarget } from '@review-desk/shared/operations';
+import type { Field } from '@/features/review/draft-writer';
+import { newerDraft, useDraftWriter } from '@/features/review/use-draft-writer';
 import { ApiError } from '@/lib/api';
 import { routes } from '@review-desk/shared/contract';
 import { call, command } from '@/lib/call';
@@ -106,14 +107,21 @@ export function useReview(prId: string | null, account: string) {
   const refreshOperations = () =>
     client.invalidateQueries({ queryKey: queryKeys.operations(account) });
 
+  const draftKey = queryKeys.draft(account, prId ?? 'none');
   const draft = useQuery({
-    queryKey: queryKeys.draft(account, prId ?? 'none'),
+    queryKey: draftKey,
     queryFn: ({ signal }) => call(routes.draft, { params: pr, signal }),
+    // Kept the newer of each part as any data is published, a read landing or a write's answer:
+    // neither an older read nor an older write ever undoes a newer.
+    structuralSharing: (cached, next) =>
+      newerDraft(cached as ReviewDraft | undefined, next as ReviewDraft),
     enabled: Boolean(prId && account),
   });
+  // Every draft write goes through the PR's writer, in one queue, on the draft you saw. The
+  // summary and verdict are edited there too (`writer.edit`), each refused save saying why.
+  const writer = useDraftWriter(account, prId ?? 'none', draft.data);
 
-  const refreshDraft = () =>
-    client.invalidateQueries({ queryKey: queryKeys.draft(account, prId ?? 'none') });
+  const refreshDraft = () => client.invalidateQueries({ queryKey: draftKey });
 
   const addComment = useMutation({
     mutationFn: (
@@ -122,33 +130,26 @@ export function useReview(prId: string | null, account: string) {
         origin?: 'user' | 'ai';
         revision?: { headOid: string; baseOid: string | null };
       },
-    ) => call(routes.addComment, { params: pr, body: input }),
+    ) => writer.write<DraftComment>('addComment', pr, { ...input }),
     onSuccess: refreshDraft,
   });
 
   const editComment = useMutation({
     mutationFn: ({ id, body }: { id: string; body: string }) =>
-      call(routes.editComment, { params: { ...pr, cid: id }, body: { body } }),
+      writer.write<DraftComment>('editComment', { ...pr, cid: id }, { body }),
     onSuccess: refreshDraft,
   });
 
   const deleteComment = useMutation({
-    mutationFn: (id: string) =>
-      call(routes.deleteComment, { params: { ...pr, cid: id }, body: {} }),
+    mutationFn: (id: string) => writer.write<{ ok: true }>('deleteComment', { ...pr, cid: id }, {}),
     onSuccess: refreshDraft,
-  });
-
-  const saveMeta = useMutation({
-    mutationFn: (changes: { body?: string; event?: ReviewEvent }) =>
-      call(routes.saveDraft, { params: pr, body: changes }),
-    // Refetch rather than applying an old autosave response over a newly queued/finished review.
-    onSuccess: refreshDraft,
-    // An autosave can land after its sheet closed (a switch away): say why it was not kept.
-    onError: (error) => toast.error(error.message),
   });
 
   const discard = useMutation({
-    mutationFn: () => command(routes.discard, pr, {}),
+    // None of your summary and verdict is autosaved into the draft it discards; text not saved
+    // is kept, unsent, since its cleanup may yet not happen (a cancel in Activity).
+    mutationFn: () =>
+      writer.command(['body', 'event'], () => command(routes.discard, pr, {}), 'keep'),
     onSuccess: () => {
       void refreshDraft();
       void refreshOperations();
@@ -156,12 +157,20 @@ export function useReview(prId: string | null, account: string) {
   });
 
   const submit = useMutation({
-    mutationFn: (input: {
+    mutationFn: ({
+      carried,
+      ...input
+    }: {
       event: ReviewEvent;
       body: string;
       expectedHeadOid: string;
       allowNewHead?: boolean;
-    }) => command(routes.submit, pr, input),
+      /** The versions of the summary and verdict sent, read with them (`writer.carry`). */
+      carried: Record<Field, number>;
+    }) =>
+      // Carries the summary and verdict as you left them: none is autosaved into the draft it
+      // submits meanwhile, nor, once it was accepted, the versions it carried.
+      writer.command(['body', 'event'], () => command(routes.submit, pr, input), 'retire', carried),
     onSettled: refreshDraft,
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.pulls(account) });
@@ -251,10 +260,10 @@ export function useReview(prId: string | null, account: string) {
 
   return {
     draft,
+    writer,
     addComment,
     editComment,
     deleteComment,
-    saveMeta,
     discard,
     submit,
     commentNow,

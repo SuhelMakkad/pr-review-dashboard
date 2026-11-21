@@ -40,6 +40,8 @@ export function pathOf<R extends Route>(
 type Options<R extends JsonRoute> = {
   params: PathParams<R['path']>;
   signal?: AbortSignal;
+  /** An unreadable answer is an error, never an empty success (see `api`). */
+  strict?: boolean;
 } & (Declared<R>['query'] extends undefined
   ? { query?: never }
   : { query?: Declared<R>['query'] }) &
@@ -53,6 +55,7 @@ export function call<R extends JsonRoute>(route: R, options: Options<R>): Promis
       method: route.method,
       ...(options.body !== undefined ? { body: options.body } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.strict ? { strict: true } : {}),
     },
   );
 }

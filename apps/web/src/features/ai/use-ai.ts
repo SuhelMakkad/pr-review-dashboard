@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { AiProvider, AiSettings, AiTask } from '@review-desk/shared/ai';
-import type { PrepareReviewOptions, ReviewDraft, ReviewEvent } from '@review-desk/shared/review';
-import { accountSwitches } from '@/lib/live';
+import type { DraftComment, PrepareReviewOptions, ReviewDraft } from '@review-desk/shared/review';
+import { useDraftWriter } from '@/features/review/use-draft-writer';
 import { routes } from '@review-desk/shared/contract';
 import { call } from '@/lib/call';
 import { queryKeys } from '@/lib/query-keys';
@@ -70,30 +70,16 @@ export function useAiReviewStatuses(account: string | null | undefined) {
 }
 
 /** AI runs for one PR. Live progress arrives over the event stream; a light poll covers gaps. */
-/**
- * A draft write's answer, which only a write sent with an id could have left pending. These are
- * sent without one, so a pending answer is never expected.
- */
-const answered = <T extends object>(answer: T): Exclude<T, { pending: true }> => {
-  if ('pending' in answer) throw new Error('The server answered as for a write still in progress.');
-
-  return answer as Exclude<T, { pending: true }>;
-};
-
 export function useAi(prId: string | null, account: string) {
   const client = useQueryClient();
   const key = queryKeys.ai(account, prId ?? 'none');
   const run = (runId: string) => ({ account, runId });
   const pr = { account, id: prId ?? '' };
   const draftKey = queryKeys.draft(account, prId ?? 'none');
-  /**
-   * Shows the draft a write answered with, unless the account shown changed while it was on its
-   * way: every draft was dropped then, to be read afresh, and an older answer must not refill it.
-   */
-  const seedDraft = (draft: ReviewDraft, since: number) => {
-    if (since === accountSwitches()) client.setQueryData(draftKey, draft);
-    else void client.invalidateQueries({ queryKey: draftKey });
-  };
+  // AI writes to the draft are the PR's writer's, queued with your own and claimed under the PR.
+  // The writer seeds the draft each leaves, newer of each part, never across an account switch.
+  const writer = useDraftWriter(account, prId ?? 'none', undefined);
+  const forPr = prId ? { prId } : {};
   const startKey = ['ai-start', account, prId] as const;
   const starts = useMutationState({
     filters: { mutationKey: startKey, exact: true },
@@ -154,24 +140,17 @@ export function useAi(prId: string | null, account: string) {
       task,
       provider,
       force,
-      draftEvent,
-      draftBody,
     }: {
       task: AiTask;
       provider?: AiProvider;
       force?: boolean;
-      draftEvent?: ReviewEvent;
-      draftBody?: string;
     }) => {
-      if (task === 'draft_summary' && draftEvent) {
-        const since = accountSwitches();
-        const draft = await call(routes.saveDraft, {
-          params: pr,
-          body: { event: draftEvent, body: draftBody },
-        });
+      // The summary is written from the verdict and text as you left them in the writer: started
+      // once every save queued before it settled, and not on a draft that refused them.
+      if (task === 'draft_summary') {
+        const refusal = await writer.settled(['body', 'event']);
 
-        // Pending only answers a guarded write, which this save is not.
-        if (!('pending' in draft)) seedDraft(draft, since);
+        if (refusal) throw new Error(refusal);
       }
 
       return call(routes.startAi, { params: pr, body: { task, provider, force } });
@@ -195,7 +174,11 @@ export function useAi(prId: string | null, account: string) {
 
   const accept = useMutation({
     mutationFn: ({ runId, index, body }: { runId: string; index: number; body?: string }) =>
-      call(routes.acceptAi, { params: run(runId), body: { index, body } }),
+      writer.write<DraftComment>('acceptAi', run(runId), {
+        index,
+        ...(body !== undefined ? { body } : {}),
+        ...forPr,
+      }),
     onSuccess: () => client.invalidateQueries({ queryKey: draftKey }),
   });
 
@@ -205,9 +188,12 @@ export function useAi(prId: string | null, account: string) {
       runId,
       ...options
     }: { runId: string; indices: number[] } & PrepareReviewOptions) =>
-      call(routes.prepareAi, { params: run(runId), body: options }).then(answered),
-    onMutate: () => ({ since: accountSwitches() }),
-    onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
+      writer.write<ReviewDraft>(
+        'prepareAi',
+        run(runId),
+        { ...options, ...forPr },
+        { replaces: ['body', 'event'] },
+      ),
     onSettled: () =>
       Promise.all([
         client.invalidateQueries({ queryKey: key }),
@@ -218,9 +204,7 @@ export function useAi(prId: string | null, account: string) {
   const applySummary = useMutation({
     mutationKey: applyKey,
     mutationFn: (runId: string) =>
-      call(routes.applyAi, { params: run(runId), body: {} }).then(answered),
-    onMutate: () => ({ since: accountSwitches() }),
-    onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
+      writer.write<ReviewDraft>('applyAi', run(runId), forPr, { replaces: ['body'] }),
     onSettled: () => client.invalidateQueries({ queryKey: key }),
   });
 

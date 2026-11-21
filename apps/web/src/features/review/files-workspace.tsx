@@ -982,7 +982,6 @@ function Workspace() {
           account={account}
           ci={item.ci}
           viewedHeadOid={diff.data?.toOid ?? detail.data.snapshot.headOid}
-          saveMeta={(changes) => review.saveMeta.mutate(changes)}
           submit={(input) => review.submit.mutateAsync(input)}
           busy={review.submit.isPending}
           onReviewNewCommits={() => {

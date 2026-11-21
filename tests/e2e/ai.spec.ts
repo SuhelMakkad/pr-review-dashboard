@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { demoWrites, expectAccessible, failNextAi, openFresh } from '@/e2e/helpers';
 
 test.describe.configure({ mode: 'serial' });
@@ -433,6 +433,17 @@ test('continues preparing after navigation and reopens the saved draft with edit
   expect(await demoWrites(page)).toEqual([]);
 });
 
+/**
+ * A draft write's refusal as the server records it: its attempt refused, a definite outcome. An
+ * error without one is no outcome at all, and the writer sends the same attempt again.
+ */
+const refusedAttempt = (route: Route) => ({
+  attempt: {
+    id: (route.request().postDataJSON() as { writeId: string }).writeId,
+    state: 'refused',
+  },
+});
+
 test('saves generated summaries across navigation and reload until explicitly used', async ({
   page,
 }, testInfo) => {
@@ -476,7 +487,10 @@ test('saves generated summaries across navigation and reload until explicitly us
     (route) =>
       route.fulfill({
         status: 503,
-        json: { error: 'Could not load the generated summary. Try again.' },
+        json: {
+          error: 'Could not load the generated summary. Try again.',
+          ...refusedAttempt(route),
+        },
       }),
     { times: 1 },
   );
@@ -498,7 +512,7 @@ test('keeps preparation errors visible after navigation and allows retrying', as
     (route) =>
       route.fulfill({
         status: 503,
-        json: { error: 'Draft preparation is temporarily unavailable.' },
+        json: { error: 'Draft preparation is temporarily unavailable.', ...refusedAttempt(route) },
       }),
     { times: 1 },
   );

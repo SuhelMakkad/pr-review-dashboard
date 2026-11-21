@@ -25,6 +25,7 @@ vi.mock('@tanstack/react-router', async (original) => ({
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  sessionStorage.clear();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -141,7 +142,10 @@ describe('drafts and Activity per account', () => {
 
     const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
 
-    act(() => hook.result.current.saveMeta.mutate({ body: 'Typed before the switch' }));
+    act(() => {
+      hook.result.current.writer.edit('body', 'Typed before the switch');
+      void hook.result.current.writer.flush();
+    });
     await waitFor(() => expect(paths).toContain('PUT /api/accounts/me/pulls/p1/draft'));
     hook.unmount();
     await act(async () => answer(reply(notActive, 409)));
@@ -156,13 +160,31 @@ describe('drafts and Activity per account', () => {
     const { adoptStatus } = await import('@/lib/live');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const answers: ((response: Response) => void)[] = [];
-    const old = { prId: 'p1', body: 'Before the switch', event: 'COMMENT', comments: [] };
+    const ids: string[] = [];
+    const versions = (revision: number) => ({ revision, generation: 0, observation: 0 });
+    const old = {
+      prId: 'p1',
+      body: 'Before the switch',
+      event: 'COMMENT',
+      comments: [],
+      versions: versions(0),
+    };
+    // A committed apply, as the server answers it: the draft it left, and its attempt.
+    const applied = (body: string, revision: number) =>
+      reply({
+        ...old,
+        body,
+        versions: versions(revision),
+        attempt: { id: ids[revision - 1], state: 'committed', revision },
+      });
 
-    vi.stubGlobal('fetch', (path: string) =>
-      path.includes('/summary')
-        ? new Promise<Response>((resolve) => answers.push(resolve))
-        : Promise.resolve(reply({ runs: [] })),
-    );
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      if (!path.includes('/summary')) return Promise.resolve(reply({ runs: [] }));
+
+      ids.push(JSON.parse(String(options?.body)).writeId);
+
+      return new Promise<Response>((resolve) => answers.push(resolve));
+    });
     adoptStatus(client, as('me', 1));
     client.setQueryData(queryKeys.draft('me', 'p1'), old);
 
@@ -171,7 +193,7 @@ describe('drafts and Activity per account', () => {
     // A reply that comes while the same account is shown fills the draft in.
     act(() => hook.result.current.applySummary.mutate('run-1'));
     await waitFor(() => expect(answers).toHaveLength(1));
-    await act(async () => answers[0](reply({ ...old, body: 'Applied' })));
+    await act(async () => answers[0](applied('Applied', 1)));
     await waitFor(() =>
       expect(client.getQueryData(queryKeys.draft('me', 'p1'))).toMatchObject({ body: 'Applied' }),
     );
@@ -183,10 +205,264 @@ describe('drafts and Activity per account', () => {
     act(() => adoptStatus(client, as('other', 2)));
     act(() => adoptStatus(client, as('me', 3)));
     expect(client.getQueryData(queryKeys.draft('me', 'p1'))).toBeUndefined();
-    await act(async () => answers[1](reply({ ...old, body: 'From before the switch' })));
+    await act(async () => answers[1](applied('From before the switch', 2)));
     await waitFor(() => expect(hook.result.current.applySummary.isSuccess).toBe(true));
 
     expect(client.getQueryData(queryKeys.draft('me', 'p1'))).toBeUndefined();
+    client.clear();
+  });
+
+  it('never starts a summary on a verdict whose save was refused', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const { useAi } = await import('@/features/ai/use-ai');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const paths: string[] = [];
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+
+      paths.push(`${method} ${path}`);
+
+      return Promise.resolve(
+        method === 'PUT' ? reply(notActive, 409) : reply({ items: [], nextCursor: null, runs: [] }),
+      );
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => ({ review: useReview('p1', 'me'), ai: useAi('p1', 'me') }), {
+      wrapper: wrapper(client),
+    });
+
+    act(() => hook.result.current.review.writer.edit('event', 'APPROVE'));
+    await act(() =>
+      hook.result.current.ai.start.mutateAsync({ task: 'draft_summary' }).catch(() => {}),
+    );
+
+    await waitFor(() => expect(hook.result.current.ai.start.error?.message).toBe(notActive.error));
+
+    expect(paths).toContain('PUT /api/accounts/me/pulls/p1/draft');
+    expect(paths).not.toContain('POST /api/accounts/me/pulls/p1/ai');
+    client.clear();
+  });
+
+  it('lets a read on its way land when a write seeds the draft, keeping the newer of the two', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const { seedNewer } = await import('@/features/review/use-draft-writer');
+    const { accountSwitches } = await import('@/lib/live');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const reads: ((response: Response) => void)[] = [];
+    const at = (revision: number, body: string) => ({
+      prId: 'p1',
+      body,
+      event: 'COMMENT',
+      comments: [],
+      versions: { revision, generation: 0, observation: 0 },
+    });
+    const shown = () =>
+      (client.getQueryData(queryKeys.draft('me', 'p1')) as { body?: string })?.body;
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) =>
+      (options?.method ?? 'GET') === 'GET' && path.endsWith('/pulls/p1/draft')
+        ? new Promise<Response>((resolve) => reads.push(resolve))
+        : Promise.resolve(reply({ items: [], nextCursor: null })),
+    );
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    // A write's answer lands while a newer read is on its way: the read still lands.
+    await waitFor(() => expect(reads).toHaveLength(1));
+    act(() => void seedNewer(client, 'me', 'p1', at(5, 'Written') as never, accountSwitches()));
+    await act(async () => reads[0](reply(at(7, 'Read'))));
+    await waitFor(() => expect(shown()).toBe('Read'));
+
+    // A read that started before a newer write lands after it: it never undoes it.
+    act(() => void hook.result.current.draft.refetch());
+    await waitFor(() => expect(reads).toHaveLength(2));
+    act(
+      () => void seedNewer(client, 'me', 'p1', at(9, 'Written later') as never, accountSwitches()),
+    );
+    await act(async () => reads[1](reply(at(8, 'Read before it'))));
+    await waitFor(() => expect(hook.result.current.draft.isFetching).toBe(false));
+
+    expect(shown()).toBe('Written later');
+    client.clear();
+  });
+
+  it('starts a summary only once the verdict chosen before it was saved', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const { useAi } = await import('@/features/ai/use-ai');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const paths: string[] = [];
+    let saved: (response: Response) => void = () => {};
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+
+      paths.push(`${method} ${path}`);
+
+      if (method === 'PUT') {
+        const { writeId } = JSON.parse(String(options?.body));
+
+        return new Promise<Response>(
+          (resolve) =>
+            (saved = () =>
+              resolve(
+                reply({
+                  prId: 'p1',
+                  body: '',
+                  event: 'APPROVE',
+                  comments: [],
+                  versions: { revision: 1, generation: 0, observation: 0 },
+                  attempt: { id: writeId, state: 'committed', revision: 1 },
+                }),
+              )),
+        );
+      }
+
+      return Promise.resolve(reply({ items: [], nextCursor: null, runs: [] }));
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => ({ review: useReview('p1', 'me'), ai: useAi('p1', 'me') }), {
+      wrapper: wrapper(client),
+    });
+
+    act(() => hook.result.current.review.writer.edit('event', 'APPROVE'));
+    await waitFor(() => expect(paths).toContain('PUT /api/accounts/me/pulls/p1/draft'));
+    act(() => hook.result.current.ai.start.mutate({ task: 'draft_summary' }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(paths).not.toContain('POST /api/accounts/me/pulls/p1/ai');
+
+    await act(async () => saved(reply({})));
+    await waitFor(() => expect(paths).toContain('POST /api/accounts/me/pulls/p1/ai'));
+    client.clear();
+  });
+
+  it.each([
+    // Submitted: your text is in the review, retired from the draft.
+    [
+      'a submit carried into the draft it submitted',
+      'POST /api/accounts/me/pulls/p1/review',
+      'saved',
+    ],
+    // Discarded, its cleanup yet to come: your text is kept, unsent, until you edit it.
+    [
+      'a discard dropped into the draft it discarded',
+      'DELETE /api/accounts/me/pulls/p1/draft',
+      'error',
+    ],
+  ])('never autosaves the summary %s', async (_case, sentAs, state) => {
+    const { useReview } = await import('@/features/review/use-review');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const paths: string[] = [];
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+
+      paths.push(`${method} ${path}`);
+
+      return Promise.resolve(
+        method === 'POST' || method === 'DELETE'
+          ? reply({ operation: { id: JSON.parse(String(options?.body)).operationId } }, 202)
+          : reply({ items: [], nextCursor: null }),
+      );
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    // Typed, then sent before its autosave's pause was over.
+    act(() => hook.result.current.writer.edit('body', 'Typed just before'));
+    await act(() =>
+      sentAs.startsWith('POST')
+        ? hook.result.current.submit.mutateAsync({
+            event: 'COMMENT',
+            body: 'Typed just before',
+            expectedHeadOid: 'abc',
+            carried: hook.result.current.writer.carry(undefined).versions,
+          })
+        : hook.result.current.discard.mutateAsync(),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    expect(paths).toContain(sentAs);
+    expect(paths).not.toContain('PUT /api/accounts/me/pulls/p1/draft');
+    expect(hook.result.current.writer.state('body')).toBe(state);
+    client.clear();
+  });
+
+  it('retires, once a submit is accepted, only the versions it was sent with', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const saved: string[] = [];
+
+    vi.stubGlobal('fetch', (_path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+      const body = options?.body ? JSON.parse(String(options.body)) : {};
+
+      if (method === 'PUT') saved.push(body.body);
+
+      return Promise.resolve(
+        method === 'POST'
+          ? reply({ operation: { id: body.operationId } }, 202)
+          : method === 'PUT'
+            ? reply({ error: 'Locked.', code: 'DRAFT_LOCKED' }, 409)
+            : reply({ items: [], nextCursor: null }),
+      );
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    act(() => hook.result.current.writer.edit('body', 'Sent'));
+
+    // Read with its values, as the sheet reads them on Submit.
+    const carried = hook.result.current.writer.carry(undefined);
+
+    expect(carried.body).toBe('Sent');
+
+    // Typed on before the submit ran: it stays yours to save, not retired with the review.
+    act(() => hook.result.current.writer.edit('body', 'Typed after'));
+    await act(() =>
+      hook.result.current.submit.mutateAsync({
+        event: carried.event,
+        body: carried.body,
+        expectedHeadOid: 'abc',
+        carried: carried.versions,
+      }),
+    );
+    await waitFor(() => expect(saved).toEqual(['Typed after']));
+    client.clear();
+  });
+
+  it('keeps the newer draft whatever is published into its query, as it is published', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const at = (revision: number, body: string) => ({
+      prId: 'p1',
+      body,
+      event: 'COMMENT',
+      comments: [],
+      versions: { revision, generation: 0, observation: 0 },
+    });
+    const key = queryKeys.draft('me', 'p1');
+
+    vi.stubGlobal('fetch', (path: string) =>
+      Promise.resolve(reply(path.endsWith('/pulls/p1/draft') ? at(3, 'Read') : { items: [] })),
+    );
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    await waitFor(() => expect(hook.result.current.draft.data).toMatchObject({ body: 'Read' }));
+
+    // A newer draft, then an older one published over it (a read computed before it landed).
+    act(() => void client.setQueryData(key, at(6, 'Newer')));
+    act(() => void client.setQueryData(key, at(4, 'Older, published later')));
+
+    expect(client.getQueryData(key)).toMatchObject({ body: 'Newer' });
     client.clear();
   });
 
