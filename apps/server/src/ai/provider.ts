@@ -6,7 +6,7 @@ import { basename, dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import type { AiEffort, AiProvider, CodexAccountStatus } from '@review-desk/shared/ai';
+import type { AiEffort, AiProvider, AiTask, CodexAccountStatus } from '@review-desk/shared/ai';
 import { redact } from '@/github/errors.js';
 
 export interface AgentRequest {
@@ -21,6 +21,8 @@ export interface AgentRequest {
   /** Private working directory, retained while a resumable run is paused. */
   workDir: string;
   timeoutMs: number;
+  /** Which task it is: internal, for the demo agent's answers. Never sent to an agent. */
+  task?: AiTask;
   threadId?: string | null;
   onThread?: (threadId: string, model: string | null) => void;
 }
