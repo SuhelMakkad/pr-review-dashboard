@@ -23,6 +23,7 @@ import { OperationQueue } from '@/operations/queue.js';
 import { ReviewService } from '@/review/service.js';
 import { SyncService } from '@/sync/service.js';
 import { snapshot } from '@test/fixtures.js';
+import { forgeTraits } from '@review-desk/shared/traits';
 
 const cleanups: (() => unknown)[] = [];
 
@@ -168,6 +169,17 @@ describe('archive access', () => {
 });
 
 describe('the router', () => {
+  it('declares GitHub’s traits for a client that declares none, as every reader does', () => {
+    const forges = new ForgeRouter(
+      {} as GitHubApi,
+      { list: async () => [], select: () => undefined },
+      { list: async () => [] },
+      () => ({}) as GitHubApi,
+    );
+
+    expect(forges.traits).toEqual(forgeTraits.github);
+  });
+
   /** A client that answers `identity` as `login`, and names itself in `teams`. */
   const client = (login: string, failing = false) =>
     ({
@@ -321,6 +333,7 @@ describe('work bound to an account', () => {
     // The preflight refresh's two checks pass. The receipt's own check is then rate limited: it
     // may have run as anyone, so it is nobody's limit.
     Object.assign(github, {
+      traits: { ...github.traits, checksAccount: true },
       verifyAccount: vi.fn(async () => {
         if (++checks < 3) return;
 
@@ -406,6 +419,7 @@ describe('work bound to an account', () => {
       let checks = 0;
       const forge = {
         compare: vi.fn(async () => ({ mergeBaseOid: 'b'.repeat(40), files: [], commits: [] })),
+        traits: forgeTraits.gitlab,
         verifyAccount: vi.fn(async (account: string) => {
           if (++checks === failing) throw new AccountUnavailable(account, 'someone@gitlab.example');
         }),
@@ -490,6 +504,7 @@ describe('work bound to an account', () => {
     // Reconciliation's identity read opens the bracket; glab signs in as someone else before the
     // check that closes it, after the receipt read.
     Object.assign(github, {
+      traits: { ...github.traits, checksAccount: true },
       verifyAccount: vi.fn(async (account: string) => {
         if (++checks === 1) throw new AccountUnavailable(account, 'someone-else');
       }),

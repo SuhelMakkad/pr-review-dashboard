@@ -1299,11 +1299,63 @@ describe('GitLab merge request snapshots', () => {
     fake.on('GET', 'merge_requests', { data: [mergeRequest()] });
 
     expect(
-      await client.searchPullIds(`is:pr reviewed-by:${VIEWER} updated:2026-10-01..2026-10-31`),
+      await client.searchPullIds({
+        kind: 'reviewed',
+        login: VIEWER,
+        from: '2026-10-01',
+        to: '2026-10-31',
+      }),
     ).toEqual(['MR_7_12']);
+    // The same filters the GitHub search syntax used to be parsed into: the window inclusive.
     expect(fake.calls.at(-1)?.path).toBe(
       'merge_requests?scope=all&state=all&reviewer_username=rev&updated_after=2026-10-01T00%3A00%3A00Z&updated_before=2026-11-01T00%3A00%3A00.000Z&per_page=100',
     );
+
+    await client.searchPullIds({
+      kind: 'authored',
+      login: VIEWER,
+      from: '2026-10-01',
+      to: '2026-10-31',
+    });
+    expect(fake.calls.at(-1)?.path).toBe(
+      'merge_requests?scope=all&state=all&author_username=rev&created_after=2026-10-01T00%3A00%3A00Z&created_before=2026-11-01T00%3A00%3A00.000Z&per_page=100',
+    );
+
+    // Named projects are listed one at a time: GitLab's merge request list takes no project filter.
+    fake
+      .on('GET', 'projects/acme%2Fplatform%2Fweb/merge_requests', { data: [mergeRequest()] })
+      .on('GET', 'projects/acme%2Fother/merge_requests', {
+        // The same MR again (a list can repeat one), and another project's.
+        data: [mergeRequest(), mergeRequest({ id: 901, iid: 3, project_id: 8 })],
+      });
+
+    expect(
+      await client.searchPullIds({
+        kind: 'reviewed',
+        login: VIEWER,
+        from: '2026-10-01',
+        to: '2026-10-31',
+        repositories: ['acme/platform/web', 'acme/other'],
+      }),
+    ).toEqual(['MR_7_12', 'MR_8_3']);
+    expect(fake.calls.slice(-2).map((call) => call.path)).toEqual([
+      'projects/acme%2Fplatform%2Fweb/merge_requests?state=all&reviewer_username=rev&updated_after=2026-10-01T00%3A00%3A00Z&updated_before=2026-11-01T00%3A00%3A00.000Z&per_page=100',
+      'projects/acme%2Fother/merge_requests?state=all&reviewer_username=rev&updated_after=2026-10-01T00%3A00%3A00Z&updated_before=2026-11-01T00%3A00%3A00.000Z&per_page=100',
+    ]);
+
+    // An empty list names no project: nothing to list, and nothing asked of GitLab.
+    const sent = fake.calls.length;
+
+    expect(
+      await client.searchPullIds({
+        kind: 'reviewed',
+        login: VIEWER,
+        from: '2026-10-01',
+        to: '2026-10-31',
+        repositories: [],
+      }),
+    ).toEqual([]);
+    expect(fake.calls).toHaveLength(sent);
   });
 });
 
@@ -2122,6 +2174,14 @@ describe('GitLab review recovery, round three', () => {
 });
 
 describe('GitLab safety, round three', () => {
+  it('escapes quick actions in automatic posts only where the forge runs them', async () => {
+    const { automaticPostBody } = await import('@/ai/post-findings.js');
+    const body = 'Looks fine.\n/merge';
+
+    expect(automaticPostBody(VIEWER, body)).not.toContain('\n/merge');
+    expect(automaticPostBody('octo', body)).toBe(body);
+  });
+
   it('keeps generated text from running GitLab quick actions', async () => {
     const { withoutQuickActions } = await import('@/gitlab/quick-actions.js');
 

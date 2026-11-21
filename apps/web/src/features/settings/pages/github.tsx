@@ -7,6 +7,7 @@ import { Button } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { AccountMenu } from '@/features/shell/account-menu';
 import { SettingRow, SettingsCard } from '@/features/settings/parts';
+import { forgeTraits } from '@review-desk/shared/traits';
 
 export function GitHubSettings() {
   const status = useStatus();
@@ -43,7 +44,7 @@ export function GitHubSettings() {
         <SettingRow
           label="Teams"
           hint={
-            account?.forge === 'gitlab'
+            account && !forgeTraits[account.forge].teams
               ? 'GitLab asks people, not teams, for reviews.'
               : 'Team review requests are matched against these.'
           }

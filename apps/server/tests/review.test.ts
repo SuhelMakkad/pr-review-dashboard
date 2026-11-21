@@ -72,6 +72,8 @@ describe('drafting', () => {
     // A forge that keys diffs but has no record of this revision: its live diff is unconfirmed.
     const pullFiles = github.pullFiles.bind(github);
 
+    github.traits = { ...github.traits, pinnedFiles: true };
+
     (github as GitHubApi).pinnedFiles = async (repository, number) => ({
       files: await pullFiles(repository, number),
       pinned: false,

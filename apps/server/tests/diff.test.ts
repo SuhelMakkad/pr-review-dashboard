@@ -154,6 +154,7 @@ describe('viewed keys in diff manifests', () => {
       const pullFiles = github.pullFiles.bind(github);
 
       // The forge keys each file's diff (as GitLab does); the manifest is built and cached for A.
+      github.traits = { ...github.traits, pinnedFiles: true };
       (github as GitHubApi).pinnedFiles = async (repository, number) => ({
         files: (await pullFiles(repository, number)).map((file) => ({
           ...file,
@@ -205,6 +206,7 @@ describe('diffs that cannot be pinned to the revision shown', () => {
       let reads = 0;
 
       // A forge that keys diffs, but has no record of this revision.
+      github.traits = { ...github.traits, pinnedFiles: true };
       (github as GitHubApi).pinnedFiles = async (repository, number) => {
         reads++;
 
@@ -230,6 +232,8 @@ describe('diffs that cannot be pinned to the revision shown', () => {
       const pr = byNumber(1839).snapshot;
       let reads = 0;
 
+      github.traits = { ...github.traits, pinnedFiles: true };
+
       (github as GitHubApi).pinnedFiles = async () => {
         reads++;
 
@@ -251,6 +255,8 @@ describe('diffs that cannot be pinned to the revision shown', () => {
       const pr = byNumber(2041).snapshot;
       const keyed = { ...pr, files: pr.files.map((file) => ({ ...file, viewedKey: 'stored' })) };
       let reads = 0;
+
+      github.traits = { ...github.traits, pinnedFiles: true };
 
       (github as GitHubApi).pinnedFiles = async () => {
         reads++;
@@ -284,6 +290,7 @@ describe('diffs that cannot be pinned to the revision shown', () => {
       let reads = 0;
 
       // The first listing cannot be pinned; any later one would be, with keys.
+      github.traits = { ...github.traits, pinnedFiles: true };
       (github as GitHubApi).pinnedFiles = async (repository, number) => {
         reads++;
 

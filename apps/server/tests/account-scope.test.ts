@@ -13,6 +13,7 @@ import { DiffService } from '@/diff/service.js';
 import { SyncService } from '@/sync/service.js';
 import { snapshot } from '@test/fixtures.js';
 import { LAST_ACCOUNT, SELECTED_ACCOUNT, STATUS, WRITE_COOLDOWN } from '@/db/settings.js';
+import { forgeTraits } from '@review-desk/shared/traits';
 
 const cleanups: (() => unknown)[] = [];
 
@@ -272,6 +273,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
         });
       }),
       resolvePull: vi.fn(async () => ({ id: 'mr-5', state: 'OPEN' as const })),
+      traits: forgeTraits.gitlab,
       verifyAccount: vi.fn(async (account: string) => {
         state.checks += 1;
         await state.onCheck?.(state.checks);
@@ -409,6 +411,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
     ]);
     const api = {
       pullFiles,
+      traits: forgeTraits.gitlab,
       verifyAccount: vi.fn(async (account: string) => {
         checks += 1;
         // glab signs in as someone else while the first build reads.
@@ -442,7 +445,11 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
     const verifyAccount = vi.fn(async (account: string) => {
       if (signedIn !== account) throw new AccountUnavailable(account, signedIn);
     });
-    const diffs = new DiffService({ pullFiles, verifyAccount } as unknown as GitHubApi);
+    const diffs = new DiffService({
+      pullFiles,
+      verifyAccount,
+      traits: forgeTraits.gitlab,
+    } as unknown as GitHubApi);
     const pr = snapshot({ id: 'mr-1', headOid: 'head-1', baseOid: 'base-1', files: [] });
 
     // A check that is itself rate limited cannot say whose the limit is.

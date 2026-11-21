@@ -1,4 +1,4 @@
-import { forgeOf, isSameUser } from '@review-desk/shared/accounts';
+import { isSameUser } from '@review-desk/shared/accounts';
 import { withoutQuickActions } from '@/gitlab/quick-actions.js';
 import {
   hasBlockingFindings,
@@ -13,7 +13,8 @@ import type { AiRunner } from '@/ai/runner.js';
 import type { AiRunRow } from '@/db/ai-runs.js';
 import type { OperationQueue } from '@/operations/queue.js';
 import type { SyncService } from '@/sync/service.js';
-import { bindForge } from '@/forge/bind.js';
+import { bindForge, declaredTraits } from '@/forge/bind.js';
+import { traitsOf } from '@review-desk/shared/traits';
 
 /** GitHub refuses comments longer than 65,536 characters; stay clear of the limit. */
 const MAX_BODY = 65_000;
@@ -96,6 +97,14 @@ export function postedReviewBody(
  * conversation comment. Anything not posted is recorded with the reason. The outbox checks the
  * post again right before each send (`OperationQueue.checkAutomaticPost`).
  */
+/**
+ * An automatic post's text as `account`'s forge receives it: where comments run quick actions
+ * (GitLab), no generated line may run as one. A reviewer's own text is never touched.
+ */
+export function automaticPostBody(account: string, body: string): string {
+  return traitsOf(account).quickActions ? withoutQuickActions(body) : body;
+}
+
 export class FindingsPublisher {
   constructor(
     private readonly sync: SyncService,
@@ -131,7 +140,9 @@ export class FindingsPublisher {
     const result = JSON.parse(row.result) as FullReviewResult;
     const blocking = hasBlockingFindings(result);
     // The run's own account's forge, whatever is selected now: GitLab's approvals carry no text.
-    const carriesSummary = bindForge(this.sync.github, row.account).approvalCarriesSummary;
+    const carriesSummary = declaredTraits(
+      bindForge(this.sync.github, row.account),
+    ).approvalCarriesSummary;
     const reason = blocking
       ? undefined
       : !row.inputs.complete
@@ -166,8 +177,7 @@ export class FindingsPublisher {
       runId: row.id,
       expectedHeadOid: row.headOid,
       event,
-      // Generated text: on GitLab, no line of it may run as a quick action.
-      body: forgeOf(row.account) === 'gitlab' ? withoutQuickActions(body) : body,
+      body: automaticPostBody(row.account, body),
       basis: {
         baseRefName: reviewed.baseRefName,
         mergeBaseOid: row.inputs.mergeBaseOid,

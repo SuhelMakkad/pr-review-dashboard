@@ -6,6 +6,8 @@ import type { CliAccount, CredentialSource, GitHubAccounts } from '@/github/cred
 import { GitHubError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
 import type { GlabAccounts } from '@/gitlab/accounts.js';
+import type { HistoryQuery } from '@/forge/port.js';
+import { declaredTraits } from '@/forge/bind.js';
 
 type AccountLister = Pick<GitHubAccounts, 'list' | 'select'>;
 
@@ -83,7 +85,7 @@ abstract class ForgeView implements GitHubApi {
     return this.target().markedComment(prId, author, marker);
   }
 
-  searchPullIds(query: string) {
+  searchPullIds(query: HistoryQuery) {
     return this.target().searchPullIds(query);
   }
 
@@ -95,8 +97,8 @@ abstract class ForgeView implements GitHubApi {
     return this.target().blobs(repository, requests);
   }
 
-  get approvalCarriesSummary() {
-    return this.target().approvalCarriesSummary;
+  get traits() {
+    return declaredTraits(this.target());
   }
 
   approveReview(prId: string, commitOid: string, body: string) {

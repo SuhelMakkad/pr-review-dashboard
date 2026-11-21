@@ -93,6 +93,38 @@ function rawSnapshot() {
 }
 
 describe('GitHub data retrieval', () => {
+  it('searches history with the same search syntax as before, for each kind of query', async () => {
+    const graphql = vi.fn().mockResolvedValue({
+      search: { nodes: [{ id: 'PR_1' }], pageInfo: { hasNextPage: false, endCursor: null } },
+    });
+    const github = new GitHub({ graphql, rest: vi.fn() });
+    const window = { login: 'octo', from: '2026-10-01', to: '2026-10-31' };
+
+    expect(await github.searchPullIds({ kind: 'reviewed', ...window })).toEqual(['PR_1']);
+    await github.searchPullIds({ kind: 'authored', ...window });
+
+    // Named repositories narrow it, any one of them matching.
+    await github.searchPullIds({
+      kind: 'reviewed',
+      ...window,
+      repositories: ['acme/api', 'acme/web'],
+    });
+
+    // An empty list names no repository: no PR, and no search across all of GitHub.
+    expect(await github.searchPullIds({ kind: 'authored', ...window, repositories: [] })).toEqual(
+      [],
+    );
+
+    expect(graphql.mock.calls.map((call) => call[1])).toEqual([
+      { query: 'is:pr reviewed-by:octo updated:2026-10-01..2026-10-31', cursor: null },
+      { query: 'is:pr author:octo created:2026-10-01..2026-10-31', cursor: null },
+      {
+        query: 'is:pr reviewed-by:octo updated:2026-10-01..2026-10-31 repo:acme/api repo:acme/web',
+        cursor: null,
+      },
+    ]);
+  });
+
   it('submits an approval with a review body against the exact reviewed commit', async () => {
     const receipt = { id: 'review-1', url: 'https://github.com/a/b/pull/1#pullrequestreview-1' };
     const graphql = vi

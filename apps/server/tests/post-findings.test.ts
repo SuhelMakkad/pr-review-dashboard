@@ -1354,7 +1354,7 @@ describe('approvals whose summary is a separate write', () => {
   const gitlabLike = async () => {
     const context = await setup();
 
-    context.github.approvalCarriesSummary = false;
+    context.github.traits = { ...context.github.traits, approvalCarriesSummary: false };
     context.setPosting(true);
 
     return context;
@@ -2046,7 +2046,7 @@ describe('approvals whose summary is a separate write', () => {
         })
         .where(and(eq(githubOperations.account, 'you'), eq(githubOperations.id, data.id)))
         .run();
-      github.approvalCarriesSummary = false;
+      github.traits = { ...github.traits, approvalCarriesSummary: false };
       before?.(context);
       queue.resume();
 

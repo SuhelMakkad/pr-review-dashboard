@@ -21,6 +21,7 @@ import { SyncService } from '@/sync/index.js';
 import type { FeedSource } from '@review-desk/shared/types';
 import { snapshot } from '@test/fixtures.js';
 import { STATUS } from '@/db/settings.js';
+import { forgeTraits } from '@review-desk/shared/traits';
 
 const stores: Store[] = [];
 
@@ -403,6 +404,7 @@ describe('adding by hand for an account not in use', () => {
           reviews: [],
         });
       }),
+      traits: forgeTraits.gitlab,
       verifyAccount: vi.fn(async (account: string) => {
         if (state.signedIn !== account) throw new AccountUnavailable(account, state.signedIn);
       }),

@@ -8,7 +8,7 @@ import {
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi, RemoteFile } from '@/github/api.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
-import { bindForge } from '@/forge/bind.js';
+import { accountCheck, bindForge, declaredTraits } from '@/forge/bind.js';
 import { textPatch } from '@/diff/patch.js';
 
 const CACHE_LIMIT = 40;
@@ -179,7 +179,7 @@ export class DiffService {
       return manifest;
     }
 
-    const verify = build.forge.verifyAccount?.bind(build.forge);
+    const verify = accountCheck(build.forge);
 
     if (!verify) {
       const manifest = await work();
@@ -226,11 +226,12 @@ export class DiffService {
     if (cached) return cached;
 
     // Where viewed state follows each diff, the files of exactly this revision, keyed.
-    const listing =
-      (await build.forge.pinnedFiles?.(pr.repository, pr.number, {
-        headOid: pr.headOid,
-        baseOid: pr.baseOid ?? null,
-      })) ?? null;
+    const listing = declaredTraits(build.forge).pinnedFiles
+      ? ((await build.forge.pinnedFiles?.(pr.repository, pr.number, {
+          headOid: pr.headOid,
+          baseOid: pr.baseOid ?? null,
+        })) ?? null)
+      : null;
     const files = listing ? listing.files : await build.forge.pullFiles(pr.repository, pr.number);
     const keyed = listing !== null;
     const manifest: DiffManifest = {

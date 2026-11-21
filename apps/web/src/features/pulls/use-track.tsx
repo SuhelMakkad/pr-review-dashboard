@@ -11,6 +11,7 @@ import { useAccount, useForge, useStatus } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 import { Button } from '@/ui/button';
 import { inQueue, type QueueSlug } from '@/features/pulls/meta';
+import { forgeTraits } from '@review-desk/shared/traits';
 
 type PullLike = { id: string; repository: string; number: number; url?: string };
 
@@ -201,7 +202,11 @@ export function NotTrackedActions({ pullRef }: { pullRef: PrRef }) {
   return (
     <div className="flex flex-col items-center gap-3">
       <AddToQueueButton
-        pullRef={account.forge === 'gitlab' ? { ...pullRef, gitlab: true } : pullRef}
+        pullRef={
+          forgeTraits[account.forge].reference.separator === '!'
+            ? { ...pullRef, gitlab: true }
+            : pullRef
+        }
       />
       <a
         className="inline-flex items-center gap-1 text-sm text-accent underline"
