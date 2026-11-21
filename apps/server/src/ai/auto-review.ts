@@ -9,67 +9,38 @@ import {
 } from '@review-desk/shared/ai';
 import { addedByHand } from '@review-desk/shared/attention';
 import type { ReviewNotification } from '@review-desk/shared/notify';
-import type {
-  AttentionReason,
-  PullRequestItem,
-  PullRequestSnapshot,
-} from '@review-desk/shared/types';
+import type { PullRequestSnapshot } from '@review-desk/shared/types';
+import {
+  admits,
+  afterStart,
+  autoReviewCandidates,
+  changedAfterCompare,
+  changedWhile,
+  dueRequests,
+  followPush,
+  outdated,
+  requestedBefore,
+  requestStage,
+  resolve,
+  settleCheck,
+  startStage,
+  stillDue,
+  type AutoReviewCandidate,
+  type StartAction,
+  type StartOutcome,
+} from '@/ai/auto-review-rules.js';
 import type { AiRunner } from '@/ai/runner.js';
 import type { AiRunRow, AutoReviewEntry } from '@/db/ai-runs.js';
 import { bindForge } from '@/forge/bind.js';
-import { GitHubError, safeError } from '@/github/errors.js';
+import { safeError } from '@/github/errors.js';
 import type { Notifier } from '@/notify/notifier.js';
-import { ReviewError } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import { AUTO_REVIEW_PRIMED } from '@/db/settings.js';
 
 type LogRow = AutoReviewEntry;
 
-/** Review requests: first requests (direct, team or assignment) and re-requests after a review. */
-const TRIGGERS = new Set<AttentionReason['kind']>(['first_review', 'requested_again']);
-const MAX_ATTEMPTS = 3;
-
-/** Errors that mean "not now" for every PR: stop the pass, record nothing, retry next sync. */
-const STOP_CODES = new Set([
-  'PLAN_LIMIT',
-  'SHUTTING_DOWN',
-  'ACCOUNT_CHANGED',
-  'ACCOUNT_NOT_ACTIVE',
-]);
-const STOP_OUTCOMES = new Set<GitHubError['outcome']>(['rate_limit', 'unavailable', 'auth']);
-
-export interface AutoReviewCandidate {
-  /** `<PR id>:<reason key>`, one per review request. */
-  key: string;
-  /** The attention reason's key: `first:<event id>` or `request:<event id>` when GitHub has one. */
-  reasonKey: string;
-  at: string;
-  item: PullRequestItem;
-}
-
-/** One key per review request, so each request is reviewed at most once. */
-export function autoReviewCandidates(items: PullRequestItem[]): AutoReviewCandidate[] {
-  return items.flatMap((item) => {
-    const reason = item.reasons.filter((candidate) => TRIGGERS.has(candidate.kind)).at(-1);
-
-    return reason
-      ? [{ key: `${item.id}:${reason.key}`, reasonKey: reason.key, at: reason.at, item }]
-      : [];
-  });
-}
-
-/**
- * The request is still open on a PR ready for review (not a draft, snoozed or done). Discovery
- * sources outlive the request (a refresh keeps them, and a PR that leaves every feed keeps its
- * last ones), so "requested" proves nothing: a review request for you or your team must still be
- * active. Assignments are taken on trust, since snapshots do not record assignees.
- */
-const stillDue = (item: PullRequestItem, key: string) =>
-  item.queue === 'attention' &&
-  (item.requestedVia.length > 0 ||
-    item.sources.includes('assigned') ||
-    item.sources.includes('manual')) &&
-  autoReviewCandidates([item]).some((candidate) => candidate.key === key);
+// The rules' own exports, as before: the request keys and candidates.
+export { autoReviewCandidates, type AutoReviewCandidate };
 
 function readyCopy(row: AiRunRow): string {
   if (row.status === 'failed') return render(say('ai.automatic-failed'), row.account);
@@ -476,12 +447,9 @@ export class AutoReviewer {
     pr: PullRequestSnapshot,
     asItFinished: boolean,
   ): Promise<boolean> {
-    if (pr.headOid === run.headOid) return false;
-    if (asItFinished) return true;
+    const changed = changedWhile(run, pr, asItFinished);
 
-    const finished = Date.parse(run.finishedAt ?? '');
-
-    if (Date.parse(pr.headCommittedAt) <= finished) return true;
+    if (changed !== 'compare') return changed;
 
     // The newest commit came later; an earlier one may have been made while it ran.
     const compare = await bindForge(this.sync.github, account).compare(
@@ -490,12 +458,7 @@ export class AutoReviewer {
       pr.headOid,
     );
 
-    return (
-      !compare ||
-      compare.commits.some(
-        (commit) => commit.committedAt === null || Date.parse(commit.committedAt) <= finished,
-      )
-    );
+    return changedAfterCompare(run, compare);
   }
 
   /**
@@ -505,24 +468,29 @@ export class AutoReviewer {
   private settle(account: string, run: AiRunRow, changed: PullRequestSnapshot | null): boolean {
     const entries = this.checking(account, run.id);
     // A review started since this one finished already covers the new commits.
-    const outdated =
-      changed && !this.startedSince(account, run.prId, run.finishedAt ?? run.createdAt, run.id)
-        ? changed
-        : null;
+    const waits = resolve((known) => outdated(changed !== null, known), {
+      coveredSince: () =>
+        this.startedSince(account, run.prId, run.finishedAt ?? run.createdAt, run.id) !== null,
+    });
+    const { actions, waited } = settleCheck(
+      entries,
+      waits && changed !== null ? changed.headOid : null,
+      run.finishedAt,
+    );
 
     this.sync.store.transaction(() => {
-      for (const entry of entries) {
-        if (outdated) this.wait(account, entry, outdated.headOid, run.finishedAt);
+      for (const action of actions) {
+        if (action.kind === 'wait') this.wait(account, action.entry, action.head, action.began);
         else
-          this.record(account, entry, {
+          this.record(account, action.entry, {
             status: 'started',
-            runId: entry.runId,
-            attempts: entry.attempts,
+            runId: action.entry.runId,
+            attempts: action.entry.attempts,
           });
       }
     });
 
-    return outdated !== null && entries.length > 0;
+    return waited;
   }
 
   /** Completes checks of finished reviews that could not ask GitHub when they finished. */
@@ -585,21 +553,18 @@ export class AutoReviewer {
 
       if (!pr) continue;
 
-      if (entry.status === 'waiting') {
-        if (pr.headOid !== entry.headOid) this.wait(account, entry, pr.headOid);
-        continue;
-      }
+      const run = entry.status === 'waiting' ? undefined : stoppable.get(entry.runId ?? '');
+      const action = followPush(entry, pr, run);
 
-      const run = stoppable.get(entry.runId ?? '')!;
+      if (action.kind === 'rewait') this.wait(account, entry, action.head);
+      else if (action.kind === 'cancelAndWait')
+        // One transaction, so the stopped run is never left without its restart. Read live:
+        // entries sharing the run stop it once.
+        this.sync.store.transaction(() => {
+          if (this.run(run!.id)?.status !== 'cancelled') this.runner.cancel(account, run!.id);
 
-      if (run.headOid === pr.headOid) continue;
-
-      // One transaction, so the stopped run is never left without its restart.
-      this.sync.store.transaction(() => {
-        if (this.run(run.id)?.status !== 'cancelled') this.runner.cancel(account, run.id);
-
-        this.wait(account, entry, pr.headOid);
-      });
+          this.wait(account, entry, action.head);
+        });
     }
   }
 
@@ -661,19 +626,9 @@ export class AutoReviewer {
     if (!this.current(account, since)) return;
 
     const log = this.log(account);
+    // The clock, read before the list, as the cutoff for this pass's restarts.
     const now = this.clock.now();
-    const due = autoReviewCandidates(this.sync.listFor(account).items)
-      .filter(({ item, key }) => stillDue(item, key))
-      .filter(({ key }) => {
-        const entry = log.get(key);
-
-        return (
-          !entry ||
-          (entry.status === 'failed' && entry.attempts < MAX_ATTEMPTS) ||
-          (entry.status === 'waiting' && Date.parse(entry.restartAt ?? '') <= now)
-        );
-      })
-      .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+    const due = dueRequests(autoReviewCandidates(this.sync.listFor(account).items), log, now);
 
     for (const candidate of due) {
       const previous = log.get(candidate.key);
@@ -702,22 +657,28 @@ export class AutoReviewer {
     waiting: LogRow | null,
   ): Promise<boolean> {
     const entry = { key: candidate.key, prId: candidate.item.id };
+    const prId = candidate.item.id;
+    const stage = resolve(
+      (known) => requestStage({ waiting, previous: previous !== undefined }, known),
+      {
+        requestedBeforeSince: () => requestedBefore(this.requestedAt(account, candidate), since),
+        checkingPr: () => this.checkingPr(account, prId),
+        pendingWait: () => this.pendingWait(account, prId),
+        replacement: () => (waiting ? this.replacement(account, waiting) : null),
+      },
+    );
 
-    // Requests made before it was turned on are backlog, even when they are only found now. A
-    // restart continues a review that was already admitted, so it is not backlog.
-    if (!waiting && Date.parse(this.requestedAt(account, candidate)) < Date.parse(since)) {
+    if (stage.kind === 'primed') {
       this.record(account, entry, { status: 'primed' });
 
       return true;
     }
 
-    // The PR's previous review is still being checked for new commits: decide once it is.
-    if (!waiting && this.checkingPr(account, candidate.item.id)) return true;
+    if (stage.kind === 'hold') return true;
 
-    // Found while the PR waits to go quiet for another request: wait with it.
-    const pending = previous ? null : this.pendingWait(account, candidate.item.id);
+    if (stage.kind === 'join') {
+      const pending = stage.wait;
 
-    if (pending) {
       this.sync.store.transaction(() => {
         this.record(account, entry, {
           status: 'waiting',
@@ -733,111 +694,86 @@ export class AutoReviewer {
       return true;
     }
 
-    // A review started during the wait takes the restart's place.
-    const replacement = waiting && this.replacement(account, waiting);
-
-    if (replacement) {
-      this.record(account, entry, { status: 'skipped', runId: replacement.id });
+    if (stage.kind === 'skip') {
+      this.record(account, entry, { status: 'skipped', runId: stage.run.id });
 
       return true;
     }
 
-    if (!this.current(account, since) || !(await this.codexReady())) return false;
+    // Codex is asked only while still current; the run in progress is read, and the request
+    // recorded, in the very turn its answer comes, as nothing else may settle in between.
+    const ready = this.current(account, since) && (await this.codexReady());
+    const gate = resolve((known) => startStage(ready, known), {
+      // Never replace a run in progress or one you paused; start() would cancel a paused run.
+      activeRun: () => this.runner.activeRun(account, prId, 'full_review'),
+    });
 
-    // Never replace a run in progress or one you paused; start() would cancel a paused run.
-    const active = this.runner.activeRun(account, candidate.item.id, 'full_review');
+    if (gate.kind === 'stop') return false;
 
-    if (active) {
-      this.record(account, entry, { status: 'skipped', runId: active.id });
+    if (gate.kind === 'skip') {
+      this.record(account, entry, { status: 'skipped', runId: gate.run.id });
 
       return true;
     }
 
     // The head start() found when it was refused because of another push during the wait.
     let pushed = null as string | null;
+    const settle = (outcome: StartOutcome) => {
+      const { actions, goOn } = resolve(
+        (known) => afterStart(outcome, { entry, previous, waiting, pushed }, known),
+        {
+          current: () => this.current(account, since),
+          latestHead: () => this.sync.detailFor(account, prId)?.snapshot.headOid ?? null,
+        },
+      );
+
+      for (const action of actions) this.apply(account, entry, action);
+
+      return goOn;
+    };
 
     try {
-      const run = await this.runner.start(account, candidate.item.id, 'full_review', {
+      const run = await this.runner.start(account, prId, 'full_review', {
         trigger: 'auto',
         // start() refreshes the PR and checks the plan first. Meanwhile automatic review may
         // have been turned off, the PR may have become a draft, you may have started a run, the
         // PR may have new commits since the wait began, or the previous review may have ended.
         admit: (detail) => {
-          pushed =
-            waiting && detail.snapshot.headOid !== waiting.headOid ? detail.snapshot.headOid : null;
-
-          return (
-            !pushed &&
-            this.current(account, since) &&
-            stillDue(detail.item, candidate.key) &&
-            !this.runner.activeRun(account, candidate.item.id, 'full_review') &&
-            !(waiting && this.replacement(account, waiting)) &&
-            // The previous review may have finished meanwhile: its check, or the wait it began,
-            // comes first. The next pass joins the wait.
-            !this.checkingPr(account, candidate.item.id) &&
-            (waiting !== null || !this.pendingWait(account, candidate.item.id))
+          const decided = resolve(
+            (known) => admits({ waiting, head: detail.snapshot.headOid }, known),
+            {
+              current: () => this.current(account, since),
+              stillDue: () => stillDue(detail.item, candidate.key),
+              activeRun: () => this.runner.activeRun(account, prId, 'full_review'),
+              replacement: () => (waiting ? this.replacement(account, waiting) : null),
+              checkingPr: () => this.checkingPr(account, prId),
+              pendingWait: () => this.pendingWait(account, prId),
+            },
           );
+
+          pushed = decided.pushed;
+
+          return decided.admit;
         },
       });
 
-      // A saved review returned without asking `admit`: the PR moved to a head reviewed before,
-      // which is a push during the wait like any other.
-      if (waiting && run.headOid !== waiting.headOid) {
-        if (this.current(account, since)) this.wait(account, waiting, run.headOid);
-
-        return true;
-      }
-
-      this.record(account, entry, { status: 'started', runId: run.id });
+      // Recorded within the try, as before: a failure to record is the start's failure.
+      return settle({ kind: 'run', run });
     } catch (error) {
-      // Not wanted now. Unrecorded, so a PR that is a draft again is reviewed once ready.
-      if (error instanceof ReviewError && error.code === 'NOT_ADMITTED') {
-        if (!this.current(account, since)) return false;
-        if (waiting && pushed) this.wait(account, waiting, pushed);
-
-        return true;
-      }
-
-      // New commits arrived while the review was being prepared: wait for the PR to go quiet.
-      if (error instanceof ReviewError && error.code === 'HEAD_MOVED') {
-        const head = this.sync.detailFor(account, candidate.item.id)?.snapshot.headOid;
-
-        if (head && this.current(account, since))
-          this.wait(
-            account,
-            waiting ?? { ...entry, runId: previous?.runId, attempts: previous?.attempts },
-            head,
-          );
-
-        return true;
-      }
-
-      if (error instanceof ReviewError && STOP_CODES.has(error.code)) return false;
-      if (error instanceof GitHubError && STOP_OUTCOMES.has(error.outcome)) return false;
-
-      // Turned off, or off and on again, while it started: what it decided then no longer holds.
-      if (!this.current(account, since)) return false;
-
-      const attempts = (previous?.attempts ?? 0) + 1;
-
-      // A restart tries again once the PR has been quiet again, until it runs out of attempts.
-      if (waiting && attempts < MAX_ATTEMPTS) {
-        const head =
-          this.sync.detailFor(account, candidate.item.id)?.snapshot.headOid ?? waiting.headOid;
-
-        if (head) this.wait(account, { ...waiting, attempts }, head);
-
-        return true;
-      }
-
-      this.record(account, entry, {
-        status: 'failed',
-        runId: waiting?.runId,
-        attempts,
-        error: safeError(error),
-      });
+      return settle({ kind: 'error', error });
     }
+  }
 
-    return true;
+  /** Applies a start's action to its request's entry. */
+  private apply(account: string, entry: Pick<LogRow, 'key' | 'prId'>, action: StartAction) {
+    if (action.kind === 'wait') this.wait(account, action.entry, action.head);
+    else if (action.kind === 'record')
+      this.record(account, entry, {
+        status: action.status,
+        runId: action.runId,
+        attempts: action.attempts,
+        // Redacted at the very write that keeps it.
+        ...(action.status === 'failed' ? { error: safeError(action.error) } : {}),
+      });
   }
 }
