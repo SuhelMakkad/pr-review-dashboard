@@ -16,6 +16,7 @@ import type { ReviewThread } from '@review-desk/shared/types';
 import type { GitHubAction } from '@review-desk/shared/operations';
 import { operationInProgress, operationUnsettled } from '@review-desk/shared/operations';
 import { CommandBanner } from '@/features/review/command-banner';
+import type { AttemptView } from '@/features/review/draft-attempts';
 import { refOf } from '@/lib/pr-ref';
 import { inQueue } from '@/features/pulls/meta';
 import { openActivity } from '@/features/activity/use-operations';
@@ -125,6 +126,12 @@ function Workspace() {
   const [replying, setReplying] = useState<string | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
   const [recoveredBody, setRecoveredBody] = useState('');
+  /** The composer's text as it is now. */
+  const [composerBody, setComposerBody] = useState('');
+  /** A refusal of the composer's comment, kept by the writer, with the text it was refused with. */
+  const [refused, setRefused] = useState<{ key: string; text: string } | null>(null);
+  /** The kept refusal the composer adds again as a new comment. */
+  const [recovering, setRecovering] = useState<string | null>(null);
   const [railTab, setRailTab] = useState<'threads' | 'assist'>('threads');
   const layout = useDefaultLayout({ id: 'files-workspace', storage: layoutStorage() });
 
@@ -216,6 +223,14 @@ function Workspace() {
   const threads = detail.data?.snapshot.threads ?? [];
   const unread = new Set(item?.unreadReplyKeys ?? []);
   const drafts = draft?.comments ?? [];
+
+  // A kept refusal this composer shows with its very text: hidden from the banner meanwhile, and
+  // shown there again once the composer closes or its text changes.
+  useEffect(() => {
+    if (!composer || !refused || composerBody.trim() !== refused.text) return;
+
+    return review.writer.showing(refused.key, refused.text);
+  }, [composer, refused, composerBody, review.writer]);
 
   const threadsByFile = useMemo(() => {
     const map = new Map<string, ReviewThread[]>();
@@ -522,7 +537,20 @@ function Workspace() {
       key={comment.id}
       comment={comment}
       busy={review.editComment.isPending || locked}
-      onEdit={(body) => review.editComment.mutateAsync({ id: comment.id, body })}
+      onEdit={(body) =>
+        review.editComment.mutateAsync({
+          id: comment.id,
+          body,
+          where: {
+            path: comment.path,
+            line: comment.line,
+            side: comment.side,
+            startLine: comment.startLine,
+            view: diffView(diff.data),
+          },
+        })
+      }
+      hideKept={(key, text) => review.writer.showing(key, text)}
       onDelete={() =>
         review.deleteComment.mutate(comment.id, { onError: (error) => toast.error(error.message) })
       }
@@ -547,16 +575,70 @@ function Workspace() {
     return true;
   };
 
+  /** A refusal the writer kept, named by it: hidden from the banner while shown here as is. */
+  const setRefusedFrom = (error: unknown, text: string) => {
+    const kept = (error as { details?: { kept?: unknown } }).details?.kept;
+
+    setComposerBody(text);
+    setRefused(typeof kept === 'string' ? { key: kept, text } : null);
+  };
+
+  /**
+   * Opens a composer with a kept comment's text, to add it as a new comment: on the lines it was
+   * for when the diff shown is the very comparison they were picked in, else on its file, for you
+   * to pick the lines again.
+   */
+  const addAsNew = (entry: AttemptView) => {
+    const where = entry.where;
+    const text = entry.texts.at(-1) ?? '';
+
+    if (!where || !files.some((file) => file.path === where.path)) {
+      toast.error('Its file is not in this diff. Copy your text instead.');
+
+      return;
+    }
+
+    const picked = { path: where.path, view: where.view as DiffView | undefined };
+    const restorable = where.line !== null && linesShown(picked, where.path, diff.data);
+
+    selectFile(where.path);
+    setRecoveredBody(text);
+    setComposerError(null);
+    setRefused(null);
+    setRecovering(entry.key);
+    setComposer(
+      restorable && where.line !== null
+        ? {
+            path: where.path,
+            line: where.line,
+            side: where.side,
+            startLine: where.startLine,
+            view: picked.view,
+          }
+        : { path: where.path, line: null, view: diffView(diff.data) },
+    );
+
+    if (where.line !== null && !restorable)
+      toast(
+        'The lines it was on are not shown now. Comment on the file, or select the lines again.',
+      );
+  };
+
+  const closeComposer = () => {
+    setComposer(null);
+    setComposerError(null);
+    setRefused(null);
+    setRecovering(null);
+  };
+
   const composerFor = (target: NonNullable<ComposerState>) => (
     <Composer
       label={target.line === null ? `Comment on ${target.path}` : `Comment on line ${target.line}`}
       initial={recoveredBody}
       busy={review.addComment.isPending || review.commentNow.isPending || locked}
       error={composerError}
-      onCancel={() => {
-        setComposer(null);
-        setComposerError(null);
-      }}
+      onChange={setComposerBody}
+      onCancel={closeComposer}
       primary={{
         label: 'Add to review',
         keys: '$mod+Enter',
@@ -564,22 +646,27 @@ function Workspace() {
         run: async (body) => {
           if (lineMoved(target, body)) return;
 
+          const side = target.line === null ? 'RIGHT' : target.side;
+          const startLine = target.line === null ? null : target.startLine;
+
           try {
             await review.addComment.mutateAsync({
               path: target.path,
               line: target.line,
-              side: target.line === null ? 'RIGHT' : target.side,
-              startLine: target.line === null ? null : target.startLine,
+              side,
+              startLine,
               body,
               // The lines are the diff's the composer was opened on; refused for another revision.
               ...(target.line !== null && target.view
                 ? { revision: { headOid: target.view.headOid, baseOid: target.view.baseOid } }
                 : {}),
+              where: { path: target.path, line: target.line, side, startLine, view: target.view },
+              ...(recovering ? { recovers: recovering } : {}),
             });
-            setComposer(null);
-            setComposerError(null);
+            closeComposer();
           } catch (error) {
             setComposerError((error as Error).message);
+            setRefusedFrom(error, body);
           }
         },
       }}
@@ -962,7 +1049,19 @@ function Workspace() {
       </Group>
 
       <div className="px-4 empty:hidden">
-        <CommandBanner writer={review.writer} />
+        <CommandBanner
+          writer={review.writer}
+          actions={{
+            addAsNew,
+            hasComment: (id) => drafts.some((comment) => comment.id === id),
+            checkComment: (entry) => {
+              if (entry.where && files.some((file) => file.path === entry.where!.path))
+                selectFile(entry.where.path);
+              else toast.error('Its file is not in this diff.');
+            },
+            openFinish: () => setFinishOpen(true),
+          }}
+        />
       </div>
 
       <PendingTray

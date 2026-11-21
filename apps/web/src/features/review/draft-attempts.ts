@@ -25,11 +25,25 @@ export interface AttemptBase {
  * - `queued`: recorded, waiting in the queue, never sent (a reload releases it);
  * - `sending`: on its way, its outcome learnt in this tab (a reload only looks it up);
  * - `checking`: may have been sent, looked up in the background;
+ * - `received`: received, and may still be saved: looked up until it settles;
  * - `unknown`: may have been received, and nothing can tell yet: never sent again on its own;
  * - `not-saved`: never saved, and never can be;
  * - `lost`: stopped without knowing whether it was received before; it can never be after.
  */
-export type AttemptPhase = 'queued' | 'sending' | 'checking' | 'unknown' | 'not-saved' | 'lost';
+export type AttemptPhase =
+  'queued' | 'sending' | 'checking' | 'received' | 'unknown' | 'not-saved' | 'lost';
+
+/**
+ * Where a comment write was asked for: what the banner says of it, and where a new comment of
+ * its text may go. Shown only, never sent. `view` is the diff comparison it was made in.
+ */
+export interface CommentWhere {
+  path: string;
+  line: number | null;
+  side: 'LEFT' | 'RIGHT';
+  startLine: number | null;
+  view?: unknown;
+}
 
 export interface AttemptRecord {
   /** Its own, from when it was asked for: its write id is made only once it is sent. */
@@ -50,18 +64,50 @@ export interface AttemptRecord {
   reason?: string;
   /** Hidden from the banner in its phase: shown again once it moves. */
   dismissed?: boolean;
+  /** When it was asked for: entries are listed oldest first. */
+  createdAt?: number;
+  /** For a comment write: where it was asked for. */
+  where?: CommentWhere;
+  /**
+   * For a comment kept not saved: the texts it was tried with, its own first, then a new
+   * comment's of it that was refused too, when it differs.
+   */
+  texts?: string[];
+  /** For a comment kept not saved: the new comment added from it, until that one settles. */
+  replacement?: { key: string };
+  /** For a new comment added from a kept one: that one's key. */
+  recovers?: string;
+  /** Received earlier: a later miss of it cannot mean it never arrived. */
+  received?: boolean;
+  /** Kept in this tab only: its record could not be saved, so a reload loses it. */
+  unrecorded?: boolean;
 }
 
 /** What the banner shows of a write. */
 export interface AttemptView {
   key: string;
-  phase: 'unknown' | 'not-saved' | 'lost';
+  phase: 'received' | 'unknown' | 'not-saved' | 'lost';
   /** What it was: "Your comment on src/a.ts:12". */
   label: string;
   /** The text it carried, to copy; none for a write whose text the server holds. */
   text: string | null;
+  /** Every text it was tried with, its own first. */
+  texts: string[];
   canSendAgain: boolean;
   canStop: boolean;
+  /** A kept comment, with no new comment of it on its way: you may add its text as a new one. */
+  canAddAsNew: boolean;
+  /** The route it was sent to, and for an edit the comment it edits. */
+  route: string;
+  commentId?: string;
+  where?: CommentWhere;
+  /** What can be checked of it: a comment, or the summary and verdict. */
+  inspect: 'comment' | 'summary' | null;
+  /** Received earlier, its outcome now not known. */
+  received: boolean;
+  /** Kept in this tab only. */
+  unrecorded: boolean;
+  createdAt: number;
   reason?: string;
 }
 
@@ -180,6 +226,7 @@ export const ATTEMPT_MESSAGES = {
   notSentReload: 'This was not sent before the page reloaded.',
   neverReceived: 'This did not reach the server, and never can now.',
   stoppedNever: 'You stopped it before it reached the server.',
+  unrecorded: "Not saved in this tab's records: it may be gone after a reload.",
   unresolved:
     'The very same is still waiting to be confirmed, so it was not sent again. Its notice with your draft says what you can do.',
 } as const;

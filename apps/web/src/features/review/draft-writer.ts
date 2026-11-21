@@ -9,6 +9,7 @@ import {
   textOfIntent,
   type AttemptRecord,
   type AttemptView,
+  type CommentWhere,
   type WriteStop,
 } from '@/features/review/draft-attempts';
 import {
@@ -389,6 +390,8 @@ export class DraftWriter {
   private readonly startWaits = new Map<string, (() => void)[]>();
   /** Writes being looked up now, by key: a lookup asked for meanwhile joins the one on its way. */
   private readonly checkingWrites = new Map<string, Promise<void>>();
+  /** Kept refusals whose very text a composer shows now, by key: the banner need not, meanwhile. */
+  private readonly shownRefusals = new Map<string, string>();
   /**
    * Raised for a write as it is sent again, or found received: a lookup begun before then says
    * nothing after.
@@ -453,6 +456,11 @@ export class DraftWriter {
           ? { ...record, phase: 'checking' }
           : record,
     );
+
+    // A new comment of a kept one a reload caught before it was sent: never sent, so the kept
+    // one may be added again, with this one's text.
+    for (const record of (saved?.writes ?? []).filter((other) => other.phase === 'queued'))
+      this.foldIntoSource(this.writes.find((other) => other.key === record.key)!);
 
     // Summary starts a reload interrupted: each one's preflight first. One that may have been
     // sent is only looked up, its text held; one that committed settles what it carried. Then a
@@ -574,8 +582,23 @@ export class DraftWriter {
   }
 
   private changed() {
+    this.recorded();
+  }
+
+  /** A change, journaled: false when the journal could not be written. */
+  private recorded(): boolean {
     this.version += 1;
-    this.persist();
+
+    const written = this.persist();
+
+    for (const listener of this.listeners) listener();
+
+    return written;
+  }
+
+  /** A change of what is shown only: nothing to journal. */
+  private shown() {
+    this.version += 1;
 
     for (const listener of this.listeners) listener();
   }
@@ -766,7 +789,13 @@ export class DraftWriter {
     route: string,
     params: Record<string, string>,
     body: Record<string, unknown>,
-    options: { replaces?: Field[] } = {},
+    options: {
+      replaces?: Field[];
+      /** For a comment write: where it was asked for, shown only. */
+      where?: CommentWhere;
+      /** For a new comment added from a kept one: that one's key. */
+      recovers?: string;
+    } = {},
   ): Promise<T> {
     // Pending edits go first, saved with what they hold now.
     void this.flush();
@@ -776,29 +805,50 @@ export class DraftWriter {
     const saves = this.savesOf(replaces);
     const seq = ++this.seq;
     const gate = this.gateAt(seq);
-
-    // An unsettled submit or discard, or an open discard: refused now, your input yours to keep.
-    if (gate) return Promise.reject(new WriteRefused(gate.message, gate.code));
-
-    // The very same as a write not settled yet (asked for again from a composer still open, or
-    // while it is sent again): refused, so a write that may land is never made twice. Its notice
-    // says what to do.
     const intent = { route, params, body };
-
-    if (this.writes.some((record) => unsettled(record) && sameIntent(record.intent, intent)))
-      return Promise.reject(new WriteRefused(ATTEMPT_MESSAGES.unresolved, 'WRITE_UNRESOLVED'));
-
+    const source = options.recovers
+      ? this.writes.find((other) => other.key === options.recovers && this.canAddAsNew(other))
+      : undefined;
     const record: AttemptRecord = {
       key: crypto.randomUUID(),
       phase: 'queued',
-      intent: { route, params, body },
+      intent,
+      createdAt: Date.now(),
+      ...(options.where ? { where: options.where } : {}),
+      ...(source ? { recovers: source.key } : {}),
     };
+
+    // An unsettled submit or discard, or an open discard: refused now, your input yours to keep.
+    if (gate)
+      return Promise.reject(this.keepRefusal(record, new WriteRefused(gate.message, gate.code)));
+
+    // The very same as a write not settled yet (asked for again from a composer still open, or
+    // while it is sent again): refused, so a write that may land is never made twice. Its own
+    // entry says what became of it, shown again if hidden; a new comment of a kept one now waits
+    // on it.
+    const same = this.writes.find((other) => unsettled(other) && sameIntent(other.intent, intent));
+
+    if (same) {
+      this.shownRefusals.delete(same.key);
+      same.dismissed = false;
+
+      if (source) source.replacement = { key: same.key };
+
+      this.changed();
+
+      return Promise.reject(
+        new WriteRefused(ATTEMPT_MESSAGES.unresolved, 'WRITE_UNRESOLVED', { kept: same.key }),
+      );
+    }
+
+    // A new comment of a kept one: linked to it in the same journal write.
+    if (source) source.replacement = { key: record.key };
 
     this.writes.push(record);
     this.changed();
 
     return this.enqueue(async () => {
-      // Kept past its job only when it could not be confirmed: the banner holds it then.
+      // Kept past its job when it could not be confirmed, or (a comment's) when it was refused.
       let kept = false;
 
       try {
@@ -842,6 +892,9 @@ export class DraftWriter {
         if (outcome.kind === 'committed') {
           this.advance(outcome.revision, write.base.generation);
 
+          // A new comment of a kept one, saved: that one goes with it, in the same journal write.
+          this.dropSourceOf(record);
+
           // An answer that is the draft (apply, prepare) is shown at once; another, read again.
           if (isDraft(outcome.body)) this.transport.committed(outcome.body, write.stamp);
           else this.transport.stale();
@@ -869,10 +922,129 @@ export class DraftWriter {
         }
 
         throw refusalOf(outcome);
+      } catch (error) {
+        // Refused for good: a comment's text is kept, journaled before its caller hears of it.
+        if (!kept && error instanceof WriteRefused && keepsRefusals(route)) {
+          kept = true;
+
+          throw this.keepRefusal(record, error);
+        }
+
+        throw error;
       } finally {
         if (!kept) this.dropWrite(record);
       }
     });
+  }
+
+  /**
+   * Keeps a comment write refused for good, its text yours to copy or add again, journaled (or,
+   * when it cannot be, kept in this tab only): a new comment of a kept one is folded back into
+   * that one, so one entry stands for both. Answers the refusal naming the entry it was kept in.
+   */
+  private keepRefusal(record: AttemptRecord, error: WriteRefused): WriteRefused {
+    const named = (key: string) =>
+      new WriteRefused(error.message, error.code, { ...error.details, kept: key }, error.status);
+
+    const linked = this.writes.find((other) => other.replacement?.key === record.key);
+
+    if (linked && this.foldIntoSource(record)) {
+      linked.unrecorded = !this.recorded() || undefined;
+
+      return named(linked.key);
+    }
+
+    // Not a comment's (refused at the click, before it was recorded): nothing to keep.
+    if (!keepsRefusals(record.intent.route)) return error;
+
+    const text = textOfIntent(record.intent);
+
+    Object.assign(record, {
+      phase: 'not-saved',
+      reason: error.message,
+      texts: text ? [text] : [],
+      dismissed: false,
+    });
+
+    if (!this.writes.includes(record)) this.writes.push(record);
+
+    record.unrecorded = !this.recorded() || undefined;
+
+    return named(record.key);
+  }
+
+  /**
+   * A new comment of a kept one, refused for good or never sent: dropped, its text kept with that
+   * one's when it differs, which may be added again. False when it has no such kept one. The
+   * caller journals it.
+   */
+  private foldIntoSource(record: AttemptRecord): boolean {
+    // Linked by the kept one: a new comment of it, or the very same comment on its way it waits on.
+    const source = this.writes.find((other) => other.replacement?.key === record.key);
+
+    if (!source) return false;
+
+    const text = textOfIntent(record.intent);
+
+    this.writes = this.writes.filter((other) => other !== record);
+    source.replacement = undefined;
+    source.dismissed = false;
+    this.shownRefusals.delete(source.key);
+
+    if (text && !(source.texts ?? []).includes(text))
+      source.texts = [...(source.texts ?? []), text];
+
+    return true;
+  }
+
+  /**
+   * A comment a kept one waits on, saved (a new comment of it, or the very same on its way): the
+   * kept one is settled with it. The caller journals it.
+   */
+  private dropSourceOf(record: AttemptRecord) {
+    this.writes = this.writes.filter((other) => other.replacement?.key !== record.key);
+  }
+
+  /** Whether `record` is a kept comment you may add as a new one: none of it on its way. */
+  private canAddAsNew(record: AttemptRecord): boolean {
+    return (
+      record.phase === 'not-saved' &&
+      keepsRefusals(record.intent.route) &&
+      !record.replacement &&
+      (record.texts?.length ?? 0) > 0
+    );
+  }
+
+  /**
+   * While a composer shows a kept refusal's very text, the banner hides it, until the returned
+   * function is called (the composer closed, or its text changed): shown again then, as after a
+   * reload.
+   */
+  showing(key: string, text: string): () => void {
+    this.shownRefusals.set(key, text);
+    this.shown();
+
+    return () => {
+      if (this.shownRefusals.get(key) !== text) return;
+
+      this.shownRefusals.delete(key);
+      this.shown();
+    };
+  }
+
+  /** Forgets every entry shown now that is settled for good: unresolved ones stay. */
+  dismissSettled() {
+    const visible = new Set(this.writeViews().map((view) => view.key));
+
+    this.writes = this.writes.filter(
+      (record) =>
+        !(visible.has(record.key) && (record.phase === 'not-saved' || record.phase === 'lost')),
+    );
+    this.starts = this.starts.filter(
+      (record) => record.phase !== 'not-started' && record.phase !== 'lost',
+    );
+    this.commands = this.commands.filter((command) => command.phase !== 'lost');
+    this.changed();
   }
 
   /**
@@ -1224,23 +1396,57 @@ export class DraftWriter {
     ]);
   }
 
-  /** The writes the banner shows: not confirmed, not saved, or stopped while not known. */
+  /**
+   * The writes the banner shows, oldest first: received and checking, not confirmed, not saved,
+   * or stopped while not known. A kept refusal a composer shows with its very text is not.
+   */
   writeViews(): AttemptView[] {
     return this.writes
+      .map((record, index) => ({ record, index }))
       .filter(
-        (record): record is AttemptRecord & { phase: AttemptView['phase'] } =>
-          (record.phase === 'unknown' || record.phase === 'not-saved' || record.phase === 'lost') &&
-          !record.dismissed,
+        ({ record }) =>
+          (record.phase === 'received' ||
+            record.phase === 'unknown' ||
+            record.phase === 'not-saved' ||
+            record.phase === 'lost') &&
+          !record.dismissed &&
+          !(record.texts ?? []).includes(this.shownRefusals.get(record.key) ?? '\u0000'),
       )
-      .map((record) => ({
-        key: record.key,
-        phase: record.phase,
-        label: labelOf(record.intent),
-        text: textOfIntent(record.intent),
-        canSendAgain: this.canSendWriteAgain(record),
-        canStop: record.phase === 'unknown' && record.writeId !== undefined,
-        ...(record.reason ? { reason: record.reason } : {}),
-      }));
+      .sort((a, b) => (a.record.createdAt ?? 0) - (b.record.createdAt ?? 0) || a.index - b.index)
+      .map(({ record }) => {
+        const route = record.intent.route;
+        const own = textOfIntent(record.intent);
+        const texts = record.texts?.length ? record.texts : own ? [own] : [];
+        const comment = keepsRefusals(route);
+        const uncertain = record.phase === 'lost' || record.phase === 'unknown';
+
+        return {
+          key: record.key,
+          phase: record.phase as AttemptView['phase'],
+          label: labelOf(record.intent),
+          text: texts[0] ?? null,
+          texts,
+          canSendAgain: this.canSendWriteAgain(record),
+          canStop: record.phase === 'unknown' && record.writeId !== undefined,
+          canAddAsNew: this.canAddAsNew(record),
+          route,
+          ...(route === 'editComment' && record.intent.params.cid
+            ? { commentId: record.intent.params.cid }
+            : {}),
+          ...(record.where ? { where: record.where } : {}),
+          inspect: !uncertain
+            ? null
+            : comment
+              ? 'comment'
+              : route === 'saveDraft'
+                ? 'summary'
+                : null,
+          received: Boolean(record.received),
+          unrecorded: Boolean(record.unrecorded),
+          createdAt: record.createdAt ?? 0,
+          ...(record.reason ? { reason: record.reason } : {}),
+        };
+      });
   }
 
   /**
@@ -1354,6 +1560,7 @@ export class DraftWriter {
   private canSendWriteAgain(record: AttemptRecord): boolean {
     return (
       record.phase === 'unknown' &&
+      !record.received &&
       record.resendable === true &&
       record.fields === undefined &&
       record.writeId !== undefined &&
@@ -1411,7 +1618,12 @@ export class DraftWriter {
       // Nothing read: looked up again later.
       if (looked === 'unreadable') return;
 
-      if (looked === 'never') this.notSaved(record, ATTEMPT_MESSAGES.neverReceived);
+      // Received earlier, its claim now gone: whether it was saved can no longer be told.
+      if (record.received && (looked === 'never' || looked === 'resend' || looked === 'unknown')) {
+        if (record.fields && this.markFailed(record.fields, NOT_CONFIRMED)) this.changed();
+
+        if (record.phase !== 'unknown') this.moveWrite(record, 'unknown', { resendable: false });
+      } else if (looked === 'never') this.notSaved(record, ATTEMPT_MESSAGES.neverReceived);
       else if (looked === 'resend' || looked === 'unknown') {
         // Not found: an autosave's text is kept for you to confirm.
         if (record.fields && this.markFailed(record.fields, NOT_CONFIRMED)) this.changed();
@@ -1420,11 +1632,12 @@ export class DraftWriter {
           resendable: looked === 'resend' && isSealed(writeId),
         });
       } else if (looked.kind === 'pending') {
-        // Received, and may still commit: never offered to be sent again, whatever an older
-        // lookup answers after.
+        // Received, and may still commit: shown so, never offered to be sent again, whatever an
+        // older lookup answers after.
         this.supersedeLookups(record);
 
-        if (record.resendable) this.moveWrite(record, record.phase, { resendable: false });
+        if (record.phase !== 'received')
+          this.moveWrite(record, 'received', { resendable: false, received: true });
       } else if (looked.kind === 'committed') this.writeCommitted(record, looked.revision);
       else if (looked.kind === 'conflict')
         this.notSaved(record, 'The draft changed since this was sent, so it was not saved.');
@@ -1435,10 +1648,11 @@ export class DraftWriter {
   }
 
   private settleStop(record: AttemptRecord, read: WriteStop) {
-    // Received, and may still commit: an older lookup's miss says nothing now.
+    // Received, and may still commit: shown so, looked up still; an older lookup's miss says
+    // nothing now.
     if (read.kind === 'pending') {
       this.supersedeLookups(record);
-      this.moveWrite(record, 'checking', { resendable: false });
+      this.moveWrite(record, 'received', { resendable: false, received: true });
     } else if (read.kind === 'committed') this.writeCommitted(record, read.revision);
     else if (read.kind === 'refused') this.refused(record, read.error);
     else if (read.kind === 'not-admitted') this.notSaved(record, ATTEMPT_MESSAGES.stoppedNever);
@@ -1449,6 +1663,8 @@ export class DraftWriter {
   private writeCommitted(record: AttemptRecord, revision: number) {
     if (record.fields) this.settleFields(record.fields, revision);
 
+    // A new comment of a kept one: that one settles with it, in the same journal write.
+    this.dropSourceOf(record);
     this.dropWrite(record);
     this.transport.stale();
   }
@@ -1469,6 +1685,13 @@ export class DraftWriter {
 
   /** Never saved: an autosave's fields keep its text for you to confirm; another is shown. */
   private notSaved(record: AttemptRecord, reason: string) {
+    // A new comment of a kept one, refused: back into that one, which may be added again.
+    if (this.foldIntoSource(record)) {
+      this.changed();
+
+      return;
+    }
+
     if (record.fields) {
       this.markFailed(record.fields, reason);
       this.dropWrite(record);
@@ -3086,7 +3309,11 @@ const unsettled = (record: AttemptRecord) =>
 
 /** Whether a write may have been received, and is to be looked up. */
 const writeNeedsLookup = (record: AttemptRecord) =>
-  (record.phase === 'checking' || record.phase === 'unknown') && record.writeId !== undefined;
+  (record.phase === 'checking' || record.phase === 'received' || record.phase === 'unknown') &&
+  record.writeId !== undefined;
+
+/** The writes whose definite refusal keeps their text for you: a comment's add or edit. */
+const keepsRefusals = (route: string) => route === 'addComment' || route === 'editComment';
 
 /** `promise`, or a rejection once `deadline` passes first. With no deadline, `promise` itself. */
 function beforeDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {

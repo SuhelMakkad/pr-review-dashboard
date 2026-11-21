@@ -272,7 +272,7 @@ describe('the draft writer', () => {
     });
 
     const refusal = await writer
-      .write('prepareAi', { account: 'you', runId: 'r' }, { prId: 'PR_1', indices: [0] })
+      .write<never>('prepareAi', { account: 'you', runId: 'r' }, { prId: 'PR_1', indices: [0] })
       .catch((error: unknown) => error);
 
     expect(refusal).toBeInstanceOf(ApiError);
@@ -1891,7 +1891,7 @@ describe('comment and AI write recovery', () => {
 
     expect(sent).toHaveLength(2);
     expect(sent[1]!.body.writeId).toBe(sent[0]!.body.writeId);
-    expect(writer.writeViews()).toEqual([
+    expect(writer.writeViews()).toMatchObject([
       {
         key: expect.any(String),
         phase: 'unknown',
@@ -1965,7 +1965,10 @@ describe('comment and AI write recovery', () => {
 
     await expect(behind).rejects.toMatchObject({ code: 'NOT_RECORDED' });
     expect(sent).toHaveLength(1);
-    expect(writer.writeViews()).toEqual([]);
+    // Kept for you all the same, in this tab only.
+    expect(writer.writeViews()).toMatchObject([
+      { phase: 'not-saved', text: 'Behind', unrecorded: true },
+    ]);
   });
 
   it('releases after a reload a write never sent, its text kept for you to copy', async () => {
@@ -2079,7 +2082,7 @@ describe('comment and AI write recovery', () => {
   it.each([
     ['not admitted', { outcome: 'not-admitted' }, [{ phase: 'not-saved', text: 'Kept' }]],
     ['unknown', { outcome: 'unknown' }, [{ phase: 'lost', canStop: false, text: 'Kept' }]],
-    ['still pending', { outcome: 'pending' }, []],
+    ['still pending', { outcome: 'pending' }, [{ phase: 'received', canStop: false }]],
   ])('stops one, as its stop answers: %s', async (_case, answer, views) => {
     const next = server();
 
@@ -2394,7 +2397,7 @@ describe('comment and AI write recovery', () => {
     }));
     await reloaded.reconcile();
 
-    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'received', canSendAgain: false }]);
   });
 
   it('never sends again one whose lifetime ended while it waited in the queue', async () => {
@@ -2503,7 +2506,7 @@ describe('comment and AI write recovery', () => {
     await second;
     await third;
 
-    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'received', canSendAgain: false }]);
   });
 
   it('ignores a miss looked up before a stop found it received', async () => {
@@ -2533,7 +2536,9 @@ describe('comment and AI write recovery', () => {
     await first;
 
     // Still being looked up, received: never shown as not arrived, nor offered again.
-    expect(reloaded.writeViews()).toEqual([]);
+    expect(reloaded.writeViews()).toMatchObject([
+      { phase: 'received', canSendAgain: false, canStop: false },
+    ]);
   });
 
   it('never holds up the draft for a write not confirmed', async () => {
@@ -3750,6 +3755,327 @@ describe('the summary start', () => {
     });
     await writer.reconcile();
     await expect(writer.startSummary({})).resolves.toMatchObject({ id: 'run-1' });
+  });
+});
+
+describe('kept refusals and recovery views', () => {
+  const NEVER = 2_000_000_000;
+  const where = {
+    path: 'a.ts',
+    line: 3,
+    side: 'RIGHT' as const,
+    startLine: null,
+    view: { mode: 'full' },
+  };
+  const target = { path: 'a.ts', line: 3, side: 'RIGHT', startLine: null };
+  const journal = () =>
+    JSON.parse(sessionStorage.getItem(`review-desk-draft-writer:you:${PR}`) ?? '{}') as {
+      writes?: { key: string; phase: string; texts?: string[]; replacement?: { key: string } }[];
+    };
+  const locked =
+    (message = 'Line gone') =>
+    async (request: WriteRequest) => {
+      throw new ApiError(message, 409, 'LINE_GONE', {
+        attempt: { id: request.body.writeId, state: 'refused' },
+      });
+    };
+  const unreachable = async () => {
+    throw new ApiError('Not reachable', 0);
+  };
+  const gap = async () => {
+    throw new ApiError('Sealed elsewhere', 409, 'WRITE_HISTORY_GAP');
+  };
+
+  it('keeps a refused comment with its text, journaled before its caller hears of it', async () => {
+    const { answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    let journaled: unknown;
+
+    writer.observe(draft(0));
+    answers.push(locked());
+
+    const refusal = await writer
+      .write<never>('addComment', pr, { ...target, body: 'Mine' }, { where })
+      .catch((error: WriteRefused) => {
+        journaled = journal().writes;
+
+        return error;
+      });
+
+    expect(refusal).toMatchObject({ code: 'LINE_GONE', details: { kept: expect.any(String) } });
+    expect(journaled).toMatchObject([{ phase: 'not-saved', texts: ['Mine'] }]);
+    expect(writer.writeViews()).toMatchObject([
+      {
+        key: (refusal as WriteRefused).details.kept,
+        phase: 'not-saved',
+        texts: ['Mine'],
+        canAddAsNew: true,
+        where,
+        reason: 'Line gone',
+      },
+    ]);
+  });
+
+  it('keeps an edit refused at the click, and nothing of a refused delete', async () => {
+    const { commands, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    commands.push(unreachable);
+    await expect(writer.submit(review, carried(writer), null)).rejects.toMatchObject({
+      code: 'COMMAND_UNKNOWN',
+    });
+    await expect(
+      writer.write('editComment', { ...pr, cid: 'c1' }, { body: 'Edited' }),
+    ).rejects.toMatchObject({
+      code: 'DRAFT_COMMAND_UNKNOWN',
+    });
+    await expect(writer.write('deleteComment', { ...pr, cid: 'c2' }, {})).rejects.toBeDefined();
+
+    expect(writer.writeViews()).toMatchObject([
+      { phase: 'not-saved', route: 'editComment', commentId: 'c1', texts: ['Edited'] },
+    ]);
+  });
+
+  it('points the very same comment, asked for again, to its first entry, shown again', async () => {
+    const { answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(0));
+    answers.push(unreachable, gap);
+    await expect(writer.write('addComment', pr, { ...target, body: 'Once' })).rejects.toBeDefined();
+
+    const [first] = writer.writeViews();
+
+    writer.dismissWrite(first!.key);
+
+    expect(writer.writeViews()).toEqual([]);
+    await expect(writer.write('addComment', pr, { ...target, body: 'Once' })).rejects.toMatchObject(
+      {
+        code: 'WRITE_UNRESOLVED',
+        details: { kept: first!.key },
+      },
+    );
+    expect(writer.writeViews().map((view) => view.key)).toEqual([first!.key]);
+  });
+
+  it('hides a kept refusal only while a composer shows its very text', async () => {
+    const { answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(0));
+    answers.push(locked());
+
+    const key = await writer
+      .write<never>('addComment', pr, { ...target, body: 'Mine' })
+      .catch((error: WriteRefused) => String(error.details.kept));
+    const release = writer.showing(key, 'Mine');
+
+    expect(writer.writeViews()).toEqual([]);
+
+    const other = writer.showing(key, 'Mine, edited');
+
+    expect(writer.writeViews()).toHaveLength(1);
+    other();
+    release();
+    expect(writer.writeViews()).toHaveLength(1);
+  });
+
+  /** A refused comment kept, and the writer that kept it. */
+  async function kept(answers?: ((request: WriteRequest) => Promise<unknown>)[]) {
+    const next = server();
+    const writer = new DraftWriter('you', PR, next.transport, instant, NEVER);
+
+    writer.observe(draft(0));
+    next.answers.push(locked(), ...(answers ?? []));
+
+    const key = await writer
+      .write<never>('addComment', pr, { ...target, body: 'Mine' }, { where })
+      .catch((error: WriteRefused) => String(error.details.kept));
+
+    return { ...next, writer, key };
+  }
+
+  it('settles a kept comment with the new comment added from it', async () => {
+    const { writer, key } = await kept();
+
+    await writer.write('addComment', pr, { ...target, body: 'Mine, again' }, { recovers: key });
+
+    expect(writer.writeViews()).toEqual([]);
+  });
+
+  it('folds a refused new comment back into the kept one, offered again with both texts', async () => {
+    const { writer, key } = await kept([locked('Still gone')]);
+
+    await expect(
+      writer.write('addComment', pr, { ...target, body: 'Mine, again' }, { recovers: key }),
+    ).rejects.toMatchObject({ details: { kept: key } });
+
+    expect(writer.writeViews()).toMatchObject([
+      { key, texts: ['Mine', 'Mine, again'], canAddAsNew: true },
+    ]);
+  });
+
+  it('offers no other new comment while one may still land, dismissed or not', async () => {
+    const { writer, key } = await kept([unreachable, gap]);
+
+    await expect(
+      writer.write('addComment', pr, { ...target, body: 'Mine, again' }, { recovers: key }),
+    ).rejects.toMatchObject({ code: 'WRITE_UNCONFIRMED' });
+
+    const replacement = writer.writeViews().find((view) => view.key !== key)!;
+
+    expect(writer.writeViews().find((view) => view.key === key)).toMatchObject({
+      canAddAsNew: false,
+      texts: ['Mine'],
+    });
+
+    writer.dismissWrite(replacement.key);
+
+    expect(writer.writeViews()).toMatchObject([{ key, canAddAsNew: false }]);
+  });
+
+  it('links a kept comment to the very same comment on its way, settled with it', async () => {
+    const { writer, key, answers, transport, sent } = await kept([unreachable, gap]);
+
+    // The same comment, its outcome not known.
+    await expect(writer.write('addComment', pr, { ...target, body: 'Same' })).rejects.toBeDefined();
+    await expect(
+      writer.write('addComment', pr, { ...target, body: 'Same' }, { recovers: key }),
+    ).rejects.toMatchObject({ code: 'WRITE_UNRESOLVED' });
+
+    const same = writer.writeViews().find((view) => view.key !== key)!;
+
+    expect(writer.writeViews().find((view) => view.key === key)).toMatchObject({
+      canAddAsNew: false,
+    });
+
+    vi.mocked(transport.lookup).mockResolvedValueOnce({
+      attempt: {
+        id: sent.at(-1)!.body.writeId,
+        state: 'committed',
+        revision: 1,
+        result: { body: {} },
+      },
+    });
+    await writer.reconcile();
+
+    expect(writer.writeViews().map((view) => view.key)).not.toContain(same.key);
+    expect(writer.writeViews().map((view) => view.key)).not.toContain(key);
+    expect(answers).toEqual([]);
+  });
+
+  it('releases, after a reload, a new comment never sent, offering the kept one again', async () => {
+    const { writer, key, answers, sent } = await kept();
+    const ahead = held();
+
+    answers.push(ahead.answer);
+    void writer.write('addComment', pr, { body: 'Ahead' });
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    void writer.write('addComment', pr, { ...target, body: 'Mine, again' }, { recovers: key });
+
+    const reloaded = new DraftWriter('you', PR, server().transport, instant, NEVER);
+
+    expect(reloaded.writeViews().find((view) => view.key === key)).toMatchObject({
+      canAddAsNew: true,
+      texts: ['Mine', 'Mine, again'],
+    });
+  });
+
+  it('shows a write a stop found received, then one whose claim was gone since, never resendable', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', PR, first.transport, instant, NEVER);
+
+    writer.observe(draft(2));
+    first.answers.push(() => new Promise(() => {}));
+    void writer.write('addComment', pr, { ...target, body: 'Kept' });
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: true,
+      provable: false,
+    });
+
+    const reloaded = new DraftWriter('you', PR, next.transport, instant, NEVER);
+
+    await reloaded.reconcile();
+    vi.mocked(next.transport.abandonWrite).mockResolvedValueOnce({ outcome: 'pending' });
+    await reloaded.stopWrite(reloaded.writeViews()[0]!.key);
+
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'received', canStop: false }]);
+
+    // Its claim gone since, even as a miss that would prove an unreceived one never arrived: it
+    // was received, and whether it was saved can no longer be told.
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: true,
+      provable: true,
+    });
+    await reloaded.reconcile();
+
+    expect(reloaded.writeViews()).toMatchObject([
+      { phase: 'unknown', received: true, canStop: true, canSendAgain: false, inspect: 'comment' },
+    ]);
+  });
+
+  it('dismisses every settled entry at once, leaving what is still to be settled', async () => {
+    const { writer, answers } = await kept([unreachable, gap]);
+
+    await expect(
+      writer.write('addComment', pr, { ...target, body: 'Not known' }),
+    ).rejects.toBeDefined();
+
+    expect(writer.writeViews().map((view) => view.phase)).toEqual(['not-saved', 'unknown']);
+
+    writer.dismissSettled();
+
+    expect(writer.writeViews().map((view) => view.phase)).toEqual(['unknown']);
+    expect(answers).toEqual([]);
+  });
+
+  it('lists entries oldest first, whatever order they were kept in', () => {
+    const entry = (key: string, body: string, createdAt: number) => ({
+      key,
+      phase: 'not-saved',
+      intent: { route: 'addComment', params: pr, body: { ...target, body } },
+      texts: [body],
+      createdAt,
+    });
+
+    sessionStorage.setItem(
+      `review-desk-draft-writer:you:${PR}`,
+      JSON.stringify({
+        fields: {
+          body: {
+            value: '',
+            version: 0,
+            settled: 0,
+            savedAt: 0,
+            failed: null,
+            generation: null,
+            since: null,
+          },
+          event: {
+            value: 'COMMENT',
+            version: 0,
+            settled: 0,
+            savedAt: 0,
+            failed: null,
+            generation: null,
+            since: null,
+          },
+        },
+        inflight: [],
+        writes: [entry('b', 'Newer', 2_000), entry('a', 'Older', 1_000)],
+      }),
+    );
+
+    const writer = new DraftWriter('you', PR, server().transport, instant, NEVER);
+
+    expect(writer.writeViews().map((view) => view.texts[0])).toEqual(['Older', 'Newer']);
   });
 });
 
