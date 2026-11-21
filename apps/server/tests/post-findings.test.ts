@@ -1398,6 +1398,33 @@ describe('approvals whose summary is a separate write', () => {
     ]);
   });
 
+  it('holds a combined approval declared before the forge split approvals, never re-planning it', async () => {
+    const context = await setup();
+    const { github, queue, review, posted } = context;
+
+    context.setPosting(true);
+
+    // Declared as one combined approval, which the forge refused.
+    github.failNext = 'ApproveReview';
+
+    const run = await review(2041);
+
+    await posted(run.id, 'needs_attention');
+    expect(stored(context, run.id).intent?.steps.at(-1)?.method).toBe('approveReview');
+    expect(stored(context, run.id).plan).toBeUndefined();
+
+    // The forge now sends approvals apart from their summaries.
+    github.traits = { ...github.traits, approvalCarriesSummary: false };
+    github.writes.length = 0;
+    await queue.control('you', postedReviewOperationId(run.id), 'retry');
+
+    const held = await posted(run.id, 'needs_attention');
+
+    expect(held.error?.code).toBe('CHECKPOINT_CONFLICT');
+    expect(stored(context, run.id).plan).toBeUndefined();
+    expect(github.writes).toEqual([]);
+  });
+
   it('sends only the summary again when the forge refused it after approving', async () => {
     const { github, queue, review, posted } = await gitlabLike();
 

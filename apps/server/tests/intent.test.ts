@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GitHubAction } from '@review-desk/shared/operations';
+import { DraftStore } from '@/db/drafts.js';
 import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
@@ -134,34 +135,37 @@ describe('step intent', () => {
   });
 
   it('resumes from a saved pending-review receipt, asking for no second review', async () => {
-    const { queue, github, review, stored, settled, comment } = await setup();
-    const add = github.addPendingReview.bind(github);
+    const { queue, github, reviews, pr, review, stored, settled, comment } = await setup();
+    const save = DraftStore.prototype.saveMeta;
+    let stopped = false;
 
     await comment('Saved before the stop');
 
-    let stopping: Promise<void> | null = null;
+    // The process stops after the pending review's receipt is saved, before the draft records it.
+    vi.spyOn(DraftStore.prototype, 'saveMeta').mockImplementation(function (
+      this: DraftStore,
+      ...args: Parameters<DraftStore['saveMeta']>
+    ) {
+      if (!stopped && 'githubReviewId' in args[2]) {
+        stopped = true;
+        void queue.pause();
+        throw new GitHubError('Stopped', null, null, 'unavailable');
+      }
 
-    // The process stops right after the pending review's receipt is saved.
-    vi.spyOn(github, 'addPendingReview').mockImplementationOnce(async (...args) => {
-      const id = await add(...args);
-
-      stopping = queue.pause();
-
-      return id;
+      return save.apply(this, args);
     });
 
     const operation = review();
 
     queue.resume();
-    await vi.waitFor(() => expect(stopping).not.toBeNull());
-    await stopping;
+    await vi.waitFor(() => expect(stopped).toBe(true));
+    await settled(operation.id, 'waiting');
 
-    // Stopped with the receipt saved and nothing after it.
-    expect(stored(operation.id)).toMatchObject({
-      status: 'queued',
-      steps: [{ method: 'addPendingReview', uncertain: false }],
-    });
+    expect(stored(operation.id).steps).toMatchObject([
+      { method: 'addPendingReview', uncertain: false },
+    ]);
     expect(stored(operation.id).steps[0].completedAt).toBeTruthy();
+    expect(reviews.drafts.draft('you', pr().id)?.githubReviewId ?? null).toBeNull();
 
     queue.resume();
     await settled(operation.id, 'succeeded');
@@ -199,12 +203,16 @@ describe('step intent', () => {
     queue.resume();
     await settled(operation.id, 'needs_attention');
 
-    // As if the first attempt had declared one write fewer than the action now works out.
+    // As if the first attempt had declared one write more than the action now works out: its
+    // receipts are still a valid prefix, so only the declaration can tell.
     const row = stored(operation.id);
 
     store.operations.update({
       ...row,
-      intent: { ...row.intent!, steps: row.intent!.steps.slice(0, -1) },
+      intent: {
+        ...row.intent!,
+        steps: [...row.intent!.steps, intended('replyToThread', literal('t-x'), literal('Later'))],
+      },
     });
     await queue.control('you', operation.id, 'retry');
 
@@ -562,6 +570,54 @@ describe('receipts that do not fit their intent', () => {
     expect(github.writes).toEqual([]);
   });
 
+  it('holds a declared reply whose history is damaged, sending it no second time', async () => {
+    const context = await setup();
+    const { queue, github, pr, stored, settled } = context;
+    const thread = pr(2041).threads[0];
+    const row = crashed(context, {
+      status: 'queued',
+      action: { type: 'reply', threadId: thread.id, body: 'Once' },
+      intent: {
+        version: 1,
+        steps: [intended('replyToThread', literal(thread.id), literal('Once'))],
+      },
+      steps: null as never,
+    });
+
+    queue.resume();
+
+    const held = await settled(row.id, 'needs_attention');
+
+    expect(held.error?.code).toBe('CHECKPOINT_CONFLICT');
+    expect(stored(row.id).steps).toEqual([expect.objectContaining({ method: '' })]);
+    expect(github.writes).toEqual([]);
+  });
+
+  it.each([
+    ['a damaged intent', { version: 1, steps: null }],
+    ['an intent of a later version', { version: 2, steps: [] }],
+  ])('holds a row with %s, and the queue goes on', async (_name, intent) => {
+    const context = await setup();
+    const { queue, github, pr, enqueue, settled } = context;
+    const row = crashed(context, {
+      status: 'queued',
+      action: { type: 'reply', threadId: pr(2041).threads[0].id, body: 'Never' },
+      intent: intent as never,
+    });
+
+    queue.resume();
+
+    const held = await settled(row.id, 'needs_attention');
+
+    expect(held.error?.code).toBe('CHECKPOINT_CONFLICT');
+
+    // The next action, on another PR, is sent as usual.
+    const next = enqueue({ type: 'viewed', path: pr(1839).files[0].path, viewed: true });
+
+    await settled(next.id, 'succeeded');
+    expect(github.writes.map((write) => write.op)).toEqual(['MarkFileViewed']);
+  });
+
   it('survives a damaged step at startup, and shows the row in Activity', async () => {
     const context = await setup();
     const row = crashed(context, { status: 'running', steps: [null] as never });
@@ -633,16 +689,44 @@ describe('the intent model', () => {
     ],
   };
 
-  it('resolves a reference from the stored result, and only once there is one', () => {
+  it('resolves a reference from an earlier finished step with a result, and nothing else', () => {
     expect(
-      resolvedArgs(intent.steps[1], [done('addPendingReview', ['PR_1', 'head'], 'R_1')]),
+      resolvedArgs(intent.steps[1], [done('addPendingReview', ['PR_1', 'head'], 'R_1')], 1),
     ).toEqual(['R_1', 'COMMENT', '']);
-    expect(resolvedArgs(intent.steps[1], [])).toBeNull();
+    expect(resolvedArgs(intent.steps[1], [], 1)).toBeNull();
+    // Unfinished, or finished without a result.
     expect(
-      resolvedArgs(intent.steps[1], [
-        { ...done('addPendingReview', ['PR_1', 'head']), completedAt: null, uncertain: true },
-      ]),
+      resolvedArgs(
+        intent.steps[1],
+        [{ ...done('addPendingReview', ['PR_1', 'head']), completedAt: null, uncertain: true }],
+        1,
+      ),
     ).toBeNull();
+    expect(
+      resolvedArgs(intent.steps[1], [done('addPendingReview', ['PR_1', 'head'], null)], 1),
+    ).toBeNull();
+    // Never itself: a receipt cannot vouch for the id it was sent with.
+    const own: Intent = {
+      version: 1,
+      steps: [intended('submitReview', resultOf(0), literal('COMMENT'), literal(''))],
+    };
+    const receipt = done('submitReview', [{ id: 'R_9' }, 'COMMENT', ''], 'R_9');
+
+    expect(resolvedArgs(own.steps[0], [receipt], 0)).toBeNull();
+    expect(intentProblem(own, [receipt])).not.toBeNull();
+  });
+
+  it('holds an intent of another version or shape', () => {
+    expect(intentProblem({ version: 2, steps: intent.steps } as never, [])).toMatch(/version 2/);
+    expect(intentProblem({ version: 1, steps: null } as never, [])).toMatch(/damaged/);
+    expect(intentProblem(null as never, [])).toMatch(/damaged/);
+    expect(
+      intentProblem({ version: 1, steps: [{ method: 'submitReview', args: null }] } as never, []),
+    ).toMatch(/write 1/);
+    // A reference to itself, or to a later write.
+    expect(
+      intentProblem({ version: 1, steps: [intended('submitReview', resultOf(0))] }, []),
+    ).toMatch(/write 1/);
   });
 
   it('accepts a completed prefix with one unfinished step last, and nothing else', () => {
@@ -677,8 +761,10 @@ describe('the intent model', () => {
     );
 
     expect(saved.args[1]).toEqual({ value: null });
-    expect(resolvedArgs(saved, [])).toEqual(['R_1', null]);
-    expect(matches(saved, 'submitReview', ['R_1', undefined], [])).toBe(true);
+    expect(resolvedArgs(saved, [], 0)).toEqual(['R_1', null]);
+    expect(matches({ version: 1, steps: [saved] }, 0, 'submitReview', ['R_1', undefined], [])).toBe(
+      true,
+    );
   });
 
   it('reads a damaged stored step as a placeholder at its index', () => {
@@ -691,6 +777,9 @@ describe('the intent model', () => {
 
     expect(steps.map((step) => step.method)).toEqual(['addPendingReview', '', '', '']);
     expect(steps.every((step) => Array.isArray(step.args))).toBe(true);
-    expect(storedSteps(undefined)).toEqual([]);
+    // A history that is not a list is damaged, not empty.
+    expect(storedSteps(undefined)).toEqual([expect.objectContaining({ method: '' })]);
+    expect(storedSteps(null)).toHaveLength(1);
+    expect(storedSteps([])).toEqual([]);
   });
 });

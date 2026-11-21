@@ -937,7 +937,7 @@ export class OperationQueue {
     const at = index === -1 ? row.steps.length : index;
     const args = verified.args.map((arg) => ('value' in arg ? arg.value : undefined));
 
-    if (!row.intent || !matches(row.intent.steps[at], verified.method, args, row.steps))
+    if (!row.intent || !matches(row.intent, at, verified.method, args, row.steps))
       throw new ReviewError('CHECKPOINT_CONFLICT', 409, say('outbox.checkpoint-conflict'));
 
     const now = isoNow(this.clock);
@@ -1221,7 +1221,7 @@ export class OperationQueue {
             if (!legacy) {
               if (!row.intent)
                 throw new ReviewError('PLAN_MISSING', 409, say('outbox.plan-missing'));
-              if (!matches(row.intent.steps[index], method, args, row.steps))
+              if (!matches(row.intent, index, method, args, row.steps))
                 throw new ReviewError(
                   'CHECKPOINT_CONFLICT',
                   409,
@@ -1560,6 +1560,14 @@ export class OperationQueue {
       throw new ReviewError('LEGACY_APPROVAL', 409, say('stop.legacy-gitlab-approval'));
 
     if (row.plan === 2) return row;
+
+    // Declared under the plan it had: a forge that now splits approvals is not re-planned under it.
+    if (row.intent) {
+      this.holdConflict(row, 'the forge now sends approvals apart from their summaries');
+
+      return null;
+    }
+
     if (unsent) return this.save({ ...row, plan: 2 });
     if (!this.refusedCombined(row)) return row;
 

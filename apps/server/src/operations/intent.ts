@@ -77,10 +77,11 @@ function isStep(value: unknown): value is MutationStep {
 /**
  * A row's stored steps, each a step: a missing or malformed entry (no method, arguments that are
  * not a list, ...) becomes a placeholder that keeps its index, so every reader sees a valid shape.
- * A step's result may be anything.
+ * A step's result may be anything. A history that is not a list at all is damaged, not empty: it
+ * reads as one placeholder, so nothing is taken to be unsent.
  */
 export function storedSteps(steps: unknown): MutationStep[] {
-  if (!Array.isArray(steps)) return [];
+  if (!Array.isArray(steps)) return [placeholderStep()];
 
   return Array.from(steps, (step: unknown) =>
     isStep(step) ? { ...step, result: step.result ?? null } : placeholderStep(),
@@ -95,10 +96,15 @@ export const isLegacy = (row: { intent?: Intent; steps: MutationStep[] }) =>
   !row.intent && row.steps.length > 0;
 
 /**
- * The arguments `planned` resolves to, from the stored results of earlier steps; null where one
- * refers to a step without a result.
+ * The arguments the write declared at `index` resolves to, from the stored results of the steps
+ * before it; null where one refers to a step that is not earlier, not finished, or without a
+ * result. A step never vouches for itself.
  */
-export function resolvedArgs(planned: StepIntent, steps: MutationStep[]): unknown[] | null {
+export function resolvedArgs(
+  planned: StepIntent,
+  steps: MutationStep[],
+  index: number,
+): unknown[] | null {
   const args: unknown[] = [];
 
   for (const arg of planned.args) {
@@ -107,35 +113,90 @@ export function resolvedArgs(planned: StepIntent, steps: MutationStep[]): unknow
       continue;
     }
 
-    const source = steps[arg.step];
+    const source = arg.step < index ? steps[arg.step] : undefined;
 
     if (!source?.completedAt || isPlaceholder(source)) return null;
 
-    if (arg.result === 'value') args.push(source.result);
-    else {
-      const result = source.result as Record<string, unknown> | null;
+    const result = source.result as unknown;
 
+    if (arg.result === 'value') {
+      if (result === null || result === undefined) return null;
+
+      args.push(result);
+    } else {
       if (typeof result !== 'object' || result === null || !(arg.field in result)) return null;
 
-      args.push(result[arg.field]);
+      const field = (result as Record<string, unknown>)[arg.field];
+
+      if (field === null || field === undefined) return null;
+
+      args.push(field);
     }
   }
 
   return args;
 }
 
-/** True when a call of `method` with `args` is the write `planned` declares, given `steps`. */
+/** True when a call of `method` with `args` at `index` is the write the intent declares there. */
 export function matches(
-  planned: StepIntent | undefined,
+  intent: Intent,
+  index: number,
   method: string,
   args: unknown[],
   steps: MutationStep[],
 ): boolean {
+  const planned = intent.steps[index];
+
   if (!planned || planned.method !== method) return false;
 
-  const expected = resolvedArgs(planned, steps);
+  const expected = resolvedArgs(planned, steps, index);
 
   return expected !== null && fingerprint(expected) === fingerprint(args);
+}
+
+const isArg = (arg: unknown, index: number): arg is IntentArg => {
+  if (typeof arg !== 'object' || arg === null) return false;
+  if ('value' in arg) return true;
+
+  const reference = arg as { step?: unknown; result?: unknown; field?: unknown };
+
+  return (
+    Number.isInteger(reference.step) &&
+    (reference.step as number) >= 0 &&
+    (reference.step as number) < index &&
+    (reference.result === 'value' ||
+      (reference.result === 'field' && typeof reference.field === 'string'))
+  );
+};
+
+/**
+ * Why a stored intent cannot be one this version runs: null when it is version 1, a list of
+ * writes each with a method and arguments, every reference to an earlier write.
+ */
+export function intentShapeProblem(intent: unknown): string | null {
+  if (typeof intent !== 'object' || intent === null) return 'the intent is damaged';
+
+  const { version, steps } = intent as { version?: unknown; steps?: unknown };
+
+  if (version !== 1)
+    return `the intent is version ${String(version)}, which this version cannot run`;
+  if (!Array.isArray(steps)) return 'the intent is damaged';
+
+  for (const [index, step] of steps.entries()) {
+    const write = step as { method?: unknown; args?: unknown } | null;
+
+    if (
+      typeof write !== 'object' ||
+      write === null ||
+      typeof write.method !== 'string' ||
+      write.method === '' ||
+      !Array.isArray(write.args) ||
+      !write.args.every((arg) => isArg(arg, index))
+    )
+      return `declared write ${index + 1} is damaged`;
+  }
+
+  return null;
 }
 
 /**
@@ -144,11 +205,14 @@ export function matches(
  * or uncertain) as the last.
  */
 export function intentProblem(intent: Intent, steps: MutationStep[]): string | null {
+  const shape = intentShapeProblem(intent);
+
+  if (shape) return shape;
   if (steps.length > intent.steps.length) return 'more steps than the intent declares';
 
   for (const [index, step] of steps.entries()) {
     if (isPlaceholder(step)) return `step ${index + 1} is missing`;
-    if (!matches(intent.steps[index], step.method, step.args, steps))
+    if (!matches(intent, index, step.method, step.args, steps))
       return `step ${index + 1} is not the write declared for it`;
     if (!step.completedAt && index < steps.length - 1)
       return `step ${index + 1} is unfinished, but a later one was sent`;
