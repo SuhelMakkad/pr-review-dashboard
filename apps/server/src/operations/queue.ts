@@ -1,4 +1,14 @@
 import { performance } from 'node:perf_hooks';
+import {
+  fingerprint as intentFingerprint,
+  fullyReceipted,
+  intended,
+  intentProblem,
+  isLegacy,
+  literal,
+  matches,
+  type StepIntent,
+} from '@/operations/intent.js';
 import { render, renderStored, say, wordingOf, type Wording } from '@/messages.js';
 import { isoNow, type Cancel, type Clock } from '@/clock.js';
 import { createHash } from 'node:crypto';
@@ -290,7 +300,8 @@ export class OperationQueue {
           (step.method === 'approveReview' && step.args[2] === ''),
       );
 
-    if (uncertain && !unresolvable) controls.push('check');
+    if (uncertain && !unresolvable && row.error?.code !== 'CHECKPOINT_CONFLICT')
+      controls.push('check');
     else if (uncertain) {
       // Nothing to retry until you look: the resolution may or may not have reached the forge.
     } else if (
@@ -332,6 +343,7 @@ export class OperationQueue {
       requestKey: _key,
       attempts: _attempts,
       steps: _steps,
+      intent: _intent,
       pendingReviewBackup: _backup,
       ...operation
     } = row;
@@ -835,11 +847,112 @@ export class OperationQueue {
     );
     if (!row) return;
 
+    // Checked before anything is sent or reconciled: reconciling an unfinished step could hide
+    // that a later one was sent before it.
+    const problem = row.intent ? intentProblem(row.intent, row.steps) : null;
+
+    if (problem) {
+      this.holdConflict(row, problem);
+
+      return;
+    }
+
     // Each action is sent as the account that queued it, whatever is selected meanwhile.
     const forge = this.forge(row.account);
 
     if (row.status === 'checking') await this.reconcile(row, forge);
     else await this.execute(row, forge);
+  }
+
+  /**
+   * Holds a row whose receipts are not its declared writes: it needs your attention, and nothing
+   * more is sent or checked for it. Saved directly, so an uncertain step cannot send it back to
+   * checking.
+   */
+  private holdConflict(row: OperationRecord, problem: string): void {
+    this.save({
+      ...row,
+      status: 'needs_attention',
+      dismissedAt: null,
+      retryAt: null,
+      progress: say('outbox.held', { reason: problem }),
+      error: { code: 'CHECKPOINT_CONFLICT', message: say('outbox.checkpoint-conflict') },
+    });
+  }
+
+  /**
+   * The writes that end the action: its last declared write, on success, must be one of them.
+   * An automatic approval sent in two steps ends with its summary, not the approval.
+   */
+  private finalMethods(row: OperationRecord): string[] {
+    const finals: Record<GitHubAction['type'], string[]> = {
+      review: ['submitReview'],
+      comment: ['submitReview', 'addConversationComment'],
+      reply: ['replyToThread'],
+      resolve: ['setThreadResolved'],
+      viewed: ['setFileViewed'],
+      reviewers: ['requestReviews'],
+      discard: ['deleteReview'],
+      ai_review: ['addConversationComment', 'approveReview'],
+    };
+
+    return row.action.type === 'ai_review'
+      ? [
+          row.action.event === 'APPROVE' && row.plan !== 2
+            ? 'approveReview'
+            : 'addConversationComment',
+        ]
+      : finals[row.action.type];
+  }
+
+  /**
+   * Refuses to call an action done before it has sent all it declared: every declared write
+   * receipted, the last the action's terminal one. A row from before intents keeps its old
+   * completion; one that declared nothing completes only where its path settles with nothing to
+   * send.
+   */
+  private assertSettled(row: OperationRecord, nothingToSend: boolean): void {
+    if (isLegacy(row)) return;
+
+    if (!row.intent) {
+      if (nothingToSend) return;
+
+      throw new ReviewError('PLAN_MISSING', 409, say('outbox.plan-missing'));
+    }
+
+    if (
+      !fullyReceipted(row.intent, row.steps) ||
+      !this.finalMethods(row).includes(row.intent.steps.at(-1)?.method ?? '')
+    )
+      throw new ReviewError('PLAN_INCOMPLETE', 409, say('outbox.plan-incomplete'));
+  }
+
+  /**
+   * Records, for a declared write whose effect is already on the forge (a thread already resolved,
+   * a pending review already gone), a receipt verified from that state, at the first unfinished
+   * step: nothing is sent. It must be the write declared there.
+   */
+  private settleDeclared(row: OperationRecord, verified: StepIntent): OperationRecord {
+    const index = row.steps.findIndex((step) => !step.completedAt);
+    const at = index === -1 ? row.steps.length : index;
+    const args = verified.args.map((arg) => ('value' in arg ? arg.value : undefined));
+
+    if (!row.intent || !matches(row.intent.steps[at], verified.method, args, row.steps))
+      throw new ReviewError('CHECKPOINT_CONFLICT', 409, say('outbox.checkpoint-conflict'));
+
+    const now = isoNow(this.clock);
+    const steps = [...row.steps];
+
+    steps[at] = {
+      method: verified.method,
+      args,
+      startedAt: now,
+      completedAt: now,
+      result: null,
+      uncertain: false,
+    };
+
+    return this.save({ ...row, steps });
   }
 
   /** The forge, with every call made as `account` (see `GitHubApi.as`). */
@@ -895,31 +1008,41 @@ export class OperationQueue {
       progress: say('outbox.checking-account'),
     });
 
+    // Decided once, as execution starts: a row from before intents replays its steps by position.
+    const legacy = isLegacy(row);
+
+    /**
+     * Records the writes a path declares before its first: once, then each retry must declare the
+     * same. A legacy row takes none.
+     */
+    const declare = (writes: StepIntent[]) => {
+      if (legacy) return;
+
+      const current = this.row(row.account, row.id);
+
+      if (current.status === 'cancelled') throw new Cancelled();
+      if (current.intent) {
+        if (intentFingerprint(current.intent.steps) !== intentFingerprint(writes))
+          throw new ReviewError('CHECKPOINT_CONFLICT', 409, say('outbox.checkpoint-conflict'));
+
+        row = current;
+
+        return;
+      }
+
+      row = this.save({ ...current, intent: { version: 1, steps: writes } });
+    };
+
     try {
       const final = row.steps.at(-1);
-      const finalMethods: Record<GitHubAction['type'], string[]> = {
-        review: ['submitReview'],
-        comment: ['submitReview', 'addConversationComment'],
-        reply: ['replyToThread'],
-        resolve: ['setThreadResolved'],
-        viewed: ['setFileViewed'],
-        reviewers: ['requestReviews'],
-        discard: ['deleteReview'],
-        ai_review: ['addConversationComment', 'approveReview'],
-      };
 
-      // A durable final receipt already proves success, even if the PR changed after a crash.
-      // An automatic approval sent in two steps ends with its summary, not the approval.
-      const finalMethod =
-        row.action.type === 'ai_review'
-          ? [
-              row.action.event === 'APPROVE' && row.plan !== 2
-                ? 'approveReview'
-                : 'addConversationComment',
-            ]
-          : finalMethods[row.action.type];
-
-      if (final?.completedAt && finalMethod.includes(final.method)) {
+      // A durable final receipt already proves success, even if the PR changed after a crash: for
+      // an intent row, only once every declared write has its receipt.
+      if (
+        final?.completedAt &&
+        this.finalMethods(row).includes(final.method) &&
+        (!row.intent || fullyReceipted(row.intent, row.steps))
+      ) {
         const receipt = final.result as { url?: string; pending?: boolean } | null;
         this.complete(
           row,
@@ -990,11 +1113,19 @@ export class OperationQueue {
       if (!pr) throw new ReviewError('NOT_FOUND', 404, say('pull.unavailable'));
 
       const action = row.action;
+      // Already in the wanted state: nothing to send. Once declared, its write is receipted from
+      // that state.
       if (
         action.type === 'resolve' &&
         pr.threads.find((thread) => thread.id === action.threadId)?.isResolved === action.resolved
       ) {
-        this.complete(row, null);
+        if (row.intent)
+          row = this.settleDeclared(
+            row,
+            intended('setThreadResolved', literal(action.threadId), literal(action.resolved)),
+          );
+
+        this.complete(row, null, !row.intent);
         return;
       }
 
@@ -1081,6 +1212,22 @@ export class OperationQueue {
             row = this.row(row.account, row.id);
             if (row.status === 'cancelled') throw new Cancelled();
             const previous = row.steps[index];
+
+            // Steps are made in order: one past the end would leave a gap.
+            if (index > row.steps.length)
+              throw new ReviewError('CHECKPOINT_CONFLICT', 409, say('outbox.checkpoint-conflict'));
+
+            // Every write of a row that is not legacy is the one declared at its index.
+            if (!legacy) {
+              if (!row.intent)
+                throw new ReviewError('PLAN_MISSING', 409, say('outbox.plan-missing'));
+              if (!matches(row.intent.steps[index], method, args, row.steps))
+                throw new ReviewError(
+                  'CHECKPOINT_CONFLICT',
+                  409,
+                  say('outbox.checkpoint-conflict'),
+                );
+            }
 
             if (
               previous &&
@@ -1225,6 +1372,7 @@ export class OperationQueue {
           assertActive: () => {
             if (this.row(row.account, row.id).status === 'cancelled') throw new Cancelled();
           },
+          intend: declare,
         },
       );
       let result: GitHubOperation['result'] = null;
@@ -1265,18 +1413,61 @@ export class OperationQueue {
         case 'discard': {
           const action = row.action;
           const backup = await this.checkedReceipt(forge, row.account, action.reviewId);
+
+          // The read took time: a cancellation meanwhile stands.
+          row = this.row(row.account, row.id);
+          if (row.status === 'cancelled') throw new Cancelled();
+
           if (backup && backup.state !== 'PENDING')
             throw new ReviewError('ALREADY_SUBMITTED', 409, say('outbox.already-submitted'));
 
-          if (backup && !row.pendingReviewBackup) {
-            if (backup) row = this.save({ ...row, pendingReviewBackup: backup });
+          if (backup && !row.pendingReviewBackup)
+            row = this.save({ ...row, pendingReviewBackup: backup });
+
+          const deletion = intended('deleteReview', literal(action.reviewId));
+
+          // No pending review to delete: nothing to send, or, once declared, its write receipted.
+          if (!backup) {
+            if (row.intent) row = this.settleDeclared(row, deletion);
+
+            this.complete(row, null, !row.intent);
+            return;
           }
 
-          if (backup) await github.deleteReview(action.reviewId);
+          declare([deletion]);
+          await github.deleteReview(action.reviewId);
           break;
         }
         case 'ai_review': {
           const action = row.action;
+          const posts =
+            action.event !== 'APPROVE'
+              ? [intended('addConversationComment', literal(row.prId), literal(action.body))]
+              : row.plan === 2
+                ? [
+                    intended(
+                      'approveReview',
+                      literal(row.prId),
+                      literal(action.expectedHeadOid),
+                      literal(''),
+                    ),
+                    intended('addConversationComment', literal(row.prId), literal(action.body)),
+                  ]
+                : [
+                    intended(
+                      'approveReview',
+                      literal(row.prId),
+                      literal(action.expectedHeadOid),
+                      literal(action.body),
+                    ),
+                  ];
+
+          declare([
+            ...(action.event === 'APPROVE' ? (row.approvalThreadIds ?? []) : []).map((threadId) =>
+              intended('setThreadResolved', literal(threadId), literal(true)),
+            ),
+            ...posts,
+          ]);
 
           if (action.event === 'APPROVE') {
             for (const threadId of row.approvalThreadIds ?? [])
@@ -1697,7 +1888,16 @@ export class OperationQueue {
     return method === 'submitReview' ? say('outbox.submitting') : say('outbox.sending');
   }
 
-  private complete(row: OperationRecord, result: GitHubOperation['result']): void {
+  /**
+   * Marks the action done. `nothingToSend`: its path found the work already done before declaring
+   * any write (see `assertSettled`).
+   */
+  private complete(
+    row: OperationRecord,
+    result: GitHubOperation['result'],
+    nothingToSend = false,
+  ): void {
+    this.assertSettled(row, nothingToSend);
     this.sync.store.transaction(() => {
       const drafts = new DraftStore(this.sync.store, row.id);
 

@@ -1389,6 +1389,13 @@ describe('approvals whose summary is a separate write', () => {
     );
     expect(operation.result?.url).toMatch(/#issuecomment-/);
     expect(stored(context, run.id)).toMatchObject({ plan: 2 });
+    // Declared before the first was sent: the resolutions, the approval, then its summary.
+    expect(stored(context, run.id).intent?.steps.map((step) => step.method)).toEqual([
+      'setThreadResolved',
+      'setThreadResolved',
+      'approveReview',
+      'addConversationComment',
+    ]);
   });
 
   it('sends only the summary again when the forge refused it after approving', async () => {
