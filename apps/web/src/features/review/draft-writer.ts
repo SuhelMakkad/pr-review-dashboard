@@ -368,6 +368,8 @@ export class DraftWriter {
   private writes: AttemptRecord[];
   /** Writes being looked up now, by key: a lookup asked for meanwhile joins the one on its way. */
   private readonly checkingWrites = new Map<string, Promise<void>>();
+  /** Raised for a write as it is sent again: a lookup begun before then says nothing after. */
+  private readonly resends = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   /** Raised on every change, so a subscriber can tell one state from the next. */
   version = 0;
@@ -997,6 +999,10 @@ export class DraftWriter {
 
     if (gate) throw new WriteRefused(gate.message, gate.code);
 
+    // A lookup on its way now was made before this send: its answer says nothing of it.
+    this.resends.set(record.key, (this.resends.get(record.key) ?? 0) + 1);
+    this.checkingWrites.delete(record.key);
+
     // Recorded as sent before it is, or never sent.
     this.moveWrite(record, 'sending');
 
@@ -1013,6 +1019,14 @@ export class DraftWriter {
         this.moveWrite(record, 'unknown');
 
         throw new WriteRefused(ahead.message, ahead.code);
+      }
+
+      // Its lifetime ended while it waited: never sent, only looked up.
+      if (Date.now() >= (record.deadline ?? 0)) {
+        this.moveWrite(record, 'unknown', { resendable: false });
+        this.poll();
+
+        return;
       }
 
       const expected = { writeId: record.writeId!, base: record.base! };
@@ -1106,14 +1120,20 @@ export class DraftWriter {
 
   private async lookUpWrite(record: AttemptRecord): Promise<void> {
     const { writeId, base } = record;
+    const resends = this.resends.get(record.key) ?? 0;
 
     if (!writeId || !base) return;
 
     try {
       const looked = fromLookup(await this.transport.lookup(writeId, base), { writeId, base });
 
-      // Settled meanwhile (stopped, or sent again): this lookup is stale.
-      if (!this.writes.includes(record) || !writeNeedsLookup(record) || record.writeId !== writeId)
+      // Settled meanwhile (stopped), or sent again since it was asked: this lookup is stale.
+      if (
+        !this.writes.includes(record) ||
+        !writeNeedsLookup(record) ||
+        record.writeId !== writeId ||
+        (this.resends.get(record.key) ?? 0) !== resends
+      )
         return;
 
       // Nothing read: looked up again later.
@@ -1190,6 +1210,11 @@ export class DraftWriter {
     if (record.phase !== phase) record.dismissed = false;
 
     Object.assign(record, extra, { phase });
+
+    // An autosave that may have been saved, and never can be now: its text is kept for you to
+    // confirm, in the journal with the move, never saved again on its own.
+    if (phase === 'lost' && record.fields) this.markFailed(record.fields, NOT_CONFIRMED);
+
     this.changed();
   }
 

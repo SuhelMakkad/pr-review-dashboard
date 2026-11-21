@@ -2365,6 +2365,71 @@ describe('comment and AI write recovery', () => {
     expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
   });
 
+  it('never sends again one whose lifetime ended while it waited in the queue', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+
+    // A write ahead of it, answered only once the lifetime has ended.
+    const ahead = held();
+
+    next.answers.push(ahead.answer);
+
+    const before = reloaded.write('addComment', comment, { body: 'Ahead' });
+
+    await vi.waitFor(() => expect(next.sent).toHaveLength(1));
+
+    const again = reloaded.sendWriteAgain(reloaded.writeViews()[0]!.key);
+
+    clock(Date.now() + ATTEMPT_TTL_MS);
+    ahead.release((request) => ({
+      attempt: { id: request.body.writeId, state: 'committed', revision: 3 },
+    }));
+    await before;
+    await again;
+
+    expect(next.sent.map((request) => request.body.body)).toEqual(['Ahead']);
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+  });
+
+  it('ignores a lookup made before it was sent again', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+
+    // A lookup on its way, its miss answered only after the resend.
+    let answer: (value: unknown) => void = () => {};
+
+    vi.mocked(next.transport.lookup).mockImplementationOnce(
+      () => new Promise((resolve) => (answer = resolve)),
+    );
+
+    const stale = reloaded.reconcile();
+
+    next.answers.push(unreachable);
+    await reloaded.sendWriteAgain(reloaded.writeViews()[0]!.key);
+    answer({ arrived: false, fenced: false, provable: true });
+    await stale;
+
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+  });
+
   it('never holds up the draft for a write not confirmed', async () => {
     const { sent, answers, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);
@@ -2502,6 +2567,44 @@ describe('autosaves across a restart', () => {
 
     expect(writers.map(({ sent }) => sent)).toEqual([[], []]);
     expect(writers[1]!.writer.state('body')).not.toBe('saved');
+  });
+
+  it('keeps for you to confirm, across reloads, an autosave a stop left lost', async () => {
+    earlierJournal();
+
+    const first = server();
+
+    vi.mocked(first.transport.lookup).mockResolvedValue({
+      attempt: {
+        id: bare,
+        state: 'refused',
+        result: {
+          status: 409,
+          body: {
+            error: 'You stopped waiting for this.',
+            code: 'WRITE_ABANDONED',
+            decision: 'unknown',
+          },
+        },
+      },
+    });
+
+    const writer = new DraftWriter('you', PR, first.transport, instant, NEVER);
+
+    await writer.reconcile();
+
+    expect(writer.writeViews()).toMatchObject([{ phase: 'lost', text: 'Old' }]);
+    expect(writer.state('body')).toBe('error');
+
+    const second = server();
+    const reloaded = new DraftWriter('you', PR, second.transport, instant, NEVER);
+
+    reloaded.observe(draft(1));
+    await reloaded.flush();
+    await reloaded.settled();
+
+    expect(second.sent).toEqual([]);
+    expect(reloaded.state('body')).toBe('error');
   });
 
   it('keeps for you to confirm an autosave a restarted server no longer knows, never saved afresh', async () => {
