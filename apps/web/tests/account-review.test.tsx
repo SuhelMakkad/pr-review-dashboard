@@ -25,6 +25,7 @@ vi.mock('@tanstack/react-router', async (original) => ({
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  sessionStorage.clear();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -141,7 +142,10 @@ describe('drafts and Activity per account', () => {
 
     const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
 
-    act(() => hook.result.current.saveMeta.mutate({ body: 'Typed before the switch' }));
+    act(() => {
+      hook.result.current.writer.edit('body', 'Typed before the switch');
+      void hook.result.current.writer.flush();
+    });
     await waitFor(() => expect(paths).toContain('PUT /api/accounts/me/pulls/p1/draft'));
     hook.unmount();
     await act(async () => answer(reply(notActive, 409)));
@@ -156,7 +160,22 @@ describe('drafts and Activity per account', () => {
     const { adoptStatus } = await import('@/lib/live');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const answers: ((response: Response) => void)[] = [];
-    const old = { prId: 'p1', body: 'Before the switch', event: 'COMMENT', comments: [] };
+    const versions = (revision: number) => ({ revision, generation: 0, observation: 0 });
+    const old = {
+      prId: 'p1',
+      body: 'Before the switch',
+      event: 'COMMENT',
+      comments: [],
+      versions: versions(0),
+    };
+    // A committed apply, as the server answers it: the draft it left, and its attempt.
+    const applied = (body: string, revision: number) =>
+      reply({
+        ...old,
+        body,
+        versions: versions(revision),
+        attempt: { id: 'a', state: 'committed', revision },
+      });
 
     vi.stubGlobal('fetch', (path: string) =>
       path.includes('/summary')
@@ -171,7 +190,7 @@ describe('drafts and Activity per account', () => {
     // A reply that comes while the same account is shown fills the draft in.
     act(() => hook.result.current.applySummary.mutate('run-1'));
     await waitFor(() => expect(answers).toHaveLength(1));
-    await act(async () => answers[0](reply({ ...old, body: 'Applied' })));
+    await act(async () => answers[0](applied('Applied', 1)));
     await waitFor(() =>
       expect(client.getQueryData(queryKeys.draft('me', 'p1'))).toMatchObject({ body: 'Applied' }),
     );
@@ -183,7 +202,7 @@ describe('drafts and Activity per account', () => {
     act(() => adoptStatus(client, as('other', 2)));
     act(() => adoptStatus(client, as('me', 3)));
     expect(client.getQueryData(queryKeys.draft('me', 'p1'))).toBeUndefined();
-    await act(async () => answers[1](reply({ ...old, body: 'From before the switch' })));
+    await act(async () => answers[1](applied('From before the switch', 2)));
     await waitFor(() => expect(hook.result.current.applySummary.isSuccess).toBe(true));
 
     expect(client.getQueryData(queryKeys.draft('me', 'p1'))).toBeUndefined();

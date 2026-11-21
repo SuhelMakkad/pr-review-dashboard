@@ -477,7 +477,6 @@ export function FullReview({
           account={account}
           ci={ci}
           viewedHeadOid={run?.headOid ?? headOid}
-          saveMeta={(changes) => review.saveMeta.mutate(changes)}
           submit={(input) => review.submit.mutateAsync(input)}
           busy={review.submit.isPending}
           onSubmitted={() => {

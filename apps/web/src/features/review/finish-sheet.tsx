@@ -11,6 +11,7 @@ import { forgeTerms } from '@review-desk/shared/accounts';
 import type { CiState } from '@review-desk/shared/types';
 import { reviewEventLabels, type ReviewDraft, type ReviewEvent } from '@review-desk/shared/review';
 import type { OperationReceipt } from '@review-desk/shared/operations';
+import { useDraftWriter } from '@/features/review/use-draft-writer';
 import { openActivity } from '@/features/activity/use-operations';
 import { ApiError } from '@/lib/api';
 import { useStatus } from '@/lib/queries';
@@ -61,7 +62,6 @@ export interface FinishSheetProps {
   ci: CiState;
   /** The head commit the reviewer was looking at. */
   viewedHeadOid: string;
-  saveMeta: (changes: { body?: string; event?: ReviewEvent }) => void;
   submit: (input: {
     event: ReviewEvent;
     body: string;
@@ -81,16 +81,18 @@ export function FinishSheet({
   account,
   ci,
   viewedHeadOid,
-  saveMeta,
   submit,
   busy,
   onSubmitted,
   onReviewNewCommits,
 }: FinishSheetProps) {
-  const [event, setEvent] = useState<ReviewEvent>(draft.event);
-  const [body, setBody] = useState(draft.body);
+  // The summary and verdict are the PR's writer's: every editor of this draft shows the same,
+  // and its saves are queued with the draft's other writes.
+  const writer = useDraftWriter(account, draft.prId, draft);
+  const event = writer.value('event', draft);
+  const body = writer.value('body', draft);
+  const saveProblem = writer.failure('body') ?? writer.failure('event');
   const [problem, setProblem] = useState<{ code?: string; message: string } | null>(null);
-  const lastSaved = useRef(draft.body);
   const ai = useAi(draft.prId, account);
   const summaryRun = ai.latest('draft_summary');
   const savedSummary = ai.completed('draft_summary');
@@ -107,51 +109,24 @@ export function FinishSheet({
     option === 'REQUEST_CHANGES' &&
     capabilities?.requestChanges !== true;
   const submitted = useRef(false);
-  const current = useRef({ body, saveMeta, applying, locked });
-
-  current.current = { body, saveMeta, applying, locked };
   const pending = draft.comments.filter((comment) => comment.status !== 'stale');
   const stale = draft.comments.filter((comment) => comment.status === 'stale');
 
   useEffect(() => {
     if (open) {
       submitted.current = false;
-      lastSaved.current = draft.body;
-      setEvent(draft.event);
-      setBody(draft.body);
       setProblem(null);
     }
   }, [open]);
 
-  // Autosave the summary so closing the sheet never loses it.
-  useEffect(() => {
-    if (!open || applying || locked || body === lastSaved.current) return;
-
-    const timer = setTimeout(() => {
-      lastSaved.current = body;
-      saveMeta({ body });
-    }, 800);
-
-    return () => clearTimeout(timer);
-  }, [body, open, applying, locked]);
-
-  // Flush pending edits when navigation unmounts the sheet before its debounce finishes.
-  useEffect(() => {
-    return () => {
-      if (
-        !submitted.current &&
-        !current.current.applying &&
-        !current.current.locked &&
-        current.current.body !== lastSaved.current
-      )
-        current.current.saveMeta({ body: current.current.body });
-    };
-  }, []);
+  // Saved now, rather than after the pause, when navigation unmounts the sheet: the writer keeps
+  // the edit either way.
+  useEffect(() => () => void writer.flush(), [writer]);
 
   const choose = (next: ReviewEvent) => {
     if (locked || unavailable(next)) return;
-    setEvent(next);
-    saveMeta({ event: next });
+
+    writer.edit('event', next);
   };
 
   const send = async (allowNewHead = false) => {
@@ -188,10 +163,7 @@ export function FinishSheet({
     <Modal
       open={open}
       onOpenChange={(next) => {
-        if (!next && !applying && !locked && !submitted.current && body !== lastSaved.current) {
-          lastSaved.current = body;
-          saveMeta({ body });
-        }
+        if (!next && !submitted.current) void writer.flush();
 
         onOpenChange(next);
       }}
@@ -280,8 +252,6 @@ export function FinishSheet({
                 task: 'draft_summary',
                 provider,
                 force: true,
-                draftEvent: event,
-                draftBody: body,
               });
             }}
           />
@@ -409,12 +379,8 @@ export function FinishSheet({
                   }
                   aria-busy={applying}
                   onClick={() => {
-                    ai.applySummary.mutate(savedSummary.id, {
-                      onSuccess: (next) => {
-                        lastSaved.current = next.body;
-                        setBody(next.body);
-                      },
-                    });
+                    // The writer seeds the draft it leaves: the sheet shows it from there.
+                    ai.applySummary.mutate(savedSummary.id);
                   }}
                 >
                   {applying ? 'Loading generated summary…' : 'Use generated summary'}
@@ -437,12 +403,17 @@ export function FinishSheet({
           <textarea
             value={body}
             disabled={applying || locked}
-            onChange={(change) => setBody(change.target.value)}
+            onChange={(change) => writer.edit('body', change.target.value)}
             rows={5}
             placeholder="The overall picture: what is good, what must change, what you did not look at."
             className="w-full resize-y rounded-sm border border-line bg-sunken px-3 py-2 text-sm outline-none placeholder:text-fg-subtle focus:border-accent"
           />
         </label>
+        {saveProblem && (
+          <p role="alert" className="text-sm text-fail">
+            {saveProblem}
+          </p>
+        )}
 
         {Boolean(draft.preparedReview?.previousDrafts?.length) && (
           <details className="space-y-2 rounded-sm border border-line p-3 text-xs">

@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { toast } from 'sonner';
 import type { DiffManifest, DiffMode } from '@review-desk/shared/diff';
-import type { ReviewEvent, Side } from '@review-desk/shared/review';
+import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
 import { showsViewedTarget, type ViewedTarget } from '@review-desk/shared/operations';
+import { newerDraft, useDraftWriter } from '@/features/review/use-draft-writer';
 import { ApiError } from '@/lib/api';
 import { routes } from '@review-desk/shared/contract';
 import { call, command } from '@/lib/call';
@@ -106,14 +106,22 @@ export function useReview(prId: string | null, account: string) {
   const refreshOperations = () =>
     client.invalidateQueries({ queryKey: queryKeys.operations(account) });
 
+  const draftKey = queryKeys.draft(account, prId ?? 'none');
   const draft = useQuery({
-    queryKey: queryKeys.draft(account, prId ?? 'none'),
-    queryFn: ({ signal }) => call(routes.draft, { params: pr, signal }),
+    queryKey: draftKey,
+    // Kept the newer of each part: a read that started before a write never undoes it.
+    queryFn: async ({ signal }) =>
+      newerDraft(
+        client.getQueryData<ReviewDraft>(draftKey),
+        await call(routes.draft, { params: pr, signal }),
+      ),
     enabled: Boolean(prId && account),
   });
+  // Every draft write goes through the PR's writer, in one queue, on the draft you saw. The
+  // summary and verdict are edited there too (`writer.edit`), each refused save saying why.
+  const writer = useDraftWriter(account, prId ?? 'none', draft.data);
 
-  const refreshDraft = () =>
-    client.invalidateQueries({ queryKey: queryKeys.draft(account, prId ?? 'none') });
+  const refreshDraft = () => client.invalidateQueries({ queryKey: draftKey });
 
   const addComment = useMutation({
     mutationFn: (
@@ -122,29 +130,19 @@ export function useReview(prId: string | null, account: string) {
         origin?: 'user' | 'ai';
         revision?: { headOid: string; baseOid: string | null };
       },
-    ) => call(routes.addComment, { params: pr, body: input }),
+    ) => writer.write<DraftComment>('addComment', pr, { ...input }),
     onSuccess: refreshDraft,
   });
 
   const editComment = useMutation({
     mutationFn: ({ id, body }: { id: string; body: string }) =>
-      call(routes.editComment, { params: { ...pr, cid: id }, body: { body } }),
+      writer.write<DraftComment>('editComment', { ...pr, cid: id }, { body }),
     onSuccess: refreshDraft,
   });
 
   const deleteComment = useMutation({
-    mutationFn: (id: string) =>
-      call(routes.deleteComment, { params: { ...pr, cid: id }, body: {} }),
+    mutationFn: (id: string) => writer.write<{ ok: true }>('deleteComment', { ...pr, cid: id }, {}),
     onSuccess: refreshDraft,
-  });
-
-  const saveMeta = useMutation({
-    mutationFn: (changes: { body?: string; event?: ReviewEvent }) =>
-      call(routes.saveDraft, { params: pr, body: changes }),
-    // Refetch rather than applying an old autosave response over a newly queued/finished review.
-    onSuccess: refreshDraft,
-    // An autosave can land after its sheet closed (a switch away): say why it was not kept.
-    onError: (error) => toast.error(error.message),
   });
 
   const discard = useMutation({
@@ -251,10 +249,10 @@ export function useReview(prId: string | null, account: string) {
 
   return {
     draft,
+    writer,
     addComment,
     editComment,
     deleteComment,
-    saveMeta,
     discard,
     submit,
     commentNow,
