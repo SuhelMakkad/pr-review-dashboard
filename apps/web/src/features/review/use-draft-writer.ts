@@ -77,10 +77,18 @@ function transport(client: QueryClient, account: string, prId: string): Transpor
         writeRoutes[request.route as keyof typeof writeRoutes] as never,
         { params: request.params, body: request.body, strict: true } as never,
       ),
+    // Every write the writer looks up is a draft write: another kind under its id is a conflict.
     lookup: (writeId, base) =>
       call(routes.draftAttempt, {
         params: { account, id: prId, attemptId: writeId },
-        query: { base: base.revision, generation: base.generation },
+        query: { base: base.revision, generation: base.generation, kind: 'write' },
+        strict: true,
+      }),
+    checkpoint: () => call(routes.claimCheckpoint, { params: { account }, strict: true }),
+    abandonWrite: (writeId) =>
+      call(routes.abandonDraftAttempt, {
+        params: { account, id: prId, attemptId: writeId },
+        body: { kind: 'write' },
         strict: true,
       }),
     stamp: accountSwitches,
@@ -171,11 +179,14 @@ export function useDraftWriter(
     if (draft) writer.observe(draft);
   }, [writer, draft]);
 
-  // Its commands are looked up as soon as anything says they may have moved: their operation
-  // changed, or the stream connected again after a gap.
+  // Its commands and writes are looked up as soon as anything says they may have moved: their
+  // operation changed, or the stream connected again after a gap. A server that started again
+  // seals ids anew, so the checkpoint is read again.
   useEffect(
     () =>
       onServerEvent((event) => {
+        if (event.type === 'hello') writer.forgetCheckpoint();
+
         if (
           event.type === 'hello' ||
           event.type === 'resync' ||

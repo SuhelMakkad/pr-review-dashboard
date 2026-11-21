@@ -33,6 +33,17 @@ afterEach(() => {
 const as = (login: string, revision = 1) => status({ account: { login }, revision });
 const reply = (body: unknown, code = 200) =>
   ({ ok: code < 400, status: code, json: async () => body }) as Response;
+
+/**
+ * Stubs `fetch` with `answer`. The claim checkpoint new write ids are sealed with is answered here
+ * too, as the server does, so each test answers only the requests it is about.
+ */
+const stubFetch = (answer: (path: string, options: RequestInit) => unknown) =>
+  vi.stubGlobal('fetch', (path: string, options: RequestInit) =>
+    String(path).endsWith('/claim-checkpoint')
+      ? Promise.resolve(reply({ checkpoint: 0, seal: '0123456789abcdef' }))
+      : answer(path, options),
+  );
 const notActive = {
   error: "You're using other now. Switch back to me to do this.",
   code: 'ACCOUNT_NOT_ACTIVE',
@@ -91,7 +102,7 @@ describe('action IDs across the move to account routes', () => {
       ['a', 'b'].flatMap((id) => first.legacyIds(`/api/accounts/me/pulls/${id}/review`, 'POST'));
 
     // One tab forgets A while the other forgets B and keeps, then clears, an id of its own.
-    vi.stubGlobal('fetch', async () => reply({ operation: { id: 'c' } }, 202));
+    stubFetch(async () => reply({ operation: { id: 'c' } }, 202));
     expect(first.forgetLegacy(key('a'), 'a')).toBe(true);
 
     const sending = second.githubCommand('/api/accounts/me/pulls/c/viewed', {});
@@ -119,7 +130,7 @@ describe('action IDs across the move to account routes', () => {
 
     const { githubCommand, legacyIds } = await import('@/lib/operation-command');
 
-    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+    stubFetch(async (_path: string, options: RequestInit) => {
       sent.push(JSON.parse(String(options.body)).operationId);
 
       return reply({ operation: { id: sent.at(-1) } }, 202);
@@ -157,7 +168,7 @@ describe('action IDs across the move to account routes', () => {
 
     const second = await import('@/lib/operation-command');
 
-    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+    stubFetch(async (_path: string, options: RequestInit) => {
       sent.push(JSON.parse(String(options.body)).operationId);
 
       // This tab's first answer is lost; the server accepted it.
@@ -192,7 +203,7 @@ describe('action IDs across the move to account routes', () => {
 
       return getItem.call(this, name);
     });
-    vi.stubGlobal('fetch', async () => reply({ operation: { id: 'legacy' } }, 202));
+    stubFetch(async () => reply({ operation: { id: 'legacy' } }, 202));
     await githubCommand(path, body);
 
     vi.restoreAllMocks();
@@ -214,7 +225,7 @@ describe('action IDs across the move to account routes', () => {
 
       return getItem.call(this, name);
     });
-    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+    stubFetch(async (_path: string, options: RequestInit) => {
       sent.push(JSON.parse(String(options.body)).operationId);
 
       return reply({ operation: { id: sent.at(-1) } }, 202);
@@ -244,7 +255,7 @@ describe('action IDs across the move to account routes', () => {
 
     const { githubCommand } = await import('@/lib/operation-command');
 
-    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+    stubFetch(async (_path: string, options: RequestInit) => {
       sent.push(JSON.parse(String(options.body)).operationId);
 
       return reply({ operation: { id: sent.at(-1) } }, 202);
@@ -267,7 +278,7 @@ describe('action IDs across the move to account routes', () => {
 
     const { githubCommand } = await import('@/lib/operation-command');
 
-    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+    stubFetch(async (_path: string, options: RequestInit) => {
       sent.push(JSON.parse(String(options.body)).operationId);
 
       return reply({ operation: { id: sent.at(-1) } }, 202);
@@ -303,7 +314,7 @@ describe('action IDs across the move to account routes', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('Quota exceeded');
     });
-    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+    stubFetch(async (_path: string, options: RequestInit) => {
       sent.push(JSON.parse(String(options.body)).operationId);
 
       if (sent.length === 1) throw new TypeError('Failed to fetch');
@@ -340,7 +351,7 @@ describe('action IDs across the move to account routes', () => {
     const { githubCommand } = await import('@/lib/operation-command');
     const sent: string[] = [];
 
-    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+    stubFetch(async (_path: string, options: RequestInit) => {
       sent.push(JSON.parse(String(options.body)).operationId);
 
       return reply({ operation: { id: sent.at(-1) } }, 202);
@@ -359,7 +370,7 @@ describe('action IDs across the move to account routes', () => {
     const sent: string[] = [];
     let refuse = true;
 
-    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+    stubFetch(async (_path: string, options: RequestInit) => {
       sent.push(JSON.parse(String(options.body)).operationId);
 
       return refuse ? reply(refusal, 409) : reply({ operation: { id: sent.at(-1) } }, 202);
@@ -384,7 +395,7 @@ describe('drafts and Activity per account', () => {
     let answer: (response: Response) => void = () => {};
     const paths: string[] = [];
 
-    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+    stubFetch((path: string, options?: RequestInit) => {
       paths.push(`${options?.method ?? 'GET'} ${path}`);
 
       return options?.method === 'PUT'
@@ -431,7 +442,7 @@ describe('drafts and Activity per account', () => {
         attempt: { id: ids[revision - 1], state: 'committed', revision },
       });
 
-    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+    stubFetch((path: string, options?: RequestInit) => {
       if (!path.includes('/summary')) return Promise.resolve(reply({ runs: [] }));
 
       ids.push(JSON.parse(String(options?.body)).writeId);
@@ -471,7 +482,7 @@ describe('drafts and Activity per account', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const paths: string[] = [];
 
-    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+    stubFetch((path: string, options?: RequestInit) => {
       const method = options?.method ?? 'GET';
 
       paths.push(`${method} ${path}`);
@@ -514,7 +525,7 @@ describe('drafts and Activity per account', () => {
     const shown = () =>
       (client.getQueryData(queryKeys.draft('me', 'p1')) as { body?: string })?.body;
 
-    vi.stubGlobal('fetch', (path: string, options?: RequestInit) =>
+    stubFetch((path: string, options?: RequestInit) =>
       (options?.method ?? 'GET') === 'GET' && path.endsWith('/pulls/p1/draft')
         ? new Promise<Response>((resolve) => reads.push(resolve))
         : Promise.resolve(reply({ items: [], nextCursor: null })),
@@ -549,7 +560,7 @@ describe('drafts and Activity per account', () => {
     const paths: string[] = [];
     let saved: (response: Response) => void = () => {};
 
-    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+    stubFetch((path: string, options?: RequestInit) => {
       const method = options?.method ?? 'GET';
 
       paths.push(`${method} ${path}`);
@@ -611,7 +622,7 @@ describe('drafts and Activity per account', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const paths: string[] = [];
 
-    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+    stubFetch((path: string, options?: RequestInit) => {
       const method = options?.method ?? 'GET';
 
       paths.push(`${method} ${path}`);
@@ -654,7 +665,7 @@ describe('drafts and Activity per account', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const saved: string[] = [];
 
-    vi.stubGlobal('fetch', (_path: string, options?: RequestInit) => {
+    stubFetch((_path: string, options?: RequestInit) => {
       const method = options?.method ?? 'GET';
       const body = options?.body ? JSON.parse(String(options.body)) : {};
 
@@ -720,7 +731,7 @@ describe('drafts and Activity per account', () => {
     const { useReview } = await import('@/features/review/use-review');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
-    vi.stubGlobal('fetch', () =>
+    stubFetch(() =>
       Promise.resolve(
         reply({ error: 'Nothing was received with this id.', code: 'NOT_FOUND' }, 404),
       ),
@@ -749,7 +760,7 @@ describe('drafts and Activity per account', () => {
     let received = false;
     let id = '';
 
-    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+    stubFetch((path: string, options?: RequestInit) => {
       const method = options?.method ?? 'GET';
 
       if (method === 'POST') {
@@ -799,13 +810,87 @@ describe('drafts and Activity per account', () => {
     client.clear();
   });
 
+  it('seals its writes with a checkpoint read again once the server says hello, looking each up as a draft write', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const { handle } = await import('@/lib/live');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const ids: string[] = [];
+    const lookups: string[] = [];
+    let checkpoints = 0;
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+
+      if (path.endsWith('/claim-checkpoint'))
+        return Promise.resolve(reply({ checkpoint: ++checkpoints, seal: '0123456789abcdef' }));
+
+      if (method === 'POST' && path.endsWith('/draft/comments')) {
+        const { writeId } = JSON.parse(String(options?.body)) as { writeId: string };
+
+        ids.push(writeId);
+
+        // The first is still on its way: looked up, then found committed.
+        return Promise.resolve(
+          ids.length === 1
+            ? reply({ pending: true, attempt: { id: writeId, state: 'pending' } }, 202)
+            : reply({ id: 'c2', attempt: { id: writeId, state: 'committed', revision: 2 } }),
+        );
+      }
+
+      if (path.includes('/draft/attempts/')) {
+        lookups.push(path);
+
+        return Promise.resolve(
+          reply({
+            attempt: {
+              id: ids[0],
+              state: 'committed',
+              revision: 1,
+              result: { body: { id: 'c1' } },
+            },
+          }),
+        );
+      }
+
+      return Promise.resolve(reply({ items: [], nextCursor: null }));
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+    const add = (body: string) =>
+      act(() =>
+        hook.result.current.addComment.mutateAsync({
+          path: 'a.ts',
+          line: 1,
+          side: 'RIGHT',
+          startLine: null,
+          body,
+        }),
+      );
+
+    await add('One');
+
+    expect(ids[0]).toMatch(/^ck1-1-0123456789abcdef-/);
+    expect(lookups).toEqual([expect.stringMatching(/[?&]kind=write(&|$)/)]);
+
+    // The server started again: the next id is sealed with a checkpoint read afresh.
+    act(() =>
+      handle(client, { type: 'hello', bootId: 'b2', account: 'me', demo: false }, { value: false }),
+    );
+    await add('Two');
+
+    expect(ids[1]).toMatch(/^ck1-2-0123456789abcdef-/);
+    expect(checkpoints).toBe(2);
+    client.clear();
+  });
+
   it('discards with what was shown at the click, offline too, never text typed after it', async () => {
     const { useReview } = await import('@/features/review/use-review');
     const { onlineManager } = await import('@tanstack/react-query');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const paths: string[] = [];
 
-    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+    stubFetch((path: string, options?: RequestInit) => {
       const method = options?.method ?? 'GET';
 
       paths.push(`${method} ${path}`);
@@ -854,7 +939,7 @@ describe('drafts and Activity per account', () => {
     });
     const key = queryKeys.draft('me', 'p1');
 
-    vi.stubGlobal('fetch', (path: string) =>
+    stubFetch((path: string) =>
       Promise.resolve(reply(path.endsWith('/pulls/p1/draft') ? at(3, 'Read') : { items: [] })),
     );
     client.setQueryData(queryKeys.status, as('me'));
@@ -1021,7 +1106,7 @@ describe('AI and Insights per account', () => {
     const { render, screen, fireEvent } = await import('@testing-library/react');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
-    vi.stubGlobal('fetch', async (path: string, options?: RequestInit) =>
+    stubFetch(async (path: string, options?: RequestInit) =>
       options?.method === 'POST'
         ? reply(notActive, 409)
         : path.includes('/insights')
@@ -1080,7 +1165,7 @@ describe('Insights refreshes and empty states', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const fetches: string[] = [];
 
-    vi.stubGlobal('fetch', async (path: string) => {
+    stubFetch(async (path: string) => {
       fetches.push(path);
 
       return reply({});
@@ -1120,7 +1205,7 @@ describe('adding by hand, per account', () => {
     const sent: { method: string; path: string; body: unknown }[] = [];
     let answer = added('membership-1');
 
-    vi.stubGlobal('fetch', async (path: string, options?: RequestInit) => {
+    stubFetch(async (path: string, options?: RequestInit) => {
       sent.push({
         method: options?.method ?? 'GET',
         path,
@@ -1171,7 +1256,7 @@ describe('adding by hand, per account', () => {
     const { useTrackPull } = await import('@/features/pulls/use-track');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
-    vi.stubGlobal('fetch', async (_path: string, options?: RequestInit) =>
+    stubFetch(async (_path: string, options?: RequestInit) =>
       reply(options?.method === 'DELETE' ? { tracked: true } : added('membership-3')),
     );
     client.setQueryData(queryKeys.status, as('me'));
@@ -1199,7 +1284,7 @@ describe('adding by hand, per account', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const posts: string[] = [];
 
-    vi.stubGlobal('fetch', async (path: string, options?: RequestInit) => {
+    stubFetch(async (path: string, options?: RequestInit) => {
       if (options?.method === 'POST') posts.push(path);
 
       return reply(options?.method === 'POST' ? added(null) : { account: 'me', items: [] });
@@ -1233,7 +1318,7 @@ describe('adding by hand, per account', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     let answer: ((response: Response) => void) | null = null;
 
-    vi.stubGlobal('fetch', (path: string, options?: RequestInit) =>
+    stubFetch((path: string, options?: RequestInit) =>
       options?.method === 'POST'
         ? new Promise<Response>((resolve) => (answer = resolve))
         : Promise.resolve(reply({ account: 'me', items: [] })),
