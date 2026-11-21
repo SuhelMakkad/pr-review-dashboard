@@ -168,6 +168,16 @@ const guard = {
   baseGeneration: z.number().int().nonnegative().optional(),
 };
 
+/**
+ * The PR a guarded write to a run's draft is for: its claim is that PR's, and the run must be one
+ * of it. Runs are addressed by their own id, which names no PR.
+ */
+const runPr = z.string().min(1).max(200).optional();
+
+/** A claimed write to a run's draft names its PR: its outcome is that PR's to look up. */
+const namesItsPr = (value: { writeId?: string; prId?: string }) =>
+  value.writeId === undefined || value.prId !== undefined;
+
 const newComment = z
   .object({
     account,
@@ -311,13 +321,22 @@ export const aiRequests = {
     task,
     provider: provider.optional(),
     force: z.boolean().optional(),
+    /** The start's own id: a retry answers with the run it started or joined. */
+    attemptId: guard.writeId,
+    baseRevision: guard.baseRevision,
+    baseGeneration: guard.baseGeneration,
   }),
   run: z.strictObject({ account }),
-  accept: z.strictObject({
-    account,
-    index: z.number().int().min(0),
-    body: z.string().trim().min(1).max(65_536).optional(),
-  }),
+  apply: z.strictObject({ account, ...guard, prId: runPr }).refine(namesItsPr),
+  accept: z
+    .strictObject({
+      account,
+      index: z.number().int().min(0),
+      body: z.string().trim().min(1).max(65_536).optional(),
+      ...guard,
+      prId: runPr,
+    })
+    .refine(namesItsPr),
   prepare: z
     .strictObject({
       account,
@@ -327,8 +346,11 @@ export const aiRequests = {
         .string()
         .regex(/^[a-f0-9]{64}$/)
         .optional(),
+      ...guard,
+      prId: runPr,
     })
-    .refine((value) => !value.replace || Boolean(value.expectedDraftRevision)),
+    .refine((value) => !value.replace || Boolean(value.expectedDraftRevision))
+    .refine(namesItsPr),
 };
 
 /** Triage of the account the path names: the body carries no account of its own. */
@@ -599,7 +621,7 @@ export const routes = {
   aiRuns: json('GET', `${pulls}/:id/ai`, { responses: { 200: as<AiRunsResponse>() } }),
   startAi: json('POST', `${pulls}/:id/ai`, {
     body: { canonical: aiRequests.start },
-    responses: { 200: as<AiRun>() },
+    responses: { 200: as<AiRun & Attempted>(), 202: pendingAttempt },
   }),
   cancelAi: json('DELETE', runs, { body: { canonical: aiRequests.run }, responses: { 200: ok } }),
   pauseAi: json('POST', `${runs}/pause`, {
@@ -612,15 +634,15 @@ export const routes = {
   }),
   acceptAi: json('POST', `${runs}/accept`, {
     body: { canonical: aiRequests.accept },
-    responses: { 200: as<DraftComment>() },
+    responses: { 200: as<DraftComment & Attempted>(), 202: pendingAttempt },
   }),
   prepareAi: json('POST', `${runs}/draft`, {
     body: { canonical: aiRequests.prepare },
-    responses: { 200: as<ReviewDraft>() },
+    responses: { 200: as<ReviewDraft & Attempted>(), 202: pendingAttempt },
   }),
   applyAi: json('POST', `${runs}/summary`, {
-    body: { canonical: aiRequests.run },
-    responses: { 200: as<ReviewDraft>() },
+    body: { canonical: aiRequests.apply },
+    responses: { 200: as<ReviewDraft & Attempted>(), 202: pendingAttempt },
   }),
 
   // Insights: an account's; the review target is every account's.

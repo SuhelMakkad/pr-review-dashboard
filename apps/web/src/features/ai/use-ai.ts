@@ -70,6 +70,16 @@ export function useAiReviewStatuses(account: string | null | undefined) {
 }
 
 /** AI runs for one PR. Live progress arrives over the event stream; a light poll covers gaps. */
+/**
+ * A draft write's answer, which only a write sent with an id could have left pending. These are
+ * sent without one, so a pending answer is never expected.
+ */
+const answered = <T extends object>(answer: T): Exclude<T, { pending: true }> => {
+  if ('pending' in answer) throw new Error('The server answered as for a write still in progress.');
+
+  return answer as Exclude<T, { pending: true }>;
+};
+
 export function useAi(prId: string | null, account: string) {
   const client = useQueryClient();
   const key = queryKeys.ai(account, prId ?? 'none');
@@ -195,7 +205,7 @@ export function useAi(prId: string | null, account: string) {
       runId,
       ...options
     }: { runId: string; indices: number[] } & PrepareReviewOptions) =>
-      call(routes.prepareAi, { params: run(runId), body: options }),
+      call(routes.prepareAi, { params: run(runId), body: options }).then(answered),
     onMutate: () => ({ since: accountSwitches() }),
     onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
     onSettled: () =>
@@ -207,7 +217,8 @@ export function useAi(prId: string | null, account: string) {
 
   const applySummary = useMutation({
     mutationKey: applyKey,
-    mutationFn: (runId: string) => call(routes.applyAi, { params: run(runId), body: {} }),
+    mutationFn: (runId: string) =>
+      call(routes.applyAi, { params: run(runId), body: {} }).then(answered),
     onMutate: () => ({ since: accountSwitches() }),
     onSuccess: (draft, _variables, context) => seedDraft(draft, context.since),
     onSettled: () => client.invalidateQueries({ queryKey: key }),
