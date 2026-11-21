@@ -195,8 +195,10 @@ describe('server boundaries', () => {
 
   /**
    * Text outside the catalog that names a forge or its terms, each allowed by its wording, with
-   * why. Everywhere else, such words come from `messages.ts`, worded for the account they are shown
-   * to. An allowance that matches nothing any more fails too.
+   * why. A message shown to users is matched whole (`…` stands for an interpolated value); only
+   * the agent's prompts, never shown, are matched by a phrase. Everywhere else, such words come
+   * from `messages.ts`, worded for the account they are shown to. A wording that matches nothing
+   * any more fails too.
    */
   const allowed: { path: string; reason: string; wordings: RegExp[] }[] = [
     {
@@ -243,7 +245,7 @@ describe('server boundaries', () => {
     {
       path: 'db/settings.ts',
       reason: "GitLab's own state, named for what it is",
-      wordings: [/^Only GitLab state, under its own prefix/],
+      wordings: [/^Only GitLab state, under its own prefix, is kept through this handle\.$/],
     },
     {
       path: 'diff/service.ts',
@@ -253,14 +255,17 @@ describe('server boundaries', () => {
     {
       path: 'forge/account.ts',
       reason: "GitLab's sign-in check, which only GitLab has",
-      wordings: [/^The GitLab CLI is signed in as/, /which GitLab account it was for/],
+      wordings: [
+        /^The GitLab CLI is signed in as …, not …\. Sign in as … again or switch accounts\.$/,
+        /^… Review Desk could not confirm which GitLab account it was for, so it will try again\.$/,
+      ],
     },
     {
       path: 'operations/queue.ts',
       reason: "recoveries of GitLab's split approvals",
       wordings: [
-        /^Stopped\. Check GitLab: the approval/,
-        /reached GitLab: the step that sent both/,
+        /^Stopped\. Check GitLab: the approval may have gone out without its summary\.$/,
+        /^Review Desk cannot tell whether this approval and its summary reached GitLab: the step that sent both was refused, and the merge request does not show both\. Check it, then approve it yourself if it still applies\.$/,
       ],
     },
     {
@@ -268,8 +273,8 @@ describe('server boundaries', () => {
       reason: 'adding a PR from another forge, host or instance names both',
       wordings: [
         /^PR$/,
-        /looks like a GitLab merge request/,
-        /^That link is for another GitLab on/,
+        /^…… looks like a GitLab merge request, but you are working as … on GitHub\. Switch to a GitLab account to add it\.$/,
+        /^That link is for another GitLab on …, not the one … is signed in to\.$/,
       ],
     },
   ];
