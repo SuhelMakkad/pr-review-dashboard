@@ -69,15 +69,18 @@ function legacyMap(): Map<string, string> {
 /** Whether a shared-map id was retired: its own mark, read directly, or this tab's record. */
 const retired = (id: string) => retiredHere.has(id) || read(RETIRED + id) !== null;
 
-/** The id saved for `key` now: its own entry's, else the shared map's unless that id is retired. */
+/** `id`, unless it is a retired one: wherever it was read from, a retired id is never reused. */
+const usable = (id: string | null | undefined) =>
+  id !== null && id !== undefined && !retired(id) ? id : undefined;
+
+/**
+ * The id saved for `key` now: its own entry's, else the shared map's, either only unless retired
+ * (a tab may have saved a copy of an id another had just retired).
+ */
 function savedId(key: string): string | undefined {
   const own = read(PREFIX + key);
 
-  if (own !== null) return own;
-
-  const legacy = legacyMap().get(key);
-
-  return legacy !== undefined && !retired(legacy) ? legacy : undefined;
+  return own !== null ? usable(own) : usable(legacyMap().get(key));
 }
 
 /** Saves `id` for `key`, under its own entry; kept in this tab either way. True once saved. */
@@ -94,11 +97,12 @@ function save(key: string, id: string): boolean {
 }
 
 /**
- * Forgets `id` for `key`: its own entry removed while it is still that id, and, for an id the
- * shared map holds, that id retired by a mark of its own (kept in this tab when the mark could
- * not be saved). True once every change is saved.
+ * Forgets `id` for `key`: its own entry removed while it is still that id, and, when it is an id
+ * the shared map held (`retire`), that id retired by a mark of its own, written for that very id
+ * whatever the map reads now (kept in this tab when the mark could not be saved). True once every
+ * change is saved.
  */
-function forget(key: string, id: string): boolean {
+function forget(key: string, id: string, retire: boolean): boolean {
   if (memory.get(key) === id) memory.delete(key);
 
   let saved = true;
@@ -109,7 +113,7 @@ function forget(key: string, id: string): boolean {
     saved = false;
   }
 
-  if (legacyMap().get(key) === id) {
+  if (retire) {
     try {
       localStorage.setItem(RETIRED + id, '1');
     } catch {
@@ -145,7 +149,7 @@ export function legacyIds(path: string, method: 'POST' | 'DELETE'): { key: strin
  * the deletion is saved, false if it was not.
  */
 export function forgetLegacy(key: string, id: string): boolean {
-  return forget(key, id);
+  return forget(key, id, true);
 }
 
 /**
@@ -168,15 +172,18 @@ export async function githubCommand<T = OperationReceipt>(
   method: 'POST' | 'DELETE' = 'POST',
 ): Promise<T> {
   const key = JSON.stringify({ path, body, method });
-  // Saved before, by this tab or another, or held by this tab though it could not be saved.
-  const operationId = savedId(key) ?? memory.get(key) ?? crypto.randomUUID();
+  // Saved before, by this tab or another, or held by this tab though it could not be saved: never
+  // a retired one.
+  const operationId = savedId(key) ?? usable(memory.get(key)) ?? crypto.randomUUID();
+  // One the earlier versions' map held: retired once it settles, so it is never reused.
+  const retire = legacyMap().get(key) === operationId;
 
   save(key, operationId);
 
   try {
     const result = await api<T>(path, { method, body: { ...body, operationId } });
 
-    forget(key, operationId);
+    forget(key, operationId, retire);
 
     return result;
   } catch (error) {
@@ -186,7 +193,7 @@ export async function githubCommand<T = OperationReceipt>(
       error.status < 500 &&
       !RETRYABLE.has(error.code ?? '')
     ) {
-      forget(key, operationId);
+      forget(key, operationId, retire);
     }
 
     throw error;

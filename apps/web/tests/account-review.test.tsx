@@ -142,6 +142,48 @@ describe('action IDs across the move to account routes', () => {
     vi.restoreAllMocks();
   });
 
+  it('never reuses a live copy of an id another tab retired', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'New reply' };
+    const key = JSON.stringify({ path, body, method: 'POST' });
+    const sent: string[] = [];
+
+    // Saved by one tab just after another retired it.
+    localStorage.setItem('review-desk-retired-command:old', '1');
+    localStorage.setItem(`review-desk-pending-command:${key}`, 'old');
+    vi.resetModules();
+
+    const { githubCommand } = await import('@/lib/operation-command');
+
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+    await githubCommand(path, body);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toBe('old');
+  });
+
+  it('retires a forgotten legacy id though the earlier versions’ map cannot be read', async () => {
+    const { forgetLegacy } = await import('@/lib/operation-command');
+    const getItem = Storage.prototype.getItem;
+
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, name) {
+      if (name === 'review-desk-pending-command-ids') throw new Error('Unreadable');
+
+      return getItem.call(this, name);
+    });
+
+    expect(forgetLegacy(JSON.stringify({ path: '/x', body: {}, method: 'POST' }), 'kept')).toBe(
+      true,
+    );
+
+    vi.restoreAllMocks();
+    expect(localStorage.getItem('review-desk-retired-command:kept')).not.toBeNull();
+  });
+
   it('sends a retry with the id it was first sent with, though storage could not keep it', async () => {
     const { githubCommand } = await import('@/lib/operation-command');
     const sent: string[] = [];
