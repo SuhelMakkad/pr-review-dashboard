@@ -262,12 +262,7 @@ export class SyncRunner {
       timing.discovered = performance.now();
 
       const membership = this.store.membership(account.login);
-      const previous = new Map(
-        this.store
-          .snapshots(account.login)
-          .filter((pr) => pr.state === 'OPEN')
-          .map((pr) => [pr.id, pr]),
-      );
+      const previous = new Map(this.store.openSnapshots(account.login).map((pr) => [pr.id, pr]));
       const ids = [...new Set([...membership.keys(), ...previous.keys()])];
       // Change detection reads every PR's state, so it starts a read of each before asking.
       const observations = new Map(
