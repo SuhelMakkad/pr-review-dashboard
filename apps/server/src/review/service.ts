@@ -9,6 +9,7 @@ import type {
   SubmitReviewResult,
 } from '@review-desk/shared/review';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
+import { say } from '@/messages.js';
 import type { DiffService } from '@/diff/service.js';
 import { textPatch } from '@/diff/patch.js';
 import type { EventBus } from '@/events.js';
@@ -38,11 +39,7 @@ class RateLimiter {
     this.stamps = this.stamps.filter((stamp) => now - stamp < 60_000);
 
     if (this.stamps.length >= this.perMinute) {
-      throw new ReviewError(
-        'RATE_LIMITED',
-        429,
-        'Too many GitHub writes in a minute. Try again shortly.',
-      );
+      throw new ReviewError('RATE_LIMITED', 429, say('review.rate-limited'));
     }
 
     this.stamps.push(now);
@@ -108,7 +105,7 @@ export class ReviewService {
       throw new ReviewError(
         'ACCOUNT_CHANGED',
         409,
-        `The GitHub CLI is now logged in as ${this.identity.login}. Nothing was posted.`,
+        say('review.cli-changed', { login: this.identity.login }),
       );
     }
   }
@@ -117,7 +114,7 @@ export class ReviewService {
   private snapshot(account: string, prId: string): PullRequestSnapshot {
     const detail = this.sync.detailFor(account, prId);
 
-    if (!detail) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
+    if (!detail) throw new ReviewError('NOT_FOUND', 404, say('pull.untracked'));
 
     return detail.snapshot;
   }
@@ -201,11 +198,7 @@ export class ReviewService {
     const range = [input.startLine ?? input.line, input.line];
 
     if (!file || range.some((line) => !visible.has(line))) {
-      throw new ReviewError(
-        'NOT_COMMENTABLE',
-        422,
-        'GitHub only accepts comments on lines that are part of this PR’s diff. Comment on the whole file instead, or pick a changed line.',
-      );
+      throw new ReviewError('NOT_COMMENTABLE', 422, say('review.not-commentable'));
     }
   }
 
@@ -235,9 +228,7 @@ export class ReviewService {
         throw new ReviewError(
           'HEAD_MOVED',
           409,
-          suggested
-            ? 'This suggestion was made for an older version of the PR. Run it again.'
-            : 'The PR changed while you were commenting. Reload the diff, then comment again.',
+          suggested ? say('review.suggestion-outdated') : say('review.changed-while-commenting'),
         );
     };
 
@@ -281,11 +272,7 @@ export class ReviewService {
 
     const comment = this.ownComment(account, prId, id);
     if (comment.status === 'pushed') {
-      throw new ReviewError(
-        'ALREADY_SENT',
-        409,
-        'This comment is already on GitHub as part of your pending review.',
-      );
+      throw new ReviewError('ALREADY_SENT', 409, say('review.already-sent'));
     }
 
     this.drafts.updateComment(account, id, { body });
@@ -430,7 +417,7 @@ export class ReviewService {
           throw new ReviewError(
             'GITHUB_ERROR',
             502,
-            `Could not check the PR before submitting: ${safeError(error)}`,
+            say('review.check-failed', { reason: safeError(error) }),
           );
         });
     const pr = refreshed?.snapshot ?? this.snapshot(request.account, prId);
@@ -535,11 +522,7 @@ export class ReviewService {
       await this.assertCommentable(pr, input);
 
       if (pr.pendingReview && pr.pendingReview.id !== this.execution?.pendingReviewId) {
-        throw new ReviewError(
-          'PENDING_REVIEW_EXISTS',
-          409,
-          'You have a pending review on GitHub. Add this comment to your review instead.',
-        );
+        throw new ReviewError('PENDING_REVIEW_EXISTS', 409, say('review.pending-exists'));
       }
     }
 
@@ -603,11 +586,7 @@ export class ReviewService {
     const pr = this.snapshot(account, prId);
 
     if (!isSameUser(pr.author.login, account)) {
-      throw new ReviewError(
-        'NOT_AUTHOR',
-        403,
-        'You can only request reviewers on your own PRs here.',
-      );
+      throw new ReviewError('NOT_AUTHOR', 403, say('review.not-author'));
     }
 
     await this.write(() => this.github.requestReviews(prId, logins));

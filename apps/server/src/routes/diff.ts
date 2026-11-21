@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { DiffMode } from '@review-desk/shared/diff';
+import { say } from '@/messages.js';
 import type { DiffService } from '@/diff/service.js';
 import type { PullRequestDetail } from '@review-desk/shared/types';
 import { routes } from '@review-desk/shared/contract';
@@ -29,7 +30,7 @@ export function registerDiffRoutes(
     async ({ account, params, query }) => {
       const detail = service.detailFor(account, params.id);
 
-      if (!detail) return failed(404, { error: 'This PR is no longer tracked.' });
+      if (!detail) return failed(404, { error: say('pull.untracked') });
 
       // Only the diff's own reads answer as failed reads; anything else is the server's own failure.
       try {

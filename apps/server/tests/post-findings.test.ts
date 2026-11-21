@@ -2318,8 +2318,21 @@ describe('the posted comment', () => {
     const body = postedReviewBody('run-2', 'abcdef1', result({ overall: 'x'.repeat(100_000) }));
 
     expect(body.length).toBeLessThanOrEqual(65_536);
-    expect(body).toContain('It is complete in Review Desk.');
+    expect(body).toContain('cut to fit on GitHub. It is complete in Review Desk.');
     expect(body.endsWith('finished.</sub>')).toBe(true);
+
+    // Cut for GitLab, it names GitLab.
+    const posted = postedReviewBody(
+      'run-2',
+      'abcdef1',
+      result({ overall: 'x'.repeat(100_000) }),
+      null,
+      false,
+      'rev@gitlab.example',
+    );
+
+    expect(posted).toContain('cut to fit on GitLab. It is complete in Review Desk.');
+    expect(posted.length).toBeLessThanOrEqual(65_536);
   });
 });
 

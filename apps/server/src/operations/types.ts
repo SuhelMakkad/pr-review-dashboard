@@ -1,4 +1,5 @@
 import type { GitHubOperation } from '@review-desk/shared/operations';
+import type { Wording } from '@/messages.js';
 import type { ReviewReceipt } from '@/github/api.js';
 
 export interface MutationStep {
@@ -12,7 +13,13 @@ export interface MutationStep {
   acknowledged?: boolean;
 }
 
-export interface OperationRecord extends Omit<GitHubOperation, 'controls'> {
+export interface OperationRecord extends Omit<GitHubOperation, 'controls' | 'progress' | 'error'> {
+  /**
+   * What Activity says of the action, and why it failed: catalog messages, or text from before
+   * the catalog (written for GitHub). Each is worded for the row's account when it is shown.
+   */
+  progress: Wording;
+  error: { code: string; message: Wording } | null;
   /**
    * `local`: the receipt of a write made locally that answered an outbox ID, such as discarding a
    * draft with nothing on the forge. Kept only so a retry of that ID answers as the first time;

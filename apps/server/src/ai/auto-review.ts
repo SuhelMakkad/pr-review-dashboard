@@ -1,3 +1,4 @@
+import { render, say } from '@/messages.js';
 import { isoNow, type Clock } from '@/clock.js';
 import { pullPath, shortRef } from '@review-desk/shared/accounts';
 import {
@@ -71,7 +72,7 @@ const stillDue = (item: PullRequestItem, key: string) =>
   autoReviewCandidates([item]).some((candidate) => candidate.key === key);
 
 function readyCopy(row: AiRunRow): string {
-  if (row.status === 'failed') return 'Automatic AI review failed. Open the PR to run it again.';
+  if (row.status === 'failed') return render(say('ai.automatic-failed'), row.account);
 
   try {
     const result = JSON.parse(row.result ?? '') as FullReviewResult;

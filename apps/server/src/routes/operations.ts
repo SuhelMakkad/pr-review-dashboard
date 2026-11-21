@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { routes } from '@review-desk/shared/contract';
 import { z } from 'zod';
+import { say } from '@/messages.js';
 import type { OperationQueue } from '@/operations/queue.js';
 import { ReviewError } from '@/review/errors.js';
 import { safeError } from '@/github/errors.js';
@@ -42,9 +43,7 @@ export function registerOperationRoutes(
 
       if (!command.success) return failed(400, { error: 'Invalid operation command.' });
       if (command.data === 'restore' && !body.confirm)
-        return failed(400, {
-          error: 'Confirm removing the pending GitHub review before restoring its draft.',
-        });
+        return failed(400, { error: say('outbox.confirm-restore') });
 
       return ok(200, await queue.control(account, params.id, command.data, body.confirm));
     },
@@ -55,7 +54,7 @@ export function registerOperationRoutes(
 /** A refusal with its code and details; anything else, the server's own failure. */
 function reviewFailure(error: unknown): Failed {
   if (error instanceof ReviewError)
-    return failed(error.status, { error: error.message, code: error.code, ...error.details });
+    return failed(error.status, { error: error.wording, code: error.code, ...error.details });
 
   return failed(500, { error: safeError(error) });
 }

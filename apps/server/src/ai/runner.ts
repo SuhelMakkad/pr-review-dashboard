@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { render, say, type Wording } from '@/messages.js';
 import { isoNow, type Clock } from '@/clock.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync } from 'node:fs';
@@ -157,12 +158,7 @@ const settled = <T>(work: Promise<T>): Promise<Settled<T>> =>
   );
 
 /** A suggestion made for an older head: its lines are not this head's. */
-const headMoved = () =>
-  new ReviewError(
-    'HEAD_MOVED',
-    409,
-    'This suggestion was made for an older version of the PR. Run it again.',
-  );
+const headMoved = () => new ReviewError('HEAD_MOVED', 409, say('review.suggestion-outdated'));
 
 export class AiRunner {
   private readonly queue: string[] = [];
@@ -508,7 +504,7 @@ export class AiRunner {
   private lookup(account: string, prId: string): PullRequestDetail {
     const detail = this.sync.detailFor(account, prId);
 
-    if (!detail) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
+    if (!detail) throw new ReviewError('NOT_FOUND', 404, say('pull.untracked'));
 
     return detail;
   }
@@ -541,7 +537,7 @@ export class AiRunner {
 
     const reviewOid = detail.item.latestReview?.commitOid;
 
-    if (!reviewOid) throw new ReviewError('NO_REVIEW', 422, 'You have not reviewed this PR yet.');
+    if (!reviewOid) throw new ReviewError('NO_REVIEW', 422, say('ai.not-reviewed'));
 
     return sinceReviewInput(
       pr,
@@ -570,7 +566,7 @@ export class AiRunner {
       createdAt: row.createdAt,
       finishedAt: row.finishedAt,
       stale: Boolean(staleReason),
-      staleReason,
+      staleReason: staleReason && render(staleReason, row.account),
       resumable: Boolean(
         row.request &&
         this.providers[row.provider].supportsResume &&
@@ -591,30 +587,29 @@ export class AiRunner {
     };
   }
 
-  private resumeProblem(row: AiRunRow): string | null {
+  private resumeProblem(row: AiRunRow): Wording | null {
     if (row.promptVersion !== promptVersions[row.task])
       return 'Review instructions changed. Generate a new review.';
 
     const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
 
-    if (!pr) return 'This PR is no longer tracked.';
+    if (!pr) return say('pull.untracked');
     if (!row.request) return 'This run has no saved checkpoint. Generate a new review.';
     if (reviewFingerprint(pr, row.account) !== reviewFingerprint(row.request.snapshot, row.account))
-      return 'The PR or its review discussion changed while this run was stopped. Generate a new review.';
+      return say('ai.changed-while-stopped');
 
     return this.staleReason(row);
   }
 
-  private staleReason(row: AiRunRow, currentHead?: string): string | null {
+  private staleReason(row: AiRunRow, currentHead?: string): Wording | null {
     const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
 
     if ((currentHead ?? pr?.headOid) && (currentHead ?? pr?.headOid) !== row.headOid)
       return 'New commits arrived after this was generated.';
 
     if (!pr || !['full_review', 'draft_summary'].includes(row.task)) return null;
-    if (!row.context) return 'Generate a new review to verify that it covers the current PR.';
-    if (row.context.review !== reviewFingerprint(pr, row.account))
-      return 'The PR or its review discussion changed after this was generated.';
+    if (!row.context) return say('ai.unverified-coverage');
+    if (row.context.review !== reviewFingerprint(pr, row.account)) return say('ai.changed-since');
 
     if (row.task === 'draft_summary') {
       if (row.context.fullReviewId !== (this.completedReview(row.account, row.prId)?.id ?? null))
@@ -1348,11 +1343,7 @@ export class AiRunner {
     const staleReason = this.staleReason(row);
 
     if (staleReason) {
-      throw new ReviewError(
-        'HEAD_MOVED',
-        409,
-        `This review is out of date. ${staleReason} Regenerate it before preparing a GitHub review.`,
-      );
+      throw new ReviewError('HEAD_MOVED', 409, say('ai.outdated', { reason: staleReason }));
     }
 
     const result = JSON.parse(row.result) as FullReviewResult;
@@ -1391,11 +1382,7 @@ export class AiRunner {
     const latest = this.detail(account, row.prId).snapshot;
 
     if (latest.headOid !== row.headOid || this.staleReason(row)) {
-      throw new ReviewError(
-        'HEAD_MOVED',
-        409,
-        'New commits arrived. Regenerate this review before preparing a GitHub review.',
-      );
+      throw new ReviewError('HEAD_MOVED', 409, say('ai.new-commits'));
     }
 
     // One synchronous transaction avoids partial drafts or duplicate comments on retries.
@@ -1465,12 +1452,7 @@ export class AiRunner {
 
     const reason = this.staleReason(row);
 
-    if (reason)
-      throw new ReviewError(
-        'STALE_REVIEW',
-        409,
-        `${reason} Generate a new summary before using it.`,
-      );
+    if (reason) throw new ReviewError('STALE_REVIEW', 409, say('ai.stale-summary', { reason }));
 
     this.reviews.drafts.saveMeta(account, row.prId, {
       body: (JSON.parse(row.result) as { body: string }).body,

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { routes } from '@review-desk/shared/contract';
+import { say } from '@/messages.js';
 import { failed, ok, serve, type Failed } from '@/http/serve.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import { GitHubError, safeError } from '@/github/errors.js';
@@ -37,19 +38,12 @@ export function readFailure(error: unknown): Failed {
     return failed(409, { error: error.message, code: error.code });
 
   if (error instanceof ReviewError)
-    return failed(error.status, { error: error.message, code: error.code });
+    return failed(error.status, { error: error.wording, code: error.code });
 
   if (error instanceof GitHubError && error.outcome === 'rate_limit')
     return failed(429, { error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
 
   return failed(502, { error: safeError(error) });
-}
-
-/** Sends what a failed live read answers. */
-export function readError(reply: FastifyReply, error: unknown) {
-  const answer = readFailure(error);
-
-  return reply.code(answer.status).send(answer.body);
 }
 
 /** What a failed queue change answers; anything else is not its to answer. */
@@ -58,7 +52,7 @@ function queueFailure(error: unknown): Failed {
     return failed(409, { error: error.message, code: error.code });
 
   if (error instanceof ReviewError)
-    return failed(error.status, { error: error.message, code: error.code });
+    return failed(error.status, { error: error.wording, code: error.code });
 
   if (error instanceof GitHubError && error.outcome === 'rate_limit')
     return failed(429, { error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
@@ -83,9 +77,7 @@ export function registerPullRoutes(app: FastifyInstance, service: SyncService): 
     ({ account, params }) => {
       const detail = service.detailFor(account, params.id);
 
-      return detail
-        ? ok(200, detail)
-        : failed(404, { error: 'This PR is no longer tracked for this account.' });
+      return detail ? ok(200, detail) : failed(404, { error: say('pull.untracked-for-account') });
     },
     serving,
   );
@@ -96,7 +88,7 @@ export function registerPullRoutes(app: FastifyInstance, service: SyncService): 
     async ({ account, params }) => {
       const detail = await service.refresh(params.id, account);
 
-      return detail ? ok(200, detail) : failed(404, { error: 'PR not found.' });
+      return detail ? ok(200, detail) : failed(404, { error: say('pull.not-found') });
     },
     { ...serving, errors: readFailure },
   );
@@ -110,7 +102,7 @@ export function registerPullRoutes(app: FastifyInstance, service: SyncService): 
 
       const detail = service.updateFor(account, params.id, body);
 
-      return detail ? ok(200, detail) : failed(404, { error: 'PR not found.' });
+      return detail ? ok(200, detail) : failed(404, { error: say('pull.not-found') });
     },
     serving,
   );

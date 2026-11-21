@@ -55,7 +55,7 @@ export function registerInsightsRoutes(
         const refusal = accountNotActive(account, selected);
 
         return failed(refusal.status, {
-          error: refusal.message,
+          error: refusal.wording,
           code: refusal.code,
           ...refusal.details,
         });

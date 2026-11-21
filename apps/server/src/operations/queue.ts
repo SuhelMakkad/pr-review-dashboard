@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { render, renderStored, say, wordingOf, type Wording } from '@/messages.js';
 import { isoNow, type Cancel, type Clock } from '@/clock.js';
 import { createHash } from 'node:crypto';
 import {
@@ -12,7 +13,7 @@ import {
   type OperationList,
   type OperationReceipt,
 } from '@review-desk/shared/operations';
-import { forForge, isSameUser } from '@review-desk/shared/accounts';
+import { isSameUser } from '@review-desk/shared/accounts';
 import type { AiSettings } from '@review-desk/shared/ai';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
@@ -142,28 +143,26 @@ function approvalOf(
 
 /** An automatic post stopped for `skipped`: as said before anything was sent, and after. */
 function stopped(
-  skipped: string,
+  skipped: Wording,
   approving: boolean,
   code = 'POST_STOPPED',
   /** The approval already went out and only its summary is stopped. */
   summary = false,
 ): PostProblem {
-  const reason = `${skipped.charAt(0).toUpperCase()}${skipped.slice(1)}`;
-
   return {
     skipped,
     code,
     attention: summary
-      ? `${reason} The PR was approved, but its summary was not posted; check the PR.`
-      : `${reason} Nothing more is sent; check the PR${approving ? ', then approve it yourself if it still applies' : ''}.`,
+      ? say('stop.summary-held', { reason: skipped })
+      : say('stop.nothing-more', { reason: skipped, approving }),
   };
 }
 
 /** Why an automatic post must not go out now: as skipped before anything was sent, and after. */
 interface PostProblem {
-  skipped: string;
+  skipped: Wording;
   code: string;
-  attention: string;
+  attention: Wording;
   /** Waits for you even when nothing was sent yet. */
   hold?: true;
   /** Not known yet: tried again like a failed read, rather than stopping the post. */
@@ -233,7 +232,7 @@ export class OperationQueue {
         ...data,
         status: uncertain ? 'checking' : 'queued',
         progress: uncertain
-          ? 'Checking an interrupted GitHub request.'
+          ? say('outbox.checking-interrupted')
           : 'Saved after a restart. Waiting to send.',
       });
     }
@@ -335,13 +334,13 @@ export class OperationQueue {
       ...operation
     } = row;
 
-    // Messages are written for GitHub; a GitLab account's actions read as GitLab's.
+    // Each message is worded for the row's account, selected or not.
     return {
       ...operation,
-      progress: operation.progress && forForge(operation.progress, row.account),
+      progress: renderStored(operation.progress, row.account),
       error: operation.error && {
         ...operation.error,
-        message: forForge(operation.error.message, row.account),
+        message: renderStored(operation.error.message, row.account),
       },
       controls: this.controls(row),
       ...(this.mayHavePosted(row) ? { confirmStop: true } : {}),
@@ -561,7 +560,7 @@ export class OperationQueue {
     admit();
 
     const pr = lookup();
-    if (!pr) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
+    if (!pr) throw new ReviewError('NOT_FOUND', 404, say('pull.untracked'));
 
     const lastCreatedAt = this.log.latestCreatedAt(account);
     const timestamp = new Date(
@@ -711,17 +710,9 @@ export class OperationQueue {
     const uncertain = this.mayHavePosted(row);
 
     if (command === 'reopen' && uncertain && !confirmed)
-      throw new ReviewError(
-        'CONFIRM_REQUIRED',
-        409,
-        'Check GitHub and confirm this action did not post before reopening it.',
-      );
+      throw new ReviewError('CONFIRM_REQUIRED', 409, say('outbox.confirm-reopen'));
     if (command === 'cancel' && uncertain && !confirmed)
-      throw new ReviewError(
-        'CONFIRM_REQUIRED',
-        409,
-        'Check GitHub before stopping: this action may already have posted.',
-      );
+      throw new ReviewError('CONFIRM_REQUIRED', 409, say('outbox.confirm-stop'));
     if (command === 'restore') return this.restore(row);
 
     if (command === 'check') {
@@ -729,7 +720,7 @@ export class OperationQueue {
         ...row,
         status: 'checking',
         dismissedAt: null,
-        progress: 'Checking GitHub before retrying.',
+        progress: say('outbox.checking-before-retry'),
       });
     } else if (command === 'retry') {
       this.save({
@@ -757,11 +748,11 @@ export class OperationQueue {
                 : this.refusedCombined(row)
                   ? 'Stopped. Check GitLab: the approval may have gone out without its summary.'
                   : uncertain && approvedAlready(row)
-                    ? 'Stopped. The PR was approved; check whether its summary was posted.'
+                    ? say('outbox.stopped-approved')
                     : uncertain
-                      ? 'Stopped. Check GitHub: this review may already be posted.'
+                      ? say('outbox.stopped-unconfirmed')
                       : approvedAlready(row)
-                        ? 'Cancelled. The PR was approved; its summary was not posted.'
+                        ? say('outbox.cancelled-approved')
                         : 'Cancelled. Nothing was posted.',
         });
         new DraftStore(this.sync.store).unlock(account, row.prId, id);
@@ -899,7 +890,7 @@ export class OperationQueue {
       status: 'running',
       retryAt: null,
       error: null,
-      progress: 'Checking the GitHub account and pull request.',
+      progress: say('outbox.checking-account'),
     });
 
     try {
@@ -957,11 +948,7 @@ export class OperationQueue {
       const preflight = async () => {
         const identity = await forge.identity();
         if (identity.login.toLowerCase() !== row.account.toLowerCase())
-          throw new ReviewError(
-            'ACCOUNT_CHANGED',
-            409,
-            'The GitHub CLI account changed. Sign in to the original account before retrying.',
-          );
+          throw new ReviewError('ACCOUNT_CHANGED', 409, say('outbox.cli-account-changed'));
 
         // A read started now: an older read still in flight can no longer be saved over it.
         return (await this.sync.refresh(row.prId, row.account, forge))?.snapshot;
@@ -993,12 +980,12 @@ export class OperationQueue {
           finishedAt: isoNow(this.clock),
           progress: pr
             ? 'Not posted: new commits arrived after this review. Run it again to review them.'
-            : 'Not posted: this PR is no longer tracked.',
+            : say('outbox.untracked'),
         });
         return;
       }
 
-      if (!pr) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer available.');
+      if (!pr) throw new ReviewError('NOT_FOUND', 404, say('pull.unavailable'));
 
       const action = row.action;
       if (
@@ -1024,8 +1011,8 @@ export class OperationQueue {
           status: 'cancelled',
           finishedAt: isoNow(this.clock),
           progress: gone
-            ? `Not marked viewed: ${action.path} is no longer part of this PR.`
-            : `Not marked viewed: ${action.path} changed after you viewed it. Look at the new diff first.`,
+            ? say('outbox.viewed-file-gone', { path: action.path })
+            : say('outbox.viewed-file-changed', { path: action.path }),
         });
         return;
       }
@@ -1049,11 +1036,7 @@ export class OperationQueue {
         pr.pendingReview?.id &&
         pr.pendingReview.id !== pendingId
       ) {
-        throw new ReviewError(
-          'PENDING_REVIEW_CHANGED',
-          409,
-          'A different pending review appeared on GitHub. Return to your draft and check its contents before submitting.',
-        );
+        throw new ReviewError('PENDING_REVIEW_CHANGED', 409, say('outbox.pending-review-changed'));
       }
       if (pendingId && !row.pendingReviewBackup) {
         const backup = await this.checkedReceipt(forge, row.account, pendingId);
@@ -1063,11 +1046,7 @@ export class OperationQueue {
           backup.commitOid &&
           backup.commitOid !== row.action.review.expectedHeadOid
         ) {
-          throw new ReviewError(
-            'HEAD_MOVED',
-            409,
-            'The pending GitHub review belongs to an older commit. Restore its draft and review the new commits.',
-          );
+          throw new ReviewError('HEAD_MOVED', 409, say('outbox.pending-review-outdated'));
         }
         if (backup) row = this.save({ ...row, pendingReviewBackup: backup });
       }
@@ -1105,18 +1084,10 @@ export class OperationQueue {
               previous &&
               (previous.method !== method || fingerprint(previous.args) !== fingerprint(args))
             )
-              throw new ReviewError(
-                'CHECKPOINT_CONFLICT',
-                409,
-                'The saved execution no longer matches this request. Open GitHub before recovering.',
-              );
+              throw new ReviewError('CHECKPOINT_CONFLICT', 409, say('outbox.checkpoint-conflict'));
             if (previous?.completedAt) return previous.result;
             if (previous?.uncertain)
-              throw new ReviewError(
-                'UNCONFIRMED',
-                409,
-                'The previous request may have reached GitHub. Check its result first.',
-              );
+              throw new ReviewError('UNCONFIRMED', 409, say('outbox.previous-unconfirmed'));
             if (this.suspended || this.closed) throw new Suspended();
             if (this.row(row.account, row.id).status === 'cancelled') throw new Cancelled();
 
@@ -1136,7 +1107,7 @@ export class OperationQueue {
               throw new ReviewError(
                 'ACCOUNT_CHANGED',
                 409,
-                'The GitHub account changed before sending. Sign in to the original account before retrying.',
+                say('outbox.account-changed-before-sending'),
               );
             // Commits, discussion and Settings can change after the check before sending, while
             // writes are paced. Every automatic post checks again right before it goes out.
@@ -1165,7 +1136,7 @@ export class OperationQueue {
                   ...row,
                   status: 'cancelled',
                   finishedAt: isoNow(this.clock),
-                  progress: `Not marked viewed: ${String(args[1])} changed after you viewed it. Look at the new diff first.`,
+                  progress: say('outbox.viewed-file-changed', { path: String(args[1]) }),
                 });
                 throw new Cancelled();
               }
@@ -1293,11 +1264,7 @@ export class OperationQueue {
           const action = row.action;
           const backup = await this.checkedReceipt(forge, row.account, action.reviewId);
           if (backup && backup.state !== 'PENDING')
-            throw new ReviewError(
-              'ALREADY_SUBMITTED',
-              409,
-              'This review was submitted on GitHub. Its saved content is preserved in Activity.',
-            );
+            throw new ReviewError('ALREADY_SUBMITTED', 409, say('outbox.already-submitted'));
 
           if (backup && !row.pendingReviewBackup) {
             if (backup) row = this.save({ ...row, pendingReviewBackup: backup });
@@ -1397,11 +1364,7 @@ export class OperationQueue {
     // Queued by an earlier version, with nothing to check its summary against after approving
     // (whichever plan it was given): nothing more of it is sent.
     if (notGiven && action.basis && !action.basis.summaryFingerprint)
-      throw new ReviewError(
-        'LEGACY_APPROVAL',
-        409,
-        'This automatic approval was queued by an earlier version of Review Desk, which could not check its summary on GitLab. Nothing more is sent; check the PR, then approve it yourself if it still applies.',
-      );
+      throw new ReviewError('LEGACY_APPROVAL', 409, say('stop.legacy-gitlab-approval'));
 
     if (row.plan === 2) return row;
     if (unsent) return this.save({ ...row, plan: 2 });
@@ -1536,8 +1499,7 @@ export class OperationQueue {
             skipped: 'this approval was queued before Review Desk checked what a review read.',
             code: 'LEGACY_APPROVAL',
             hold: true,
-            attention:
-              'This automatic approval was queued before Review Desk checked what a review read. Nothing more is sent; check the PR, then approve it yourself if it still applies.',
+            attention: say('stop.legacy-approval'),
           }
         : null;
 
@@ -1591,14 +1553,15 @@ export class OperationQueue {
   /** Records why a post stops: skipped when nothing was sent yet, otherwise needing attention. */
   private stopFor(row: OperationRecord, problem: PostProblem | null): void {
     if (!problem) return;
-    if (problem.retry) throw new GitHubError(problem.attention, null, null, 'unavailable');
+    if (problem.retry)
+      throw new GitHubError(render(problem.attention, row.account), null, null, 'unavailable');
 
     if (!problem.hold && !row.steps.some((step) => step.completedAt || step.uncertain)) {
       this.save({
         ...row,
         status: 'cancelled',
         finishedAt: isoNow(this.clock),
-        progress: `Not posted: ${problem.skipped}`,
+        progress: say('outbox.not-posted', { reason: problem.skipped }),
       });
       throw new Cancelled();
     }
@@ -1620,10 +1583,10 @@ export class OperationQueue {
     args: unknown[],
   ): PostProblem | null {
     const approving = action.event === 'APPROVE';
-    const stop = (skipped: string, code?: string) =>
+    const stop = (skipped: Wording, code?: string) =>
       stopped(skipped, approving, code, isSummary(action, method));
 
-    if (!pr) return stop('this PR is no longer tracked.', 'NOT_FOUND');
+    if (!pr) return stop(say('stop.untracked'), 'NOT_FOUND');
     if (pr.headOid !== action.expectedHeadOid)
       return stop(
         'new commits arrived after this review. Run it again to review them.',
@@ -1634,8 +1597,7 @@ export class OperationQueue {
     const basis = action.basis;
 
     if (allowed || !basis) return allowed;
-    if (pr.baseRefName !== basis.baseRefName)
-      return stop('the PR now targets another branch.', 'BASE_CHANGED');
+    if (pr.baseRefName !== basis.baseRefName) return stop(say('stop.retargeted'), 'BASE_CHANGED');
     if (mergeBase === undefined)
       return {
         skipped: 'Review Desk could not confirm where the target branch is.',
@@ -1644,8 +1606,7 @@ export class OperationQueue {
           'Review Desk could not confirm where the target branch is. It tries again; nothing is sent until it can.',
         retry: true,
       };
-    if (mergeBase !== basis.mergeBaseOid)
-      return stop('the PR shows another diff than the one reviewed.', 'BASE_CHANGED');
+    if (mergeBase !== basis.mergeBaseOid) return stop(say('stop.other-diff'), 'BASE_CHANGED');
 
     const resolved = new Set(
       row.steps
@@ -1668,16 +1629,14 @@ export class OperationQueue {
         skipped: 'Review Desk could not record which approval this post gave.',
         code: 'APPROVAL_UNKNOWN',
         hold: true,
-        attention:
-          'Review Desk could not record which approval this post gave, so its summary was not posted. Check the PR.',
+        attention: say('stop.approval-unknown'),
       };
     if (summary && (!approval || approval.id !== row.approvalId))
       return {
-        skipped: 'your approval of the reviewed commit is no longer on the PR.',
+        skipped: say('stop.approval-withdrawn'),
         code: 'APPROVAL_WITHDRAWN',
         hold: true,
-        attention:
-          'Your approval of the reviewed commit is no longer on the PR, so its summary was not posted. Check the PR.',
+        attention: say('stop.approval-gone'),
       };
 
     // The summary after its approval is checked without your reviews, which that approval
@@ -1689,32 +1648,25 @@ export class OperationQueue {
         skipped: 'this summary was queued before Review Desk could check it after approving.',
         code: 'DISCUSSION_CHANGED',
         hold: true,
-        attention:
-          'This summary was queued before Review Desk could check it after approving. The PR was approved, but its summary was not posted; check the PR.',
+        attention: say('stop.summary-unchecked'),
       };
 
     if (
       [...resolved].some((id) => !pr.threads.find((thread) => thread.id === id)?.isResolved) ||
       publicationFingerprint(pr, action.runId, row.account, resolved, !summary) !== expected
     )
-      return stop(
-        'the PR or its discussion changed after this review. Run it again to review it.',
-        'DISCUSSION_CHANGED',
-      );
+      return stop(say('stop.discussion-changed'), 'DISCUSSION_CHANGED');
 
     if (approving && !isSummary(action, method)) {
-      if (pr.isDraft) return stop('the PR was turned into a draft.');
-      if (isSameUser(pr.author.login, row.account)) return stop('you cannot approve your own PR.');
+      if (pr.isDraft) return stop(say('stop.draft'));
+      if (isSameUser(pr.author.login, row.account)) return stop(say('stop.own'));
     }
 
     if (method === 'setThreadResolved') {
       const thread = pr.threads.find((candidate) => candidate.id === String(args[0]));
 
       if (!basis.threadIds.includes(String(args[0])) || !thread || thread.isResolved)
-        return stop(
-          'the PR or its discussion changed after this review. Run it again to review it.',
-          'DISCUSSION_CHANGED',
-        );
+        return stop(say('stop.discussion-changed'), 'DISCUSSION_CHANGED');
       if (thread.viewerCanResolve === false)
         return stop('a thread this review read can no longer be resolved by you.');
     }
@@ -1722,7 +1674,7 @@ export class OperationQueue {
     return null;
   }
 
-  private stepLabel(method: string, row: OperationRecord): string {
+  private stepLabel(method: string, row: OperationRecord): Wording {
     if (method === 'addReviewThread' && row.action.type === 'review') {
       const completed = row.steps.filter(
         (step) => step.method === 'addReviewThread' && step.completedAt,
@@ -1735,14 +1687,12 @@ export class OperationQueue {
       return method === 'setThreadResolved'
         ? 'Resolving open review threads before approving.'
         : method === 'approveReview'
-          ? 'Approving the PR with the AI review.'
+          ? say('outbox.approving')
           : row.action.event === 'APPROVE'
             ? 'Posting the AI review summary after approving.'
-            : 'Posting the AI review to the PR conversation.';
+            : say('outbox.posting-review');
 
-    return method === 'submitReview'
-      ? 'Submitting your pending review to GitHub.'
-      : 'Sending to GitHub.';
+    return method === 'submitReview' ? say('outbox.submitting') : say('outbox.sending');
   }
 
   private complete(row: OperationRecord, result: GitHubOperation['result']): void {
@@ -1800,8 +1750,8 @@ export class OperationQueue {
               ? 'Pending review removed. Your editable draft is restored.'
               : 'Pending review discarded.'
             : result?.pending
-              ? 'Added to your pending review on GitHub.'
-              : 'Confirmed by GitHub.',
+              ? say('outbox.added-to-pending')
+              : say('outbox.confirmed'),
       });
     });
 
@@ -1830,8 +1780,8 @@ export class OperationQueue {
       this.save({
         ...row,
         status: 'checking',
-        progress: 'The connection ended after sending. Checking GitHub before retrying.',
-        error: { code: 'UNCONFIRMED', message: safeError(error) },
+        progress: say('outbox.connection-ended'),
+        error: { code: 'UNCONFIRMED', message: wordingOf(error, safeError) },
       });
       return;
     }
@@ -1866,7 +1816,7 @@ export class OperationQueue {
         attempts: row.attempts + 1,
         retryAt,
         progress: 'Waiting to retry. Your action is saved.',
-        error: { code: error.outcome.toUpperCase(), message: safeError(error) },
+        error: { code: error.outcome.toUpperCase(), message: wordingOf(error, safeError) },
       });
       return;
     }
@@ -1886,7 +1836,7 @@ export class OperationQueue {
             : error instanceof GitHubError
               ? error.outcome.toUpperCase()
               : 'GITHUB_ERROR',
-        message: safeError(error),
+        message: wordingOf(error, safeError),
       },
     });
   }
@@ -1901,7 +1851,7 @@ export class OperationQueue {
     try {
       const identity = await forge.identity();
       if (identity.login.toLowerCase() !== row.account.toLowerCase())
-        throw new Error('Sign in to the original GitHub account before checking this action.');
+        throw new ReviewError('ACCOUNT_CHANGED', 409, say('outbox.sign-in-to-check'));
 
       let confirmed = false;
       let result: unknown = null;
@@ -1925,7 +1875,7 @@ export class OperationQueue {
           this.save({
             ...row,
             status: 'needs_attention',
-            progress: 'GitHub still has your pending review. You can retry submission.',
+            progress: say('outbox.pending-review-kept'),
             error: {
               code: 'RETRY_SUBMISSION',
               message: 'The review has not been submitted. Its comments are preserved.',
@@ -2036,18 +1986,17 @@ export class OperationQueue {
 
           status: 'queued',
           error: null,
-          progress: 'GitHub confirmed the interrupted step. Resuming.',
+          progress: say('outbox.step-confirmed'),
         });
       } else {
         this.save({
           ...row,
           status: 'needs_attention',
           dismissedAt: null,
-          progress: 'Unconfirmed. Open GitHub to verify before taking another action.',
+          progress: say('outbox.unconfirmed'),
           error: {
             code: 'UNCONFIRMED',
-            message:
-              'This request may have reached GitHub. Your saved content is available below; it will not be sent again automatically.',
+            message: say('outbox.may-have-reached'),
           },
         });
       }
@@ -2056,8 +2005,8 @@ export class OperationQueue {
         ...row,
         status: 'needs_attention',
         dismissedAt: null,
-        progress: 'Could not confirm the GitHub result.',
-        error: { code: 'UNCONFIRMED', message: safeError(error) },
+        progress: say('outbox.result-unconfirmed'),
+        error: { code: 'UNCONFIRMED', message: wordingOf(error, safeError) },
       });
     }
   }
