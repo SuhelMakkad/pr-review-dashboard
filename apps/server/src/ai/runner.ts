@@ -29,7 +29,7 @@ import type { PullRequestDetail, PullRequestSnapshot } from '@review-desk/shared
 import type { AiRunRow } from '@/db/ai-runs.js';
 import type { DiffService } from '@/diff/service.js';
 import type { EventBus } from '@/events.js';
-import { asAccount } from '@/github/credentials.js';
+import { bindForge } from '@/forge/bind.js';
 import { redact, safeError } from '@/github/errors.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
 import { accountNotActive } from '@/review/errors.js';
@@ -49,11 +49,13 @@ import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
 import { draftChanged, planPreparation, preparationRevision } from '@/ai/preparation.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
 import {
+  archiveAccess,
   downloadRepository,
   prepareReviewWorkspace,
   type RepositoryExporter,
 } from '@/ai/workspace.js';
 import { AI_SETTINGS } from '@/db/settings.js';
+import type { GitHubApi } from '@/github/api.js';
 
 const MAX_CONCURRENT = 2;
 const PROBE_TTL_MS = 5 * 60_000;
@@ -815,9 +817,9 @@ export class AiRunner {
 
       if (!id) return;
 
-      // A run keeps its own account's GitHub access if you switch accounts while it runs.
-      const account = this.row(id)?.account;
-      const execution = account ? asAccount(account, () => this.execute(id)) : this.execute(id);
+      // A run keeps its own account's GitHub access if you switch accounts while it runs: it
+      // binds to that account as it starts (`execute`).
+      const execution = this.execute(id);
 
       this.executions.set(id, execution);
       void execution.finally(() => this.executions.delete(id));
@@ -846,6 +848,10 @@ export class AiRunner {
 
     if (!row || !saved) return;
 
+    // Bound as the run starts, and kept to its end whatever is selected meanwhile.
+    const forge = row.account ? bindForge(this.sync.github, row.account) : this.sync.github;
+    // The archives share the run's credentials: the same source, not a second binding.
+    const access = archiveAccess(row.account, forge);
     const controller = new AbortController();
     const workDir = join(this.workRoot, id);
     /** When progress was last sent to the app, on the monotonic clock; null before the first. */
@@ -889,18 +895,19 @@ export class AiRunner {
           this.emit(row);
 
           const snapshot = saved.snapshot;
-          const diff = await this.diffs.manifest(snapshot, 'full', null, row.account);
+          const diff = await this.diffs.manifest(snapshot, 'full', null, row.account, forge);
 
           for (const path of ['before', 'after', 'review.json'])
             await rm(join(workDir, path), { recursive: true, force: true });
 
           measured = await prepareReviewWorkspace(
-            this.sync.github,
+            forge,
             snapshot,
             diff,
             workDir,
             controller.signal,
             this.exportRepository,
+            access,
           );
         }
 
@@ -946,7 +953,7 @@ export class AiRunner {
 
       const output =
         row.task === 'draft_comments' || row.task === 'full_review'
-          ? await this.anchor(row, parsed.data as DraftCommentsResult)
+          ? await this.anchor(row, parsed.data as DraftCommentsResult, forge)
           : parsed.data;
       controller.signal.throwIfAborted();
 
@@ -1035,13 +1042,18 @@ export class AiRunner {
   }
 
   /** Keeps only anchors GitHub would accept; the rest stay as unanchored suggestions. */
-  private async anchor(row: AiRunRow, result: DraftCommentsResult): Promise<DraftCommentsResult> {
+  private async anchor(
+    row: AiRunRow,
+    result: DraftCommentsResult,
+    /** The run's own binding, so anchoring reads as the account the run started as. */
+    forge: GitHubApi,
+  ): Promise<DraftCommentsResult> {
     // The run's own snapshot, since the active account may have changed while it ran.
     const snapshot = row.request?.snapshot ?? this.sync.detailFor(row.account, row.prId)?.snapshot;
 
     if (!snapshot) return result;
 
-    const full = await this.diffs.manifest(snapshot, 'full', null, row.account);
+    const full = await this.diffs.manifest(snapshot, 'full', null, row.account, forge);
 
     return {
       ...result,

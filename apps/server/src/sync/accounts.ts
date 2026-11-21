@@ -138,6 +138,13 @@ export class AccountState {
     return account;
   }
 
+  /** What the account's forge supports, as its last sync read it, in use or not. */
+  capabilitiesOf(login: string): SyncStatus['capabilities'] {
+    return login === this.status.account?.login
+      ? this.status.capabilities
+      : this.store.settings.get(STATUS.of(login))?.capabilities;
+  }
+
   /** The account's own saved details (its web address, say), in use or not. */
   accountOf(login: string): SyncStatus['account'] {
     return login === this.status.account?.login

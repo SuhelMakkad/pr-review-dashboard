@@ -411,7 +411,8 @@ export class ReviewService {
     if (
       event === 'REQUEST_CHANGES' &&
       forgeOf(account) === 'gitlab' &&
-      this.sync.status.capabilities?.requestChanges !== true
+      // That account's own forge, which need not be the one in use (a queued review, say).
+      this.sync.capabilitiesOf(account)?.requestChanges !== true
     )
       throw new ReviewError('UNSUPPORTED', 422, REQUEST_CHANGES_UNSUPPORTED);
   }

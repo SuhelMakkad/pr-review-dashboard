@@ -105,6 +105,19 @@ export interface ReviewReceipt {
  */
 export interface GitHubApi extends GitHubWrites {
   /**
+   * This forge with every call made as `login`, for as long as the work that holds it runs,
+   * whatever is selected meanwhile. Absent where a forge cannot tell accounts apart (a test's
+   * stand-in): it is then its own binding (see `bindForge`).
+   */
+  as?(login: string): GitHubApi;
+
+  /**
+   * With no account selected: whose the credentials in use right now are, with this forge bound to
+   * them for the rest of the work, so it stays that account's even if the CLI switches meanwhile.
+   */
+  discoverIdentity?(): Promise<{ identity: Actor; forge: GitHubApi }>;
+
+  /**
    * Refuses (`AccountUnavailable`) when the forge is signed in as someone other than `account`.
    * GitLab only: each GitHub call carries the named account's own token, so it needs no check.
    */

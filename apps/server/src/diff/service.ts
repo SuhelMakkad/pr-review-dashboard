@@ -8,7 +8,7 @@ import {
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi, RemoteFile } from '@/github/api.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
-import { asAccount } from '@/github/credentials.js';
+import { bindForge } from '@/forge/bind.js';
 import { textPatch } from '@/diff/patch.js';
 
 const CACHE_LIMIT = 40;
@@ -31,6 +31,8 @@ const shortSha = (oid: string) => oid.slice(0, 7);
  */
 interface Build {
   account: string | null;
+  /** The forge, bound to `account` when there is one, so every read is that account's. */
+  forge: GitHubApi;
   staged: [string, DiffManifest][];
 }
 
@@ -151,8 +153,14 @@ export class DiffService {
     mode: DiffMode,
     reviewOid: string | null,
     account: string | null = null,
+    /** The caller's own binding to `account`, kept for its whole operation; else one is made. */
+    forge?: GitHubApi,
   ): Promise<DiffManifest> {
-    const build: Build = { account, staged: [] };
+    const build: Build = {
+      account,
+      forge: forge ?? (account ? bindForge(this.github, account) : this.github),
+      staged: [],
+    };
     const work = async () => {
       if (mode === 'full' || !reviewOid) return this.withViewed(await this.full(build, pr), pr);
 
@@ -171,18 +179,17 @@ export class DiffService {
       return manifest;
     }
 
-    const verify = this.github.verifyAccount?.bind(this.github);
+    const verify = build.forge.verifyAccount?.bind(build.forge);
 
-    if (!verify)
-      return asAccount(account, async () => {
-        const manifest = await work();
+    if (!verify) {
+      const manifest = await work();
 
-        this.publish(build);
+      this.publish(build);
 
-        return manifest;
-      });
+      return manifest;
+    }
 
-    return asAccount(account, async () => {
+    return (async () => {
       // A limit met by a check itself cannot be tied to the account: it is nobody's cooldown.
       const check = () =>
         verify(account).catch((error: unknown) => Promise.reject(unattributed(error)));
@@ -209,7 +216,7 @@ export class DiffService {
       this.publish(build);
 
       return manifest;
-    });
+    })();
   }
 
   private async full(build: Build, pr: PullRequestSnapshot): Promise<DiffManifest> {
@@ -220,11 +227,11 @@ export class DiffService {
 
     // Where viewed state follows each diff, the files of exactly this revision, keyed.
     const listing =
-      (await this.github.pinnedFiles?.(pr.repository, pr.number, {
+      (await build.forge.pinnedFiles?.(pr.repository, pr.number, {
         headOid: pr.headOid,
         baseOid: pr.baseOid ?? null,
       })) ?? null;
-    const files = listing ? listing.files : await this.github.pullFiles(pr.repository, pr.number);
+    const files = listing ? listing.files : await build.forge.pullFiles(pr.repository, pr.number);
     const keyed = listing !== null;
     const manifest: DiffManifest = {
       prId: pr.id,
@@ -266,7 +273,7 @@ export class DiffService {
 
     if (cached) return cached;
 
-    const comparison = await this.github.compare(pr.repository, reviewOid, pr.headOid);
+    const comparison = await build.forge.compare(pr.repository, reviewOid, pr.headOid);
 
     if (!comparison) {
       const full = await this.full(build, pr);
@@ -303,21 +310,22 @@ export class DiffService {
       });
     }
 
-    return this.remember(build, key, await this.rebased(pr, reviewOid, prPaths, base));
+    return this.remember(build, key, await this.rebased(build.forge, pr, reviewOid, prPaths, base));
   }
 
   /** History was rewritten: diff each file as reviewed against its current content. */
   private async rebased(
+    forge: GitHubApi,
     pr: PullRequestSnapshot,
     reviewOid: string,
     prPaths: Set<string>,
     base: Pick<DiffManifest, 'prId' | 'mode' | 'fromOid' | 'toOid'>,
   ): Promise<DiffManifest> {
-    const atReview = await this.github.compare(pr.repository, pr.baseRefName, reviewOid);
+    const atReview = await forge.compare(pr.repository, pr.baseRefName, reviewOid);
     const paths = [...new Set([...prPaths, ...(atReview?.files.map((file) => file.path) ?? [])])]
       .sort()
       .slice(0, MAX_INTERDIFF_FILES);
-    const blobs = await this.github.blobs(pr.repository, [
+    const blobs = await forge.blobs(pr.repository, [
       ...paths.map((path) => ({ oid: reviewOid, path })),
       ...paths.map((path) => ({ oid: pr.headOid, path })),
     ]);

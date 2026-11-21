@@ -11,21 +11,46 @@ import type { DiffManifest } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi } from '@/github/api.js';
 import { parseAccount } from '@review-desk/shared/accounts';
-import { ghCredentials, scopedAccount } from '@/github/credentials.js';
+import { ghCredentials, type CredentialSource } from '@/github/credentials.js';
 import { safeError } from '@/github/errors.js';
 import { baseGlabEnvironment, glabCwd } from '@/gitlab/transport.js';
 import { AgentError } from '@/ai/provider.js';
 import { log } from '@/log.js';
 import { observeInputs } from '@/ai/inputs.js';
+import { BoundForge } from '@/forge/router.js';
 
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Whose a review's archives are, and, for GitHub, the credentials its downloads use: settled when
+ * the run starts and kept to its end, whatever is selected meanwhile.
+ */
+export interface ArchiveAccess {
+  account: string | null;
+  /** GitHub's credentials for the run; GitLab's CLI signs each request in for itself. */
+  credentials: CredentialSource | null;
+}
+
+/**
+ * The archive access of a run for `account`, with no account the selected one's. A run's forge
+ * bound to GitHub lends its own credentials, so the archives are read with the same source.
+ */
+export function archiveAccess(account: string | null, forge?: GitHubApi): ArchiveAccess {
+  if (!account) return { account: null, credentials: ghCredentials };
+  if (parseAccount(account).forge !== 'github') return { account, credentials: null };
+
+  const shared = forge instanceof BoundForge ? forge.credentials : null;
+
+  return { account, credentials: shared ?? ghCredentials.bind(account) };
+}
 
 export type RepositoryExporter = (
   repository: string,
   oid: string,
   directory: string,
   signal: AbortSignal,
+  access: ArchiveAccess,
 ) => Promise<string[]>;
 
 /** Extract regular files only; repository symlinks must never lead outside the review workspace. */
@@ -78,8 +103,12 @@ const GITHUB_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 /** GitLab projects can sit in nested groups: `group/subgroup/project`. */
 const GITLAB_PROJECT = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/;
 
-async function archiveCommand(repository: string, oid: string): Promise<ArchiveCommand> {
-  const account = parseAccount(scopedAccount() ?? '');
+async function archiveCommand(
+  repository: string,
+  oid: string,
+  access: ArchiveAccess,
+): Promise<ArchiveCommand> {
+  const account = parseAccount(access.account ?? '');
 
   if (account.forge === 'gitlab') {
     if (!GITLAB_PROJECT.test(repository) || !COMMIT.test(oid)) throw invalidRepository();
@@ -102,7 +131,7 @@ async function archiveCommand(repository: string, oid: string): Promise<ArchiveC
   return {
     command: 'gh',
     args: ['api', '--hostname', 'github.com', `repos/${repository}/tarball/${oid}`],
-    env: await ghCredentials.environment(),
+    env: await (access.credentials ?? ghCredentials).environment(),
   };
 }
 
@@ -118,8 +147,9 @@ export const downloadRepository: RepositoryExporter = async (
   oid,
   directory,
   signal,
+  access,
 ) => {
-  const { command, args, env, cwd } = await archiveCommand(repository, oid);
+  const { command, args, env, cwd } = await archiveCommand(repository, oid, access);
   const archive = `${directory}.tar.gz`;
   const started = performance.now();
   const controller = new AbortController();
@@ -205,9 +235,18 @@ export async function prepareReviewWorkspace(
   directory: string,
   signal: AbortSignal,
   exportRepository: RepositoryExporter,
+  access: ArchiveAccess,
 ): Promise<ReviewInputs> {
   if (!pr.baseOid)
     throw new AgentError('The PR base commit is unavailable. Refresh and try again.');
+
+  // glab signs each request in with its own sign-in: the compare and both downloads count as this
+  // account's only between checks that glab still is it, or the agent would read someone else's.
+  const check = async () => {
+    if (access.account) await github.verifyAccount?.(access.account);
+  };
+
+  await check();
 
   const comparison = await github.compare(pr.repository, pr.baseOid, pr.headOid);
   const mergeBase = comparison?.mergeBaseOid;
@@ -220,14 +259,20 @@ export async function prepareReviewWorkspace(
     mergeBase,
     join(directory, 'before'),
     signal,
+    access,
   );
+
+  await check();
+
   const omittedAfter = await exportRepository(
     pr.repository,
     pr.headOid,
     join(directory, 'after'),
     signal,
+    access,
   );
 
+  await check();
   signal.throwIfAborted();
 
   const { inputs, files } = await observeInputs(directory, pr, diff, comparison, mergeBase);

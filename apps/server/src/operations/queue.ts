@@ -19,8 +19,8 @@ import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
 import { githubOperations } from '@/db/schema.js';
 import { DiffService } from '@/diff/service.js';
-import type { GitHubApi } from '@/github/api.js';
-import { asAccount } from '@/github/credentials.js';
+import type { GitHubApi, ReviewReceipt } from '@/github/api.js';
+import { bindForge } from '@/forge/bind.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { DraftStore } from '@/db/drafts.js';
 import { ReviewError, ReviewService } from '@/review/service.js';
@@ -28,6 +28,7 @@ import { accountNotActive } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import type { MutationStep, OperationRecord } from './types.js';
 import { WRITE_COOLDOWN } from '@/db/settings.js';
+import { AccountUnavailable, unattributed } from '@/forge/account.js';
 
 const MUTATIONS = new Set([
   'approveReview',
@@ -817,11 +818,57 @@ export class OperationQueue {
     if (!row) return;
 
     // Each action is sent as the account that queued it, whatever is selected meanwhile.
-    if (row.status === 'checking') await asAccount(row.account, () => this.reconcile(row));
-    else await asAccount(row.account, () => this.execute(row));
+    const forge = this.forge(row.account);
+
+    if (row.status === 'checking') await this.reconcile(row, forge);
+    else await this.execute(row, forge);
   }
 
-  private async execute(original: OperationRecord): Promise<void> {
+  /** The forge, with every call made as `account` (see `GitHubApi.as`). */
+  private forge(account: string): GitHubApi {
+    return bindForge(this.sync.github, account);
+  }
+
+  /**
+   * A review's receipt, read as `account`. glab signs each request in with its own sign-in, so the
+   * read counts only between two checks that it is still that account: a sign-in change around it
+   * fails the read (`AccountUnavailable`), so another user's drafts never answer for this account.
+   */
+  private async checkedReceipt(
+    forge: GitHubApi,
+    account: string,
+    id: string,
+    /** True where an identity check has just opened the bracket (reconciliation's). */
+    opened = false,
+  ): Promise<ReviewReceipt | null> {
+    // A limit met by a check itself cannot be tied to the account: it is nobody's cooldown.
+    const check = async () =>
+      forge.verifyAccount?.(account).catch((error: unknown) => Promise.reject(unattributed(error)));
+
+    if (!opened) await check();
+
+    let receipt: ReviewReceipt | null;
+
+    try {
+      receipt = await forge.reviewReceipt(id);
+    } catch (error) {
+      if (error instanceof AccountUnavailable) throw error;
+
+      // A limit the read met is the account's only if glab is still signed in as it.
+      const confirmed = await check().then(
+        () => true,
+        () => false,
+      );
+
+      throw confirmed ? error : unattributed(error);
+    }
+
+    await check();
+
+    return receipt;
+  }
+
+  private async execute(original: OperationRecord, forge: GitHubApi): Promise<void> {
     let row = this.save({
       ...original,
       status: 'running',
@@ -883,7 +930,7 @@ export class OperationQueue {
       if (!combined) allowed();
 
       const preflight = async () => {
-        const identity = await this.sync.github.identity();
+        const identity = await forge.identity();
         if (identity.login.toLowerCase() !== row.account.toLowerCase())
           throw new ReviewError(
             'ACCOUNT_CHANGED',
@@ -892,7 +939,7 @@ export class OperationQueue {
           );
 
         // A read started now: an older read still in flight can no longer be saved over it.
-        return (await this.sync.refresh(row.prId, row.account))?.snapshot;
+        return (await this.sync.refresh(row.prId, row.account, forge))?.snapshot;
       };
       const pr = await preflight().catch((error: unknown) => {
         this.coolDown(row.account, error);
@@ -902,7 +949,7 @@ export class OperationQueue {
       });
       if (this.row(row.account, row.id).status === 'cancelled') return;
 
-      const planned = await this.planApproval(row, pr);
+      const planned = await this.planApproval(forge, row, pr);
 
       if (!planned) return;
       row = planned;
@@ -984,7 +1031,7 @@ export class OperationQueue {
         );
       }
       if (pendingId && !row.pendingReviewBackup) {
-        const backup = await this.sync.github.reviewReceipt(pendingId);
+        const backup = await this.checkedReceipt(forge, row.account, pendingId);
         if (
           row.action.type === 'review' &&
           backup?.state === 'PENDING' &&
@@ -1016,7 +1063,7 @@ export class OperationQueue {
       }
 
       let stepIndex = 0;
-      const github = new Proxy(this.sync.github, {
+      const github = new Proxy(forge, {
         get: (target, property) => {
           const method = String(property);
           const value = Reflect.get(target, property);
@@ -1069,7 +1116,7 @@ export class OperationQueue {
             // Commits, discussion and Settings can change after the check before sending, while
             // writes are paced. Every automatic post checks again right before it goes out.
             if (row.action.type === 'ai_review')
-              row = await this.checkAutomaticPost(row, method, args);
+              row = await this.checkAutomaticPost(forge, row, method, args);
 
             // The pacing wait and the account check above take time, and GitHub marks whichever
             // diff is current when the mark arrives: check the diff again right before it goes.
@@ -1079,7 +1126,7 @@ export class OperationQueue {
               row.action.type === 'viewed' &&
               row.action.target
             ) {
-              const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
+              const pr = (await this.sync.refresh(row.prId, row.account, forge))?.snapshot;
 
               row = this.row(row.account, row.id);
               if (row.status === 'cancelled') throw new Cancelled();
@@ -1103,7 +1150,7 @@ export class OperationQueue {
               method === 'submitReview' &&
               (row.action.type === 'review' || row.action.type === 'comment')
             ) {
-              await this.sync.refresh(row.prId, row.account);
+              await this.sync.refresh(row.prId, row.account, forge);
               const expected =
                 row.action.type === 'review'
                   ? row.action.review.expectedHeadOid
@@ -1161,7 +1208,7 @@ export class OperationQueue {
             // The approval this post just gave, named while nothing else can have replaced it:
             // its summary goes only with that one.
             if (method === 'approveReview' && args[2] === '' && row.action.type === 'ai_review')
-              row = await this.bindApproval(row);
+              row = await this.bindApproval(forge, row);
 
             return result;
           };
@@ -1219,7 +1266,7 @@ export class OperationQueue {
           break;
         case 'discard': {
           const action = row.action;
-          const backup = await this.sync.github.reviewReceipt(action.reviewId);
+          const backup = await this.checkedReceipt(forge, row.account, action.reviewId);
           if (backup && backup.state !== 'PENDING')
             throw new ReviewError(
               'ALREADY_SUBMITTED',
@@ -1287,7 +1334,7 @@ export class OperationQueue {
       action.type === 'ai_review' &&
       action.event === 'APPROVE' &&
       !row.plan &&
-      !this.sync.github.approvalCarriesSummary &&
+      !this.forge(row.account).approvalCarriesSummary &&
       step &&
       !step.completedAt &&
       !step.uncertain,
@@ -1304,13 +1351,14 @@ export class OperationQueue {
    * is left to `reconcile`. Null when the row is settled here.
    */
   private async planApproval(
+    forge: GitHubApi,
     row: OperationRecord,
     pr: PullRequestSnapshot | undefined,
   ): Promise<OperationRecord | null> {
     const action = row.action;
 
     if (action.type !== 'ai_review' || action.event !== 'APPROVE') return row;
-    if (this.sync.github.approvalCarriesSummary) return row;
+    if (forge.approvalCarriesSummary) return row;
 
     const unsent = !row.steps.some((step) => step.method === 'approveReview');
     // Not given yet: never sent, or refused as a split step (a refused combined step is checked
@@ -1336,11 +1384,7 @@ export class OperationQueue {
 
     const approved = approvalOf(row, pr, false);
     const summary = approved
-      ? await this.sync.github.markedComment(
-          row.prId,
-          row.account,
-          postedReviewMarker(action.runId),
-        )
+      ? await forge.markedComment(row.prId, row.account, postedReviewMarker(action.runId))
       : null;
 
     // Stopped while the forge was asked: it stays stopped.
@@ -1365,6 +1409,7 @@ export class OperationQueue {
    * sent, a post that fails a check is skipped with the reason; after, the rest waits for you.
    */
   private async checkAutomaticPost(
+    forge: GitHubApi,
     row: OperationRecord,
     method: string,
     args: unknown[],
@@ -1405,17 +1450,14 @@ export class OperationQueue {
     let compared: string | null = null;
 
     if (basis) {
-      target = await read(() => this.sync.github.branchHead(row.repository, basis.baseRefName));
+      target = await read(() => forge.branchHead(row.repository, basis.baseRefName));
       compared = target
-        ? ((
-            await read(() =>
-              this.sync.github.compare(row.repository, target!, action.expectedHeadOid),
-            )
-          )?.mergeBaseOid ?? null)
+        ? ((await read(() => forge.compare(row.repository, target!, action.expectedHeadOid)))
+            ?.mergeBaseOid ?? null)
         : null;
     }
 
-    await read(() => this.sync.refresh(row.prId, row.account));
+    await read(() => this.sync.refresh(row.prId, row.account, forge));
 
     row = this.row(row.account, row.id);
     if (row.status === 'cancelled') throw new Cancelled();
@@ -1491,9 +1533,9 @@ export class OperationQueue {
    * Records which approval an automatic approval just gave, read right after it: GitLab names it
    * by its note. Where it cannot be read, nothing is recorded, and the summary waits for you.
    */
-  private async bindApproval(row: OperationRecord): Promise<OperationRecord> {
+  private async bindApproval(forge: GitHubApi, row: OperationRecord): Promise<OperationRecord> {
     try {
-      await this.sync.refresh(row.prId, row.account);
+      await this.sync.refresh(row.prId, row.account, forge);
     } catch (error) {
       // A rate limit holds everything until its time, and stops this attempt; the approval's
       // receipt is kept. Any other failure leaves it unnamed, and the summary waits.
@@ -1506,7 +1548,7 @@ export class OperationQueue {
     }
 
     const pr = this.sync.store.snapshot(row.account, row.prId) ?? undefined;
-    const approval = approvalOf(row, pr, this.sync.github.approvalCarriesSummary);
+    const approval = approvalOf(row, pr, forge.approvalCarriesSummary);
     const current = this.row(row.account, row.id);
 
     return approval ? this.save({ ...current, approvalId: approval.id }) : current;
@@ -1593,7 +1635,7 @@ export class OperationQueue {
     const summary = isSummary(action, method);
 
     const approval = summary
-      ? approvalOf(row, pr, this.sync.github.approvalCarriesSummary)
+      ? approvalOf(row, pr, this.forge(row.account).approvalCarriesSummary)
       : undefined;
 
     if (summary && !row.approvalId)
@@ -1824,7 +1866,7 @@ export class OperationQueue {
     });
   }
 
-  private async reconcile(row: OperationRecord): Promise<void> {
+  private async reconcile(row: OperationRecord, forge: GitHubApi): Promise<void> {
     const step = row.steps.find((candidate) => candidate.uncertain && !candidate.completedAt);
     if (!step) {
       this.save({ ...row, status: 'queued', error: null });
@@ -1832,7 +1874,7 @@ export class OperationQueue {
     }
 
     try {
-      const identity = await this.sync.github.identity();
+      const identity = await forge.identity();
       if (identity.login.toLowerCase() !== row.account.toLowerCase())
         throw new Error('Sign in to the original GitHub account before checking this action.');
 
@@ -1840,7 +1882,7 @@ export class OperationQueue {
       let result: unknown = null;
 
       if (step.method === 'submitReview') {
-        const receipt = await this.sync.github.reviewReceipt(String(step.args[0]));
+        const receipt = await this.checkedReceipt(forge, row.account, String(step.args[0]), true);
         const states: Record<string, string> = {
           APPROVE: 'APPROVED',
           COMMENT: 'COMMENTED',
@@ -1867,13 +1909,14 @@ export class OperationQueue {
           return;
         }
       } else if (step.method === 'deleteReview') {
-        confirmed = (await this.sync.github.reviewReceipt(String(step.args[0]))) === null;
+        confirmed =
+          (await this.checkedReceipt(forge, row.account, String(step.args[0]), true)) === null;
       } else if (step.method === 'approveReview' && row.action.type === 'ai_review') {
-        await this.sync.refresh(row.prId, row.account);
+        await this.sync.refresh(row.prId, row.account, forge);
 
         const action = row.action;
         const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
-        const carries = this.sync.github.approvalCarriesSummary;
+        const carries = forge.approvalCarriesSummary;
 
         // An approval sent alone (plan 2) is confirmed by your approval of the head (see
         // `approvalOf`). One that carries its summary (GitHub) by the review with its text. A
@@ -1894,7 +1937,7 @@ export class OperationQueue {
               review.body === action.body,
           );
         } else if (approvalOf(row, pr, false)) {
-          receipt = await this.sync.github.markedComment(
+          receipt = await forge.markedComment(
             row.prId,
             row.account,
             postedReviewMarker(action.runId),
@@ -1910,7 +1953,7 @@ export class OperationQueue {
         // conversation by the PR's repository and number (a snapshot keeps only the latest, and
         // none once the PR closes). Absence is not proof: the forge may not list it yet, so an
         // unfound comment stays unconfirmed rather than being sent again.
-        const posted = await this.sync.github.markedComment(
+        const posted = await forge.markedComment(
           row.prId,
           row.account,
           postedReviewMarker(row.action.runId),
@@ -1925,7 +1968,7 @@ export class OperationQueue {
         // approve over someone else's resolution, and sending it again over their reopening.
         // It waits for you (`confirmed` stays false).
       } else if (step.method === 'setFileViewed' || step.method === 'setThreadResolved') {
-        await this.sync.refresh(row.prId, row.account);
+        await this.sync.refresh(row.prId, row.account, forge);
         const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
 
         const viewedState = pr?.files.find((file) => file.path === step.args[1])?.viewerViewedState;

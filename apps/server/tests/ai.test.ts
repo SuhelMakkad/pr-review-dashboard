@@ -22,12 +22,14 @@ import { AiRunner } from '@/ai/runner.js';
 import { preparedCommentFingerprint } from '@/ai/preparation.js';
 import { jsonSchemaFor } from '@/ai/tasks.js';
 import {
+  archiveAccess,
+  type ArchiveAccess,
   extractRepository,
   prepareReviewWorkspace,
   type RepositoryExporter,
 } from '@/ai/workspace.js';
 import { Store } from '@/db/store.js';
-import { FixtureGitHub } from '@/demo/fixture-github.js';
+import { DEMO_SECOND_ACCOUNT, FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { DiffService } from '@/diff/service.js';
 import { EventBus } from '@/events.js';
@@ -433,9 +435,29 @@ async function setup() {
   cleanups.push(() => store.close());
   await sync.sync();
 
-  const exported: { oid: string; directory: string }[] = [];
-  const exportRepository: RepositoryExporter = async (repository, oid, directory, signal) => {
-    exported.push({ oid, directory });
+  const exported: { oid: string; directory: string; access: ArchiveAccess }[] = [];
+  let held: Promise<void> | null = null;
+  /** Holds every export until the returned function is called. */
+  const holdExports = () => {
+    let release!: () => void;
+
+    held = new Promise((resolve) => (release = resolve));
+
+    return () => {
+      held = null;
+      release();
+    };
+  };
+  const exportRepository: RepositoryExporter = async (
+    repository,
+    oid,
+    directory,
+    signal,
+    access,
+  ) => {
+    exported.push({ oid, directory, access });
+
+    if (held) await held;
 
     for (const [path, content] of Object.entries(
       github.scenario.world.repos.files(repository, oid),
@@ -479,6 +501,7 @@ async function setup() {
     diffs,
     exported,
     exportRepository,
+    holdExports,
     root,
   };
 }
@@ -591,6 +614,35 @@ describe('Codex plan usage', () => {
 });
 
 describe('AI runner', () => {
+  it('keeps a full review its own account through a switch, from its compare to its archives', async () => {
+    const { github, runner, pr, finished, exported, holdExports } = await setup();
+    const release = holdExports();
+    const compared: string[] = [];
+    const compare = github.compare.bind(github);
+
+    vi.spyOn(github, 'compare').mockImplementation(async (...args) => {
+      // Whose the call is, as the fixture answers it.
+      compared.push((await github.identity()).login);
+
+      return compare(...args);
+    });
+
+    const run = await runner.start('you', pr(1839).id, 'full_review');
+
+    // Selected elsewhere while the run's first archive is on its way.
+    await vi.waitFor(() => expect(exported).toHaveLength(1));
+    github.select(DEMO_SECOND_ACCOUNT);
+    release();
+
+    expect((await finished(run)).status).toBe('done');
+    expect(compared.length).toBeGreaterThan(0);
+    expect(new Set(compared)).toEqual(new Set(['you']));
+    // Both archives as the run's account, with the one source of credentials it started with.
+    expect(exported).toHaveLength(2);
+    expect(exported[0].access.account).toBe('you');
+    expect(exported[1].access).toBe(exported[0].access);
+  });
+
   it('runs two full reviews in isolated workspaces and queues another until a slot is free', async () => {
     const { runner, providers, pr, finished, root, sync, github } = await setup();
     const controls = holdRuns(providers.codex);
@@ -1386,6 +1438,7 @@ describe('AI runner', () => {
       directory,
       new AbortController().signal,
       exporter,
+      archiveAccess(null),
     );
 
     const context = JSON.parse(readFileSync(join(directory, 'review.json'), 'utf8'));

@@ -124,14 +124,23 @@ export class SyncService {
     return this.state.knows(account);
   }
 
+  /** What the account's forge supports, as its last sync read it, in use or not. */
+  capabilitiesOf(account: string): SyncStatus['capabilities'] {
+    return this.state.capabilitiesOf(account);
+  }
+
   /** Refuses a read while the account is cooling down after a rate limit. */
   assertNotCoolingDown(account?: string | null): void {
     this.state.assertNotCoolingDown(account);
   }
 
   /** Refetches one PR now (see `PullQueue.refresh`). */
-  refresh(id: string, account?: string | null): Promise<PullRequestDetail | null> {
-    return this.queue.refresh(id, account);
+  refresh(
+    id: string,
+    account?: string | null,
+    forge?: GitHubApi,
+  ): Promise<PullRequestDetail | null> {
+    return this.queue.refresh(id, account, forge);
   }
 
   /** Adds a PR to the queue by hand (see `PullQueue.track`). */

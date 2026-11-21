@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { githubOp } from '@/forge/ops.js';
 import { forgeRequest } from '@/forge/timing.js';
-import { ghCredentials, type GhCredentials } from '@/github/credentials.js';
+import { ghCredentials, type CredentialSource } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
@@ -61,7 +61,8 @@ interface RunResult {
 export class GhCli implements GitHubTransport {
   constructor(
     private readonly timeoutMs = 35_000,
-    private readonly credentials: GhCredentials = ghCredentials,
+    /** The selected account's by default; a client for one account's work binds its own. */
+    private readonly credentials: CredentialSource = ghCredentials,
   ) {}
 
   private async spawn(args: string[], input?: string): Promise<RunResult> {

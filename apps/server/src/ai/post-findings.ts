@@ -13,6 +13,7 @@ import type { AiRunner } from '@/ai/runner.js';
 import type { AiRunRow } from '@/db/ai-runs.js';
 import type { OperationQueue } from '@/operations/queue.js';
 import type { SyncService } from '@/sync/service.js';
+import { bindForge } from '@/forge/bind.js';
 
 /** GitHub refuses comments longer than 65,536 characters; stay clear of the limit. */
 const MAX_BODY = 65_000;
@@ -129,6 +130,8 @@ export class FindingsPublisher {
 
     const result = JSON.parse(row.result) as FullReviewResult;
     const blocking = hasBlockingFindings(result);
+    // The run's own account's forge, whatever is selected now: GitLab's approvals carry no text.
+    const carriesSummary = bindForge(this.sync.github, row.account).approvalCarriesSummary;
     const reason = blocking
       ? undefined
       : !row.inputs.complete
@@ -137,7 +140,7 @@ export class FindingsPublisher {
           ? 'Approving is turned off in Settings.'
           : current.isDraft
             ? 'Draft PRs are not approved automatically.'
-            : alreadyApproved(reviewed, row.account, this.sync.github.approvalCarriesSummary)
+            : alreadyApproved(reviewed, row.account, carriesSummary)
               ? 'You had already approved this PR.'
               : isSameUser(current.author.login, row.account)
                 ? 'You cannot approve your own PR.'
@@ -154,7 +157,7 @@ export class FindingsPublisher {
       row.headOid,
       result,
       row.inputs,
-      event === 'APPROVE' && !this.sync.github.approvalCarriesSummary,
+      event === 'APPROVE' && !carriesSummary,
     );
     const operationId = postedReviewOperationId(row.id);
 

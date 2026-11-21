@@ -16,6 +16,7 @@ import { EventBus } from '@/events.js';
 import { ForgeRouter } from '@/forge/router.js';
 import { ghCredentials } from '@/github/credentials.js';
 import { GitHub } from '@/github/read.js';
+import { GhCli } from '@/github/transport.js';
 import { GlabAccounts } from '@/gitlab/accounts.js';
 import { GitLab } from '@/gitlab/read.js';
 import { createSessionToken } from '@/http/security.js';
@@ -82,8 +83,26 @@ await pruneBackups(config.dataDir);
 // GitHub accounts come from the GitHub CLI, GitLab accounts (any host) from the GitLab CLI.
 const forges = fixture
   ? null
-  : new ForgeRouter(new GitHub(), ghCredentials, new GlabAccounts(), (host) =>
-      GitLab.forHost(host, store.settings.forgeLocal),
+  : new ForgeRouter(
+      new GitHub(),
+      ghCredentials,
+      new GlabAccounts(),
+      (host) => GitLab.forHost(host, store.settings.forgeLocal),
+      // Work for one account keeps that account's credentials for as long as it runs.
+      {
+        bound: (login) => {
+          const credentials = ghCredentials.bind(login);
+
+          return { client: new GitHub(new GhCli(undefined, credentials)), credentials };
+        },
+        pinned: async () => {
+          const credentials = await ghCredentials.pin();
+
+          return credentials
+            ? { client: new GitHub(new GhCli(undefined, credentials)), credentials }
+            : null;
+        },
+      },
     );
 // Real forges turn Retry-After into deadlines with the system's wall time, so they share its clock.
 const service = new SyncService(
