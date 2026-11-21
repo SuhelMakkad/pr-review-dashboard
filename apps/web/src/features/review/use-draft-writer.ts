@@ -3,8 +3,11 @@ import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { routes } from '@review-desk/shared/contract';
 import type { ReviewDraft } from '@review-desk/shared/review';
 import { toast } from 'sonner';
+import { pathOf } from '@/lib/call';
+import { forgetLegacy, legacyIds } from '@/lib/operation-command';
+import { ApiError } from '@/lib/api';
 import { call } from '@/lib/call';
-import { accountSwitches } from '@/lib/live';
+import { accountSwitches, onServerEvent } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
 import { draftWriter, type DraftWriter, type Transport } from '@/features/review/draft-writer';
 
@@ -88,7 +91,54 @@ function transport(client: QueryClient, account: string, prId: string): Transpor
     },
     stale: () => void client.invalidateQueries({ queryKey: key }),
     refused: (reason) => void toast.error(reason),
+    epoch: () =>
+      call(routes.receiptEpoch, { params: { account }, strict: true }).then(({ epoch }) => epoch),
+    sendCommand: (request) =>
+      call(
+        commandRoutes[request.route] as never,
+        { params: request.params, body: request.body, strict: true } as never,
+      ),
+    // Nothing received under the id: a 404 the receipt route answers as such.
+    receipt: (id) =>
+      call(routes.operationReceipt, { params: { account, id }, strict: true }).catch(
+        (error: unknown) => {
+          if (error instanceof ApiError && error.status === 404 && error.code === 'NOT_FOUND')
+            return null;
+
+          throw error;
+        },
+      ),
+    abandon: (id, kind, epoch) =>
+      call(routes.abandonCommand, {
+        params: { account, id: prId, commandId: id },
+        body: { type: kind === 'submit' ? 'review' : 'discard', epoch },
+        strict: true,
+      }),
   };
+}
+
+/** The commands the writer sends, by name. */
+const commandRoutes = { submit: routes.submit, discard: routes.discard } as const;
+
+/**
+ * Hands the writer the submit and discard ids an earlier version kept for this draft: forgotten
+ * there only once the writer recorded them.
+ */
+function adoptLegacy(writer: DraftWriter, account: string, prId: string) {
+  const pr = { account, id: prId };
+  const legacy = [
+    ...legacyIds(pathOf(routes.submit, pr), 'POST').map((entry) => ({
+      ...entry,
+      kind: 'submit' as const,
+    })),
+    ...legacyIds(pathOf(routes.discard, pr), 'DELETE').map((entry) => ({
+      ...entry,
+      kind: 'discard' as const,
+    })),
+  ];
+
+  if (legacy.length > 0 && writer.adopt(legacy.map(({ id, kind }) => ({ id, kind }))))
+    for (const entry of legacy) forgetLegacy(entry.key);
 }
 
 /**
@@ -101,7 +151,13 @@ export function useDraftWriter(
   draft: ReviewDraft | undefined,
 ): DraftWriter {
   const client = useQueryClient();
-  const writer = draftWriter(client, account, prId, () => transport(client, account, prId));
+  const writer = draftWriter(
+    client,
+    account,
+    prId,
+    () => transport(client, account, prId),
+    (made) => adoptLegacy(made, account, prId),
+  );
 
   useSyncExternalStore(
     (listener) => writer.subscribe(listener),
@@ -111,6 +167,21 @@ export function useDraftWriter(
   useEffect(() => {
     if (draft) writer.observe(draft);
   }, [writer, draft]);
+
+  // Its commands are looked up as soon as anything says they may have moved: their operation
+  // changed, or the stream connected again after a gap.
+  useEffect(
+    () =>
+      onServerEvent((event) => {
+        if (
+          event.type === 'hello' ||
+          event.type === 'resync' ||
+          (event.type === 'operation.updated' && event.account === account && event.prId === prId)
+        )
+          void writer.reconcile();
+      }),
+    [writer, account, prId],
+  );
 
   return writer;
 }

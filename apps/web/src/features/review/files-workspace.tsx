@@ -15,6 +15,7 @@ import type { DraftComment } from '@review-desk/shared/review';
 import type { ReviewThread } from '@review-desk/shared/types';
 import type { GitHubAction } from '@review-desk/shared/operations';
 import { operationInProgress, operationUnsettled } from '@review-desk/shared/operations';
+import { CommandBanner } from '@/features/review/command-banner';
 import { refOf } from '@/lib/pr-ref';
 import { inQueue } from '@/features/pulls/meta';
 import { openActivity } from '@/features/activity/use-operations';
@@ -959,6 +960,10 @@ function Workspace() {
           </>
         )}
       </Group>
+
+      <div className="px-4 empty:hidden">
+        <CommandBanner writer={review.writer} />
+      </div>
 
       <PendingTray
         draft={draft}

@@ -42,6 +42,28 @@ try {
 }
 
 /**
+ * The ids an earlier version kept for actions now owned elsewhere (a draft's submit and discard,
+ * which its writer sends): each with its key, to be forgotten once its new owner recorded it.
+ */
+export function legacyIds(path: string, method: 'POST' | 'DELETE'): { key: string; id: string }[] {
+  return [...pending].flatMap(([key, id]) => {
+    try {
+      const sent = JSON.parse(key) as { path: string; method: string };
+
+      return sent.path === path && sent.method === method ? [{ key, id }] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** Forgets an id its new owner recorded. */
+export function forgetLegacy(key: string) {
+  pending.delete(key);
+  storage.set(STORAGE_KEY, JSON.stringify([...pending]));
+}
+
+/**
  * Refusals that did nothing and can be retried as they are: the same action, sent again, keeps
  * its ID, so a retry after an earlier answer was lost is recognised.
  */

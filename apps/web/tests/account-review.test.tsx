@@ -347,11 +347,11 @@ describe('drafts and Activity per account', () => {
       'POST /api/accounts/me/pulls/p1/review',
       'saved',
     ],
-    // Discarded, its cleanup yet to come: your text is kept, unsent, until you edit it.
+    // Discarded, its cleanup yet to come: your text is held, unsent, until it is final.
     [
       'a discard dropped into the draft it discarded',
       'DELETE /api/accounts/me/pulls/p1/draft',
-      'error',
+      'saving',
     ],
   ])('never autosaves the summary %s', async (_case, sentAs, state) => {
     const { useReview } = await import('@/features/review/use-review');
@@ -366,7 +366,9 @@ describe('drafts and Activity per account', () => {
       return Promise.resolve(
         method === 'POST' || method === 'DELETE'
           ? reply({ operation: { id: JSON.parse(String(options?.body)).operationId } }, 202)
-          : reply({ items: [], nextCursor: null }),
+          : path.endsWith('/receipt-epoch')
+            ? reply({ epoch: 0 })
+            : reply({ items: [], nextCursor: null }),
       );
     });
     client.setQueryData(queryKeys.status, as('me'));
@@ -382,6 +384,7 @@ describe('drafts and Activity per account', () => {
             body: 'Typed just before',
             expectedHeadOid: 'abc',
             carried: hook.result.current.writer.carry(undefined).versions,
+            expectedPendingReviewId: null,
           })
         : hook.result.current.discard.mutateAsync(),
     );
@@ -393,7 +396,7 @@ describe('drafts and Activity per account', () => {
     client.clear();
   });
 
-  it('retires, once a submit is accepted, only the versions it was sent with', async () => {
+  it('retires, once a submit is accepted, only the versions it was sent with, keeping what you typed after', async () => {
     const { useReview } = await import('@/features/review/use-review');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const saved: string[] = [];
@@ -409,7 +412,9 @@ describe('drafts and Activity per account', () => {
           ? reply({ operation: { id: body.operationId } }, 202)
           : method === 'PUT'
             ? reply({ error: 'Locked.', code: 'DRAFT_LOCKED' }, 409)
-            : reply({ items: [], nextCursor: null }),
+            : _path.endsWith('/receipt-epoch')
+              ? reply({ epoch: 0 })
+              : reply({ items: [], nextCursor: null }),
       );
     });
     client.setQueryData(queryKeys.status, as('me'));
@@ -423,7 +428,8 @@ describe('drafts and Activity per account', () => {
 
     expect(carried.body).toBe('Sent');
 
-    // Typed on before the submit ran: it stays yours to save, not retired with the review.
+    // Typed on before the submit ran: never saved into the draft it submits, nor retired with
+    // the review: kept for you to confirm.
     act(() => hook.result.current.writer.edit('body', 'Typed after'));
     await act(() =>
       hook.result.current.submit.mutateAsync({
@@ -431,9 +437,106 @@ describe('drafts and Activity per account', () => {
         body: carried.body,
         expectedHeadOid: 'abc',
         carried: carried.versions,
+        expectedPendingReviewId: null,
       }),
     );
-    await waitFor(() => expect(saved).toEqual(['Typed after']));
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    expect(saved).toEqual([]);
+    expect(hook.result.current.writer.value('body', undefined)).toBe('Typed after');
+    expect(hook.result.current.writer.failure('body')).toMatch(/after you submitted/);
+    client.clear();
+  });
+
+  it('adopts a submit id an earlier version kept for the draft, forgetting it there once recorded', async () => {
+    localStorage.setItem(
+      'review-desk-pending-command-ids',
+      JSON.stringify([
+        [
+          JSON.stringify({
+            path: '/api/accounts/me/pulls/p1/review',
+            body: { event: 'COMMENT', body: 'Old', expectedHeadOid: 'abc' },
+            method: 'POST',
+          }),
+          'kept-before',
+        ],
+      ]),
+    );
+    vi.resetModules();
+
+    const { useReview } = await import('@/features/review/use-review');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve(
+        reply({ error: 'Nothing was received with this id.', code: 'NOT_FOUND' }, 404),
+      ),
+    );
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    expect(hook.result.current.writer.commandViews()).toMatchObject([
+      { id: 'kept-before', kind: 'submit', legacy: true, canSendAgain: false },
+    ]);
+    expect(JSON.parse(localStorage.getItem('review-desk-pending-command-ids')!)).toEqual([]);
+    client.clear();
+  });
+
+  it('looks an unconfirmed submit up as soon as its operation changes', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const { handle } = await import('@/lib/live');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let received = false;
+    let id = '';
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+
+      if (method === 'POST') {
+        id = JSON.parse(String(options?.body)).operationId;
+
+        return Promise.reject(new TypeError('Failed to fetch'));
+      }
+
+      if (path.endsWith('/receipt-epoch')) return Promise.resolve(reply({ epoch: 0 }));
+      if (path.includes('/receipt'))
+        return Promise.resolve(
+          received
+            ? reply({ kind: 'forge', prId: 'p1', type: 'review', status: 'queued' })
+            : reply({ error: 'Nothing was received with this id.', code: 'NOT_FOUND' }, 404),
+        );
+
+      return Promise.resolve(reply({ items: [], nextCursor: null }));
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    await act(() =>
+      hook.result.current.submit
+        .mutateAsync({
+          event: 'COMMENT',
+          body: '',
+          expectedHeadOid: 'abc',
+          carried: hook.result.current.writer.carry(undefined).versions,
+          expectedPendingReviewId: null,
+        })
+        .catch(() => {}),
+    );
+
+    expect(hook.result.current.writer.commandViews()).toMatchObject([{ phase: 'unknown' }]);
+
+    received = true;
+    act(() =>
+      handle(
+        client,
+        { type: 'operation.updated', account: 'me', prId: 'p1', operationId: id, status: 'queued' },
+        { value: false },
+      ),
+    );
+
+    await waitFor(() => expect(hook.result.current.writer.commandViews()).toEqual([]));
     client.clear();
   });
 

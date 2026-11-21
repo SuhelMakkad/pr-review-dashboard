@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DiffManifest, DiffMode } from '@review-desk/shared/diff';
 import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
 import { showsViewedTarget, type ViewedTarget } from '@review-desk/shared/operations';
+import type { OperationReceipt } from '@review-desk/shared/operations';
 import type { Field } from '@/features/review/draft-writer';
 import { newerDraft, useDraftWriter } from '@/features/review/use-draft-writer';
 import { ApiError } from '@/lib/api';
@@ -146,10 +147,9 @@ export function useReview(prId: string | null, account: string) {
   });
 
   const discard = useMutation({
-    // None of your summary and verdict is autosaved into the draft it discards; text not saved
-    // is kept, unsent, since its cleanup may yet not happen (a cancel in Activity).
-    mutationFn: () =>
-      writer.command(['body', 'event'], () => command(routes.discard, pr, {}), 'keep'),
+    // Queued in the writer, carrying the summary and verdict as shown: until its cleanup is final
+    // your edits are parked, then saved on the draft it left, or kept for you to confirm.
+    mutationFn: () => writer.discard(writer.carry(draft.data)),
     onSuccess: () => {
       void refreshDraft();
       void refreshOperations();
@@ -159,6 +159,7 @@ export function useReview(prId: string | null, account: string) {
   const submit = useMutation({
     mutationFn: ({
       carried,
+      expectedPendingReviewId,
       ...input
     }: {
       event: ReviewEvent;
@@ -167,10 +168,16 @@ export function useReview(prId: string | null, account: string) {
       allowNewHead?: boolean;
       /** The versions of the summary and verdict sent, read with them (`writer.carry`). */
       carried: Record<Field, number>;
+      /** The pending review the sheet showed, merged from both parts of the draft. */
+      expectedPendingReviewId: string | null;
     }) =>
-      // Carries the summary and verdict as you left them: none is autosaved into the draft it
-      // submits meanwhile, nor, once it was accepted, the versions it carried.
-      writer.command(['body', 'event'], () => command(routes.submit, pr, input), 'retire', carried),
+      // Queued in the writer with what it carries: none of it is autosaved into the draft it
+      // submits, and once it is admitted the versions it carried are retired.
+      writer.submit(
+        input,
+        { body: input.body, event: input.event, versions: carried },
+        expectedPendingReviewId,
+      ) as Promise<OperationReceipt>,
     onSettled: refreshDraft,
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.pulls(account) });

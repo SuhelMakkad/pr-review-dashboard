@@ -7,6 +7,7 @@ import { operationInProgress, type GitHubOperation } from '@review-desk/shared/o
 import type { PrepareReviewOptions } from '@review-desk/shared/review';
 import type { CiState } from '@review-desk/shared/types';
 import { forgeTerms } from '@review-desk/shared/accounts';
+import { CommandBanner } from '@/features/review/command-banner';
 import { ApiError } from '@/lib/api';
 import { refOf } from '@/lib/pr-ref';
 import { dateTime } from '@/lib/time';
@@ -127,6 +128,10 @@ export function FullReview({
   const reusable =
     prepared?.runId === run?.id &&
     [...selected].sort((a, b) => a - b).join(',') === prepared?.indices.join(',');
+  // Already prepared for this run and selection, with no inline comments of its own, and fresh:
+  // opened as it is, read only, with no prepare queued behind a summary start. A legacy inline
+  // draft still takes the prepare path; the submit's own fences apply either way.
+  const openable = reusable && !run?.stale && !prepared?.content?.comments?.length;
   const preparing = ai.preparation?.status === 'pending';
   const prepareError =
     ai.preparation?.status === 'error' &&
@@ -160,6 +165,7 @@ export function FullReview({
 
   return (
     <section aria-label="Full review" className="space-y-3">
+      <CommandBanner writer={review.writer} />
       <Reveal show={Boolean(ai.restartAt) || ai.restartPaused}>
         {(ai.restartAt || ai.restartPaused) && (
           <p role="status" className="flex gap-1.5 text-xs text-fg-muted">
@@ -366,7 +372,13 @@ export function FullReview({
                       size="sm"
                       disabled={!locked && (run.stale || preparing)}
                       aria-busy={preparing}
-                      onClick={locked ? openActivity : () => prepare()}
+                      onClick={
+                        locked
+                          ? openActivity
+                          : openable
+                            ? () => setFinishOpen(true)
+                            : () => prepare()
+                      }
                     >
                       {locked
                         ? 'Review queued · View activity'
