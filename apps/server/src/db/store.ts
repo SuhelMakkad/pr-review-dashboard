@@ -18,6 +18,7 @@ import { batches } from '@/db/batches.js';
 import { snapshotCodec, triageCodec } from '@/db/codecs.js';
 import { migrateDatabase } from '@/db/migrate.js';
 import { NotificationLog } from '@/db/notifications.js';
+import { OperationLog } from '@/db/operations.js';
 import { LAST_ACCOUNT, Settings, STATUS } from '@/db/settings.js';
 import {
   activityEvents,
@@ -63,6 +64,8 @@ export class Store {
   readonly autoReviewLog: AutoReviewLog;
   /** Notifications already delivered (`db/notifications.ts`). */
   readonly notificationLog: NotificationLog;
+  /** The outbox's forge operations and local receipts (`db/operations.ts`). */
+  readonly operations: OperationLog;
   private transactionDepth = 0;
   /** Effects waiting for the outermost transaction to commit. */
   private committed: (() => void)[] = [];
@@ -78,6 +81,7 @@ export class Store {
     this.aiRuns = new AiRuns(this.db);
     this.autoReviewLog = new AutoReviewLog(this.db);
     this.notificationLog = new NotificationLog(this.db);
+    this.operations = new OperationLog(this.db);
     migrateDatabase(this.db, path);
   }
 

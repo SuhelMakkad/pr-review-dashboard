@@ -48,16 +48,28 @@ export function registerReviewRoutes(
     routes.discard,
     ({ params, body: discard }) => {
       const prId = params.id;
-      const replay = queue.replay(discard.account, discard.operationId, {
-        prId,
-        request: discard,
-        type: 'discard',
-      });
+      const expected = { prId, request: discard, type: 'discard' as const };
+
+      // A local discard of this ID answers as it did, before anything else is checked or touched.
+      if (queue.replayedLocally(discard.account, discard.operationId, expected))
+        return ok(200, { ok: true as const });
+
+      const replay = queue.replay(discard.account, discard.operationId, expected);
 
       if (replay) return ok(202, replay);
 
-      // Nothing on the forge: cleared at once, in this turn, never calling it.
-      if (reviews.clearLocal(discard.account, prId)) return ok(200, { ok: true as const });
+      // Nothing on the forge: cleared at once, in this turn, never calling it, with a receipt.
+      if (
+        queue.writeLocally(
+          discard.account,
+          prId,
+          discard.operationId,
+          { type: 'discard', reviewId: '' },
+          discard,
+          () => reviews.clearLocal(discard.account, prId),
+        )
+      )
+        return ok(200, { ok: true as const });
 
       const reviewId = reviews.drafts.draft(discard.account, prId)!.githubReviewId!;
 

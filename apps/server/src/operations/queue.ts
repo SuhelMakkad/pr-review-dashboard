@@ -1,7 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { isoNow, type Cancel, type Clock } from '@/clock.js';
 import { createHash } from 'node:crypto';
-import { and, asc, desc, eq, inArray, lt, or } from 'drizzle-orm';
 import {
   operationInProgress,
   operationUnsettled,
@@ -17,7 +16,6 @@ import { forForge, isSameUser } from '@review-desk/shared/accounts';
 import type { AiSettings } from '@review-desk/shared/ai';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { postedReviewMarker, publicationFingerprint } from '@/ai/freshness.js';
-import { githubOperations } from '@/db/schema.js';
 import { DiffService } from '@/diff/service.js';
 import type { GitHubApi, ReviewReceipt } from '@/github/api.js';
 import { bindForge } from '@/forge/bind.js';
@@ -178,6 +176,14 @@ export interface QueueOptions {
 }
 
 /** SQLite is the outbox. A step is committed before its remote call and after its receipt. */
+/** An action ID already used, for different content or by another kind of write. */
+const conflict = () =>
+  new ReviewError(
+    'OPERATION_CONFLICT',
+    409,
+    'This action ID was already used for different content.',
+  );
+
 export class OperationQueue {
   private cancelWake: Cancel | null = null;
   private active: Promise<void> | null = null;
@@ -220,11 +226,7 @@ export class OperationQueue {
 
     this.opened = true;
 
-    for (const { data } of this.db
-      .select()
-      .from(githubOperations)
-      .where(inArray(githubOperations.status, ['running', 'checking']))
-      .all()) {
+    for (const data of this.log.interrupted()) {
       const uncertain = data.steps.some((step) => !step.completedAt && step.uncertain);
 
       this.save({
@@ -239,42 +241,23 @@ export class OperationQueue {
     this.wake();
   }
 
-  private get db() {
-    return this.sync.store.db;
+  /** The outbox's rows, as saved (`db/operations.ts`). */
+  private get log() {
+    return this.sync.store.operations;
   }
 
   private rows(account: string): OperationRecord[] {
-    return this.db
-      .select({ data: githubOperations.data })
-      .from(githubOperations)
-      .where(
-        and(
-          eq(githubOperations.account, account),
-          inArray(githubOperations.status, [
-            'queued',
-            'running',
-            'waiting',
-            'checking',
-            'needs_attention',
-          ]),
-        ),
-      )
-      .orderBy(asc(githubOperations.createdAt), asc(githubOperations.id))
-      .all()
-      .map((row) => row.data);
+    return this.log.active(account);
   }
 
+  /** A forge operation, as Activity shows it: a local receipt is unavailable, as an unknown ID. */
   private row(account: string, id: string): OperationRecord {
-    const row = this.db
-      .select({ data: githubOperations.data })
-      .from(githubOperations)
-      .where(and(eq(githubOperations.account, account), eq(githubOperations.id, id)))
-      .get();
+    const row = this.log.visible(account, id);
 
     if (!row)
       throw new ReviewError('NOT_FOUND', 404, 'That action is unavailable for this account.');
 
-    return row.data;
+    return row;
   }
 
   /** Refuses new work for an account other than the one in use: nothing is queued or changed. */
@@ -373,9 +356,9 @@ export class OperationQueue {
     return this.public(this.row(account, id));
   }
 
-  /** Any account's action by ID, or null when there is none. */
+  /** Any account's forge action by ID, or null when there is none; never a local receipt. */
   find(account: string, id: string): GitHubOperation | null {
-    const row = this.existing(account, id);
+    const row = this.log.visible(account, id);
 
     return row ? this.public(row) : null;
   }
@@ -394,17 +377,86 @@ export class OperationQueue {
 
     if (!existing) return null;
 
+    // A local write's ID can never become a forge operation's (see `replayedLocally`).
+    if (existing.kind === 'local') throw conflict();
+
     this.assertSame(existing, expected);
 
     return { operation: this.public(existing) };
   }
 
+  /**
+   * True when `id` is the receipt of a local write for this same request, which then answers as
+   * it did the first time, whatever has changed since: a retry of a discard never deletes a draft
+   * made after it. A forge operation's ID is not one; any other request for this one is refused.
+   */
+  replayedLocally(
+    account: string,
+    id: string,
+    expected: { prId: string; request: unknown; type: GitHubAction['type'] },
+  ): boolean {
+    const existing = this.existing(account, id);
+
+    if (existing?.kind !== 'local') return false;
+
+    this.assertSame(existing, expected);
+
+    return true;
+  }
+
+  /**
+   * Makes a local write that answers the outbox ID `id`, such as discarding a draft with nothing
+   * on the forge: `write` makes it, or returns false when the forge has to take part after all.
+   * The ID lookup, the write and its receipt commit together; the receipt is kept as long as
+   * outbox rows, so a retry of `id` replays it (`replayedLocally`).
+   */
+  writeLocally(
+    account: string,
+    prId: string,
+    id: string,
+    action: GitHubAction,
+    request: unknown,
+    write: () => boolean,
+  ): boolean {
+    return this.sync.store.transaction(() => {
+      // Taken meanwhile, as a forge operation or a local receipt: never written twice.
+      if (this.existing(account, id)) throw conflict();
+      if (!write()) return false;
+
+      const at = isoNow(this.clock);
+
+      this.log.insert({
+        id,
+        account,
+        prId,
+        kind: 'local',
+        // Never read from the PR cache: a draft clears even when its cached PR is unreadable, or
+        // gone. Activity never shows a receipt, so nothing needs these.
+        repository: '',
+        number: 0,
+        title: '',
+        prUrl: '',
+        action: structuredClone(action),
+        status: 'succeeded',
+        progress: 'Done here; nothing was sent.',
+        createdAt: at,
+        updatedAt: at,
+        finishedAt: at,
+        retryAt: null,
+        dismissedAt: null,
+        error: null,
+        result: null,
+        steps: [],
+        attempts: 0,
+        requestKey: fingerprint({ prId, request }),
+      });
+
+      return true;
+    });
+  }
+
   private existing(account: string, id: string): OperationRecord | undefined {
-    return this.db
-      .select({ data: githubOperations.data })
-      .from(githubOperations)
-      .where(and(eq(githubOperations.account, account), eq(githubOperations.id, id)))
-      .get()?.data;
+    return this.log.find(account, id);
   }
 
   /** The request key as legacy routes made it, plus the action's type and thread. */
@@ -420,34 +472,17 @@ export class OperationQueue {
       existing.action.type !== expected.type ||
       threadOf(existing.action) !== expected.threadId
     )
-      throw new ReviewError(
-        'OPERATION_CONFLICT',
-        409,
-        'This action ID was already used for different content.',
-      );
+      throw conflict();
   }
 
   list(account: string, cursor?: string): OperationList {
     const [before, beforeId] = cursor?.split('|') ?? [];
-    const page = this.db
-      .select({ data: githubOperations.data })
-      .from(githubOperations)
-      .where(
-        and(
-          eq(githubOperations.account, account),
-          inArray(githubOperations.status, [...TERMINAL]),
-          before && beforeId
-            ? or(
-                lt(githubOperations.createdAt, before),
-                and(eq(githubOperations.createdAt, before), lt(githubOperations.id, beforeId)),
-              )
-            : undefined,
-        ),
-      )
-      .orderBy(desc(githubOperations.createdAt), desc(githubOperations.id))
-      .limit(51)
-      .all()
-      .map((row) => row.data);
+    const page = this.log.finished(
+      account,
+      [...TERMINAL],
+      before && beforeId ? { createdAt: before, id: beforeId } : null,
+      51,
+    );
     const recent = page.slice(0, 50);
     const active = cursor ? [] : this.rows(account).filter((row) => operationUnsettled(row.status));
     const last = recent.at(-1);
@@ -507,6 +542,9 @@ export class OperationQueue {
     const requestKey = fingerprint({ prId, request });
     const existing = this.existing(account, id);
 
+    // A local write's ID can never become a forge operation's.
+    if (existing?.kind === 'local') throw conflict();
+
     if (existing) {
       this.assertSame(existing, {
         prId,
@@ -525,13 +563,7 @@ export class OperationQueue {
     const pr = lookup();
     if (!pr) throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
 
-    const lastCreatedAt = this.db
-      .select({ createdAt: githubOperations.createdAt })
-      .from(githubOperations)
-      .where(eq(githubOperations.account, account))
-      .orderBy(desc(githubOperations.createdAt))
-      .limit(1)
-      .get()?.createdAt;
+    const lastCreatedAt = this.log.latestCreatedAt(account);
     const timestamp = new Date(
       Math.max(this.clock.now(), lastCreatedAt ? Date.parse(lastCreatedAt) + 1 : -Infinity),
     ).toISOString();
@@ -614,10 +646,7 @@ export class OperationQueue {
         }
       }
 
-      this.db
-        .insert(githubOperations)
-        .values({ account, id, prId, status: row.status, createdAt: timestamp, data: row })
-        .run();
+      this.log.insert(row);
     });
 
     // Inside a caller's transaction, nothing is announced or sent before it commits.
@@ -632,11 +661,7 @@ export class OperationQueue {
   private save(row: OperationRecord): OperationRecord {
     const next = { ...row, updatedAt: isoNow(this.clock) };
 
-    this.db
-      .update(githubOperations)
-      .set({ status: next.status, data: next })
-      .where(and(eq(githubOperations.account, row.account), eq(githubOperations.id, row.id)))
-      .run();
+    this.log.update(next);
     this.emit(next);
 
     return next;
