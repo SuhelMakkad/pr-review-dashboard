@@ -57,10 +57,21 @@ export function legacyIds(path: string, method: 'POST' | 'DELETE'): { key: strin
   });
 }
 
-/** Forgets an id its new owner recorded. */
-export function forgetLegacy(key: string) {
-  pending.delete(key);
-  storage.set(STORAGE_KEY, JSON.stringify([...pending]));
+/** Forgets an id its new owner recorded: true once the deletion is saved, false if it was not. */
+export function forgetLegacy(key: string): boolean {
+  const next = new Map(pending);
+
+  next.delete(key);
+
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([...next]));
+  } catch {
+    return false;
+  }
+
+  pending = next;
+
+  return true;
 }
 
 /**

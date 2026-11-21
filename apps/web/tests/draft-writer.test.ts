@@ -1337,9 +1337,9 @@ describe('submit and discard', () => {
   it('adopts an earlier version’s id as recovery-only: looked up or stopped, never sent again', () => {
     const { transport } = server();
     const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
-    const forget = vi.fn();
+    const forget = vi.fn(() => true);
 
-    writer.adopt([{ id: 'legacy', kind: 'submit' }], forget);
+    writer.adopt([{ id: 'legacy', kind: 'submit', forget }]);
 
     expect(writer.commandViews()).toMatchObject([
       { id: 'legacy', legacy: true, canSendAgain: false, carried: null },
@@ -1351,12 +1351,12 @@ describe('submit and discard', () => {
   it('holds the gate for an earlier version’s id it could not journal, forgetting it there only once it can', () => {
     const { transport } = server();
     const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
-    const forget = vi.fn();
+    const forget = vi.fn(() => true);
     const full = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('Quota exceeded');
     });
 
-    writer.adopt([{ id: 'legacy', kind: 'discard' }], forget);
+    writer.adopt([{ id: 'legacy', kind: 'discard', forget }]);
 
     expect(writer.blocked()).not.toBeNull();
     expect(forget).not.toHaveBeenCalled();
@@ -1393,7 +1393,7 @@ describe('submit and discard', () => {
 
     writer.observe(draft(1));
     vi.mocked(transport.receipt).mockResolvedValueOnce(receipt('discard', 'running'));
-    writer.adopt([{ id: 'legacy', kind: 'discard' }], () => {});
+    writer.adopt([{ id: 'legacy', kind: 'discard', forget: () => true }]);
     await vi.waitFor(() => expect(writer.commandViews()).toMatchObject([{ phase: 'admitted' }]));
     writer.edit('body', 'Parked');
 
@@ -1433,13 +1433,19 @@ describe('submit and discard', () => {
   it('forgets a legacy id settled before it was journaled only once its outcome is', async () => {
     const { transport } = server();
     const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
-    const forget = vi.fn();
+    // What the journal held as it was forgotten there.
+    let journaled: string | null = null;
+    const forget = vi.fn(() => {
+      journaled = sessionStorage.getItem('review-desk-draft-writer:you:PR_1');
+
+      return true;
+    });
     const full = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('Quota exceeded');
     });
 
     vi.mocked(transport.receipt).mockResolvedValueOnce(receipt('review', 'queued'));
-    writer.adopt([{ id: 'legacy', kind: 'submit' }], forget);
+    writer.adopt([{ id: 'legacy', kind: 'submit', forget }]);
     await vi.waitFor(() => expect(writer.commandViews()).toEqual([]));
 
     expect(forget).not.toHaveBeenCalled();
@@ -1448,7 +1454,7 @@ describe('submit and discard', () => {
     writer.observe(draft(1));
 
     expect(forget).toHaveBeenCalledOnce();
-    expect(sessionStorage.getItem('review-desk-draft-writer:you:PR_1')).toContain('settledLegacy');
+    expect(journaled).toContain('"settledLegacy":["legacy"]');
   });
 
   it('takes no epoch but a valid one as evidence of a reset', async () => {
@@ -1594,7 +1600,7 @@ describe('submit and discard', () => {
     expect(writer.state('body')).toBe('saved');
   });
 
-  it('never moves text from before a legacy discard into the draft it left', async () => {
+  it('keeps every edit for you to confirm after a legacy discard: its request had no base to tie them to a draft', async () => {
     const { sent, transport } = server();
     const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
 
@@ -1606,17 +1612,104 @@ describe('submit and discard', () => {
     vi.mocked(transport.receipt).mockImplementationOnce(
       () => new Promise((resolve) => (final = resolve)),
     );
-    writer.adopt([{ id: 'legacy', kind: 'discard' }], () => {});
+    writer.adopt([{ id: 'legacy', kind: 'discard', forget: () => true }]);
     writer.edit('event', 'APPROVE');
     final(receipt('discard', 'succeeded', [5, 1]));
     await vi.waitFor(() => expect(writer.commandViews()).toEqual([]));
     await writer.settled();
 
-    // Typed behind it: saved on the draft it left. From before it: kept for you to confirm.
-    expect(sent.map((request) => [request.body.event, request.body.body])).toEqual([
-      ['APPROVE', undefined],
-    ]);
+    // Typed before it or behind it: nothing ties either to the draft it cleared.
+    expect(sent).toEqual([]);
     expect(writer.failure('body')).toMatch(/Kept from before the discard/);
+    expect(writer.failure('event')).toMatch(/Kept from before the discard/);
+  });
+
+  it('reports to its caller a discard its receipt saw finish while its own answer hung', async () => {
+    vi.useFakeTimers();
+
+    const { commands, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+
+    writer.observe(draft(1));
+    commands.push(silent);
+
+    const discarding = writer.discard(carried(writer));
+
+    await vi.advanceTimersByTimeAsync(1);
+    vi.mocked(transport.receipt).mockResolvedValueOnce(receipt('discard', 'succeeded', [3, 1]));
+    await writer.reconcile();
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+
+    await expect(discarding).resolves.toEqual({});
+    expect(writer.commandViews()).toEqual([]);
+  });
+
+  it('reports a receipt’s outcome when the answer arrived unreadable after it', async () => {
+    const { commands, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+    let unreadable: () => void = () => {};
+
+    writer.observe(draft(1));
+    commands.push(
+      () =>
+        new Promise((_, reject) => {
+          unreadable = () => reject(new ApiError('Unreadable', 200, 'UNREADABLE'));
+        }),
+    );
+
+    const submitting = writer.submit(review, carried(writer), null);
+
+    await vi.waitFor(() => expect(transport.sendCommand).toHaveBeenCalled());
+    vi.mocked(transport.receipt).mockResolvedValueOnce(receipt('review', 'queued'));
+    await writer.reconcile();
+    unreadable();
+
+    await expect(submitting).resolves.toEqual({});
+  });
+
+  it('never adopts again, after a reload, a legacy id it settled, and forgets it there once it can', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', 'PR_1', first.transport, instant, 2_000_000_000);
+    let deletable = false;
+    const forget = vi.fn(() => deletable);
+
+    vi.mocked(first.transport.receipt).mockResolvedValueOnce(receipt('review', 'queued'));
+    writer.adopt([{ id: 'legacy', kind: 'submit', forget }]);
+    await vi.waitFor(() => expect(writer.commandViews()).toEqual([]));
+    writer.observe(draft(1));
+
+    // Its deletion there failed: it is still offered, after a reload, but never adopted again.
+    const reloaded = new DraftWriter('you', 'PR_1', server().transport, instant, 2_000_000_000);
+
+    deletable = true;
+    reloaded.adopt([{ id: 'legacy', kind: 'submit', forget }]);
+
+    expect(reloaded.commandViews()).toEqual([]);
+    expect(reloaded.blocked()).toBeNull();
+    expect(forget).toHaveBeenLastCalledWith();
+    expect(sessionStorage.getItem('review-desk-draft-writer:you:PR_1') ?? '').not.toContain(
+      'legacy',
+    );
+  });
+
+  it('saves as it is an edit made on the draft a discard left, shown before its receipt was read', async () => {
+    const { sent, commands, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+
+    writer.observe(draft(1));
+    commands.push(async (request) => ({ operation: { id: request.body.operationId } }));
+    await writer.discard(carried(writer));
+    // Its cleanup shows in the draft before its receipt does; you type on that draft.
+    writer.observe(draft(3, {}, 1));
+    writer.edit('body', 'On the new draft');
+    vi.mocked(transport.receipt).mockResolvedValueOnce(receipt('discard', 'succeeded', [3, 1]));
+    await writer.reconcile();
+    await writer.settled();
+
+    expect(sent.map((request) => [request.body.body, request.body.baseGeneration])).toEqual([
+      [undefined, 0],
+      ['On the new draft', 1],
+    ]);
   });
 });
 
