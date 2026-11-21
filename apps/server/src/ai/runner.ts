@@ -25,7 +25,7 @@ import {
   type FullReviewResult,
   type ReviewInputs,
 } from '@review-desk/shared/ai';
-import { commentableLines } from '@review-desk/shared/diff';
+import { commentableLines, type DiffManifest } from '@review-desk/shared/diff';
 import type { DraftComment, PrepareReviewOptions, ReviewDraft } from '@review-desk/shared/review';
 import type { PullRequestDetail, PullRequestSnapshot } from '@review-desk/shared/types';
 import type { AiRunRow } from '@/db/ai-runs.js';
@@ -36,20 +36,12 @@ import { redact, safeError } from '@/github/errors.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
 import { accountNotActive } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
-import {
-  authorFeedbackInput,
-  briefInput,
-  draftCommentsInput,
-  draftSummaryInput,
-  fullReviewInput,
-  sinceReviewInput,
-} from '@/ai/context.js';
 import { agentExited, agentRunning, removeWorkspace, type AgentProvider } from '@/ai/provider.js';
 import { log } from '@/log.js';
 import { evidence, revalidated, type PreparedContext } from '@/ai/inputs.js';
 import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
 import { draftChanged, planPreparation, preparationRevision } from '@/ai/preparation.js';
-import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
+import { jsonSchemaFor, TASKS, type ContextKey, type TaskDefinition } from '@/ai/tasks.js';
 import {
   archiveAccess,
   downloadRepository,
@@ -400,12 +392,18 @@ export class AiRunner {
         ? previous.since
         : isoNow(this.clock);
 
+    // A task that runs on one provider only is always saved with it.
+    const tasks = { ...settings.tasks };
+
+    for (const task of Object.keys(TASKS) as AiTask[]) {
+      const only = TASKS[task].provider;
+
+      if (only) tasks[task] = { ...tasks[task], provider: only };
+    }
+
     this.sync.store.settings.set(AI_SETTINGS, {
       ...settings,
-      tasks: {
-        ...settings.tasks,
-        full_review: { ...settings.tasks.full_review, provider: 'codex' },
-      },
+      tasks,
       autoReview: { enabled, since },
       postFindings: settings.postFindings ?? current.postFindings,
       approveFindings: settings.approveFindings ?? current.approveFindings,
@@ -510,41 +508,63 @@ export class AiRunner {
     return detail;
   }
 
+  /**
+   * The task's prompt, from the evidence it declares: the diff gathered now, as the account, and
+   * the draft and completed review captured before (the same ones its context records).
+   */
   private async buildInput(
-    task: AiTask,
+    definition: TaskDefinition,
     detail: PullRequestDetail,
     account: string,
-    completedReview: AiRunRow | null,
+    captured: { draft: ReviewDraft | null; completedReview: AiRunRow | null },
   ): Promise<string> {
     const pr = detail.snapshot;
+    let diff: DiffManifest | null = null;
 
-    if (task === 'full_review')
-      return fullReviewInput(pr, await this.diffs.manifest(pr, 'full', null, account));
-    if (task === 'brief')
-      return briefInput(pr, await this.diffs.manifest(pr, 'full', null, account));
-    if (task === 'draft_comments')
-      return draftCommentsInput(pr, await this.diffs.manifest(pr, 'full', null, account));
-    if (task === 'author_feedback') return authorFeedbackInput(pr);
+    if (definition.evidence.diff === 'since-review') {
+      const reviewOid = detail.item.latestReview?.commitOid;
 
-    if (task === 'draft_summary') {
-      const draft = this.reviews.draft(account, pr.id);
-      return draftSummaryInput(
-        pr,
-        await this.diffs.manifest(pr, 'full', null, account),
-        draft,
-        completedReview?.result ? (JSON.parse(completedReview.result) as FullReviewResult) : null,
-      );
+      // Refused before any diff is read.
+      if (!reviewOid) throw new ReviewError('NO_REVIEW', 422, say('ai.not-reviewed'));
+
+      diff = await this.diffs.manifest(pr, 'since-review', reviewOid, account);
+    } else if (definition.evidence.diff === 'full') {
+      diff = await this.diffs.manifest(pr, 'full', null, account);
     }
 
-    const reviewOid = detail.item.latestReview?.commitOid;
+    const review = captured.completedReview;
 
-    if (!reviewOid) throw new ReviewError('NO_REVIEW', 422, say('ai.not-reviewed'));
-
-    return sinceReviewInput(
+    // Only what the task declares is gathered; its definition reads nothing else.
+    return definition.input({
       pr,
-      await this.diffs.manifest(pr, 'since-review', reviewOid, account),
-      account,
-    );
+      diff: diff!,
+      draft: captured.draft!,
+      completedReview: review
+        ? {
+            id: review.id,
+            result: review.result ? (JSON.parse(review.result) as FullReviewResult) : null,
+          }
+        : null,
+      login: account,
+    });
+  }
+
+  /** What the run's freshness is compared on, as the task declares, in the order it is saved. */
+  private contextOf(
+    definition: TaskDefinition,
+    pr: PullRequestDetail['snapshot'],
+    account: string,
+    captured: { draft: ReviewDraft | null; completedReview: AiRunRow | null },
+  ): AiRunContext | null {
+    if (definition.context.length === 0) return null;
+
+    const has = (key: ContextKey) => definition.context.includes(key);
+
+    return {
+      review: reviewFingerprint(pr, account),
+      ...(has('draft') ? { draft: draftFingerprint(captured.draft!) } : {}),
+      ...(has('fullReviewId') ? { fullReviewId: captured.completedReview?.id ?? null } : {}),
+    };
   }
 
   private toRun(row: AiRunRow, currentHead?: string): AiRun {
@@ -582,14 +602,14 @@ export class AiRunner {
       pauseReason: row.pauseReason,
       creditsUsed: creditsUsed(row.usage),
       trigger: row.trigger,
-      ...(row.task === 'full_review'
+      ...(TASKS[row.task].reportsInputs
         ? { inputs: row.inputs ?? null, publication: row.publication ?? null }
         : {}),
     };
   }
 
   private resumeProblem(row: AiRunRow): Wording | null {
-    if (row.promptVersion !== promptVersions[row.task])
+    if (row.promptVersion !== TASKS[row.task].promptVersion)
       return 'Review instructions changed. Generate a new review.';
 
     const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
@@ -608,18 +628,40 @@ export class AiRunner {
     if ((currentHead ?? pr?.headOid) && (currentHead ?? pr?.headOid) !== row.headOid)
       return 'New commits arrived after this was generated.';
 
-    if (!pr || !['full_review', 'draft_summary'].includes(row.task)) return null;
-    if (!row.context) return say('ai.unverified-coverage');
-    if (row.context.review !== reviewFingerprint(pr, row.account)) return say('ai.changed-since');
+    const keys = TASKS[row.task].context;
 
-    if (row.task === 'draft_summary') {
-      if (row.context.fullReviewId !== (this.completedReview(row.account, row.prId)?.id ?? null))
-        return 'A newer full review is available. Generate a new summary to include it.';
-      if (row.context.draft !== draftFingerprint(this.reviews.draft(row.account, row.prId)))
-        return 'Your verdict or draft comments changed after this summary was generated.';
+    if (!pr || keys.length === 0) return null;
+    if (!row.context) return say('ai.unverified-coverage');
+
+    // In the task's order: the first that changed is the reason given.
+    for (const key of keys) {
+      const reason = this.changedSince(row, row.context, key, pr);
+
+      if (reason) return reason;
     }
 
     return null;
+  }
+
+  /** Why the run is stale on `key`, or null while it still holds. */
+  private changedSince(
+    row: AiRunRow,
+    context: AiRunContext,
+    key: ContextKey,
+    pr: PullRequestDetail['snapshot'],
+  ): Wording | null {
+    if (key === 'review')
+      return context.review !== reviewFingerprint(pr, row.account) ? say('ai.changed-since') : null;
+
+    // Read only once the keys before it held.
+    if (key === 'fullReviewId')
+      return context.fullReviewId !== (this.completedReview(row.account, row.prId)?.id ?? null)
+        ? 'A newer full review is available. Generate a new summary to include it.'
+        : null;
+
+    return context.draft !== draftFingerprint(this.reviews.draft(row.account, row.prId))
+      ? 'Your verdict or draft comments changed after this summary was generated.'
+      : null;
   }
 
   private completedReview(account: string, prId: string): AiRunRow | null {
@@ -688,40 +730,36 @@ export class AiRunner {
       return run;
     };
 
+    const definition = TASKS[task];
+
     this.detail(account, prId);
 
-    if (task === 'full_review' || task === 'draft_summary')
+    if (definition.refreshFirst)
       this.selected(account, await settled(this.sync.refresh(prId, account)));
 
     const detail = this.detail(account, prId);
     const settings = this.settings();
     const taskSettings = settings.tasks[task];
     const provider =
-      task === 'full_review'
-        ? 'codex'
-        : (options.provider ?? taskSettings.provider ?? settings.defaultProvider);
+      definition.provider ?? options.provider ?? taskSettings.provider ?? settings.defaultProvider;
     // Model ids are Codex's; another agent gets its own default.
     const model = provider === 'codex' ? taskSettings.model : null;
 
-    const completedReview = task === 'draft_summary' ? this.completedReview(account, prId) : null;
-    const context: AiRunContext | null = ['full_review', 'draft_summary'].includes(task)
-      ? {
-          review: reviewFingerprint(detail.snapshot, account),
-          ...(task === 'draft_summary'
-            ? {
-                draft: draftFingerprint(this.reviews.draft(account, prId)),
-                fullReviewId: completedReview?.id ?? null,
-              }
-            : {}),
-        }
-      : null;
+    // Captured once, before the diff is read: the prompt and its context are built from the same.
+    const captured = {
+      draft: definition.evidence.draft ? this.reviews.draft(account, prId) : null,
+      completedReview: definition.evidence.completedReview
+        ? this.completedReview(account, prId)
+        : null,
+    };
+    const context = this.contextOf(definition, detail.snapshot, account, captured);
     const input = this.selected(
       account,
-      await settled(this.buildInput(task, detail, account, completedReview)),
+      await settled(this.buildInput(definition, detail, account, captured)),
     );
     const head = detail.snapshot.headOid;
 
-    if (task === 'full_review') {
+    if (definition.recheckRevision) {
       this.selected(account, await settled(this.sync.refresh(prId, account)));
 
       const latest = this.detail(account, prId).snapshot;
@@ -741,7 +779,7 @@ export class AiRunner {
           provider,
           model ?? '',
           taskSettings.effort,
-          promptVersions[task],
+          definition.promptVersion,
           head,
           input,
           JSON.stringify(context),
@@ -798,13 +836,13 @@ export class AiRunner {
         model,
         effort: taskSettings.effort,
         headOid: head,
-        promptVersion: promptVersions[task],
+        promptVersion: definition.promptVersion,
         cacheKey: key,
         context,
         request: {
           input,
           snapshot: structuredClone(detail.snapshot),
-          instructions: instructions[task],
+          instructions: definition.instructions,
           schema: jsonSchemaFor(task),
         },
         status: 'queued',
@@ -898,7 +936,7 @@ export class AiRunner {
       const prepared =
         context?.headOid === row.headOid && context.repository === saved.snapshot.repository;
 
-      if (row.task === 'full_review') {
+      if (TASKS[row.task].execution === 'workspace') {
         let measured: ReviewInputs | null;
 
         if (prepared && context) {
@@ -944,7 +982,8 @@ export class AiRunner {
           effort: row.effort,
           model: row.model,
           workDir,
-          timeoutMs: timeouts[row.task],
+          timeoutMs: TASKS[row.task].timeoutMs,
+          task: row.task,
           threadId: row.threadId,
           onThread: (threadId, model) => this.update(id, { threadId, model }),
         },
@@ -962,17 +1001,16 @@ export class AiRunner {
         },
       );
       controller.signal.throwIfAborted();
-      const parsed = taskSchemas[row.task].safeParse(result.output);
+      const parsed = TASKS[row.task].schema.safeParse(result.output);
 
       if (!parsed.success) {
         validCheckpoint = false;
         throw new Error('The agent returned an answer in an unexpected shape.');
       }
 
-      const output =
-        row.task === 'draft_comments' || row.task === 'full_review'
-          ? await this.anchor(row, parsed.data as DraftCommentsResult, forge)
-          : parsed.data;
+      const output = TASKS[row.task].anchors
+        ? await this.anchor(row, parsed.data as DraftCommentsResult, forge)
+        : parsed.data;
       controller.signal.throwIfAborted();
 
       this.settle(

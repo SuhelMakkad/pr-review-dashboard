@@ -1,4 +1,4 @@
-import type { AiProvider, CodexAccountStatus } from '@review-desk/shared/ai';
+import type { AiProvider, AiTask, CodexAccountStatus } from '@review-desk/shared/ai';
 import type { AgentProvider, AgentRequest } from '@/ai/provider.js';
 import { AgentError } from '@/ai/provider.js';
 import { readFile } from 'node:fs/promises';
@@ -89,7 +89,10 @@ export class FixtureProvider implements AgentProvider {
       throw new AgentError(message);
     }
 
-    if (request.instructions.includes('perform a full code review')) {
+    // By the task's own id, never by words in its prompt, which can change.
+    const task: AiTask = request.task ?? 'draft_summary';
+
+    if (task === 'full_review') {
       const review = JSON.parse(await readFile(join(request.workDir, 'review.json'), 'utf8')) as {
         files: DiffFile[];
       };
@@ -130,85 +133,69 @@ export class FixtureProvider implements AgentProvider {
       size: Number(match[2]) + Number(match[3]),
     }));
     const title = /Title: (.*)/.exec(input)?.[1] ?? 'this change';
-    const task = request.instructions.includes('write a brief')
-      ? 'brief'
-      : request.instructions.includes('already reviewed an earlier version')
-        ? 'since_review'
-        : request.instructions.includes('propose review comments')
-          ? 'draft_comments'
-          : request.instructions.includes('is the author')
-            ? 'author_feedback'
-            : 'draft_summary';
+    const answers: Record<Exclude<AiTask, 'full_review'>, () => unknown> = {
+      brief: () => ({
+        summary: `${title}. The change touches ${files.length} ${files.length === 1 ? 'file' : 'files'}; the largest part is in ${files[0]?.path ?? 'the main module'}.`,
+        risk: files.reduce((sum, file) => sum + file.size, 0) > 60 ? 'medium' : 'low',
+        riskReasons: ['Schema or behaviour changes need a careful look at edge cases.'],
+        focusFiles: files
+          .slice(0, 2)
+          .map((file) => ({ path: file.path, reason: 'Largest change in this PR.' })),
+        questions: ['How was this tested against production-sized data?'],
+      }),
+      since_review: () => ({
+        summary:
+          'The author responded to your review with targeted changes in the files you commented on.',
+        threads: [...input.matchAll(/<thread id="([^"]+)"[^>]*resolved="(true|false)"/g)].map(
+          (match, index) => ({
+            threadId: match[1],
+            verdict: index === 0 ? 'addressed' : 'partially',
+            explanation:
+              index === 0
+                ? 'The new code does what you asked.'
+                : 'Partly done; one case is still open.',
+          }),
+        ),
+        newConcerns: ['The new batching loop has no upper bound on retries.'],
+      }),
+      draft_comments: () =>
+        (() => {
+          const fileMatch = /<file path="([^"]+)"[^>]*>\n[\s\S]*?\nR(\d+) \+ ([^\n]*)/.exec(input);
 
-    const output =
-      task === 'brief'
-        ? {
-            summary: `${title}. The change touches ${files.length} ${files.length === 1 ? 'file' : 'files'}; the largest part is in ${files[0]?.path ?? 'the main module'}.`,
-            risk: files.reduce((sum, file) => sum + file.size, 0) > 60 ? 'medium' : 'low',
-            riskReasons: ['Schema or behaviour changes need a careful look at edge cases.'],
-            focusFiles: files
-              .slice(0, 2)
-              .map((file) => ({ path: file.path, reason: 'Largest change in this PR.' })),
-            questions: ['How was this tested against production-sized data?'],
-          }
-        : task === 'since_review'
-          ? {
-              summary:
-                'The author responded to your review with targeted changes in the files you commented on.',
-              threads: [...input.matchAll(/<thread id="([^"]+)"[^>]*resolved="(true|false)"/g)].map(
-                (match, index) => ({
-                  threadId: match[1],
-                  verdict: index === 0 ? 'addressed' : 'partially',
-                  explanation:
-                    index === 0
-                      ? 'The new code does what you asked.'
-                      : 'Partly done; one case is still open.',
-                }),
-              ),
-              newConcerns: ['The new batching loop has no upper bound on retries.'],
-            }
-          : task === 'draft_comments'
-            ? (() => {
-                const fileMatch = /<file path="([^"]+)"[^>]*>\n[\s\S]*?\nR(\d+) \+ ([^\n]*)/.exec(
-                  input,
-                );
-
-                return {
-                  overall: 'Mostly solid; one thing worth checking before merging.',
-                  comments: fileMatch
-                    ? [
-                        {
-                          path: fileMatch[1],
-                          line: Number(fileMatch[2]),
-                          side: 'RIGHT',
-                          severity: 'suggestion',
-                          body: `Consider a test that covers \`${fileMatch[3].trim().slice(0, 40)}\` with an empty input.`,
-                        },
-                        {
-                          path: fileMatch[1],
-                          line: 99_999,
-                          side: 'RIGHT',
-                          severity: 'nit',
-                          body: 'This anchor is invalid on purpose.',
-                        },
-                      ]
-                    : [],
-                };
-              })()
-            : task === 'author_feedback'
-              ? {
-                  summary:
-                    'Reviewers asked for a smaller retry cap and a fix for the failing tests.',
-                  actionItems: [...input.matchAll(/<thread id="([^"]+)"/g)]
-                    .slice(0, 3)
-                    .map((match) => ({
-                      text: 'Reply and push a fix for this thread.',
-                      threadId: match[1],
-                    })),
-                }
-              : {
-                  body: 'Thanks for this. The direction looks right; I left a few comments, mostly about tests and edge cases.',
-                };
+          return {
+            overall: 'Mostly solid; one thing worth checking before merging.',
+            comments: fileMatch
+              ? [
+                  {
+                    path: fileMatch[1],
+                    line: Number(fileMatch[2]),
+                    side: 'RIGHT',
+                    severity: 'suggestion',
+                    body: `Consider a test that covers \`${fileMatch[3].trim().slice(0, 40)}\` with an empty input.`,
+                  },
+                  {
+                    path: fileMatch[1],
+                    line: 99_999,
+                    side: 'RIGHT',
+                    severity: 'nit',
+                    body: 'This anchor is invalid on purpose.',
+                  },
+                ]
+              : [],
+          };
+        })(),
+      author_feedback: () => ({
+        summary: 'Reviewers asked for a smaller retry cap and a fix for the failing tests.',
+        actionItems: [...input.matchAll(/<thread id="([^"]+)"/g)].slice(0, 3).map((match) => ({
+          text: 'Reply and push a fix for this thread.',
+          threadId: match[1],
+        })),
+      }),
+      draft_summary: () => ({
+        body: 'Thanks for this. The direction looks right; I left a few comments, mostly about tests and edge cases.',
+      }),
+    };
+    const output = answers[task]();
 
     return { output, model: `${this.label} (demo)`, usage: null };
   }
