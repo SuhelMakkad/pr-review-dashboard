@@ -169,7 +169,7 @@ export function FullReview({
 
   return (
     <section aria-label="Full review" className="space-y-3">
-      <CommandBanner writer={review.writer} />
+      <CommandBanner writer={review.writer} actions={{ openFinish: () => setFinishOpen(true) }} />
       <Reveal show={Boolean(ai.restartAt) || ai.restartPaused}>
         {(ai.restartAt || ai.restartPaused) && (
           <p role="status" className="flex gap-1.5 text-xs text-fg-muted">

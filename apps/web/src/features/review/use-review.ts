@@ -5,6 +5,7 @@ import { showsViewedTarget, type ViewedTarget } from '@review-desk/shared/operat
 import type { OperationReceipt } from '@review-desk/shared/operations';
 import type { Field } from '@/features/review/draft-writer';
 import type { Carried } from '@/features/review/draft-commands';
+import type { CommentWhere } from '@/features/review/draft-attempts';
 import { newerDraft, useDraftWriter } from '@/features/review/use-draft-writer';
 import { ApiError } from '@/lib/api';
 import { routes } from '@review-desk/shared/contract';
@@ -126,19 +127,41 @@ export function useReview(prId: string | null, account: string) {
   const refreshDraft = () => client.invalidateQueries({ queryKey: draftKey });
 
   const addComment = useMutation({
-    mutationFn: (
-      input: CommentTarget & {
-        body: string;
-        origin?: 'user' | 'ai';
-        revision?: { headOid: string; baseOid: string | null };
-      },
-    ) => writer.write<DraftComment>('addComment', pr, { ...input }),
+    mutationFn: ({
+      where,
+      recovers,
+      ...input
+    }: CommentTarget & {
+      body: string;
+      origin?: 'user' | 'ai';
+      revision?: { headOid: string; baseOid: string | null };
+      /** Where it was asked for, with the diff comparison shown: kept with a refusal of it. */
+      where?: CommentWhere;
+      /** A kept refusal this adds again as a new comment. */
+      recovers?: string;
+    }) =>
+      writer.write<DraftComment>(
+        'addComment',
+        pr,
+        { ...input },
+        {
+          ...(where ? { where } : {}),
+          ...(recovers ? { recovers } : {}),
+        },
+      ),
     onSuccess: refreshDraft,
   });
 
   const editComment = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: string }) =>
-      writer.write<DraftComment>('editComment', { ...pr, cid: id }, { body }),
+    mutationFn: ({ id, body, where }: { id: string; body: string; where?: CommentWhere }) =>
+      writer.write<DraftComment>(
+        'editComment',
+        { ...pr, cid: id },
+        { body },
+        {
+          ...(where ? { where } : {}),
+        },
+      ),
     onSuccess: refreshDraft,
   });
 
