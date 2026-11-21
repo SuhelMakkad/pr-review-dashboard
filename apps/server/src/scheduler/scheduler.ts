@@ -286,7 +286,12 @@ export class Scheduler {
 
     this.runs.set(idOf(work), run);
     run.done = Promise.resolve()
-      .then(() => handler.run(work, controller.signal))
+      .then(() => {
+        // Closed between its claim and now: released, never started.
+        if (controller.signal.aborted) throw new Aborted();
+
+        return handler.run(work, controller.signal);
+      })
       .then(
         (result): Outcome => ({ kind: 'next', next: result.next }),
         (error: unknown): Outcome =>

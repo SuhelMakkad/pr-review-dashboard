@@ -512,6 +512,21 @@ describe('the scheduler', () => {
     expect(clock.wakes()).toEqual([]);
   });
 
+  it('starts no handler once closed between its claim and its run', async () => {
+    const { clock, scheduler, ask, row, at } = setup();
+    const { run } = handler();
+
+    scheduler.register('job', { class: 'automation', run });
+    scheduler.open();
+    ask('job', 'k', 0);
+    clock.fire();
+    // Before the run's microtask.
+    await scheduler.close();
+
+    expect(run).not.toHaveBeenCalled();
+    expect(row()).toMatchObject({ requestedAt: at(0), claimedBy: null, attempts: 0 });
+  });
+
   it('looks again within a second when it cannot read what is due', () => {
     const { clock, store, scheduler, ask } = setup();
     const runnable = store.scheduledWork.runnable.bind(store.scheduledWork);

@@ -177,15 +177,22 @@ export class SyncRunner {
       // Taken again in the turn it was freed: wait for that one too.
       if (this.running) continue;
 
-      const { performed } = this.begin(true, 'interval');
-      const done = await Promise.race([performed, aborting(signal)]);
+      const { run, performed } = this.begin(true, 'interval');
+
+      // Its failure is this caller's to hear, through `performed`: never left unhandled when no
+      // one else joined the slot.
+      void run.catch(() => undefined);
+
+      const done = await Promise.race([performed.catch(() => null), aborting(signal)]);
 
       if (done === 'aborted') return { kind: 'aborted' };
-      if (done.account === null || !sameAccount(done.account, account)) return { kind: 'inactive' };
+      // Another account found once it ran: its own account is not in use.
+      if (done?.account && !sameAccount(done.account, account)) return { kind: 'inactive' };
 
-      return done.hookRan
-        ? { kind: 'synced', account: done.account, hooked: done.hooked }
-        : { kind: 'missed', account: done.account };
+      // Ended before its hook completed: failed, or before it even knew whose sync it was.
+      return done?.hookRan
+        ? { kind: 'synced', account, hooked: done.hooked }
+        : { kind: 'missed', account };
     }
   }
 

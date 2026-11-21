@@ -66,6 +66,30 @@ describe('a sync of its own', () => {
     expect(await sync.syncOwn('you', signal)).toEqual({ kind: 'missed', account: 'you' });
   });
 
+  it('says it missed when it failed before it knew whose sync it was', async () => {
+    const { github, sync, signal } = await setup();
+
+    vi.spyOn(github, 'identity').mockRejectedValueOnce(new Error('Connection refused'));
+
+    expect(await sync.syncOwn('you', signal)).toEqual({ kind: 'missed', account: 'you' });
+  });
+
+  it('says it missed when its run failed as it finished, leaving nothing unhandled', async () => {
+    const { store, sync, signal } = await setup();
+    const save = store.saveStatus.bind(store);
+
+    vi.spyOn(store, 'saveStatus').mockImplementation((status) => {
+      if (new Error().stack?.includes('finishSync')) throw new Error('disk I/O error');
+
+      save(status);
+    });
+
+    expect(await sync.syncOwn('you', signal)).toEqual({ kind: 'missed', account: 'you' });
+    // A later sync is not held up by it.
+    vi.restoreAllMocks();
+    await sync.sync();
+  });
+
   it('starts nothing for an account not in use', async () => {
     const { github, sync, signal } = await setup();
     const identity = vi.spyOn(github, 'identity');
