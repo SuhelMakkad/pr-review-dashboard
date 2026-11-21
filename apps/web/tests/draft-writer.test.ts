@@ -3185,6 +3185,104 @@ describe('the summary start', () => {
     expect(routes(sent)).toEqual(['startAi', 'addComment']);
   });
 
+  it('never reopens a start its first answer refused while its resend waited for an answer', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    let refuse: () => void = () => {};
+
+    writer.observe(draft(1));
+    answers.push(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          refuse = () =>
+            reject(
+              new ApiError('Plan limit reached', 429, 'PLAN_LIMIT', {
+                attempt: { id: request.body.attemptId, state: 'refused' },
+              }),
+            );
+        }),
+    );
+
+    const unknown = expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'SUMMARY_START_UNKNOWN',
+    });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    answers.push(() => new Promise(() => {}));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+
+    await vi.advanceTimersByTimeAsync(1);
+    // The first send's refusal, recorded under its id, comes while the resend waits.
+    refuse();
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await again;
+
+    expect(writer.startViews()).toMatchObject([{ phase: 'not-started' }]);
+    vi.useRealTimers();
+    await expect(writer.startSummary({})).resolves.toMatchObject({ id: 'run-1' });
+    expect(routes(sent)).toEqual(['startAi', 'startAi', 'startAi']);
+  });
+
+  it('keeps the queue while a start sent again is looked up, its one send answered without an outcome', async () => {
+    const { writer, transport, answers, sent } = await unknownStart();
+
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    answers.push(async (request) => ({
+      pending: true,
+      attempt: { id: request.body.attemptId, state: 'pending' },
+    }));
+    vi.mocked(transport.lookup).mockImplementationOnce(async (id) => ({
+      attempt: { id, state: 'committed', revision: 1, result: { body: { id: 'run-1' } } },
+    }));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+    const behind = writer.write('addComment', pr, { body: 'Behind' });
+
+    await again;
+    await behind;
+
+    expect(routes(sent)).toEqual(['startAi', 'startAi', 'addComment']);
+    expect(writer.startViews()).toEqual([]);
+    expect(transport.started).toHaveBeenCalled();
+  });
+
+  it('stops reading the checkpoint once a start gave up at its bound', async () => {
+    vi.useFakeTimers();
+
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, () => 1_000, NEVER);
+
+    writer.observe(draft(1));
+    vi.mocked(transport.checkpoint).mockRejectedValue(new ApiError('Not reachable', 0));
+
+    const refused = expect(writer.startSummary({})).rejects.toMatchObject({ code: 'NOT_SENT' });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await refused;
+
+    const reads = vi.mocked(transport.checkpoint).mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(10 * COMMAND_BOUND_MS);
+
+    expect(vi.mocked(transport.checkpoint).mock.calls).toHaveLength(reads);
+    expect(sent).toEqual([]);
+  });
+
   it('is held back by a submit not known, as any write is', async () => {
     const { sent, commands, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);
@@ -3267,7 +3365,13 @@ describe('the summary start', () => {
     answers.push(async () => {
       throw new ApiError('Not active', 409, 'ACCOUNT_NOT_ACTIVE');
     });
-    await writer.sendStartAgain(writer.startViews()[0]!.key);
+    // Its claim is looked up within the bound, finding nothing more.
+    vi.useFakeTimers();
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await again;
 
     expect(sent.map((request) => request.body.attemptId)).toEqual([attemptId, attemptId]);
     expect(writer.startViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);

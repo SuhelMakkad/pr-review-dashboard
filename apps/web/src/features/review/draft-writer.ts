@@ -994,7 +994,13 @@ export class DraftWriter {
       throw new WriteRefused(COMMAND_MESSAGES.notRecorded, 'NOT_RECORDED');
     }
 
+    // Still being sent again by this click: settled meanwhile (a late answer of its first send),
+    // it is never reopened.
+    const resending = () => this.starts.includes(record) && record.phase === 'sending';
+
     await this.enqueue(async () => {
+      if (!resending()) return;
+
       const ahead = this.gateAt(seq);
       const attempt = record.attempt!;
 
@@ -1008,23 +1014,26 @@ export class DraftWriter {
         return;
       }
 
-      // Settled meanwhile (a late answer of its first send admitted it): nothing to send.
-      if (!this.starts.includes(record) || record.phase !== 'sending') return;
-
+      const deadline = Date.now() + COMMAND_BOUND_MS;
       const expected = { writeId: attempt.writeId, base: attempt.base };
       const answer = decode(this.transport.send(attempt.request), false, expected);
-      const settled = await beforeDeadline(answer, Date.now() + COMMAND_BOUND_MS).catch(() => null);
+      let settled = await beforeDeadline(answer, deadline).catch(() => null);
 
       // Not answered in time: the queue goes on, and its answer still settles it if it comes.
       if (!settled) {
         void answer.then((late) => this.settleStartAnswer(record, late, true));
-        this.moveStart(record, 'unknown', { resendable: false });
-        this.poll();
+
+        if (resending()) {
+          this.moveStart(record, 'unknown', { resendable: false });
+          this.poll();
+        }
 
         return;
       }
 
-      this.settleStartAnswer(record, settled);
+      // Answered without its outcome: the queue waits, within the bound, on its claim.
+      if (resending()) settled = await this.awaitClaim(record, settled, deadline);
+      if (resending()) this.settleStartAnswer(record, settled);
     });
   }
 
@@ -1634,7 +1643,7 @@ export class DraftWriter {
 
       return { error: new WriteRefused(START_MESSAGES.notSent, 'NOT_SENT'), release: true };
     };
-    const writeId = await beforeDeadline(this.sealedId(), deadline).catch(() => null);
+    const writeId = await this.sealedId(deadline);
 
     if (!writeId) return notSent();
 
@@ -1776,7 +1785,7 @@ export class DraftWriter {
 
       return { kept, error };
     };
-    const attemptId = await beforeDeadline(this.sealedId(), deadline).catch(() => null);
+    const attemptId = await this.sealedId(deadline);
 
     if (!attemptId) return unsent(new WriteRefused(START_MESSAGES.notSent, 'NOT_SENT'));
 
@@ -1898,7 +1907,7 @@ export class DraftWriter {
 
     this.sealing = null;
 
-    const attemptId = await beforeDeadline(this.sealedId(), deadline).catch(() => null);
+    const attemptId = await this.sealedId(deadline);
     const unsent = (): Outcome => ({
       kind: 'refused',
       error: new ApiError(START_MESSAGES.notSent, 0, 'NOT_SENT'),
@@ -2513,13 +2522,22 @@ export class DraftWriter {
    * after a restart (`forgetCheckpoint`) or a refusal that says it is stale. Waits, as a write
    * with no answer does, while it cannot be read.
    */
-  private async sealedId(): Promise<string> {
+  private async sealedId(deadline: number): Promise<string | null>;
+  private async sealedId(): Promise<string>;
+  private async sealedId(deadline = Infinity): Promise<string | null> {
     let sealing = this.sealing;
 
     for (let attempt = 0; !sealing; attempt++) {
-      sealing = await this.transport.checkpoint().then(readCheckpoint, () => null);
+      // A command's own reads end at its bound: nothing keeps retrying once its job is over.
+      if (Date.now() >= deadline) return null;
 
-      if (!sealing) await sleep(this.backoff(attempt));
+      sealing = await beforeDeadline(this.transport.checkpoint(), deadline).then(
+        readCheckpoint,
+        () => null,
+      );
+
+      if (!sealing)
+        await sleep(Math.min(this.backoff(attempt), Math.max(0, deadline - Date.now())));
     }
 
     this.sealing = sealing;
@@ -2794,7 +2812,7 @@ export class DraftWriter {
         resealed += 1;
         this.sealing = null;
 
-        const writeId = await beforeDeadline(this.sealedId(), deadline).catch(() => null);
+        const writeId = await this.sealedId(deadline);
 
         // Out of time for a new id: never received under the one refused, nothing more is sent.
         if (!writeId) {
