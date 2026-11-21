@@ -134,32 +134,37 @@ export function useAi(prId: string | null, account: string) {
     wasBusy.current = Boolean(busy);
   }, [busy, client]);
 
-  const start = useMutation({
-    mutationKey: startKey,
-    // Queued at the click, offline too: a summary start captures what is shown then, never text
-    // typed while a paused mutation waited.
-    networkMode: 'always',
-    mutationFn: async ({
-      task,
-      provider,
-      force,
-    }: {
-      task: AiTask;
-      provider?: AiProvider;
-      force?: boolean;
-    }) => {
-      // The summary is written from the verdict and text as you left them: the writer's own job,
-      // which saves them first and fences the start on the draft that save left.
-      if (task === 'draft_summary')
-        return writer.startSummary({
-          ...(provider ? { provider } : {}),
-          ...(force !== undefined ? { force } : {}),
-        });
+  type StartVariables = { task: AiTask; provider?: AiProvider; force?: boolean };
 
-      return call(routes.startAi, { params: pr, body: { task, provider, force } });
-    },
+  const otherStart = useMutation({
+    mutationKey: startKey,
+    mutationFn: ({ task, provider, force }: StartVariables) =>
+      call(routes.startAi, { params: pr, body: { task, provider, force } }),
     onSuccess: () => client.invalidateQueries({ queryKey: key }),
   });
+  // The summary is written from the verdict and text as you left them: the writer's own job, which
+  // saves them first and fences the start on the draft that save left. Queued at the click,
+  // offline too, so it never captures text typed while a paused mutation waited.
+  const summaryStart = useMutation({
+    mutationKey: startKey,
+    networkMode: 'always',
+    mutationFn: ({ provider, force }: StartVariables) =>
+      writer.startSummary({
+        ...(provider ? { provider } : {}),
+        ...(force !== undefined ? { force } : {}),
+      }),
+    onSuccess: () => client.invalidateQueries({ queryKey: key }),
+  });
+  const startOf = (variables: StartVariables) =>
+    variables.task === 'draft_summary' ? summaryStart : otherStart;
+  // The latest start of either kind: its error is the one shown.
+  const latestStart = summaryStart.submittedAt > otherStart.submittedAt ? summaryStart : otherStart;
+  const start = {
+    mutate: (variables: StartVariables) => startOf(variables).mutate(variables),
+    mutateAsync: (variables: StartVariables) => startOf(variables).mutateAsync(variables),
+    error: latestStart.error,
+    isPending: summaryStart.isPending || otherStart.isPending,
+  };
 
   const cancel = useMutation({
     mutationFn: (runId: string) => call(routes.cancelAi, { params: run(runId), body: {} }),

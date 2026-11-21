@@ -1008,12 +1008,23 @@ export class DraftWriter {
         return;
       }
 
-      const expected = { writeId: attempt.writeId, base: attempt.base };
+      // Settled meanwhile (a late answer of its first send admitted it): nothing to send.
+      if (!this.starts.includes(record) || record.phase !== 'sending') return;
 
-      this.settleStartAnswer(
-        record,
-        await decode(this.transport.send(attempt.request), false, expected),
-      );
+      const expected = { writeId: attempt.writeId, base: attempt.base };
+      const answer = decode(this.transport.send(attempt.request), false, expected);
+      const settled = await beforeDeadline(answer, Date.now() + COMMAND_BOUND_MS).catch(() => null);
+
+      // Not answered in time: the queue goes on, and its answer still settles it if it comes.
+      if (!settled) {
+        void answer.then((late) => this.settleStartAnswer(record, late, true));
+        this.moveStart(record, 'unknown', { resendable: false });
+        this.poll();
+
+        return;
+      }
+
+      this.settleStartAnswer(record, settled);
     });
   }
 
@@ -1256,8 +1267,12 @@ export class DraftWriter {
 
       const expected = { writeId: record.writeId!, base: record.base! };
       const stamp = this.transport.stamp();
-      // Sent once, as you asked: an answer that says nothing leaves it to its lookups again.
-      const outcome = await decode(this.transport.send(record.request!), false, expected);
+      // Sent once, as you asked: an answer that says nothing, or none in time, leaves it to its
+      // lookups again, and the queue goes on.
+      const outcome = await beforeDeadline(
+        decode(this.transport.send(record.request!), false, expected),
+        Date.now() + COMMAND_BOUND_MS,
+      ).catch((): Outcome => ({ kind: 'unknown', error: null }));
 
       if (outcome.kind === 'committed') {
         // An answer may replay a commit made long ago, or one on a draft the queue has not seen:
@@ -1774,7 +1789,7 @@ export class DraftWriter {
     if (Date.now() >= deadline) return unsent(new WriteRefused(START_MESSAGES.notSent, 'NOT_SENT'));
 
     const answer = this.startOnce(record, deadline);
-    const settled = await beforeDeadline(answer, deadline).catch(() => null);
+    let settled = await beforeDeadline(answer, deadline).catch(() => null);
 
     if (!settled) {
       // Not answered in time: settled by its answer, should it still come.
@@ -1784,6 +1799,10 @@ export class DraftWriter {
 
       return { kept, error: new WriteRefused(START_MESSAGES.unknown, 'SUMMARY_START_UNKNOWN') };
     }
+
+    // Answered, yet without its outcome: the queue still waits, within the bound, while its claim
+    // is looked up. A run it finds is the caller's answer.
+    settled = await this.awaitClaim(record, settled, deadline);
 
     const result = this.settleStartAnswer(record, settled);
 
@@ -1796,6 +1815,49 @@ export class DraftWriter {
           kept,
           error: result.error ?? new WriteRefused(START_MESSAGES.unknown, 'SUMMARY_START_UNKNOWN'),
         };
+  }
+
+  /**
+   * Looks a start's claim up, within the bound, while its answer said nothing of its outcome:
+   * the outcome it finds, else what was answered. Never sends anything.
+   */
+  private async awaitClaim(
+    record: StartRecord,
+    outcome: Outcome,
+    deadline: number,
+  ): Promise<Outcome> {
+    for (
+      let attempt = 0;
+      (outcome.kind === 'pending' || outcome.kind === 'unknown' || outcome.kind === 'gap') &&
+      Date.now() < deadline;
+      attempt++
+    ) {
+      await beforeDeadline(sleep(this.backoff(attempt)), deadline).catch(() => {});
+
+      const envelope = record.attempt;
+
+      if (!envelope || Date.now() >= deadline) break;
+
+      const expected = { writeId: envelope.writeId, base: envelope.base };
+      const looked = await beforeDeadline(
+        this.transport.lookup(envelope.writeId, envelope.base, 'start'),
+        deadline,
+      )
+        .then((answer) => fromLookup(answer, expected))
+        .catch((): 'unreadable' => 'unreadable');
+
+      if (looked === 'never')
+        return {
+          kind: 'refused',
+          error: new ApiError(ATTEMPT_MESSAGES.neverReceived, 409, 'NOT_RECEIVED', {
+            attempt: { id: envelope.writeId, state: 'refused' },
+          }),
+        };
+
+      if (typeof looked !== 'string' && looked.kind !== 'pending') return looked;
+    }
+
+    return outcome;
   }
 
   /** The start's envelope: the frozen request, its sealed id and base. */
@@ -1837,12 +1899,17 @@ export class DraftWriter {
     this.sealing = null;
 
     const attemptId = await beforeDeadline(this.sealedId(), deadline).catch(() => null);
+    const unsent = (): Outcome => ({
+      kind: 'refused',
+      error: new ApiError(START_MESSAGES.notSent, 0, 'NOT_SENT'),
+    });
 
-    if (!attemptId || Date.now() >= deadline) return notConfirmed();
+    if (!attemptId || Date.now() >= deadline) return unsent();
 
     record.attempt = this.startEnvelope(record, attemptId, attempt.base);
 
-    if (!this.persist()) return notConfirmed();
+    // Recorded under its new id, and still in time, or never sent.
+    if (!this.persist() || Date.now() >= deadline) return unsent();
 
     return decode(this.transport.send(record.attempt.request), true, {
       writeId: attemptId,
@@ -2737,6 +2804,9 @@ export class DraftWriter {
 
         this.reseal(write, writeId);
 
+        // An autosave on its way is journaled under its new id before it is sent, as it was first.
+        if (!options.onReseal && !options.owned) this.changed();
+
         // A journaled write is recorded under its new id before it is sent.
         if (options.onReseal && !options.onReseal(write)) {
           outcome = {
@@ -2750,7 +2820,7 @@ export class DraftWriter {
         continue;
       }
 
-      await sleep(this.backoff(attempt++));
+      await within(sleep(this.backoff(attempt++)), undefined);
 
       // Sent, and not settled by its deadline: never sent again, only looked up.
       if (Date.now() >= deadline) {
