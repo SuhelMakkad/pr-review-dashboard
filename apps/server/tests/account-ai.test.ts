@@ -16,7 +16,7 @@ import { Backfill } from '@/insights/backfill.js';
 import { extractActivity } from '@/insights/extract.js';
 import { activityEvents } from '@/db/schema.js';
 import { AiRunner } from '@/ai/runner.js';
-import { DraftStore } from '@/review/drafts.js';
+import { DraftStore } from '@/db/drafts.js';
 import { ReviewService } from '@/review/service.js';
 import { SyncService } from '@/sync/service.js';
 import { BACKFILL } from '@/db/settings.js';

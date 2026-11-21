@@ -22,7 +22,7 @@ import { DiffService } from '@/diff/service.js';
 import type { GitHubApi } from '@/github/api.js';
 import { asAccount } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
-import { DraftStore } from '@/review/drafts.js';
+import { DraftStore } from '@/db/drafts.js';
 import { ReviewError, ReviewService } from '@/review/service.js';
 import { accountNotActive } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';

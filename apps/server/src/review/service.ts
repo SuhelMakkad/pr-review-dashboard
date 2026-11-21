@@ -16,7 +16,7 @@ import type { GitHubApi } from '@/github/api.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
 import type { SyncService } from '@/sync/service.js';
-import { DraftStore } from '@/review/drafts.js';
+import { DraftStore } from '@/db/drafts.js';
 import { accountNotActive, ReviewError } from '@/review/errors.js';
 import { REQUEST_CHANGES_UNSUPPORTED } from '@/gitlab/write.js';
 import type { FrozenReview } from '@review-desk/shared/operations';

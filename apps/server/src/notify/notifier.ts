@@ -1,5 +1,4 @@
 import { pullPath, shortRef } from '@review-desk/shared/accounts';
-import { and, eq } from 'drizzle-orm';
 import { addedByHand } from '@review-desk/shared/attention';
 import type { AuthorItem } from '@review-desk/shared/author';
 import {
@@ -10,8 +9,7 @@ import {
   type ReviewNotification,
 } from '@review-desk/shared/notify';
 import type { PullRequestItem } from '@review-desk/shared/types';
-import { notificationLog } from '@/db/schema.js';
-import { batches, type Store } from '@/db/store.js';
+import type { Store } from '@/db/store.js';
 import type { EventBus } from '@/events.js';
 import { NOTIFICATION_SETTINGS } from '@/db/settings.js';
 
@@ -110,35 +108,15 @@ export class Notifier {
   }
 
   private seen(account: string, key: string): boolean {
-    return Boolean(
-      this.store.db
-        .select({ key: notificationLog.key })
-        .from(notificationLog)
-        .where(and(eq(notificationLog.account, account), eq(notificationLog.key, key)))
-        .get(),
-    );
+    return this.store.notificationLog.seen(account, key);
   }
 
   private remember(account: string, notifications: ReviewNotification[], channel: string) {
     const sentAt = new Date().toISOString();
 
-    this.store.transaction(() => {
-      for (const batch of batches(notifications)) {
-        this.store.db
-          .insert(notificationLog)
-          .values(
-            batch.map((notification) => ({
-              account,
-              key: notification.key,
-              prId: notification.prId,
-              channel,
-              sentAt,
-            })),
-          )
-          .onConflictDoNothing()
-          .run();
-      }
-    });
+    this.store.transaction(() =>
+      this.store.notificationLog.remember(account, notifications, channel, sentAt),
+    );
   }
 
   /** Called after every sync with the current inbox and author view. */
