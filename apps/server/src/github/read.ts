@@ -45,6 +45,8 @@ import {
 import { GhCli, type GitHubTransport } from '@/github/transport.js';
 import { createWriter, type GitHubWrites, type ThreadInput } from '@/github/write.js';
 import type { ReviewEvent } from '@review-desk/shared/review';
+import { forgeTraits } from '@review-desk/shared/traits';
+import type { HistoryQuery } from '@/forge/port.js';
 
 interface PageInfo {
   hasNextPage: boolean;
@@ -354,7 +356,7 @@ export function fingerprintOf(node: RawDetect): string {
 }
 
 export class GitHub implements GitHubApi {
-  readonly approvalCarriesSummary = true;
+  readonly traits = forgeTraits.github;
 
   private readonly writes: GitHubWrites;
 
@@ -550,7 +552,12 @@ export class GitHub implements GitHubApi {
     return { results, budget };
   }
 
-  async searchPullIds(query: string): Promise<string[]> {
+  async searchPullIds(history: HistoryQuery): Promise<string[]> {
+    // GitHub's own search syntax: by update date for reviews, by creation date for authored PRs.
+    const query =
+      history.kind === 'reviewed'
+        ? `is:pr reviewed-by:${history.login} updated:${history.from}..${history.to}`
+        : `is:pr author:${history.login} created:${history.from}..${history.to}`;
     const ids: string[] = [];
     let cursor: string | null = null;
 

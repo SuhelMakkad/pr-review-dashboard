@@ -72,6 +72,8 @@ import {
   type Submission,
 } from '@/gitlab/write.js';
 import { parseVersion, reviewFeatures, type GitLabVersion } from '@/gitlab/version.js';
+import { forgeTraits } from '@review-desk/shared/traits';
+import type { HistoryQuery } from '@/forge/port.js';
 
 /** Where Review Desk keeps what GitLab cannot store for it (viewed files). */
 export interface SettingsStore {
@@ -134,30 +136,18 @@ interface RawTodo {
 }
 
 /** GitHub search qualifiers the insights backfill uses, as GitLab list filters. */
-function searchFilters(query: string): string | null {
-  const qualifier = (name: string) => new RegExp(`(?:^|\\s)${name}:(\\S+)`).exec(query)?.[1];
-  const range = (value: string | undefined, field: 'created' | 'updated') => {
-    const [from, to] = (value ?? '').split('..');
-
-    if (!from || !to) return '';
-
-    // `to` is an inclusive day; GitLab's `_before` is exclusive.
-    const end = new Date(Date.parse(`${to}T00:00:00Z`) + 86_400_000).toISOString();
-
-    return `&${field}_after=${encodeURIComponent(`${from}T00:00:00Z`)}&${field}_before=${encodeURIComponent(end)}`;
-  };
-  const reviewer = qualifier('reviewed-by');
-  const author = qualifier('author');
-  const user = reviewer ?? author;
-
-  if (!user) return null;
-
-  const filter = reviewer ? 'reviewer_username' : 'author_username';
+/** The merge requests a history search lists: reviewed by update date, authored by creation. */
+function searchFilters(history: HistoryQuery): string {
+  const [filter, field] =
+    history.kind === 'reviewed'
+      ? (['reviewer_username', 'updated'] as const)
+      : (['author_username', 'created'] as const);
+  // `to` is an inclusive day; GitLab's `_before` is exclusive.
+  const end = new Date(Date.parse(`${history.to}T00:00:00Z`) + 86_400_000).toISOString();
 
   return (
-    `merge_requests?scope=all&state=all&${filter}=${encodeURIComponent(accountHandle(user))}` +
-    range(qualifier('created'), 'created') +
-    range(qualifier('updated'), 'updated')
+    `merge_requests?scope=all&state=all&${filter}=${encodeURIComponent(accountHandle(history.login))}` +
+    `&${field}_after=${encodeURIComponent(`${history.from}T00:00:00Z`)}&${field}_before=${encodeURIComponent(end)}`
   );
 }
 
@@ -167,8 +157,8 @@ function searchFilters(query: string): string | null {
  * GitLab's notes, reviewers and approvals become reviews, requests and verdicts.
  */
 export class GitLab implements GitHubApi {
-  /** An approval takes no text: its summary is a separate note. */
-  readonly approvalCarriesSummary = false;
+  /** An approval takes no text: its summary is a separate note (see `ForgeTraits`). */
+  readonly traits = forgeTraits.gitlab;
 
   private readonly writes: GitLabWrites;
 
@@ -919,11 +909,8 @@ export class GitLab implements GitHubApi {
   }
 
   /** Merge request ids for the GitHub-style search the insights backfill sends. */
-  async searchPullIds(query: string): Promise<string[]> {
-    const path = searchFilters(query);
-
-    if (!path) return [];
-
+  async searchPullIds(history: HistoryQuery): Promise<string[]> {
+    const path = searchFilters(history);
     const mrs = await paginate<RawMergeRequest>(
       this.transport,
       path,

@@ -1,4 +1,5 @@
 import { instanceUrl, parseAccount } from '@review-desk/shared/accounts';
+import { forgeTraits } from '@review-desk/shared/traits';
 
 export interface PrRef {
   /** The GitHub owner, or a GitLab project's namespace, which can be nested (`group/sub`). */
@@ -114,7 +115,9 @@ export function placeRef(
 
   const { forge, host } = parseAccount(account.login);
 
-  if (ref.gitlab && forge === 'github') return { ref: null, elsewhere: 'GitLab' };
+  // A `group/project!12` reference names a project path this forge cannot take.
+  if (ref.gitlab && !forgeTraits[forge].reference.nestedPaths)
+    return { ref: null, elsewhere: 'GitLab' };
   if (!ref.host) return { ref, elsewhere: null };
 
   const web = instanceUrl(account.webUrl);

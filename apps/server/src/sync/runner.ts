@@ -16,7 +16,7 @@ import { log } from '@/log.js';
 import type { EventBus } from '@/events.js';
 import type { DetectResult, GitHubApi } from '@/github/api.js';
 import type { GitHubAccounts } from '@/github/credentials.js';
-import { bindForge, discoverIdentity } from '@/forge/bind.js';
+import { accountCheck, bindForge, discoverIdentity } from '@/forge/bind.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { ReviewError } from '@/review/errors.js';
 import { laterDeadline, sameAccount, type AccountState } from '@/sync/accounts.js';
@@ -24,12 +24,9 @@ import type { PullReads } from '@/sync/reads.js';
 import type { SnapshotCoordinator } from '@/sync/snapshots.js';
 import { ordered } from '@/sync/sources.js';
 import { SELECTED_ACCOUNT } from '@/db/settings.js';
+import { traitsOf } from '@review-desk/shared/traits';
 
-const signInCommand = (account: string) => {
-  const { forge, host } = parseAccount(account);
-
-  return forge === 'gitlab' ? `glab auth login --hostname ${host}` : 'gh auth login';
-};
+const signInCommand = (account: string) => traitsOf(account).signIn(parseAccount(account).host);
 
 /** How often each discovery feed runs on the background schedule. Manual syncs run them all. */
 const FEED_INTERVAL_MS: Record<FeedSource, number> = {
@@ -221,13 +218,13 @@ export class SyncRunner {
        * phase are not seen: Review Desk never reads the GitLab token.) GitHub calls each carry the
        * account's own token, so they need no check.
        */
-      const verify =
-        timing.forge === 'gitlab' && forge.verifyAccount
-          ? () =>
-              forge.verifyAccount!(account.login)
-                // A limit met by the check could be someone else's: never this account's status.
-                .catch((error: unknown) => Promise.reject(unattributed(error)))
-          : null;
+      const check = timing.forge === 'gitlab' ? accountCheck(forge) : null;
+      const verify = check
+        ? () =>
+            check(account.login)
+              // A limit met by the check could be someone else's: never this account's status.
+              .catch((error: unknown) => Promise.reject(unattributed(error)))
+        : null;
 
       if (account.login !== this.state.status.account?.login) {
         const waiting = this.state.adoptIdentity(account);

@@ -349,7 +349,7 @@ describe('history imports per account', () => {
     const free = new Set<string>();
 
     vi.spyOn(fixture, 'searchPullIds').mockImplementation(async (query) => {
-      const login = /(?:reviewed-by|author):(\S+)/.exec(query)![1];
+      const login = query.login;
 
       if (!free.has(login))
         await new Promise<void>((resolve) =>
@@ -408,6 +408,7 @@ describe('history imports per account', () => {
 
     // A forge that cannot carry the account with each call, as GitLab's.
     Object.assign(fixture, {
+      traits: { ...fixture.traits, checksAccount: true },
       verifyAccount: async (login: string) => {
         if (signedIn !== login) throw new AccountUnavailable(login, signedIn);
       },
@@ -464,7 +465,7 @@ describe('history imports per account', () => {
 
     const verifyAccount = vi.fn(async () => undefined);
 
-    Object.assign(fixture, { verifyAccount });
+    Object.assign(fixture, { verifyAccount, traits: { ...fixture.traits, checksAccount: true } });
     store.settings.set(BACKFILL.of('you'), {
       doneWindows: ['2026-08-07..2026-09-06'],
       finishedAt: null,

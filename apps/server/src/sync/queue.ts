@@ -13,6 +13,8 @@ import type { AccountState } from '@/sync/accounts.js';
 import type { PullReads } from '@/sync/reads.js';
 import type { SnapshotCoordinator } from '@/sync/snapshots.js';
 import { ordered } from '@/sync/sources.js';
+import { accountCheck } from '@/forge/bind.js';
+import { traitsOf } from '@review-desk/shared/traits';
 
 /**
  * Work on one PR as it happens: refreshing it, adding it to the queue by hand or removing it, and
@@ -59,7 +61,7 @@ export class PullQueue {
 
       // Where the forge cannot carry the account with each call (GitLab), its sign-in is checked
       // before the read and again before its result is kept.
-      const verify = bound.verifyAccount?.bind(bound);
+      const verify = accountCheck(bound);
       const read = () => bound.snapshot(id, account, cached.sources, cached);
       /** Saved before the caller hears of it, so the next request waits too. */
       const keepLimit = (error: unknown) => {
@@ -157,9 +159,11 @@ export class PullQueue {
         `That ${forge === 'gitlab' ? 'link' : 'PR'} is on ${host}, but you are working as ${login}. Switch to an account on ${host} to add it.`,
       );
 
+    const { reference } = traitsOf(login);
+
     // A nested path or a `group/project!12` reference names a GitLab project; GitHub would read
     // only its first two segments and could find a different PR.
-    if (forge === 'github' && (gitlab || path.split('/').length !== 2))
+    if (!reference.nestedPaths && (gitlab || path.split('/').length !== 2))
       throw new ReviewError(
         'OTHER_HOST',
         409,
@@ -175,10 +179,10 @@ export class PullQueue {
         409,
         `That link is for another GitLab on ${host}, not the one ${login} is signed in to.`,
       );
-    const label = `${repository}${forge === 'gitlab' ? '!' : '#'}${number}`;
+    const label = `${repository}${reference.separator}${number}`;
     // For GitLab, nothing is saved unless glab is this account before the reads and after them.
     const verify = () =>
-      (async () => client.verifyAccount?.(login))().catch((error: unknown) =>
+      (async () => accountCheck(client)?.(login))().catch((error: unknown) =>
         // A limit met by the check itself cannot be tied to the account.
         Promise.reject(unattributed(error)),
       );

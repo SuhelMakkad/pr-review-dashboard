@@ -18,6 +18,8 @@ import { AgentError } from '@/ai/provider.js';
 import { log } from '@/log.js';
 import { observeInputs } from '@/ai/inputs.js';
 import { BoundForge } from '@/forge/router.js';
+import { accountCheck } from '@/forge/bind.js';
+import { traitsOf } from '@review-desk/shared/traits';
 
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 512 * 1024 * 1024;
@@ -110,7 +112,7 @@ async function archiveCommand(
 ): Promise<ArchiveCommand> {
   const account = parseAccount(access.account ?? '');
 
-  if (account.forge === 'gitlab') {
+  if (traitsOf(access.account ?? '').archive === 'archive') {
     if (!GITLAB_PROJECT.test(repository) || !COMMIT.test(oid)) throw invalidRepository();
 
     return {
@@ -243,7 +245,7 @@ export async function prepareReviewWorkspace(
   // glab signs each request in with its own sign-in: the compare and both downloads count as this
   // account's only between checks that glab still is it, or the agent would read someone else's.
   const check = async () => {
-    if (access.account) await github.verifyAccount?.(access.account);
+    if (access.account) await accountCheck(github)?.(access.account);
   };
 
   await check();

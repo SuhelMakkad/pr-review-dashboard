@@ -1,11 +1,5 @@
-import type {
-  Actor,
-  FeedSource,
-  ForgeCapabilities,
-  PullRequestSnapshot,
-  Source,
-} from '@review-desk/shared/types';
-import type { GitHubWrites } from '@/github/write.js';
+import type { PullRequestSnapshot } from '@review-desk/shared/types';
+import type { ForgePort } from '@/forge/port.js';
 
 export interface RateBudget {
   limit: number;
@@ -99,88 +93,5 @@ export interface ReviewReceipt {
   comments: { id: string; body: string; path: string; line: number | null; url: string }[];
 }
 
-/**
- * Domain-level GitHub access. The real client (`GitHub`) implements it over the gh CLI; demo mode
- * implements it from an in-memory scenario so the UI and services run without GitHub.
- */
-export interface GitHubApi extends GitHubWrites {
-  /**
-   * This forge with every call made as `login`, for as long as the work that holds it runs,
-   * whatever is selected meanwhile. Absent where a forge cannot tell accounts apart (a test's
-   * stand-in): it is then its own binding (see `bindForge`).
-   */
-  as?(login: string): GitHubApi;
-
-  /**
-   * With no account selected: whose the credentials in use right now are, with this forge bound to
-   * them for the rest of the work, so it stays that account's even if the CLI switches meanwhile.
-   */
-  discoverIdentity?(): Promise<{ identity: Actor; forge: GitHubApi }>;
-
-  /**
-   * Refuses (`AccountUnavailable`) when the forge is signed in as someone other than `account`.
-   * GitLab only: each GitHub call carries the named account's own token, so it needs no check.
-   */
-  verifyAccount?(account: string): Promise<void>;
-
-  /**
-   * True where an approval carries its summary in one write (GitHub's review body). Where it
-   * cannot (GitLab: an approval, then a note), the two are sent and checkpointed as separate
-   * steps, so each has its own receipt.
-   */
-  readonly approvalCarriesSummary: boolean;
-  reviewReceipt(id: string): Promise<ReviewReceipt | null>;
-  identity(): Promise<Actor>;
-  /** Where the forge differs from GitHub; absent means everything is supported. */
-  capabilities?(): Promise<ForgeCapabilities>;
-  teams(): Promise<string[]>;
-  discover(login: string, source: FeedSource): Promise<string[]>;
-  /** Finds a PR by repository and number; null when it does not exist or cannot be seen. */
-  resolvePull(repository: string, number: number): Promise<ResolvedPull | null>;
-  detect(
-    ids: string[],
-    options?: DetectOptions,
-  ): Promise<{ results: DetectResult[]; budget: RateBudget | null }>;
-  snapshot(
-    id: string,
-    login: string,
-    sources: Source[],
-    previous?: PullRequestSnapshot,
-  ): Promise<PullRequestSnapshot>;
-  /** Files changed by the PR (base...head) with their patches. */
-  pullFiles(repository: string, number: number): Promise<RemoteFile[]>;
-  /**
-   * Where the forge's viewed state follows each file's diff (GitLab): the files of exactly this
-   * revision, keyed for viewed marks (see `PinnedFiles`). Null, or absent, where viewed state is
-   * per file whatever its diff (GitHub).
-   */
-  pinnedFiles?(
-    repository: string,
-    number: number,
-    revision: { headOid: string; baseOid: string | null },
-  ): Promise<PinnedFiles | null>;
-  /** Three-dot comparison; null when either commit is unknown to GitHub. */
-  compare(repository: string, base: string, head: string): Promise<CompareResult | null>;
-  /** The commit `branch` points to now; null when there is no such branch. */
-  branchHead(repository: string, branch: string): Promise<string | null>;
-  /**
-   * The comment `author` left in the conversation of PR `prId` that starts with `marker`, read
-   * through every page (a snapshot keeps only the latest ones). The PR is named by its id, which
-   * a renamed or moved repository keeps. Null when there is none; throws when not every page
-   * could be read, so absence is never assumed.
-   */
-  markedComment(
-    prId: string,
-    author: string,
-    marker: string,
-  ): Promise<{ id: string; url: string } | null>;
-  /** PR node ids matching a search (open or closed); used to backfill history. */
-  searchPullIds(query: string): Promise<string[]>;
-  /** Light snapshots (requests, your reviews, verdicts) for many PRs, for review history. */
-  history(ids: string[], login: string): Promise<PullRequestSnapshot[]>;
-  /** File contents at commits; null entries for paths that do not exist there. */
-  blobs(
-    repository: string,
-    requests: { oid: string; path: string }[],
-  ): Promise<(BlobText | null)[]>;
-}
+/** The forge interface under its original name (see `ForgePort`). */
+export type GitHubApi = ForgePort;

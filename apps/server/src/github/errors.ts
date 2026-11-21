@@ -1,15 +1,9 @@
 import { homedir } from 'node:os';
 
-export class GitHubError extends Error {
-  constructor(
-    message: string,
-    readonly retryAt: string | null = null,
-    readonly status: number | null = null,
-    readonly outcome: 'unknown' | 'rejected' | 'unavailable' | 'rate_limit' | 'auth' = 'unknown',
-  ) {
-    super(message);
-  }
-}
+import { ForgeError as GitHubError } from '@/forge/port.js';
+
+/** A forge's failure under its original name: one class, so `instanceof` holds either way. */
+export { GitHubError };
 
 const registeredSecrets = new Set<string>();
 

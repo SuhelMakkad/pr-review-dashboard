@@ -1,6 +1,6 @@
 import type { EventBus } from '@/events.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
-import { bindForge } from '@/forge/bind.js';
+import { accountCheck, bindForge } from '@/forge/bind.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import { extractActivity } from '@/insights/extract.js';
@@ -96,7 +96,7 @@ export class Backfill {
     // Where the forge cannot carry the account with each call (GitLab), its sign-in is checked
     // before a window's reads and again before they are saved. A limit met by a check itself
     // cannot be tied to the account.
-    const verify = github.verifyAccount?.bind(github);
+    const verify = accountCheck(github);
     const check = async () => {
       if (verify)
         await verify(login).catch((error: unknown) => Promise.reject(unattributed(error)));
@@ -158,10 +158,12 @@ export class Backfill {
     force: boolean,
     known: Set<string>,
   ) {
+    // A window is `from..to`, both inclusive days.
+    const [from, to] = window.split('..');
     const ids = [
       ...new Set([
-        ...(await github.searchPullIds(`is:pr reviewed-by:${login} updated:${window}`)),
-        ...(await github.searchPullIds(`is:pr author:${login} created:${window}`)),
+        ...(await github.searchPullIds({ kind: 'reviewed', login, from, to })),
+        ...(await github.searchPullIds({ kind: 'authored', login, from, to })),
       ]),
     ].filter((id) => force || !known.has(id));
 
@@ -176,7 +178,7 @@ export class Backfill {
   private async keepLimit(
     login: string,
     error: unknown,
-    verify: ((account: string) => Promise<void>) | undefined,
+    verify: ((account: string) => Promise<void>) | null,
   ): Promise<void> {
     if (!(error instanceof GitHubError) || error.outcome !== 'rate_limit' || !error.retryAt) return;
 

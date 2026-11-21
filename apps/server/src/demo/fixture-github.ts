@@ -24,6 +24,8 @@ import type {
 import { GitHubError } from '@/github/errors.js';
 import { demoHistory } from '@/demo/history.js';
 import type { Scenario } from '@/demo/scenario.js';
+import { forgeTraits, type ForgeTraits } from '@review-desk/shared/traits';
+import type { HistoryQuery } from '@/forge/port.js';
 
 /** A GitHub stand-in backed by an in-memory scenario. Used by demo mode and end-to-end tests. */
 export interface FixtureWrite {
@@ -65,8 +67,11 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
   private sequence = 0;
   /** Every write GitHub would have received, for assertions in tests. */
   readonly writes: FixtureWrite[] = [];
-  /** GitHub's approvals carry their summary; tests turn this off to act as GitLab does. */
-  approvalCarriesSummary = true;
+  /**
+   * GitHub's traits; tests can change them, for example to send an approval and its summary as
+   * GitLab does.
+   */
+  traits: ForgeTraits = { ...forgeTraits.github };
   /** How long each PR read takes, so a benchmark can watch the server while a sync runs. */
   readDelayMs = 0;
   /** The next write with this op name fails once (failure injection for tests). */
@@ -397,7 +402,7 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
       (reviewer) => reviewer.login !== this.scenario.world.viewer.login,
     );
     // Acting as GitLab, an approval is also a verdict read from its own note.
-    if (!this.approvalCarriesSummary)
+    if (!this.traits.approvalCarriesSummary)
       pull.snapshot.verdicts.push({
         id: `note-${id}`,
         login: this.scenario.world.viewer.login,
@@ -683,15 +688,14 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
   }
 
   /** Answers the backfill's searches from the scenario plus fictional history. */
-  async searchPullIds(query: string): Promise<string[]> {
+  async searchPullIds(query: HistoryQuery): Promise<string[]> {
     if (this.outsider) return [];
 
     const login = this.scenario.world.viewer.login;
-    const range = /(updated|created):(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})/.exec(query);
-    const from = range ? Date.parse(range[2]) : 0;
-    const to = range ? Date.parse(range[3]) + 24 * 3_600_000 : Infinity;
-    const field = range?.[1] === 'created' ? 'createdAt' : 'updatedAt';
-    const reviewer = query.includes('reviewed-by:');
+    const from = Date.parse(query.from);
+    const to = Date.parse(query.to) + 24 * 3_600_000;
+    const field = query.kind === 'authored' ? 'createdAt' : 'updatedAt';
+    const reviewer = query.kind === 'reviewed';
     const all = [
       ...this.history_,
       ...this.scenario.world.pulls.map((pull) => pull.snapshot as PullRequestSnapshot),

@@ -1,4 +1,5 @@
-import type { ReviewEvent, Side } from '@review-desk/shared/review';
+import type { Side } from '@review-desk/shared/review';
+import type { ForgeWrites } from '@/forge/port.js';
 import { GitHubError } from '@/github/errors.js';
 import { mutations } from '@/github/queries.js';
 import type { GitHubTransport } from '@/github/transport.js';
@@ -28,46 +29,8 @@ export interface ViewedRevision {
   fileKey?: string;
 }
 
-/** GitHub writes used by the review workspace and enabled automations. */
-export interface GitHubWrites {
-  approveReview(
-    prId: string,
-    commitOid: string,
-    body: string,
-  ): Promise<{ id: string; url: string }>;
-  addPendingReview(prId: string, commitOid: string): Promise<string>;
-  addReviewThread(reviewId: string, thread: ThreadInput): Promise<string>;
-  submitReview(
-    reviewId: string,
-    event: ReviewEvent,
-    body: string,
-  ): Promise<{ id: string; url: string }>;
-  deleteReview(reviewId: string): Promise<void>;
-  commentNow(
-    prId: string,
-    commitOid: string,
-    thread: ThreadInput,
-  ): Promise<{ id: string; url: string }>;
-  replyToThread(
-    threadId: string,
-    body: string,
-  ): Promise<{ id: string; url: string; pending: boolean }>;
-  setThreadResolved(threadId: string, resolved: boolean): Promise<void>;
-  /**
-   * `expected`: the file's diff the mark is for (its `viewedKey`). A forge that can check it
-   * refuses the mark when the file's diff is another one now (GitLab); GitHub cannot, and ignores
-   * it.
-   */
-  setFileViewed(
-    prId: string,
-    path: string,
-    viewed: boolean,
-    expected?: { fileKey: string },
-  ): Promise<ViewedRevision | null>;
-  addConversationComment(prId: string, body: string): Promise<{ id: string; url: string }>;
-  /** Adds (never removes) requested reviewers; re-requesting someone asks them again. */
-  requestReviews(prId: string, logins: string[]): Promise<void>;
-}
+/** The forge's writes under their original name (see `ForgeWrites`). */
+export type GitHubWrites = ForgeWrites;
 
 function threadVariables(thread: ThreadInput) {
   const file = thread.subjectType === 'FILE' || thread.line === null || thread.line === undefined;
