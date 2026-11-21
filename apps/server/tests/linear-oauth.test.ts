@@ -518,11 +518,13 @@ describe('Linear sign-in routes', () => {
 
     try {
       const id = sync.list().items.find((item) => item.number === 2041)!.id;
-      const bodies = [
-        (await read('/api/linear/status')).body,
-        (await read(`/api/pulls/${id}/tickets`)).body,
-      ].join('\n');
+      const status = await read('/api/linear/status');
+      const tickets = await read(`/api/accounts/you/pulls/${id}/tickets`);
+      const bodies = [status.body, tickets.body].join('\n');
 
+      expect([status.statusCode, tickets.statusCode]).toEqual([200, 200]);
+      // The tickets themselves carry the failure, redacted: not just the shared status.
+      expect(tickets.body).toContain('[redacted]');
       expect(bodies).toContain('[redacted]');
       expect(bodies).not.toContain(access);
       expect(bodies).not.toContain('refresh-1-abcdef');

@@ -3,7 +3,6 @@ import type { GitHubAction } from '@review-desk/shared/operations';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { safeError } from '@/github/errors.js';
-import { legacyAccountError } from '@/review/errors.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
 import type { OperationQueue } from '@/operations/queue.js';
 import { readError } from '@/routes/pulls.js';
@@ -96,34 +95,17 @@ const schemas = {
     .strict(),
 };
 
-/**
- * Runs `work`, answering its refusal in the account's forge's words. The legacy routes keep their
- * answer for an account not in use (`ACCOUNT_CHANGED`) until they go.
- */
-async function handle(
-  reply: FastifyReply,
-  account: string,
-  scoped: string | null,
-  work: () => Promise<unknown>,
-) {
+/** Runs `work`, answering its refusal in the account's forge's words. */
+async function handle(reply: FastifyReply, account: string, work: () => Promise<unknown>) {
   const worded = (text: string) => forForge(text, account);
 
   try {
     return (await work()) ?? { ok: true };
-  } catch (raw) {
-    const error = scoped === null ? legacyAccountError(raw) : raw;
-
+  } catch (error) {
     if (error instanceof ReviewError) {
       return reply
         .code(error.status)
         .send({ error: worded(error.message), code: error.code, ...error.details });
-    }
-
-    if (error instanceof Error && error.message === 'ACCOUNT_CHANGED') {
-      return reply.code(409).send({
-        error: worded('GitHub account changed. Refresh before writing.'),
-        code: 'ACCOUNT_CHANGED',
-      });
     }
 
     return reply.code(500).send({ error: safeError(error) });
@@ -138,30 +120,26 @@ export function registerReviewRoutes(
 ): void {
   const serve = scopedRoutes(app, sync);
 
-  serve('get', '/api/pulls/:id/draft', async (request, reply, scoped) => {
-    const account = scoped ?? String(request.query.account ?? '');
-
-    return handle(reply, account, scoped, async () => reviews.draft(account, request.params.id));
+  serve('get', '/api/pulls/:id/draft', async (request, reply, login) => {
+    return handle(reply, login, async () => reviews.draft(login, request.params.id));
   });
 
-  serve('put', '/api/pulls/:id/draft', async (request, reply, scoped) => {
-    const draft = input(schemas.draft, request, reply, scoped);
+  serve('put', '/api/pulls/:id/draft', async (request, reply, login) => {
+    const draft = input(schemas.draft, request, reply, login);
 
     return (
       draft &&
-      handle(reply, draft.account, scoped, () =>
-        reviews.saveDraft(draft.account, request.params.id, draft),
-      )
+      handle(reply, draft.account, () => reviews.saveDraft(draft.account, request.params.id, draft))
     );
   });
 
-  serve('delete', '/api/pulls/:id/draft', async (request, reply, scoped) => {
-    const discard = input(schemas.discard, request, reply, scoped);
+  serve('delete', '/api/pulls/:id/draft', async (request, reply, login) => {
+    const discard = input(schemas.discard, request, reply, login);
     const prId = request.params.id;
 
     return (
       discard &&
-      handle(reply, discard.account, scoped, async () => {
+      handle(reply, discard.account, async () => {
         const replay = queue.replay(discard.account, discard.operationId, {
           prId,
           request: discard,
@@ -190,44 +168,44 @@ export function registerReviewRoutes(
     );
   });
 
-  serve('post', '/api/pulls/:id/draft/comments', async (request, reply, scoped) => {
-    const comment = input(schemas.comment, request, reply, scoped);
+  serve('post', '/api/pulls/:id/draft/comments', async (request, reply, login) => {
+    const comment = input(schemas.comment, request, reply, login);
 
     return (
       comment &&
-      handle(reply, comment.account, scoped, () => reviews.addComment(request.params.id, comment))
+      handle(reply, comment.account, () => reviews.addComment(request.params.id, comment))
     );
   });
 
-  serve('patch', '/api/pulls/:id/draft/comments/:cid', async (request, reply, scoped) => {
-    const edit = input(schemas.edit, request, reply, scoped);
+  serve('patch', '/api/pulls/:id/draft/comments/:cid', async (request, reply, login) => {
+    const edit = input(schemas.edit, request, reply, login);
 
     return (
       edit &&
-      handle(reply, edit.account, scoped, () =>
+      handle(reply, edit.account, () =>
         reviews.updateComment(edit.account, request.params.id, request.params.cid!, edit.body),
       )
     );
   });
 
-  serve('delete', '/api/pulls/:id/draft/comments/:cid', async (request, reply, scoped) => {
-    const target = input(schemas.accountOnly, request, reply, scoped);
+  serve('delete', '/api/pulls/:id/draft/comments/:cid', async (request, reply, login) => {
+    const target = input(schemas.accountOnly, request, reply, login);
 
     return (
       target &&
-      handle(reply, target.account, scoped, () =>
+      handle(reply, target.account, () =>
         reviews.deleteComment(target.account, request.params.id, request.params.cid!),
       )
     );
   });
 
-  serve('post', '/api/pulls/:id/review', async (request, reply, scoped) => {
-    const submit = input(schemas.submit, request, reply, scoped);
+  serve('post', '/api/pulls/:id/review', async (request, reply, login) => {
+    const submit = input(schemas.submit, request, reply, login);
     const prId = request.params.id;
 
     return (
       submit &&
-      handle(reply, submit.account, scoped, async () => {
+      handle(reply, submit.account, async () => {
         // A retry of an accepted review returns its receipt, whatever has changed since.
         const replay = queue.replay(submit.account, submit.operationId, {
           prId,
@@ -271,12 +249,12 @@ export function registerReviewRoutes(
     );
   });
 
-  serve('post', '/api/pulls/:id/comments', async (request, reply, scoped) => {
-    const comment = input(schemas.now, request, reply, scoped);
+  serve('post', '/api/pulls/:id/comments', async (request, reply, login) => {
+    const comment = input(schemas.now, request, reply, login);
 
     return (
       comment &&
-      handle(reply, comment.account, scoped, async () =>
+      handle(reply, comment.account, async () =>
         reply
           .code(202)
           .send(
@@ -292,12 +270,12 @@ export function registerReviewRoutes(
     );
   });
 
-  serve('post', '/api/pulls/:id/viewed', async (request, reply, scoped) => {
-    const viewed = input(schemas.viewed, request, reply, scoped);
+  serve('post', '/api/pulls/:id/viewed', async (request, reply, login) => {
+    const viewed = input(schemas.viewed, request, reply, login);
 
     return (
       viewed &&
-      handle(reply, viewed.account, scoped, async () =>
+      handle(reply, viewed.account, async () =>
         reply.code(202).send(
           queue.enqueue(
             viewed.account,
@@ -316,12 +294,12 @@ export function registerReviewRoutes(
     );
   });
 
-  serve('post', '/api/pulls/:id/reviewers', async (request, reply, scoped) => {
-    const reviewers = input(schemas.reviewers, request, reply, scoped);
+  serve('post', '/api/pulls/:id/reviewers', async (request, reply, login) => {
+    const reviewers = input(schemas.reviewers, request, reply, login);
 
     return (
       reviewers &&
-      handle(reply, reviewers.account, scoped, async () =>
+      handle(reply, reviewers.account, async () =>
         reply
           .code(202)
           .send(
@@ -344,7 +322,6 @@ export function registerReviewRoutes(
    */
   async function onThread(
     reply: FastifyReply,
-    scoped: string | null,
     request: { account: string; prId: string; operationId: string },
     action: Extract<GitHubAction, { type: 'reply' | 'resolve' }>,
   ) {
@@ -364,7 +341,7 @@ export function registerReviewRoutes(
     const shown = () =>
       sync.detailFor(account, prId)?.snapshot.threads.some(({ id }) => id === action.threadId);
 
-    return handle(reply, account, scoped, async () => {
+    return handle(reply, account, async () => {
       const replay = admit();
 
       if (replay) return reply.code(202).send(replay);
@@ -390,12 +367,12 @@ export function registerReviewRoutes(
     });
   }
 
-  serve('post', '/api/threads/:threadId/replies', async (request, reply, scoped) => {
-    const answer = input(schemas.reply, request, reply, scoped);
+  serve('post', '/api/threads/:threadId/replies', async (request, reply, login) => {
+    const answer = input(schemas.reply, request, reply, login);
 
     return (
       answer &&
-      onThread(reply, scoped, answer, {
+      onThread(reply, answer, {
         type: 'reply',
         threadId: request.params.threadId!,
         body: answer.body,
@@ -403,12 +380,12 @@ export function registerReviewRoutes(
     );
   });
 
-  serve('post', '/api/threads/:threadId/resolution', async (request, reply, scoped) => {
-    const resolution = input(schemas.resolve, request, reply, scoped);
+  serve('post', '/api/threads/:threadId/resolution', async (request, reply, login) => {
+    const resolution = input(schemas.resolve, request, reply, login);
 
     return (
       resolution &&
-      onThread(reply, scoped, resolution, {
+      onThread(reply, resolution, {
         type: 'resolve',
         threadId: request.params.threadId!,
         resolved: resolution.resolved,

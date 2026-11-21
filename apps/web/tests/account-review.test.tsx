@@ -9,10 +9,17 @@ import { handle } from '@/lib/live';
 import { queryKeys } from '@/lib/query-keys';
 import { status } from '@test/fixtures';
 
-const toasts = vi.hoisted(() => ({ info: vi.fn(), error: vi.fn() }));
+const toasts = vi.hoisted(() => ({ info: vi.fn(), error: vi.fn(), success: vi.fn() }));
 
 vi.mock('sonner', () => ({
-  toast: Object.assign(toasts.info, { error: toasts.error, success: vi.fn() }),
+  toast: Object.assign(toasts.info, { error: toasts.error, success: toasts.success }),
+}));
+
+const navigate = vi.hoisted(() => vi.fn());
+
+vi.mock('@tanstack/react-router', async (original) => ({
+  ...(await original<typeof import('@tanstack/react-router')>()),
+  useNavigate: () => navigate,
 }));
 
 afterEach(() => {
@@ -407,6 +414,166 @@ describe('Insights refreshes and empty states', () => {
     expect(await screen.findByText('Insights appear after the first sync.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Re-read history' })).toBeDisabled();
     expect(fetches.filter((path) => path.includes('/insights'))).toEqual([]);
+    client.clear();
+  });
+});
+
+describe('adding by hand, per account', () => {
+  const added = (membershipId: string | null) => ({
+    account: 'me',
+    snapshot: {
+      id: 'p9',
+      repository: 'acme/web',
+      number: 9,
+      url: 'https://github.com/acme/web/pull/9',
+      author: { login: 'carol' },
+    },
+    item: { queue: 'needs_attention', sources: ['manual'] },
+    triage: {},
+    membershipId,
+  });
+
+  it("undoes an add only by the membership it made, for the add's own account", async () => {
+    const { useTrackPull } = await import('@/features/pulls/use-track');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    let answer = added('membership-1');
+
+    vi.stubGlobal('fetch', async (path: string, options?: RequestInit) => {
+      sent.push({
+        method: options?.method ?? 'GET',
+        path,
+        body: options?.body ? JSON.parse(String(options.body)) : null,
+      });
+
+      return reply(options?.method === 'DELETE' ? { tracked: false } : answer);
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useTrackPull(), { wrapper: wrapper(client) });
+
+    await act(() =>
+      hook.result.current.mutateAsync({
+        ref: { owner: 'acme', repo: 'web', number: 9 },
+        account: 'me',
+      }),
+    );
+
+    const [, options] = toasts.success.mock.calls.at(-1)!;
+
+    // Another account is shown by the time Undo is pressed: the add was me's, and so is its Undo.
+    client.setQueryData(queryKeys.status, as('other'));
+    await act(async () => options.action.onClick());
+
+    expect(sent.find((call) => call.method === 'DELETE')).toEqual({
+      method: 'DELETE',
+      path: '/api/accounts/me/pulls/p9/track',
+      body: { membershipId: 'membership-1' },
+    });
+
+    // An add of a PR already added made nothing to undo.
+    answer = added(null);
+    client.setQueryData(queryKeys.status, as('me'));
+    hook.rerender();
+    await act(() =>
+      hook.result.current.mutateAsync({
+        ref: { owner: 'acme', repo: 'web', number: 9 },
+        account: 'me',
+      }),
+    );
+
+    expect(toasts.success.mock.calls.at(-1)![1]).toBeUndefined();
+    client.clear();
+  });
+
+  it("says an add's Undo left the PR in the queue when a feed still lists it", async () => {
+    const { useTrackPull } = await import('@/features/pulls/use-track');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    vi.stubGlobal('fetch', async (_path: string, options?: RequestInit) =>
+      reply(options?.method === 'DELETE' ? { tracked: true } : added('membership-3')),
+    );
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useTrackPull(), { wrapper: wrapper(client) });
+
+    await act(() =>
+      hook.result.current.mutateAsync({
+        ref: { owner: 'acme', repo: 'web', number: 9 },
+        account: 'me',
+      }),
+    );
+    await act(async () => toasts.success.mock.calls.at(-1)![1].action.onClick());
+
+    await waitFor(() =>
+      expect(toasts.info).toHaveBeenCalledWith(expect.stringContaining('stays in your queue')),
+    );
+    client.clear();
+  });
+
+  it('adds for the account shown when you added, even when the add waited past a switch', async () => {
+    const { onlineManager } = await import('@tanstack/react-query');
+    const { AddToQueueButton } = await import('@/features/pulls/use-track');
+    const { render, screen, fireEvent } = await import('@testing-library/react');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const posts: string[] = [];
+
+    vi.stubGlobal('fetch', async (path: string, options?: RequestInit) => {
+      if (options?.method === 'POST') posts.push(path);
+
+      return reply(options?.method === 'POST' ? added(null) : { account: 'me', items: [] });
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+    render(
+      <QueryClientProvider client={client}>
+        <AddToQueueButton pullRef={{ owner: 'acme', repo: 'web', number: 9 }} />
+      </QueryClientProvider>,
+    );
+
+    // Offline, the add waits; meanwhile the page comes to show another account.
+    onlineManager.setOnline(false);
+
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Add to review queue' }));
+      await waitFor(() => expect(client.getMutationCache().getAll()[0]?.state.isPaused).toBe(true));
+      act(() => {
+        client.setQueryData(queryKeys.status, as('other'));
+      });
+    } finally {
+      onlineManager.setOnline(true);
+    }
+
+    await waitFor(() => expect(posts).toEqual(['/api/accounts/me/pulls/track']));
+    client.clear();
+  });
+
+  it('opens an added PR only while its account is still shown', async () => {
+    const { useAddAndOpen } = await import('@/features/pulls/use-track');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let answer: ((response: Response) => void) | null = null;
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) =>
+      options?.method === 'POST'
+        ? new Promise<Response>((resolve) => (answer = resolve))
+        : Promise.resolve(reply({ account: 'me', items: [] })),
+    );
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useAddAndOpen(), { wrapper: wrapper(client) });
+    let done: Promise<unknown> = Promise.resolve();
+
+    act(() => {
+      done = hook.result.current.add({ owner: 'acme', repo: 'web', number: 9 });
+    });
+    await waitFor(() => expect(answer).not.toBeNull());
+    client.setQueryData(queryKeys.status, as('other'));
+    await act(async () => {
+      answer!(reply(added('membership-2')));
+      await done;
+    });
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(toasts.info).toHaveBeenCalledWith('Added for me.');
     client.clear();
   });
 });

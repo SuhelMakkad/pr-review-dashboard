@@ -298,22 +298,22 @@ describe('local security', () => {
 
     cleanups.push(() => app.close());
 
-    const payload = { account: 'you', note: 'hello' };
+    const payload = { note: 'hello' };
     const missing = await app.inject({
       method: 'PATCH',
-      url: `/api/pulls/${service.list().items[0].id}/triage`,
+      url: `/api/accounts/you/pulls/${service.list().items[0].id}/triage`,
       headers: write,
       payload,
     });
     const wrong = await app.inject({
       method: 'PATCH',
-      url: `/api/pulls/${service.list().items[0].id}/triage`,
+      url: `/api/accounts/you/pulls/${service.list().items[0].id}/triage`,
       headers: { ...write, 'x-review-desk-session': 'secret-session-tokeX' },
       payload,
     });
     const right = await app.inject({
       method: 'PATCH',
-      url: `/api/pulls/${service.list().items[0].id}/triage`,
+      url: `/api/accounts/you/pulls/${service.list().items[0].id}/triage`,
       headers: { ...write, 'x-review-desk-session': 'secret-session-token' },
       payload,
     });

@@ -271,7 +271,7 @@ describe('shutdown order', () => {
           host: '127.0.0.1',
           port,
           method: 'POST',
-          path: `/api/pulls/${encodeURIComponent(id)}/refresh`,
+          path: `/api/accounts/you/pulls/${encodeURIComponent(id)}/refresh`,
           agent: false,
           headers: {
             Connection: 'close',

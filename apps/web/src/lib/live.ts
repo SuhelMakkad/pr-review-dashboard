@@ -38,29 +38,6 @@ export function fallbackInterval(live: LiveState, ms = 15_000): number | false {
   return live.connected ? false : ms;
 }
 
-/**
- * Answers that survive an account switch: those that hold nothing of any one account, and those
- * keyed by the account they were fetched for (`queryKeys.account`), which can never be shown for
- * another one and are left to expire on their own.
- */
-const SHARED_QUERIES = new Set<unknown>([
-  queryKeys.status[0],
-  'status-poll',
-  queryKeys.accounts[0],
-  queryKeys.account(null)[0],
-]);
-
-/**
- * Shows a new sync status, the only way one is shown. Of two statuses from this server process,
- * the one with the lower revision is older, however late it arrives, and is ignored; one from
- * another process means the server restarted with a new session, so the page reloads, as it does
- * when the event stream says so.
- *
- * When it names another account than the one shown, answers not keyed by an account are dropped
- * rather than refetched, so no screen shows, or starts editing, the previous account's drafts or
- * runs while the new account's load. The routed pages remount at the same time (`useRemountKey`
- * in the shell), so nothing they hold carries over either.
- */
 let switches = 0;
 
 /** How many times the account shown has changed: an answer that crossed a switch is not cached. */
@@ -72,6 +49,18 @@ const isDraft = (key: QueryKey) => key[0] === queryKeys.account(null)[0] && key[
 const isInsights = (query: Query) =>
   query.queryKey[0] === queryKeys.account(null)[0] && query.queryKey[2] === 'insights';
 
+/**
+ * Shows a new sync status, the only way one is shown. Of two statuses from this server process,
+ * the one with the lower revision is older, however late it arrives, and is ignored; one from
+ * another process means the server restarted with a new session, so the page reloads, as it does
+ * when the event stream says so.
+ *
+ * Every account's answers are keyed by that account (`queryKeys.account`), so none is ever shown
+ * for another, and the rest are no one account's. When the account shown changes, its answers
+ * are read again, and every account's drafts are dropped: editable, they are never shown from
+ * before a switch. The routed pages remount at the same time (`useRemountKey` in the shell), so
+ * nothing they hold carries over either.
+ */
 export function adoptStatus(client: QueryClient, status: SyncStatus): void {
   const boot = session.bootId();
 
@@ -94,13 +83,9 @@ export function adoptStatus(client: QueryClient, status: SyncStatus): void {
   const shown = previous?.account?.login ?? null;
   const switched = shown !== null && shown !== login;
 
-  // Drafts are editable: every account's is read afresh after a switch, never shown from before it.
   if (switched) {
     switches += 1;
-    client.removeQueries({
-      predicate: (query: Query) =>
-        !SHARED_QUERIES.has(query.queryKey[0]) || isDraft(query.queryKey),
-    });
+    client.removeQueries({ predicate: (query: Query) => isDraft(query.queryKey) });
   }
 
   client.setQueryData(queryKeys.status, status);

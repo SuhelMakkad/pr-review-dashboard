@@ -450,7 +450,10 @@ describe('what is measured', () => {
         'x-review-desk-session': 'test-session',
       },
     });
-    await app.inject({ method: 'GET', url: '/api/pulls/PR_secret_repo_1?token=ghp_x' });
+    await app.inject({
+      method: 'GET',
+      url: '/api/accounts/you/pulls/PR_secret_repo_1?token=ghp_x',
+    });
 
     const requests = records().filter((record) => record.event === 'http.request');
 
@@ -461,7 +464,7 @@ describe('what is measured', () => {
       status: 200,
       ms: expect.any(Number),
     });
-    expect(requests[1]).toMatchObject({ route: '/api/pulls/:id' });
+    expect(requests[1]).toMatchObject({ route: '/api/accounts/:account/pulls/:id' });
     expect(JSON.stringify(requests)).not.toContain('secret');
     expect(JSON.stringify(requests)).not.toContain('ghp_');
   });

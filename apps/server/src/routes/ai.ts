@@ -4,7 +4,6 @@ import type { AutoReviewer } from '@/ai/auto-review.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import { GitHubError, safeError } from '@/github/errors.js';
-import { legacyAccountError } from '@/review/errors.js';
 import { input, scopedRoutes } from '@/routes/scoped.js';
 import type { SyncService } from '@/sync/service.js';
 import { ReviewError } from '@/review/service.js';
@@ -92,21 +91,14 @@ const schemas = {
 };
 
 /**
- * Runs `work`. A refusal keeps its details (a draft's revision, both accounts' names). On an
- * account's own routes (`scoped`), a forge read that failed answers as forge reads do: the
- * account unavailable, or rate limited until when. The legacy routes keep their answer for an
- * account not in use (`ACCOUNT_CHANGED`) until they go.
+ * Runs `work`. A refusal keeps its details (a draft's revision, both accounts' names), and a
+ * forge read that failed answers as forge reads do: the account unavailable, or rate limited until
+ * when.
  */
-async function handle(
-  reply: FastifyReply,
-  work: () => Promise<unknown> | unknown,
-  scoped: string | null = null,
-) {
+async function handle(reply: FastifyReply, work: () => Promise<unknown> | unknown) {
   try {
     return (await work()) ?? { ok: true };
-  } catch (raw) {
-    const error = scoped === null ? legacyAccountError(raw) : raw;
-
+  } catch (error) {
     if (error instanceof ReviewError)
       return reply.code(error.status).send({
         ...error.details,
@@ -114,10 +106,10 @@ async function handle(
         code: error.code,
       });
 
-    if (scoped !== null && error instanceof AccountUnavailable)
+    if (error instanceof AccountUnavailable)
       return reply.code(409).send({ error: error.message, code: error.code });
 
-    if (scoped !== null && error instanceof GitHubError && error.outcome === 'rate_limit')
+    if (error instanceof GitHubError && error.outcome === 'rate_limit')
       return reply
         .code(429)
         .send({ error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
@@ -187,115 +179,98 @@ export function registerAiRoutes(
     ...(autoReviewer.pausedRestarts(account).has(prId) ? { restartPaused: true } : {}),
   });
 
-  serve('get', '/api/ai/reviews', async (request, reply, scoped) =>
-    handle(
-      reply,
-      () => {
-        const account = scoped ?? String(request.query.account ?? '');
-        const restarts = autoReviewer.restarts(account);
-        const paused = autoReviewer.pausedRestarts(account);
-        const reviews: AiReviewStatus[] = runner.reviewStatuses(account).map((review) => ({
-          ...review,
-          restartAt: restarts.get(review.prId) ?? null,
-          ...(paused.has(review.prId) ? { restartPaused: true } : {}),
-        }));
-        const listed = new Set(reviews.map((review) => review.prId));
+  serve('get', '/api/ai/reviews', async (request, reply, login) =>
+    handle(reply, () => {
+      const account = login;
+      const restarts = autoReviewer.restarts(account);
+      const paused = autoReviewer.pausedRestarts(account);
+      const reviews: AiReviewStatus[] = runner.reviewStatuses(account).map((review) => ({
+        ...review,
+        restartAt: restarts.get(review.prId) ?? null,
+        ...(paused.has(review.prId) ? { restartPaused: true } : {}),
+      }));
+      const listed = new Set(reviews.map((review) => review.prId));
 
-        // New commits stopped the first automatic review before it had a run.
-        for (const prId of new Set([...restarts.keys(), ...paused])) {
-          if (listed.has(prId)) continue;
+      // New commits stopped the first automatic review before it had a run.
+      for (const prId of new Set([...restarts.keys(), ...paused])) {
+        if (listed.has(prId)) continue;
 
-          reviews.push({
-            prId,
-            runId: null,
-            status: null,
-            stale: false,
-            trigger: 'auto',
-            ...restartOf(account, prId),
-          });
-        }
+        reviews.push({
+          prId,
+          runId: null,
+          status: null,
+          stale: false,
+          trigger: 'auto',
+          ...restartOf(account, prId),
+        });
+      }
 
-        return { reviews };
-      },
-      scoped,
-    ),
+      return { reviews };
+    }),
   );
 
-  serve('get', '/api/pulls/:id/ai', async (request, reply, scoped) =>
-    handle(
-      reply,
-      () => {
-        const account = scoped ?? String(request.query.account ?? '');
-        const response: AiRunsResponse = {
-          runs: runner.runs(account, request.params.id!),
-          ...restartOf(account, request.params.id!),
-        };
+  serve('get', '/api/pulls/:id/ai', async (request, reply, login) =>
+    handle(reply, () => {
+      const account = login;
+      const response: AiRunsResponse = {
+        runs: runner.runs(account, request.params.id!),
+        ...restartOf(account, request.params.id!),
+      };
 
-        return response;
-      },
-      scoped,
-    ),
+      return response;
+    }),
   );
 
-  serve('post', '/api/pulls/:id/ai', async (request, reply, scoped) => {
-    const body = input(schemas.start, request, reply, scoped);
+  serve('post', '/api/pulls/:id/ai', async (request, reply, login) => {
+    const body = input(schemas.start, request, reply, login);
 
     return (
-      body &&
-      handle(reply, () => runner.start(body.account, request.params.id!, body.task, body), scoped)
+      body && handle(reply, () => runner.start(body.account, request.params.id!, body.task, body))
     );
   });
 
   // Stopping a run changes nothing on the forge: any account's own runs can be stopped.
-  serve('delete', '/api/ai/runs/:runId', async (request, reply, scoped) => {
-    const body = input(schemas.cancel, request, reply, scoped);
+  serve('delete', '/api/ai/runs/:runId', async (request, reply, login) => {
+    const body = input(schemas.cancel, request, reply, login);
 
-    return body && handle(reply, () => runner.cancel(body.account, request.params.runId!), scoped);
+    return body && handle(reply, () => runner.cancel(body.account, request.params.runId!));
   });
 
-  serve('post', '/api/ai/runs/:runId/pause', async (request, reply, scoped) => {
-    const body = input(schemas.cancel, request, reply, scoped);
+  serve('post', '/api/ai/runs/:runId/pause', async (request, reply, login) => {
+    const body = input(schemas.cancel, request, reply, login);
 
-    return body && handle(reply, () => runner.pause(body.account, request.params.runId!), scoped);
+    return body && handle(reply, () => runner.pause(body.account, request.params.runId!));
   });
 
-  serve('post', '/api/ai/runs/:runId/resume', async (request, reply, scoped) => {
-    const body = input(schemas.cancel, request, reply, scoped);
+  serve('post', '/api/ai/runs/:runId/resume', async (request, reply, login) => {
+    const body = input(schemas.cancel, request, reply, login);
 
-    return body && handle(reply, () => runner.resume(body.account, request.params.runId!), scoped);
+    return body && handle(reply, () => runner.resume(body.account, request.params.runId!));
   });
 
-  serve('post', '/api/ai/runs/:runId/accept', async (request, reply, scoped) => {
-    const body = input(schemas.accept, request, reply, scoped);
+  serve('post', '/api/ai/runs/:runId/accept', async (request, reply, login) => {
+    const body = input(schemas.accept, request, reply, login);
 
     return (
       body &&
-      handle(
-        reply,
-        () => runner.accept(body.account, request.params.runId!, body.index, body.body),
-        scoped,
+      handle(reply, () => runner.accept(body.account, request.params.runId!, body.index, body.body))
+    );
+  });
+
+  serve('post', '/api/ai/runs/:runId/draft', async (request, reply, login) => {
+    const body = input(schemas.prepare, request, reply, login);
+
+    return (
+      body &&
+      handle(reply, () =>
+        runner.prepareReview(body.account, request.params.runId!, body.indices, body),
       )
     );
   });
 
-  serve('post', '/api/ai/runs/:runId/draft', async (request, reply, scoped) => {
-    const body = input(schemas.prepare, request, reply, scoped);
+  serve('post', '/api/ai/runs/:runId/summary', async (request, reply, login) => {
+    const body = input(schemas.cancel, request, reply, login);
 
-    return (
-      body &&
-      handle(
-        reply,
-        () => runner.prepareReview(body.account, request.params.runId!, body.indices, body),
-        scoped,
-      )
-    );
-  });
-
-  serve('post', '/api/ai/runs/:runId/summary', async (request, reply, scoped) => {
-    const body = input(schemas.cancel, request, reply, scoped);
-
-    return (
-      body && handle(reply, () => runner.applySummary(body.account, request.params.runId!), scoped)
-    );
+    return body && handle(reply, () => runner.applySummary(body.account, request.params.runId!));
   });
 }

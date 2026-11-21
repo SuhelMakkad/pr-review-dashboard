@@ -969,7 +969,7 @@ describe('durable GitHub operations', () => {
     const operationId = randomUUID();
     const options = {
       method: 'POST' as const,
-      url: `/api/pulls/${encodeURIComponent(pr().id)}/review`,
+      url: `/api/accounts/you/pulls/${encodeURIComponent(pr().id)}/review`,
       headers: {
         host: '127.0.0.1:4317',
         'content-type': 'application/json',
@@ -977,7 +977,6 @@ describe('durable GitHub operations', () => {
         'x-review-desk-session': 'test-session',
       },
       payload: {
-        account: 'you',
         operationId,
         event: 'APPROVE',
         body: 'Queued via HTTP',
@@ -1029,8 +1028,11 @@ describe('durable GitHub operations', () => {
     child = await startServer(directory, port, 1);
     const base = `http://127.0.0.1:${port}`;
     const result = async (id: string) =>
-      ((await (await fetch(`${base}/api/operations/${id}?account=you`)).json()) as OperationReceipt)
-        .operation;
+      (
+        (await (
+          await fetch(`${base}/api/accounts/you/operations/${id}`)
+        ).json()) as OperationReceipt
+      ).operation;
 
     await expect
       .poll(async () => (await result(interrupted.operation.id)).status, { timeout: 3000 })

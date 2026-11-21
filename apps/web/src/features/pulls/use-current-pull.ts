@@ -21,6 +21,8 @@ export function useCurrentPull(): {
   ref: PrRef | null;
   item: PullRequestItem | null;
   authored: boolean;
+  /** The account of the list the PR came from: an action on it is that account's. */
+  account: string | null;
 } {
   const ref = useRouteRef();
   const pulls = usePulls();
@@ -29,15 +31,17 @@ export function useCurrentPull(): {
     ? (pulls.data?.items.find((candidate) => sameRef(candidate, ref)) ?? null)
     : null;
 
-  if (reviewing || !ref) return { ref, item: reviewing, authored: false };
+  if (reviewing || !ref)
+    return { ref, item: reviewing, authored: false, account: pulls.data?.account ?? null };
 
   const own = mine.data?.items.find((candidate) => sameRef(candidate, ref));
 
-  if (!own) return { ref, item: null, authored: false };
+  if (!own) return { ref, item: null, authored: false, account: null };
 
   return {
     ref,
     authored: true,
+    account: mine.data?.account ?? null,
     item: {
       id: own.id,
       number: own.number,

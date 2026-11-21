@@ -435,7 +435,7 @@ describe('account routes', () => {
     const pull = service.list().items[0];
     const diff = await app.inject({
       method: 'GET',
-      url: `/api/pulls/${pull.id}/diff?mode=full`,
+      url: `/api/accounts/you/pulls/${pull.id}/diff?mode=full`,
       headers,
     });
 

@@ -67,6 +67,12 @@ export const feedMembership = sqliteTable(
     id: text('id').notNull(),
     feed: text('feed').$type<Source>().notNull(),
     seenAt: text('seen_at').notNull(),
+    /**
+     * Names one manual membership, from the add that made it to its removal: an Undo removes only
+     * the membership its add made, never one added again since. Null for other feeds, and for
+     * manual rows made before it existed.
+     */
+    membershipId: text('membership_id'),
   },
   (table) => [primaryKey({ columns: [table.account, table.id, table.feed] })],
 );

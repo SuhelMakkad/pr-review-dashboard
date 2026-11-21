@@ -84,11 +84,14 @@ describe('routes that name an account', () => {
       snapshot: { id: pr.id },
     });
 
-    // The legacy routes stay with the selected account, which tracks nothing.
-    expect((await call('GET', '/api/pulls')).json()).toEqual({
+    // The selected account tracks nothing, and is served for itself.
+    expect((await call('GET', `/api/accounts/${DEMO_SECOND_ACCOUNT}/pulls`)).json()).toEqual({
       account: DEMO_SECOND_ACCOUNT,
       items: [],
     });
+
+    // The routes that named no account are gone.
+    expect((await call('GET', '/api/pulls')).statusCode).toBe(404);
 
     // An account this app never worked as is not served.
     const unknown = await call('GET', '/api/accounts/nobody/pulls');
@@ -115,13 +118,13 @@ describe('routes that name an account', () => {
     expect(refreshed.json()).toMatchObject({ account: 'you' });
     expect(fixture.reads.at(-1)).toEqual({ id: pr.id, account: 'you' });
 
-    // The legacy route still refuses a write for an account that is not selected.
-    const legacy = await call('PATCH', `/api/pulls/${pr.id}/triage`, {
+    // A body that names an account as well as the path is refused, changing nothing.
+    const named = await call('PATCH', `/api/accounts/you/pulls/${pr.id}/triage`, {
       account: 'you',
       note: 'Late',
     });
 
-    expect(legacy.statusCode).toBe(409);
+    expect(named.statusCode).toBe(400);
     expect(store.triage('you', pr.id).note).toBe('For you');
   });
 
@@ -168,8 +171,7 @@ describe('routes that name an account', () => {
     const { fixture, pr, call } = await switchedAway();
 
     // Both accounts track the PR: the second one adds it by hand.
-    const added = await call('POST', '/api/pulls/track', {
-      account: DEMO_SECOND_ACCOUNT,
+    const added = await call('POST', `/api/accounts/${DEMO_SECOND_ACCOUNT}/pulls/track`, {
       repository: pr.repository,
       number: pr.number,
     });
@@ -584,9 +586,9 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
 
     const added = await app.inject({
       method: 'POST',
-      url: '/api/pulls/track',
+      url: `/api/accounts/${encodeURIComponent(ACCOUNT)}/pulls/track`,
       headers,
-      payload: { account: ACCOUNT, repository: 'team/app', number: 5, gitlab: true },
+      payload: { repository: 'team/app', number: 5, gitlab: true },
     });
 
     expect(added.statusCode).toBe(409);

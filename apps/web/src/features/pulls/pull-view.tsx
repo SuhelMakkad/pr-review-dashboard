@@ -458,7 +458,7 @@ function PullDetailView({
               variant="ghost"
               icon={<ListMinus size={13} />}
               disabled={untrack.isPending}
-              onClick={() => leaveQueue(() => untrack.mutate(item))}
+              onClick={() => leaveQueue(() => untrack.mutate({ item, account }))}
             >
               Remove from queue
             </Button>

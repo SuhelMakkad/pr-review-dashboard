@@ -132,11 +132,6 @@ describe('AI and Insights for an account not in use', () => {
     }
 
     expect(await runs()).toHaveLength(4);
-
-    // The legacy routes keep their answer until they go.
-    const legacy = await call('POST', `/api/pulls/${pr.id}/ai`, { account: 'you', task: 'brief' });
-
-    expect(legacy.json()).toMatchObject({ code: 'ACCOUNT_CHANGED' });
   });
 
   it("stops another account's run, and serves a run only through its own account's path", async () => {

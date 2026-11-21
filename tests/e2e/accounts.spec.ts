@@ -81,9 +81,12 @@ test('switches from Settings', async ({ page }) => {
 test("keeps each account's private note on a PR both accounts track", async ({ page }) => {
   const id = 'PR_acme_api_2050';
   const note = page.getByRole('textbox', { name: 'Private note' });
-  const savedNote = async () =>
-    ((await (await page.request.get(`/api/pulls/${id}`)).json()) as { triage?: { note: string } })
-      .triage?.note;
+  const savedNote = async (login: string) =>
+    (
+      (await (await page.request.get(`/api/accounts/${login}/pulls/${id}`)).json()) as {
+        triage?: { note: string };
+      }
+    ).triage?.note;
   const switchTo = async (login: string) => {
     await page.getByRole('button', { name: /^Switch GitHub account, now / }).click();
     await page.getByRole('menuitemradio', { name: login, exact: true }).click();
@@ -98,24 +101,27 @@ test("keeps each account's private note on a PR both accounts track", async ({ p
 
   await openFresh(page, '/inbox/attention/acme/api/2050');
   await note.fill('Note for you');
-  await expect.poll(savedNote).toBe('Note for you');
+  await expect.poll(() => savedNote('you')).toBe('Note for you');
 
   await switchTo('you-personal');
   await page.getByRole('button', { name: 'Add to review queue' }).click();
   await expect(note).toHaveValue('');
   await note.fill('Note for personal');
-  await expect.poll(savedNote).toBe('Note for personal');
+  await expect.poll(() => savedNote('you-personal')).toBe('Note for personal');
 
-  // Both accounts track this PR now, so its page stays open across each switch.
+  // Both accounts track this PR now, so its page stays open across each switch. Each account's
+  // note is checked whichever is selected.
   await switchTo('you');
   await expect(note).toHaveValue('Note for you');
   await pastAutosave();
-  expect(await savedNote()).toBe('Note for you');
+  expect(await savedNote('you')).toBe('Note for you');
+  expect(await savedNote('you-personal')).toBe('Note for personal');
 
   await switchTo('you-personal');
   await expect(note).toHaveValue('Note for personal');
   await pastAutosave();
-  expect(await savedNote()).toBe('Note for personal');
+  expect(await savedNote('you-personal')).toBe('Note for personal');
+  expect(await savedNote('you')).toBe('Note for you');
 });
 
 test('saves a note held across a switch for the account it was written for', async ({ page }) => {
