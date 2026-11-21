@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, inArray, lt, or, sql } from 'drizzle-orm';
 import type { GitHubOperation } from '@review-desk/shared/operations';
+import { storedSteps } from '@/operations/intent.js';
 import { githubOperations } from '@/db/schema.js';
 import type { Database } from '@/db/store.js';
 import type { OperationRecord } from '@/operations/types.js';
@@ -17,6 +18,15 @@ const ACTIVE: GitHubOperation['status'][] = [
  * True for a forge operation, false for a local receipt. Rows from before local receipts existed
  * carry no kind: they are all forge operations.
  */
+/**
+ * A row as read: its steps each a step, a missing or damaged entry read as a placeholder that keeps
+ * its index (see `storedSteps`), so startup, Activity and the queue never meet a malformed one.
+ */
+const stored = (row: OperationRecord): OperationRecord => ({
+  ...row,
+  steps: storedSteps(row.steps),
+});
+
 const forgeRow = sql`json_extract(${githubOperations.data}, '$.kind') IS NOT 'local'`;
 
 /**
@@ -35,7 +45,7 @@ export class OperationLog {
       .from(githubOperations)
       .where(inArray(githubOperations.status, ['running', 'checking']))
       .all()
-      .map((row) => row.data);
+      .map((row) => stored(row.data));
   }
 
   /** The account's rows still to settle, oldest first. */
@@ -46,25 +56,29 @@ export class OperationLog {
       .where(and(eq(githubOperations.account, account), inArray(githubOperations.status, ACTIVE)))
       .orderBy(asc(githubOperations.createdAt), asc(githubOperations.id))
       .all()
-      .map((row) => row.data);
+      .map((row) => stored(row.data));
   }
 
   /** The row with this ID, a local receipt included: what a retry of that ID replays. */
   find(account: string, id: string): OperationRecord | undefined {
-    return this.db
+    const row = this.db
       .select({ data: githubOperations.data })
       .from(githubOperations)
       .where(and(eq(githubOperations.account, account), eq(githubOperations.id, id)))
       .get()?.data;
+
+    return row && stored(row);
   }
 
   /** The forge operation with this ID, as Activity shows it; never a local receipt. */
   visible(account: string, id: string): OperationRecord | undefined {
-    return this.db
+    const row = this.db
       .select({ data: githubOperations.data })
       .from(githubOperations)
       .where(and(eq(githubOperations.account, account), eq(githubOperations.id, id), forgeRow))
       .get()?.data;
+
+    return row && stored(row);
   }
 
   /**
@@ -99,7 +113,7 @@ export class OperationLog {
       .orderBy(desc(githubOperations.createdAt), desc(githubOperations.id))
       .limit(limit)
       .all()
-      .map((row) => row.data);
+      .map((row) => stored(row.data));
   }
 
   /**

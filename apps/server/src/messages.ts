@@ -113,6 +113,15 @@ const catalog = {
     `The saved execution no longer matches this request. Open ${f.name} before recovering.`,
   'outbox.previous-unconfirmed': (f: ForgeTerms) =>
     `The previous request may have reached ${f.name}. Check its result first.`,
+  'outbox.held': given(
+    ['reason'],
+    (f, p) =>
+      `Held: ${p.reason}. Nothing more is sent or checked; open ${f.name} to see what this action posted.`,
+  ),
+  'outbox.plan-missing': (f: ForgeTerms) =>
+    `This action was about to send a write it had not declared, so nothing more was sent to ${f.name}. Check it before retrying.`,
+  'outbox.plan-incomplete': (f: ForgeTerms) =>
+    `This action stopped before sending everything it declared. Check ${f.name} before retrying.`,
   'outbox.already-submitted': (f: ForgeTerms) =>
     `This review was submitted on ${f.name}. Its saved content is preserved in Activity.`,
   'outbox.untracked': (f: ForgeTerms) => `Not posted: this ${f.short} is no longer tracked.`,

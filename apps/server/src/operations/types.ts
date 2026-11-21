@@ -1,4 +1,5 @@
 import type { GitHubOperation } from '@review-desk/shared/operations';
+import type { Intent } from '@/operations/intent.js';
 import type { Wording } from '@/messages.js';
 import type { ReviewReceipt } from '@/github/api.js';
 
@@ -20,6 +21,11 @@ export interface OperationRecord extends Omit<GitHubOperation, 'controls' | 'pro
    */
   progress: Wording;
   error: { code: string; message: Wording } | null;
+  /**
+   * Every write the action will make, declared before the first was sent (see `intent.ts`).
+   * Absent for rows from before intents, and until the first write is declared.
+   */
+  intent?: Intent;
   /**
    * `local`: the receipt of a write made locally that answered an outbox ID, such as discarding a
    * draft with nothing on the forge. Kept only so a retry of that ID answers as the first time;

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import type { GitHubAction, OperationReceipt } from '@review-desk/shared/operations';
+import { intended, literal } from '@/operations/intent.js';
 import { TestClock, type Clock } from '@/clock.js';
 import { Store } from '@/db/store.js';
 import { githubOperations } from '@/db/schema.js';
@@ -128,43 +129,63 @@ describe('durable GitHub operations', () => {
     ]);
   });
 
-  it('keeps confirmed final receipts successful even when the PR changed before recovery', async () => {
-    const { queue, store, github, pr, submit } = await setup();
-    const { operation } = await submit();
-    const row = store.db
-      .select()
-      .from(githubOperations)
-      .where(eq(githubOperations.id, operation.id))
-      .get()!;
-    const timestamp = new Date().toISOString();
-    const result = { id: 'confirmed-review', url: `${pr().url}#confirmed-review` };
-    store.db
-      .update(githubOperations)
-      .set({
-        data: {
-          ...row.data,
-          steps: [
-            {
-              method: 'submitReview',
-              args: ['confirmed-review', 'APPROVE', 'Looks good.'],
-              startedAt: timestamp,
-              completedAt: timestamp,
-              result,
-              uncertain: false,
-            },
-          ],
-        },
-      })
-      .where(eq(githubOperations.id, operation.id))
-      .run();
-    github.scenario.world.pulls.find((pull) => pull.snapshot.id === pr().id)!.snapshot.headOid =
-      'new-head-after-success';
+  it.each([
+    ['from before intents', undefined],
+    [
+      'with its intent, fully receipted',
+      {
+        version: 1 as const,
+        steps: [
+          intended(
+            'submitReview',
+            literal('confirmed-review'),
+            literal('APPROVE'),
+            literal('Looks good.'),
+          ),
+        ],
+      },
+    ],
+  ])(
+    'keeps a confirmed final receipt, %s, successful even when the PR changed before recovery',
+    async (_name, intent) => {
+      const { queue, store, github, pr, submit } = await setup();
+      const { operation } = await submit();
+      const row = store.db
+        .select()
+        .from(githubOperations)
+        .where(eq(githubOperations.id, operation.id))
+        .get()!;
+      const timestamp = new Date().toISOString();
+      const result = { id: 'confirmed-review', url: `${pr().url}#confirmed-review` };
+      store.db
+        .update(githubOperations)
+        .set({
+          data: {
+            ...row.data,
+            ...(intent ? { intent } : {}),
+            steps: [
+              {
+                method: 'submitReview',
+                args: ['confirmed-review', 'APPROVE', 'Looks good.'],
+                startedAt: timestamp,
+                completedAt: timestamp,
+                result,
+                uncertain: false,
+              },
+            ],
+          },
+        })
+        .where(eq(githubOperations.id, operation.id))
+        .run();
+      github.scenario.world.pulls.find((pull) => pull.snapshot.id === pr().id)!.snapshot.headOid =
+        'new-head-after-success';
 
-    queue.resume();
-    const recovered = await completed(queue, operation.id);
-    expect(recovered.result?.url).toBe(result.url);
-    expect(github.writes).toEqual([]);
-  });
+      queue.resume();
+      const recovered = await completed(queue, operation.id);
+      expect(recovered.result?.url).toBe(result.url);
+      expect(github.writes).toEqual([]);
+    },
+  );
 
   it('keeps unsettled actions visible while paginating completed history', async () => {
     const { queue, store, pr } = await setup();

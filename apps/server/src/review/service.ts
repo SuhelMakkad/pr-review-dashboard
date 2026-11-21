@@ -9,6 +9,7 @@ import type {
   SubmitReviewResult,
 } from '@review-desk/shared/review';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
+import { intended, literal, resultOf, type StepIntent } from '@/operations/intent.js';
 import { say } from '@/messages.js';
 import type { DiffService } from '@/diff/service.js';
 import { textPatch } from '@/diff/patch.js';
@@ -76,6 +77,8 @@ export class ReviewService {
       pendingReviewId?: string;
       approvalThreadIds?: string[];
       assertActive?: () => void;
+      /** Records the writes a path is about to make, before the first (see `intent.ts`). */
+      intend?: (writes: StepIntent[]) => void;
     },
   ) {
     this.drafts = new DraftStore(sync.store, execution?.operationId, execution?.assertActive);
@@ -119,8 +122,16 @@ export class ReviewService {
     return detail.snapshot;
   }
 
-  private async write<T>(work: () => Promise<T>): Promise<T> {
-    if (this.execution) return work();
+  /**
+   * Makes the writes of `work`. In the outbox, `writes` declares them first: exactly the calls
+   * `work` makes, in order, built from the same values.
+   */
+  private async write<T>(work: () => Promise<T>, writes: StepIntent[]): Promise<T> {
+    if (this.execution) {
+      this.execution.intend?.(writes);
+
+      return work();
+    }
 
     this.limiter.take();
 
@@ -473,18 +484,35 @@ export class ReviewService {
         })
       : draft.comments;
 
+    // Every write, worked out once: what is declared is what is sent.
+    const threadIds =
+      request.event === 'APPROVE'
+        ? (this.execution?.approvalThreadIds ??
+          pr.threads.filter((thread) => !thread.isResolved).map((thread) => thread.id))
+        : [];
+    const existing = frozen
+      ? frozen.githubReviewId
+      : (draft.githubReviewId ?? pr.pendingReview?.id ?? null);
+    const threads = comments
+      .filter((candidate) => candidate.status === 'draft')
+      .map((comment) => ({ comment, thread: toThread(comment) }));
+    const writes = threadIds.map((threadId) =>
+      intended('setThreadResolved', literal(threadId), literal(true)),
+    );
+    // A new pending review is used through its receipt: whatever id the forge gave it.
+    const review = existing ? literal(existing) : resultOf(writes.length);
+
+    if (!existing) writes.push(intended('addPendingReview', literal(prId), literal(pr.headOid)));
+
+    for (const { thread } of threads)
+      writes.push(intended('addReviewThread', review, literal(thread)));
+
+    writes.push(intended('submitReview', review, literal(request.event), literal(request.body)));
+
     return this.write(async () => {
-      if (request.event === 'APPROVE') {
-        const threadIds =
-          this.execution?.approvalThreadIds ??
-          pr.threads.filter((thread) => !thread.isResolved).map((thread) => thread.id);
+      for (const threadId of threadIds) await this.github.setThreadResolved(threadId, true);
 
-        for (const threadId of threadIds) await this.github.setThreadResolved(threadId, true);
-      }
-
-      let reviewId = frozen
-        ? frozen.githubReviewId
-        : (draft.githubReviewId ?? pr.pendingReview?.id ?? null);
+      let reviewId = existing;
 
       if (!reviewId) {
         reviewId = await this.github.addPendingReview(prId, pr.headOid);
@@ -492,8 +520,8 @@ export class ReviewService {
       }
 
       // Each comment is recorded as it lands, so a retry after a failure never duplicates it.
-      for (const comment of comments.filter((candidate) => candidate.status === 'draft')) {
-        const threadId = await this.github.addReviewThread(reviewId, toThread(comment));
+      for (const { comment, thread } of threads) {
+        const threadId = await this.github.addReviewThread(reviewId, thread);
 
         this.drafts.updateComment(account, comment.id, {
           status: 'pushed',
@@ -501,7 +529,7 @@ export class ReviewService {
         });
       }
 
-      const review = await this.github.submitReview(reviewId, request.event, request.body);
+      const submitted = await this.github.submitReview(reviewId, request.event, request.body);
 
       if (!this.execution) {
         this.drafts.clear(account, prId);
@@ -509,8 +537,8 @@ export class ReviewService {
       }
       if (!this.execution) await this.refreshQuietly(account, prId);
 
-      return { reviewUrl: review.url, submittedComments: comments.length };
-    });
+      return { reviewUrl: submitted.url, submittedComments: comments.length };
+    }, writes);
   }
 
   async commentNow(prId: string, input: NewDraftComment): Promise<{ url: string }> {
@@ -526,29 +554,38 @@ export class ReviewService {
       }
     }
 
-    const result = await this.write(() =>
+    // The outbox posts a line comment as a review of one comment.
+    const thread = { ...input, subjectType: input.line === null ? 'FILE' : 'LINE' } as const;
+    const writes =
       input.path && this.execution
-        ? (async () => {
-            const reviewId = await this.github.addPendingReview(prId, pr.headOid);
+        ? [
+            intended('addPendingReview', literal(prId), literal(pr.headOid)),
+            intended('addReviewThread', resultOf(0), literal(thread)),
+            intended('submitReview', resultOf(0), literal('COMMENT'), literal('')),
+          ]
+        : [intended('addConversationComment', literal(prId), literal(input.body))];
+    const result = await this.write(
+      () =>
+        input.path && this.execution
+          ? (async () => {
+              const reviewId = await this.github.addPendingReview(prId, pr.headOid);
 
-            await this.github.addReviewThread(reviewId, {
-              ...input,
-              subjectType: input.line === null ? 'FILE' : 'LINE',
-            });
+              await this.github.addReviewThread(reviewId, thread);
 
-            return this.github.submitReview(reviewId, 'COMMENT', '');
-          })()
-        : input.path
-          ? this.github.commentNow(prId, pr.headOid, {
-              path: input.path,
-              body: input.body,
-              line: input.line,
-              side: input.side,
-              startLine: input.startLine,
-              startSide: input.startSide,
-              subjectType: input.line === null ? 'FILE' : 'LINE',
-            })
-          : this.github.addConversationComment(prId, input.body),
+              return this.github.submitReview(reviewId, 'COMMENT', '');
+            })()
+          : input.path
+            ? this.github.commentNow(prId, pr.headOid, {
+                path: input.path,
+                body: input.body,
+                line: input.line,
+                side: input.side,
+                startLine: input.startLine,
+                startSide: input.startSide,
+                subjectType: input.line === null ? 'FILE' : 'LINE',
+              })
+            : this.github.addConversationComment(prId, input.body),
+      writes,
     );
 
     if (!this.execution) await this.refreshQuietly(input.account, prId);
@@ -565,7 +602,10 @@ export class ReviewService {
     await this.guard(account, true);
     this.snapshot(account, prId);
 
-    const result = await this.write(() => this.github.replyToThread(threadId, body));
+    const result = await this.write(
+      () => this.github.replyToThread(threadId, body),
+      [intended('replyToThread', literal(threadId), literal(body))],
+    );
 
     if (!this.execution) await this.refreshQuietly(account, prId);
 
@@ -575,7 +615,10 @@ export class ReviewService {
   async resolve(account: string, prId: string, threadId: string, resolved: boolean): Promise<void> {
     await this.guard(account, true);
     this.snapshot(account, prId);
-    await this.write(() => this.github.setThreadResolved(threadId, resolved));
+    await this.write(
+      () => this.github.setThreadResolved(threadId, resolved),
+      [intended('setThreadResolved', literal(threadId), literal(resolved))],
+    );
     if (!this.execution) await this.refreshQuietly(account, prId);
   }
 
@@ -589,7 +632,10 @@ export class ReviewService {
       throw new ReviewError('NOT_AUTHOR', 403, say('review.not-author'));
     }
 
-    await this.write(() => this.github.requestReviews(prId, logins));
+    await this.write(
+      () => this.github.requestReviews(prId, logins),
+      [intended('requestReviews', literal(prId), literal(logins))],
+    );
     if (!this.execution) await this.refreshQuietly(account, prId);
   }
 
@@ -606,10 +652,13 @@ export class ReviewService {
     this.snapshot(account, prId);
 
     // Called with exactly the arguments it needs, so checkpoints of older actions still match.
-    const revision = await this.write(() =>
-      expected
-        ? this.github.setFileViewed(prId, path, viewed, expected)
-        : this.github.setFileViewed(prId, path, viewed),
+    const args = [prId, path, viewed, ...(expected ? [expected] : [])];
+    const revision = await this.write(
+      () =>
+        expected
+          ? this.github.setFileViewed(prId, path, viewed, expected)
+          : this.github.setFileViewed(prId, path, viewed),
+      [intended('setFileViewed', ...args.map(literal))],
     );
 
     // Onto the latest stored PR and the reads that started before the write, where they show the
