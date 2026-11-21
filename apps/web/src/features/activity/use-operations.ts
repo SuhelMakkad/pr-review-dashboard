@@ -1,9 +1,8 @@
+import { call } from '@/lib/call';
+import { routes } from '@review-desk/shared/contract';
 import { useSyncExternalStore } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import type { GitHubOperation, OperationList } from '@review-desk/shared/operations';
-import { api } from '@/lib/api';
 import { fallbackInterval, useLive } from '@/lib/live';
-import { accountPath } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 
 let open = false;
@@ -36,10 +35,10 @@ export function useOperation(account: string, id: string | null) {
 
   return useQuery({
     queryKey: queryKeys.operation(account, id),
-    queryFn: () =>
-      api<{ operation: GitHubOperation }>(
-        accountPath(account, `/operations/${encodeURIComponent(id!)}`),
-      ).then((response) => response.operation),
+    queryFn: ({ signal }) =>
+      call(routes.operation, { params: { account, id: id! }, signal }).then(
+        (response) => response.operation,
+      ),
     enabled: Boolean(account && id),
     staleTime: live.connected ? Infinity : 0,
     refetchInterval: fallbackInterval(live),
@@ -52,13 +51,12 @@ export function useOperations(account: string) {
   return useInfiniteQuery({
     queryKey: queryKeys.operations(account),
     initialPageParam: null as string | null,
-    queryFn: ({ pageParam }) =>
-      api<OperationList>(
-        accountPath(
-          account,
-          `/operations${pageParam ? `?cursor=${encodeURIComponent(pageParam)}` : ''}`,
-        ),
-      ),
+    queryFn: ({ pageParam, signal }) =>
+      call(routes.operations, {
+        params: { account },
+        query: { cursor: pageParam ?? undefined },
+        signal,
+      }),
     getNextPageParam: (last) => last.nextCursor,
     enabled: Boolean(account),
     staleTime: live.connected ? Infinity : 0,

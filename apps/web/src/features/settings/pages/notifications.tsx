@@ -1,3 +1,5 @@
+import { call } from '@/lib/call';
+import { routes } from '@review-desk/shared/contract';
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -5,7 +7,6 @@ import {
   type NotificationKind,
   type NotificationSettings,
 } from '@review-desk/shared/notify';
-import { api } from '@/lib/api';
 import { notificationsSupported } from '@/lib/notifications';
 import { useNotificationSettings } from '@/lib/queries';
 import { Button } from '@/ui/button';
@@ -42,14 +43,11 @@ export function NotificationSettingsPage({ account }: { account: string }) {
   );
   const save = useMutation({
     mutationFn: (settings: NotificationSettings) =>
-      api<NotificationSettings>('/api/notifications/settings', {
-        method: 'PUT',
-        body: { account, settings },
-      }),
+      call(routes.saveNotificationSettings, { params: {}, body: { account, settings } }),
     onSuccess: (settings) => client.setQueryData(['notify-settings'], settings),
   });
   const test = useMutation({
-    mutationFn: () => api('/api/notifications/test', { method: 'POST' }),
+    mutationFn: () => call(routes.testNotification, { params: {} }),
   });
   // Edits live in React state until saved, so controlled inputs update within the click.
   const [pending, setPending] = useState<NotificationSettings | null>(null);

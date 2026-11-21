@@ -1,9 +1,9 @@
+import { call } from '@/lib/call';
+import { routes } from '@review-desk/shared/contract';
 import { useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import type { LinearStatus } from '@review-desk/shared/tickets';
-import { api } from '@/lib/api';
 import { Button } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { Enter } from '@/ui/motion';
@@ -17,13 +17,13 @@ export function LinearSettings({ result }: { result?: 'connected' | 'failed' }) 
   const data = status.data;
 
   const connect = useMutation({
-    mutationFn: () => api<{ url: string }>('/api/linear/connect', { method: 'POST' }),
+    mutationFn: () => call(routes.linearConnect, { params: {} }),
     // Linear's sign-in page sends the browser back to this page when it is done.
     onSuccess: ({ url }) => window.location.assign(url),
     onError: (error) => toast.error(error.message),
   });
   const disconnect = useMutation({
-    mutationFn: () => api<LinearStatus>('/api/linear/disconnect', { method: 'POST' }),
+    mutationFn: () => call(routes.linearDisconnect, { params: {} }),
     onSuccess: (next) => {
       queryClient.setQueryData(['linear-status'], next);
       void queryClient.invalidateQueries({ predicate: (query) => isTicketQuery(query.queryKey) });

@@ -1,10 +1,10 @@
+import { command } from '@/lib/call';
+import { routes } from '@review-desk/shared/contract';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { ArrowUpRight, CircleCheck, CircleDot, RotateCcw } from 'lucide-react';
 import type { AuthorItem, Blocker } from '@review-desk/shared/author';
-import { githubCommand } from '@/lib/operation-command';
-import { accountPath } from '@/lib/queries';
 import { openActivity } from '@/features/activity/use-operations';
 import { useOperations } from '@/features/activity/use-operations';
 import { operationUnsettled } from '@review-desk/shared/operations';
@@ -32,9 +32,7 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
     );
   const rerequest = useMutation({
     mutationFn: (logins: string[]) =>
-      githubCommand(accountPath(account, `/pulls/${encodeURIComponent(item.id)}/reviewers`), {
-        logins,
-      }),
+      command(routes.reviewers, { account, id: item.id }, { logins }),
     onSuccess: (_result, logins) => {
       toast(`Review request queued for ${logins.join(', ')}`, {
         action: { label: 'View activity', onClick: openActivity },

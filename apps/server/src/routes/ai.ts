@@ -1,132 +1,29 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
-import { z } from 'zod';
+import type { FastifyInstance } from 'fastify';
 import type { AutoReviewer } from '@/ai/auto-review.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import { GitHubError, safeError } from '@/github/errors.js';
-import { input, scopedRoutes } from '@/routes/scoped.js';
+import { failed, ok, serve, type Failed } from '@/http/serve.js';
 import type { SyncService } from '@/sync/service.js';
 import { ReviewError } from '@/review/service.js';
-import {
-  defaultAiSettings,
-  type AiReviewStatus,
-  type AiRunsResponse,
-} from '@review-desk/shared/ai';
-
-const account = z.string().min(1).max(100);
-const provider = z.enum(['codex', 'claude']);
-const task = z.enum([
-  'full_review',
-  'brief',
-  'since_review',
-  'draft_comments',
-  'author_feedback',
-  'draft_summary',
-]);
-const effort = z.enum(['low', 'medium', 'high', 'xhigh']);
-const taskSettings = z.strictObject({
-  provider: provider.nullable(),
-  effort,
-  model: z.string().max(100).nullable(),
-});
-
-const schemas = {
-  settings: z.strictObject({
-    account,
-    settings: z.strictObject({
-      defaultProvider: provider,
-      tasks: z.strictObject({
-        full_review: taskSettings.optional().default(defaultAiSettings().tasks.full_review),
-        brief: taskSettings,
-        since_review: taskSettings,
-        draft_comments: taskSettings,
-        author_feedback: taskSettings,
-        draft_summary: taskSettings,
-      }),
-      // `since` is set by the server; a value sent back from the client is ignored.
-      autoReview: z
-        .strictObject({ enabled: z.boolean(), since: z.string().max(40).nullable().optional() })
-        .optional(),
-      // Optional so a window opened before the setting existed keeps its saved value.
-      postFindings: z.boolean().optional(),
-      approveFindings: z.boolean().optional(),
-      resolveThreads: z.boolean().optional(),
-    }),
-  }),
-  // Only the switches you changed: a save never resends, and so never restores, the others.
-  automation: z.strictObject({
-    account,
-    changes: z
-      .strictObject({
-        autoReview: z.boolean().optional(),
-        postFindings: z.boolean().optional(),
-        approveFindings: z.boolean().optional(),
-        resolveThreads: z.boolean().optional(),
-      })
-      .refine((changes) => Object.keys(changes).length > 0, 'Nothing to change.'),
-  }),
-  start: z.strictObject({
-    account,
-    task,
-    provider: provider.optional(),
-    force: z.boolean().optional(),
-  }),
-  cancel: z.strictObject({ account }),
-  accept: z.strictObject({
-    account,
-    index: z.number().int().min(0),
-    body: z.string().trim().min(1).max(65_536).optional(),
-  }),
-  prepare: z
-    .strictObject({
-      account,
-      indices: z.array(z.number().int().min(0)).max(100),
-      replace: z.boolean().optional(),
-      expectedDraftRevision: z
-        .string()
-        .regex(/^[a-f0-9]{64}$/)
-        .optional(),
-    })
-    .refine((value) => !value.replace || Boolean(value.expectedDraftRevision)),
-};
+import type { AiReviewStatus } from '@review-desk/shared/ai';
+import { routes } from '@review-desk/shared/contract';
 
 /**
- * Runs `work`. A refusal keeps its details (a draft's revision, both accounts' names), and a
- * forge read that failed answers as forge reads do: the account unavailable, or rate limited until
- * when.
+ * A refusal keeps its details (a draft's revision, both accounts' names), and a forge read that
+ * failed answers as forge reads do: the account unavailable, or rate limited until when.
  */
-async function handle(reply: FastifyReply, work: () => Promise<unknown> | unknown) {
-  try {
-    return (await work()) ?? { ok: true };
-  } catch (error) {
-    if (error instanceof ReviewError)
-      return reply.code(error.status).send({
-        ...error.details,
-        error: error.message,
-        code: error.code,
-      });
+function aiFailure(error: unknown): Failed {
+  if (error instanceof ReviewError)
+    return failed(error.status, { ...error.details, error: error.message, code: error.code });
 
-    if (error instanceof AccountUnavailable)
-      return reply.code(409).send({ error: error.message, code: error.code });
+  if (error instanceof AccountUnavailable)
+    return failed(409, { error: error.message, code: error.code });
 
-    if (error instanceof GitHubError && error.outcome === 'rate_limit')
-      return reply
-        .code(429)
-        .send({ error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
+  if (error instanceof GitHubError && error.outcome === 'rate_limit')
+    return failed(429, { error: safeError(error), code: 'RATE_LIMITED', retryAt: error.retryAt });
 
-    return reply.code(500).send({ error: safeError(error) });
-  }
-}
-
-function parse<T>(schema: z.ZodType<T>, value: unknown, reply: FastifyReply): T | null {
-  const result = schema.safeParse(value);
-
-  if (!result.success) {
-    void reply.code(400).send({ error: 'Invalid request.', details: z.flattenError(result.error) });
-    return null;
-  }
-
-  return result.data;
+  return failed(500, { error: safeError(error) });
 }
 
 export function registerAiRoutes(
@@ -135,43 +32,49 @@ export function registerAiRoutes(
   autoReviewer: AutoReviewer,
   sync: SyncService,
 ): void {
-  app.get('/api/ai', async () => {
-    const [providers, codex] = await Promise.all([runner.providerStatuses(), runner.codexStatus()]);
+  const serving = { sync, errors: aiFailure };
+  const done = () => ok(200, { ok: true as const });
 
-    return { settings: runner.settings(), providers, codex };
-  });
+  serve(
+    app,
+    routes.ai,
+    async () => {
+      const [providers, codex] = await Promise.all([
+        runner.providerStatuses(),
+        runner.codexStatus(),
+      ]);
 
-  app.put('/api/ai/settings', async (request, reply) => {
-    const input = parse(schemas.settings, request.body, reply);
+      return ok(200, { settings: runner.settings(), providers, codex });
+    },
+    // A probe that fails is the server's own failure, as it always was.
+    { sync },
+  );
 
-    return (
-      input &&
-      handle(reply, () => {
-        // Agents and tasks only. Automation and posting are saved one switch at a time below: a
-        // page with older settings must never turn back on what you turned off elsewhere.
-        const { defaultProvider, tasks } = input.settings;
+  serve(
+    app,
+    routes.aiSettings,
+    ({ body }) => {
+      // Agents and tasks only. Automation and posting are saved one switch at a time below: a
+      // page with older settings must never turn back on what you turned off elsewhere.
+      const { defaultProvider, tasks } = body.settings;
 
-        return runner.saveSettings({ defaultProvider, tasks });
-      })
-    );
-  });
+      return ok(200, runner.saveSettings({ defaultProvider, tasks }));
+    },
+    serving,
+  );
 
-  app.put('/api/ai/automation', async (request, reply) => {
-    const input = parse(schemas.automation, request.body, reply);
+  serve(
+    app,
+    routes.aiAutomation,
+    ({ body }) => {
+      const saved = runner.saveAutomation(body.changes);
 
-    return (
-      input &&
-      handle(reply, () => {
-        const saved = runner.saveAutomation(input.changes);
+      autoReviewer.settingsSaved(body.account);
 
-        autoReviewer.settingsSaved(input.account);
-
-        return saved;
-      })
-    );
-  });
-
-  const serve = scopedRoutes(app, sync);
+      return ok(200, saved);
+    },
+    serving,
+  );
 
   /** Restarts wait for the account in use; another account's show as paused until it is. */
   const restartOf = (account: string, prId: string) => ({
@@ -179,9 +82,10 @@ export function registerAiRoutes(
     ...(autoReviewer.pausedRestarts(account).has(prId) ? { restartPaused: true } : {}),
   });
 
-  serve('get', '/api/ai/reviews', async (request, reply, login) =>
-    handle(reply, () => {
-      const account = login;
+  serve(
+    app,
+    routes.aiReviews,
+    ({ account }) => {
       const restarts = autoReviewer.restarts(account);
       const paused = autoReviewer.pausedRestarts(account);
       const reviews: AiReviewStatus[] = runner.reviewStatuses(account).map((review) => ({
@@ -205,72 +109,77 @@ export function registerAiRoutes(
         });
       }
 
-      return { reviews };
-    }),
+      return ok(200, { reviews });
+    },
+    serving,
   );
 
-  serve('get', '/api/pulls/:id/ai', async (request, reply, login) =>
-    handle(reply, () => {
-      const account = login;
-      const response: AiRunsResponse = {
-        runs: runner.runs(account, request.params.id!),
-        ...restartOf(account, request.params.id!),
-      };
-
-      return response;
-    }),
+  serve(
+    app,
+    routes.aiRuns,
+    ({ account, params }) =>
+      ok(200, { runs: runner.runs(account, params.id), ...restartOf(account, params.id) }),
+    serving,
   );
 
-  serve('post', '/api/pulls/:id/ai', async (request, reply, login) => {
-    const body = input(schemas.start, request, reply, login);
-
-    return (
-      body && handle(reply, () => runner.start(body.account, request.params.id!, body.task, body))
-    );
-  });
+  serve(
+    app,
+    routes.startAi,
+    async ({ params, body }) =>
+      ok(200, await runner.start(body.account, params.id, body.task, body)),
+    serving,
+  );
 
   // Stopping a run changes nothing on the forge: any account's own runs can be stopped.
-  serve('delete', '/api/ai/runs/:runId', async (request, reply, login) => {
-    const body = input(schemas.cancel, request, reply, login);
+  serve(
+    app,
+    routes.cancelAi,
+    ({ params, body }) => {
+      runner.cancel(body.account, params.runId);
 
-    return body && handle(reply, () => runner.cancel(body.account, request.params.runId!));
-  });
+      return done();
+    },
+    serving,
+  );
 
-  serve('post', '/api/ai/runs/:runId/pause', async (request, reply, login) => {
-    const body = input(schemas.cancel, request, reply, login);
+  serve(
+    app,
+    routes.pauseAi,
+    ({ params, body }) => {
+      runner.pause(body.account, params.runId);
 
-    return body && handle(reply, () => runner.pause(body.account, request.params.runId!));
-  });
+      return done();
+    },
+    serving,
+  );
 
-  serve('post', '/api/ai/runs/:runId/resume', async (request, reply, login) => {
-    const body = input(schemas.cancel, request, reply, login);
+  serve(
+    app,
+    routes.resumeAi,
+    async ({ params, body }) => ok(200, await runner.resume(body.account, params.runId)),
+    serving,
+  );
 
-    return body && handle(reply, () => runner.resume(body.account, request.params.runId!));
-  });
+  serve(
+    app,
+    routes.acceptAi,
+    async ({ params, body }) =>
+      ok(200, await runner.accept(body.account, params.runId, body.index, body.body)),
+    serving,
+  );
 
-  serve('post', '/api/ai/runs/:runId/accept', async (request, reply, login) => {
-    const body = input(schemas.accept, request, reply, login);
+  serve(
+    app,
+    routes.prepareAi,
+    async ({ params, body }) =>
+      ok(200, await runner.prepareReview(body.account, params.runId, body.indices, body)),
+    serving,
+  );
 
-    return (
-      body &&
-      handle(reply, () => runner.accept(body.account, request.params.runId!, body.index, body.body))
-    );
-  });
-
-  serve('post', '/api/ai/runs/:runId/draft', async (request, reply, login) => {
-    const body = input(schemas.prepare, request, reply, login);
-
-    return (
-      body &&
-      handle(reply, () =>
-        runner.prepareReview(body.account, request.params.runId!, body.indices, body),
-      )
-    );
-  });
-
-  serve('post', '/api/ai/runs/:runId/summary', async (request, reply, login) => {
-    const body = input(schemas.cancel, request, reply, login);
-
-    return body && handle(reply, () => runner.applySummary(body.account, request.params.runId!));
-  });
+  serve(
+    app,
+    routes.applyAi,
+    async ({ params, body }) => ok(200, await runner.applySummary(body.account, params.runId)),
+    serving,
+  );
 }

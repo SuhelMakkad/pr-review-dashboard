@@ -1,12 +1,13 @@
+import { call } from '@/lib/call';
+import { routes } from '@review-desk/shared/contract';
 import { useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { ArrowUpRight, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { instanceUrl, isSameUser, parseAccount } from '@review-desk/shared/accounts';
 import type { PullRequestDetail, PullRequestItem, SyncStatus } from '@review-desk/shared/types';
-import { api } from '@/lib/api';
 import { formatRef, refOf, type PrRef } from '@/lib/pr-ref';
-import { accountPath, useAccount, useForge, useStatus } from '@/lib/queries';
+import { useAccount, useForge, useStatus } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 import { Button } from '@/ui/button';
 import { inQueue, type QueueSlug } from '@/features/pulls/meta';
@@ -37,10 +38,10 @@ async function untrackPull(
   item: PullLike,
   membershipId?: string,
 ) {
-  const result = await api<{ tracked: boolean }>(
-    accountPath(account, `/pulls/${encodeURIComponent(item.id)}/track`),
-    { method: 'DELETE', body: membershipId ? { membershipId } : {} },
-  );
+  const result = await call(routes.untrack, {
+    params: { account, id: item.id },
+    body: membershipId ? { membershipId } : {},
+  });
 
   await refreshQueue(client, account);
 
@@ -53,7 +54,8 @@ async function untrackPull(
  * there was not this add's to remove.
  */
 async function trackPull(client: QueryClient, account: string, ref: PrRef): Promise<Added> {
-  const detail = await api<Added>(accountPath(account, '/pulls/track'), {
+  const detail: Added = await call(routes.track, {
+    params: { account },
     body: {
       repository: `${ref.owner}/${ref.repo}`,
       number: ref.number,

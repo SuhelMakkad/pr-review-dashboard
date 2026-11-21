@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { Query, QueryClient, QueryKey } from '@tanstack/react-query';
+import { routes, serverEvent } from '@review-desk/shared/contract';
 import type { ServerEvent } from '@review-desk/shared/events';
 import type { SyncStatus } from '@review-desk/shared/types';
 import { queryKeys } from '@/lib/query-keys';
@@ -159,7 +160,8 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
       return;
     }
     case 'resync':
-      void client.invalidateQueries();
+      // Through `refresh`, so a first load on its way is read again once it lands.
+      refresh(client, everything);
       return;
     case 'status':
       adoptStatus(client, event.status);
@@ -213,24 +215,124 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
   }
 }
 
+/** Every query: what a resync, or a frame that could not be read, reads again. */
+const everything = () => true;
+
+/** Queries with a read again already due once their read in flight lands. */
+const followUps = new WeakSet<Query>();
+
+/**
+ * Reads every query again after frames that could not be read, never cancelling a read already
+ * on its way: a refetch slower than a recovery window still finishes. Such a read may have started
+ * before the frames, so it is read once more when it lands; one more at most, however many
+ * recoveries came meanwhile.
+ */
+function recover(client: QueryClient): void {
+  const cache = client.getQueryCache();
+
+  for (const query of cache.getAll()) {
+    if (query.state.fetchStatus !== 'fetching') {
+      void client.invalidateQueries(
+        { queryKey: query.queryKey, exact: true },
+        { cancelRefetch: false },
+      );
+      continue;
+    }
+
+    if (followUps.has(query)) continue;
+
+    followUps.add(query);
+
+    const unsubscribe = cache.subscribe((event) => {
+      if (event.query !== query) return;
+      if (event.type !== 'removed' && query.state.fetchStatus === 'fetching') return;
+
+      unsubscribe();
+      followUps.delete(query);
+
+      if (event.type !== 'removed')
+        void client.invalidateQueries(
+          { queryKey: query.queryKey, exact: true },
+          { cancelRefetch: false },
+        );
+    });
+  }
+}
+
+/** How long unreadable frames are gathered before the one refresh that recovers from them. */
+export const UNREADABLE_WINDOW_MS = 250;
+
+let warned = false;
+
+/**
+ * Reads the frames of the event stream, checked against the contract (`serverEvent`). A frame
+ * that cannot be read, malformed or of an unknown shape, may have announced a change that is
+ * now never applied: while the stream is up nothing polls, so everything is read again. The first
+ * such frame schedules that refresh for `UNREADABLE_WINDOW_MS` later; those after it, until then,
+ * join it, since it comes after them all. However long a burst lasts, a refresh comes every
+ * window. It stays due across the stream's own reconnects, since a replay may skip a frame already
+ * received; only closing the stream cancels it.
+ */
+export function frameReader(client: QueryClient) {
+  const firstHello = { value: true };
+  let due: ReturnType<typeof setTimeout> | null = null;
+
+  const unreadable = (problem: unknown) => {
+    if (!warned) {
+      warned = true;
+      console.warn('Review Desk could not read an update from the server; reading again.', problem);
+    }
+
+    if (due) return;
+
+    due = setTimeout(() => {
+      due = null;
+      recover(client);
+    }, UNREADABLE_WINDOW_MS);
+  };
+
+  return {
+    read(data: string) {
+      let parsed: unknown;
+
+      try {
+        parsed = JSON.parse(data);
+      } catch (error) {
+        unreadable(error);
+        return;
+      }
+
+      const frame = serverEvent.safeParse(parsed);
+
+      if (!frame.success) {
+        unreadable(frame.error);
+        return;
+      }
+
+      handle(client, frame.data as ServerEvent, firstHello);
+    },
+    close() {
+      if (due) clearTimeout(due);
+      due = null;
+    },
+  };
+}
+
 /** Opens the server event stream. EventSource reconnects by itself and replays via Last-Event-ID. */
 export function startLive(client: QueryClient): () => void {
   if (typeof EventSource === 'undefined') return () => {};
 
-  const firstHello = { value: true };
-  const source = new EventSource('/api/events');
+  const frames = frameReader(client);
+  const source = new EventSource(routes.events.path);
 
   source.onopen = () => setState({ connected: true, disconnectedAt: null });
   source.onerror = () => {
     if (state.connected) setState({ connected: false, disconnectedAt: Date.now() });
   };
-  source.onmessage = (message) => {
-    try {
-      handle(client, JSON.parse(message.data) as ServerEvent, firstHello);
-    } catch {
-      // Ignore malformed frames; the next event or resync restores consistency.
-    }
-  };
+  source.onmessage = (message) => frames.read(message.data);
 
-  return () => source.close();
+  return () => {
+    source.close();
+    frames.close();
+  };
 }

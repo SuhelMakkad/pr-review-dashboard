@@ -1,3 +1,4 @@
+import { routes } from '@review-desk/shared/contract';
 import type { ServerResponse } from 'node:http';
 import type { FastifyInstance } from 'fastify';
 import type { ServerEvent } from '@review-desk/shared/events';
@@ -30,7 +31,7 @@ declare module 'fastify' {
 export function registerEventStream(app: FastifyInstance, options: SseOptions): void {
   const streams = new Set<ServerResponse>();
 
-  app.get('/api/events', { config: { stream: true } }, (request, reply) => {
+  app.get(routes.events.path, { config: { stream: true } }, (request, reply) => {
     reply.hijack();
 
     const stream = reply.raw;

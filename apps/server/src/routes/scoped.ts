@@ -1,7 +1,5 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { knownAccount, type AccountParams } from '@/routes/pulls.js';
-import type { SyncService } from '@/sync/service.js';
 
 export type ScopedRequest = FastifyRequest<{
   Params: Record<string, string>;
@@ -38,22 +36,4 @@ export function input<T>(
   }
 
   return parse(schema, { ...body, account }, reply);
-}
-
-/**
- * Serves each route under `/api/accounts/:account`, for the account its path names. An account
- * this app never worked as is not served.
- */
-export function scopedRoutes(app: FastifyInstance, sync: SyncService) {
-  return function serve(
-    method: 'get' | 'put' | 'post' | 'patch' | 'delete',
-    path: string,
-    work: (request: ScopedRequest, reply: FastifyReply, account: string) => Promise<unknown>,
-  ) {
-    app[method](`/api/accounts/:account${path.slice('/api'.length)}`, (request, reply) => {
-      const account = knownAccount(sync, request.params as AccountParams, reply);
-
-      return account ? work(request as ScopedRequest, reply, account) : reply;
-    });
-  };
 }

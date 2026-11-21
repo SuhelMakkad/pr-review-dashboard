@@ -1,9 +1,9 @@
+import { call } from '@/lib/call';
+import { routes } from '@review-desk/shared/contract';
 import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, LoaderCircle, RefreshCw, Table2 } from 'lucide-react';
-import type { Insights } from '@review-desk/shared/insights';
-import { api } from '@/lib/api';
-import { accountPath, useAccount, useForge, useStatus } from '@/lib/queries';
+import { useAccount, useForge, useStatus } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
 import { relativePhrase } from '@/lib/time';
 import { Button } from '@/ui/button';
@@ -15,18 +15,6 @@ import { ColumnChart } from '@/features/insights/charts/column-chart';
 import { formatHours, Legend } from '@/features/insights/charts/common';
 import { LineChart } from '@/features/insights/charts/line-chart';
 import { SegmentedBar } from '@/features/insights/charts/segmented-bar';
-
-interface InsightsResponse {
-  insights: Insights | null;
-  backfill: {
-    doneWindows: string[];
-    finishedAt: string | null;
-    lastError: string | null;
-    running: boolean;
-  } | null;
-  slaHours: number;
-  repositories: string[];
-}
 
 const ranges = [7, 30, 90] as const;
 
@@ -149,24 +137,19 @@ export function InsightsPage() {
   const [repo, setRepo] = useState('');
   const query = useQuery({
     queryKey: queryKeys.insights(account, days, repo),
-    queryFn: () =>
-      api<InsightsResponse>(
-        accountPath(
-          account,
-          `/insights?days=${days}${repo ? `&repo=${encodeURIComponent(repo)}` : ''}`,
-        ),
-      ),
+    queryFn: ({ signal }) =>
+      call(routes.insights, { params: { account }, query: { days, repo }, signal }),
     enabled: Boolean(account),
     placeholderData: (previous) => previous,
     refetchInterval: (state) => (state.state.data?.backfill?.running ? 3000 : false),
   });
   const backfill = useMutation({
-    mutationFn: () => api(accountPath(account, '/insights/backfill'), { method: 'POST', body: {} }),
+    mutationFn: () => call(routes.backfill, { params: { account }, body: {} }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.insights(account) }),
   });
   const target = useMutation({
     mutationFn: (slaHours: number) =>
-      api('/api/insights/settings', { method: 'PUT', body: { account, slaHours } }),
+      call(routes.insightsSettings, { params: {}, body: { account, slaHours } }),
     // Every account's Insights measure against the review target.
     onSuccess: () =>
       client.invalidateQueries({

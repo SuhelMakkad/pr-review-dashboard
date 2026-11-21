@@ -298,6 +298,17 @@ describe('AI and Insights for an account not in use', () => {
     expect(drafts.draft('you', pr.id)).toBeNull();
   });
 
+  it('reads Insights for the ranges offered, and the default for anything else', async () => {
+    const { call } = await demo();
+    const days = async (query: string) =>
+      (await call('GET', `/api/accounts/you/insights${query}`)).json().insights.range.days;
+
+    expect(await days('?days=7')).toBe(7);
+    expect(await days('?days=90')).toBe(90);
+    expect(await days('?days=45')).toBe(30);
+    expect(await days('')).toBe(30);
+  });
+
   it('names the account on AI events', async () => {
     const { events, finished, start } = await demo();
 
