@@ -46,54 +46,47 @@ export function newerDraft(cached: ReviewDraft | undefined, incoming: ReviewDraf
 
 /**
  * Writes `draft` into the cache, keeping the newer of each part (`newerDraft`): false, writing
- * nothing, when the account shown changed since `since`.
+ * nothing, when the account shown changed since `since`. A read on its way is left to finish: it
+ * merges the same way as it lands, so neither an older read nor an older write undoes a newer.
  */
 export function seedNewer(
   client: QueryClient,
   account: string,
   prId: string,
   draft: ReviewDraft,
-  since = accountSwitches(),
+  since: number,
 ): boolean {
   if (accountSwitches() !== since) return false;
 
-  const key = queryKeys.draft(account, prId);
-
-  // A read that started before this write must not land after it.
-  void client.cancelQueries({ queryKey: key, exact: true });
-  client.setQueryData<ReviewDraft>(key, (cached) => newerDraft(cached, draft));
+  client.setQueryData<ReviewDraft>(queryKeys.draft(account, prId), (cached) =>
+    newerDraft(cached, draft),
+  );
 
   return true;
 }
 
 function transport(client: QueryClient, account: string, prId: string): Transport {
-  // The account switches as the write now on its way was sent (the queue sends one at a time):
-  // an answer that crossed a switch must not refill the drafts it dropped, to be read afresh.
-  let sentAt = accountSwitches();
+  const key = queryKeys.draft(account, prId);
 
   return {
-    send: (request) => {
-      sentAt = accountSwitches();
-
-      return call(
+    send: (request) =>
+      call(
         writeRoutes[request.route as keyof typeof writeRoutes] as never,
-        {
-          params: request.params,
-          body: request.body,
-          strict: true,
-        } as never,
-      );
-    },
+        { params: request.params, body: request.body, strict: true } as never,
+      ),
     lookup: (writeId, base) =>
       call(routes.draftAttempt, {
         params: { account, id: prId, attemptId: writeId },
         query: { base: base.revision, generation: base.generation },
         strict: true,
       }),
-    committed: (draft) => {
-      if (draft) seedNewer(client, account, prId, draft, sentAt);
+    stamp: accountSwitches,
+    // An answer to a write sent before a switch must not refill the drafts it dropped: read again.
+    committed: (draft, stamp) => {
+      if (!seedNewer(client, account, prId, draft, stamp))
+        void client.invalidateQueries({ queryKey: key });
     },
-    stale: () => void client.invalidateQueries({ queryKey: queryKeys.draft(account, prId) }),
+    stale: () => void client.invalidateQueries({ queryKey: key }),
     refused: (reason) => void toast.error(reason),
   };
 }

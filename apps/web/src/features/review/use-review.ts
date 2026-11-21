@@ -109,12 +109,13 @@ export function useReview(prId: string | null, account: string) {
   const draftKey = queryKeys.draft(account, prId ?? 'none');
   const draft = useQuery({
     queryKey: draftKey,
-    // Kept the newer of each part: a read that started before a write never undoes it.
-    queryFn: async ({ signal }) =>
-      newerDraft(
-        client.getQueryData<ReviewDraft>(draftKey),
-        await call(routes.draft, { params: pr, signal }),
-      ),
+    // Kept the newer of each part, against the cache as the read lands: a read that started
+    // before a write never undoes it.
+    queryFn: async ({ signal }) => {
+      const read = await call(routes.draft, { params: pr, signal });
+
+      return newerDraft(client.getQueryData<ReviewDraft>(draftKey), read);
+    },
     enabled: Boolean(prId && account),
   });
   // Every draft write goes through the PR's writer, in one queue, on the draft you saw. The
@@ -146,7 +147,8 @@ export function useReview(prId: string | null, account: string) {
   });
 
   const discard = useMutation({
-    mutationFn: () => command(routes.discard, pr, {}),
+    // Drops your unsaved summary and verdict with the draft: none is autosaved meanwhile.
+    mutationFn: () => writer.command(['body', 'event'], () => command(routes.discard, pr, {})),
     onSuccess: () => {
       void refreshDraft();
       void refreshOperations();
@@ -159,7 +161,10 @@ export function useReview(prId: string | null, account: string) {
       body: string;
       expectedHeadOid: string;
       allowNewHead?: boolean;
-    }) => command(routes.submit, pr, input),
+    }) =>
+      // Carries the summary and verdict as you left them: none is autosaved into the draft it
+      // submits meanwhile, nor after it was accepted.
+      writer.command(['body', 'event'], () => command(routes.submit, pr, input)),
     onSettled: refreshDraft,
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.pulls(account) });

@@ -1,4 +1,4 @@
-import type { DraftAttempt, ReviewDraft, ReviewEvent } from '@review-desk/shared/review';
+import type { ReviewDraft, ReviewEvent } from '@review-desk/shared/review';
 import { ApiError } from '@/lib/api';
 
 /**
@@ -12,6 +12,8 @@ import { ApiError } from '@/lib/api';
 export type Field = 'body' | 'event';
 
 type FieldValue<F extends Field> = F extends 'event' ? ReviewEvent : string;
+
+const FIELDS = ['body', 'event'] as const;
 
 /** The draft revision and generation a write acts on. */
 export interface Base {
@@ -41,16 +43,21 @@ export type Outcome =
   | { kind: 'refused'; error: ApiError }
   | { kind: 'unknown'; error: unknown };
 
-/** The lookup's answer for an attempt (see `routes.draftAttempt`). */
-export type LookupAnswer =
-  { attempt: DraftAttempt & { result?: unknown } } | { arrived: false; fenced: boolean };
+/** The write an answer is about: only an answer that names it, on its base, settles it. */
+export interface Expected {
+  writeId: string;
+  base: Base;
+}
 
 /** How the writer reaches the server: injected, so it runs without React or a network in tests. */
 export interface Transport {
   send(request: WriteRequest): Promise<unknown>;
-  lookup(writeId: string, base: Base): Promise<LookupAnswer>;
-  /** The draft as the write that committed left it, or as the server has it now: shown at once. */
-  committed(draft: ReviewDraft | null): void;
+  /** The attempt's state, as `routes.draftAttempt` answers it; decoded by `fromLookup`. */
+  lookup(writeId: string, base: Base): Promise<unknown>;
+  /** The account-switch stamp now: a write's answer is shown only under the stamp it was sent at. */
+  stamp(): number;
+  /** The draft a write left, or the server's draft that refused it, from a write sent at `stamp`. */
+  committed(draft: ReviewDraft, stamp: number): void;
   /** A change the queue cannot show itself (a comment write): the draft is read again. */
   stale(): void;
   /** A save was refused: says why, even when no editor of the draft is open. */
@@ -72,58 +79,109 @@ export class WriteRefused extends ApiError {
   }
 }
 
-/** Decodes a write's answer. Only a decoded attempt settles it; anything else stays unknown. */
-export async function decode(answer: Promise<unknown>, first: boolean): Promise<Outcome> {
-  try {
-    const body = (await answer) as { pending?: true; attempt?: DraftAttempt };
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
 
-    if (body?.pending) return { kind: 'pending' };
-    if (body?.attempt?.state === 'committed')
-      return { kind: 'committed', body, revision: body.attempt.revision };
+const isDraft = (body: unknown): body is ReviewDraft =>
+  isObject(body) && isObject(body.versions) && Array.isArray(body.comments);
+
+/** The attempt `value` names, if it is `expected`'s and well formed; otherwise undefined. */
+function attemptOf(
+  value: unknown,
+  expected: Expected,
+): { state: 'pending' | 'refused' } | { state: 'committed'; revision: number } | undefined {
+  if (!isObject(value) || value.id !== expected.writeId) return undefined;
+  if (value.state === 'pending' || value.state === 'refused') return { state: value.state };
+
+  // A commit is at or after its base: the base itself only for a write that changed nothing.
+  const revision = value.revision;
+
+  return value.state === 'committed' &&
+    typeof revision === 'number' &&
+    Number.isInteger(revision) &&
+    revision >= expected.base.revision
+    ? { state: 'committed', revision }
+    : undefined;
+}
+
+/** A refusal's outcome: a change since (with the draft as it is), or any other refusal. */
+const refusedOutcome = (error: ApiError): Outcome =>
+  error.code === 'DRAFT_REVISION_CONFLICT' && isDraft(error.details.draft)
+    ? { kind: 'conflict', draft: error.details.draft }
+    : { kind: 'refused', error };
+
+/**
+ * Decodes a write's answer. Only an attempt that names this write settles it; anything else stays
+ * unknown, except a client error to a first send, which no claim can have answered.
+ */
+export async function decode(
+  answer: Promise<unknown>,
+  first: boolean,
+  expected: Expected,
+): Promise<Outcome> {
+  try {
+    const body = await answer;
+    const attempt = isObject(body) ? attemptOf(body.attempt, expected) : undefined;
+
+    if (attempt?.state === 'pending' && isObject(body) && body.pending === true)
+      return { kind: 'pending' };
+    if (attempt?.state === 'committed')
+      return { kind: 'committed', body, revision: attempt.revision };
 
     return { kind: 'unknown', error: new Error('The answer carried no outcome.') };
   } catch (error) {
     if (!(error instanceof ApiError)) return { kind: 'unknown', error };
 
-    const attempt = error.details.attempt as DraftAttempt | undefined;
+    const attempt = attemptOf(error.details.attempt, expected);
 
-    if (attempt?.state === 'refused')
-      return error.code === 'DRAFT_REVISION_CONFLICT' && error.details.draft
-        ? { kind: 'conflict', draft: error.details.draft as ReviewDraft }
-        : { kind: 'refused', error };
+    if (attempt?.state === 'refused') return refusedOutcome(error);
+    if (attempt) return { kind: 'unknown', error };
 
-    // No outcome recorded: no answer, an unreadable one, or a refusal before the claim (a session
-    // or schema check). Definite only when nothing earlier of this write may have arrived.
-    if (error.status === 0 || error.code === 'UNREADABLE') return { kind: 'unknown', error };
+    // No outcome recorded: no answer, an unreadable one, a server error, or a refusal before the
+    // claim (a session or schema check). Only the last is definite, and only when nothing earlier
+    // of this write may have arrived.
+    const beforeClaim = error.code !== 'UNREADABLE' && error.status >= 400 && error.status < 500;
 
-    return first ? { kind: 'refused', error } : { kind: 'unknown', error };
+    return first && beforeClaim ? { kind: 'refused', error } : { kind: 'unknown', error };
   }
 }
 
-/** Decodes a lookup's answer; `never` means the write did not arrive and never can commit. */
-export function fromLookup(answer: LookupAnswer): Outcome | 'never' | 'resend' {
-  if (!('attempt' in answer)) return answer.fenced ? 'never' : 'resend';
+/**
+ * Decodes a lookup's answer: `never` means the write did not arrive and never can commit; `resend`
+ * that it may yet, or that the answer could not be read, so the write is sent again as it was.
+ */
+export function fromLookup(answer: unknown, expected: Expected): Outcome | 'never' | 'resend' {
+  if (!isObject(answer)) return 'resend';
 
-  const { attempt } = answer;
-  const result = attempt.result as { body?: unknown; status?: number } | undefined;
+  if (!('attempt' in answer))
+    return answer.arrived === false && typeof answer.fenced === 'boolean'
+      ? answer.fenced
+        ? 'never'
+        : 'resend'
+      : 'resend';
 
+  const attempt = attemptOf(answer.attempt, expected);
+  const result = isObject(answer.attempt) ? answer.attempt.result : undefined;
+  const recorded = isObject(result) ? result : {};
+
+  if (!attempt) return 'resend';
   if (attempt.state === 'pending') return { kind: 'pending' };
   if (attempt.state === 'committed')
-    return { kind: 'committed', body: result?.body, revision: attempt.revision };
+    return { kind: 'committed', body: recorded.body, revision: attempt.revision };
 
-  const body = (result?.body ?? {}) as { error?: string; code?: string; draft?: ReviewDraft };
-  const error = new ApiError(body.error ?? 'Not saved.', result?.status ?? 409, body.code, body);
+  const body = isObject(recorded.body) ? recorded.body : {};
+  const status = typeof recorded.status === 'number' ? recorded.status : 409;
+  const message = typeof body.error === 'string' ? body.error : 'Not saved.';
+  const code = typeof body.code === 'string' ? body.code : undefined;
 
-  return body.code === 'DRAFT_REVISION_CONFLICT' && body.draft
-    ? { kind: 'conflict', draft: body.draft }
-    : { kind: 'refused', error };
+  return refusedOutcome(new ApiError(message, status, code, body));
 }
 
 interface FieldState {
   value: string;
   /** Raised by every edit. */
   version: number;
-  /** The highest version the server confirmed saved. */
+  /** The highest version the server confirmed saved, or a command retired. */
   settled: number;
   /** The highest version a queued save carries: a flush never queues it twice. */
   queued: number;
@@ -131,7 +189,20 @@ interface FieldState {
   savedAt: number;
   /** Why its latest save was refused; it is kept, not sent again, until you edit it. */
   failed: string | null;
-  /** The draft generation shown when it was edited: never sent into another (a discard's next). */
+  /**
+   * The draft generation its unsaved text began on, and when: fixed until it is saved, or until
+   * you edit it after a refusal. Never sent into another generation, nor resent after a week.
+   */
+  generation: number | null;
+  since: number | null;
+  /** The version a running command (submit, discard) carries: no autosave of it meanwhile. */
+  owned: number | null;
+}
+
+/** A field's text as a save carries it. */
+interface Snapshot {
+  value: string;
+  version: number;
   generation: number | null;
 }
 
@@ -140,25 +211,36 @@ interface Inflight {
   writeId: string;
   request: WriteRequest;
   base: Base;
+  /** When it stops being sent: within the server's receipts, and the journal's week. */
+  deadline: number;
+  /** The account-switch stamp as it was first sent: its answer is shown only under it. */
+  stamp: number;
   /** For a meta save, the field versions it carries: only these are journaled. */
   fields?: Partial<Record<Field, number>>;
 }
 
 /**
  * What a reload keeps: each field, and the autosaves on their way, sent again after it with the
- * same id. A comment or AI write is not resent after a reload: the draft read then shows whether
- * it was kept.
+ * same id until their deadline. A comment or AI write is not resent after a reload: the draft
+ * read then shows whether it was kept.
  */
 interface Journal {
-  fields: Record<Field, Omit<FieldState, 'queued'>>;
-  inflight: Inflight[];
-  /** When it was written: one older than `JOURNAL_TTL_MS` is not restored. */
-  written: number;
+  fields: Record<Field, Omit<FieldState, 'queued' | 'owned'>>;
+  inflight: Omit<Inflight, 'stamp'>[];
 }
 
 const DEBOUNCE_MS = 800;
-const JOURNAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** How long a write is sent again, and an unsaved edit kept to be saved: then only kept. */
+export const ATTEMPT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const journalKey = (account: string, prId: string) => `review-desk-draft-writer:${account}:${prId}`;
+
+const DISCARDED_ELSEWHERE =
+  'This draft was discarded or submitted elsewhere. Your text is kept here and was not saved.';
+const NOT_CONFIRMED =
+  'This could not be confirmed as saved. Your text is kept here; check the draft before saving it again.';
+const EXPIRED = 'Kept from more than a week ago, and not saved. Edit it to save it.';
+const UNSAVED_REPLACED =
+  'Your own summary or verdict was not saved, and this would replace it. Copy or clear it, then try again.';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -188,6 +270,7 @@ export class DraftWriter {
       Math.min(500 * 2 ** attempt, 10_000),
   ) {
     const saved = readJournal(account, prId);
+    const now = Date.now();
     const fresh = (field: Field): FieldState => ({
       value: field === 'event' ? 'COMMENT' : '',
       version: 0,
@@ -196,17 +279,46 @@ export class DraftWriter {
       savedAt: 0,
       failed: null,
       generation: null,
+      since: null,
+      owned: null,
     });
     // After a reload nothing is queued: an unsaved edit is saved again, besides the very save
     // the journal kept. A refused one stays refused, kept until you edit it.
     const restored = (field: Field): FieldState =>
-      saved ? { ...saved.fields[field], queued: saved.fields[field].settled } : fresh(field);
+      saved
+        ? { ...saved.fields[field], queued: saved.fields[field].settled, owned: null }
+        : fresh(field);
 
     this.fields = { body: restored('body'), event: restored('event') };
-    this.inflight = saved?.inflight ?? [];
 
-    // Autosaves a reload interrupted are sent again as they were: each answers once, by its id.
-    for (const write of this.inflight) void this.enqueue(() => this.resume(write));
+    // An unsaved edit from more than a week ago is kept, never saved on its own.
+    for (const state of Object.values(this.fields))
+      if (
+        state.version > state.settled &&
+        !state.failed &&
+        now - (state.since ?? now) >= ATTEMPT_TTL_MS
+      )
+        state.failed = EXPIRED;
+
+    // Autosaves a reload interrupted are sent again as they were, each answering once by its id,
+    // until their deadline; past it their text is kept, unconfirmed.
+    const stamp = transport.stamp();
+
+    this.inflight = [];
+
+    for (const write of saved?.inflight ?? []) {
+      if (now >= write.deadline) this.markFailed(write.fields ?? {}, NOT_CONFIRMED);
+      else {
+        const resumed = { ...write, stamp };
+
+        // Queued already: a flush meanwhile does not send the same versions twice.
+        for (const [field, version] of Object.entries(write.fields ?? {}) as [Field, number][])
+          this.fields[field].queued = Math.max(this.fields[field].queued, version);
+
+        this.inflight.push(resumed);
+        void this.enqueue(() => this.resume(resumed));
+      }
+    }
   }
 
   subscribe(listener: () => void): () => void {
@@ -218,12 +330,10 @@ export class DraftWriter {
   private changed() {
     this.version += 1;
     writeJournal(this.account, this.prId, {
-      fields: {
-        body: strip(this.fields.body),
-        event: strip(this.fields.event),
-      },
-      inflight: this.inflight.filter((write) => write.fields),
-      written: Date.now(),
+      fields: { body: strip(this.fields.body), event: strip(this.fields.event) },
+      inflight: this.inflight
+        .filter((write) => write.fields)
+        .map(({ stamp: _stamp, ...write }) => write),
     });
 
     for (const listener of this.listeners) listener();
@@ -271,11 +381,16 @@ export class DraftWriter {
   edit<F extends Field>(field: F, value: FieldValue<F>) {
     const state = this.fields[field];
 
+    // Unsaved text begins here, on the draft as shown; typing again after a refusal, which you
+    // saw, makes it yours for that draft.
+    if (state.version <= state.settled || state.failed) {
+      state.generation = this.seen?.generation ?? null;
+      state.since = Date.now();
+    }
+
     state.value = value;
     state.version += 1;
     state.failed = null;
-    // Edited on the draft as shown: a refused edit typed again is yours for this draft.
-    state.generation = this.seen?.generation ?? null;
     this.changed();
 
     if (this.timer) clearTimeout(this.timer);
@@ -290,24 +405,33 @@ export class DraftWriter {
 
     this.timer = null;
 
-    const fields = (['body', 'event'] as const).filter((field) => {
+    const fields = FIELDS.filter((field) => {
       const state = this.fields[field];
 
-      return state.version > Math.max(state.settled, state.queued) && !state.failed;
+      return (
+        state.version > Math.max(state.settled, state.queued) &&
+        !state.failed &&
+        state.owned === null
+      );
     });
 
     if (fields.length === 0) return Promise.resolve();
 
     // Resolved now, not when it runs: an edit after this is the next save's.
-    const snapshot = Object.fromEntries(
-      fields.map((field) => [
-        field,
-        { value: this.fields[field].value, version: this.fields[field].version },
-      ]),
-    ) as Partial<Record<Field, { value: string; version: number }>>;
-    const base = this.baseNow();
+    const snapshot: Partial<Record<Field, Snapshot>> = {};
 
-    for (const field of fields) this.fields[field].queued = this.fields[field].version;
+    for (const field of fields) {
+      const state = this.fields[field];
+
+      snapshot[field] = {
+        value: state.value,
+        version: state.version,
+        generation: state.generation,
+      };
+      state.queued = state.version;
+    }
+
+    const base = this.baseNow();
 
     return this.enqueue(() => this.save(snapshot, base));
   }
@@ -316,11 +440,13 @@ export class DraftWriter {
    * Queues a draft write (a comment's add, edit or delete, an AI accept, apply or prepare): sent
    * after every write before it, on the draft you saw, with its own id. Resolves with its answer
    * once it committed; rejects with `WriteRefused` when it was refused, its input yours to keep.
+   * One that `replaces` the summary or verdict is refused while your own text of it is unsaved.
    */
   write<T>(
     route: string,
     params: Record<string, string>,
     body: Record<string, unknown>,
+    options: { replaces?: Field[] } = {},
   ): Promise<T> {
     // Pending edits go first, saved with what they hold now.
     void this.flush();
@@ -334,22 +460,18 @@ export class DraftWriter {
           'DRAFT_CHANGED_LOCALLY',
         );
 
-      const guard = this.guard(base);
-      const write: Inflight = {
-        writeId: guard.writeId,
-        request: { route, params, body: { ...body, ...guardOf(guard) } },
-        base: baseOf(guard),
-      };
+      if ((options.replaces ?? []).some((field) => this.fields[field].failed))
+        throw new WriteRefused(UNSAVED_REPLACED, 'DRAFT_EDIT_UNSAVED');
+
+      const write = this.attempt(this.guard(base), { route, params, body });
       const outcome = await this.dispatch(write);
 
       if (outcome.kind === 'committed') {
-        this.advance(outcome.revision);
+        this.advance(outcome.revision, write.base.generation);
 
         // An answer that is the draft (apply, prepare) is shown at once; another, read again.
-        if (isDraft(outcome.body)) {
-          this.retireFailed(outcome.revision);
-          this.transport.committed(outcome.body);
-        } else this.transport.stale();
+        if (isDraft(outcome.body)) this.transport.committed(outcome.body, write.stamp);
+        else this.transport.stale();
 
         return outcome.body as T;
       }
@@ -358,7 +480,7 @@ export class DraftWriter {
 
       if (outcome.kind === 'conflict') {
         this.observe(outcome.draft);
-        this.transport.committed(outcome.draft);
+        this.transport.committed(outcome.draft, write.stamp);
 
         throw new WriteRefused(
           'The draft changed since you saw it. Nothing was saved; check it, then try again.',
@@ -369,6 +491,60 @@ export class DraftWriter {
 
       throw refusalOf(outcome);
     });
+  }
+
+  /**
+   * Resolves once every write queued so far has settled, pending edits saved first. What waits on
+   * it runs outside the queue, so a slow one never holds up the writes queued after it.
+   */
+  settled(): Promise<void> {
+    void this.flush();
+
+    return this.enqueue(async () => {});
+  }
+
+  /**
+   * Runs a command (submit, discard) that carries or drops `fields` as they are now: none of them
+   * is autosaved while it runs. Its success retires the versions it carried; its failure releases
+   * them, to be saved as before.
+   */
+  async command<T>(fields: Field[], run: () => Promise<T>): Promise<T> {
+    if (this.timer) clearTimeout(this.timer);
+
+    this.timer = null;
+
+    const owned = new Map(fields.map((field) => [field, this.fields[field].version]));
+
+    for (const [field, version] of owned) this.fields[field].owned = version;
+
+    this.changed();
+
+    try {
+      const result = await run();
+
+      for (const [field, version] of owned) {
+        const state = this.fields[field];
+
+        state.owned = null;
+
+        if (version > state.settled) {
+          state.settled = version;
+          state.savedAt = 0;
+        }
+
+        if (state.version === version) state.failed = null;
+      }
+
+      return result;
+    } catch (error) {
+      for (const field of owned.keys()) this.fields[field].owned = null;
+
+      throw error;
+    } finally {
+      this.changed();
+      // An edit made meanwhile, or one released, is saved now.
+      void this.flush();
+    }
   }
 
   /** Runs `job` after every write before it. */
@@ -411,84 +587,85 @@ export class DraftWriter {
     };
   }
 
-  private advance(revision: number) {
-    const generation = this.last?.generation ?? this.seen?.generation ?? 0;
+  /** A new attempt of `request` under `guard`. */
+  private attempt(
+    guard: Guard,
+    request: WriteRequest,
+    fields?: Partial<Record<Field, number>>,
+  ): Inflight {
+    return {
+      writeId: guard.writeId,
+      request: { ...request, body: { ...request.body, ...guardOf(guard) } },
+      base: { revision: guard.baseRevision, generation: guard.baseGeneration },
+      deadline: Date.now() + ATTEMPT_TTL_MS,
+      stamp: this.transport.stamp(),
+      ...(fields ? { fields } : {}),
+    };
+  }
 
+  /** A write on a base of `generation` committed at `revision`: the next queued acts on it. */
+  private advance(revision: number, generation: number) {
     this.last = { revision, generation };
 
     if (!this.seen || revision > this.seen.revision) this.seen = { revision, generation };
   }
 
-  private async save(
-    snapshot: Partial<Record<Field, { value: string; version: number }>>,
-    base: Base | 'chain',
-  ): Promise<void> {
+  private async save(snapshot: Partial<Record<Field, Snapshot>>, base: Base | 'chain') {
     let guard = this.guard(base);
 
-    // An edit made on another generation (before a discard elsewhere) is never sent into this one.
-    const elsewhere = Object.entries(snapshot).filter(([field, saved]) => {
-      const generation = this.fields[field as Field].generation;
-
-      return (
-        this.fields[field as Field].version === saved!.version &&
-        generation !== null &&
-        generation !== guard.baseGeneration
-      );
-    });
+    // Text begun on another generation (before a discard elsewhere) is never sent into this one.
+    const elsewhere = (Object.entries(snapshot) as [Field, Snapshot][]).filter(
+      ([, saved]) => saved.generation !== null && saved.generation !== guard.baseGeneration,
+    );
 
     if (elsewhere.length > 0) {
       this.failFields(
-        Object.fromEntries(elsewhere.map(([field, saved]) => [field, saved!.version])),
+        Object.fromEntries(elsewhere.map(([field, saved]) => [field, saved.version])),
         DISCARDED_ELSEWHERE,
       );
 
-      for (const [field] of elsewhere) delete snapshot[field as Field];
+      for (const [field] of elsewhere) delete snapshot[field];
     }
 
-    if (Object.keys(snapshot).length === 0) return;
+    const sent = Object.entries(snapshot) as [Field, Snapshot][];
+
+    if (sent.length === 0) return;
+
+    const fields = Object.fromEntries(sent.map(([field, saved]) => [field, saved.version]));
+    const values = Object.fromEntries(sent.map(([field, saved]) => [field, saved.value]));
 
     for (;;) {
-      const fields = Object.fromEntries(
-        Object.entries(snapshot).map(([field, saved]) => [field, saved!.version]),
-      ) as Partial<Record<Field, number>>;
-      const write: Inflight = {
-        writeId: guard.writeId,
-        request: {
-          route: 'saveDraft',
-          params: { account: this.account, id: this.prId },
-          body: {
-            ...Object.fromEntries(
-              Object.entries(snapshot).map(([field, saved]) => [field, saved!.value]),
-            ),
-            ...guardOf(guard),
-          },
-        },
-        base: baseOf(guard),
+      const write = this.attempt(
+        guard,
+        { route: 'saveDraft', params: { account: this.account, id: this.prId }, body: values },
         fields,
-      };
+      );
       const outcome = await this.dispatch(write);
 
       if (outcome.kind === 'committed') {
         this.settleFields(fields, outcome.revision);
-        this.advance(outcome.revision);
-        this.transport.committed(outcome.body as ReviewDraft);
+        this.advance(outcome.revision, write.base.generation);
+
+        if (isDraft(outcome.body)) this.transport.committed(outcome.body, write.stamp);
+        else this.transport.stale();
 
         return;
       }
 
       if (outcome.kind === 'conflict') {
         const draft = outcome.draft;
-        const versions = draft.versions;
+        const versions = draft.versions!;
 
         this.observe(draft);
-        this.transport.committed(draft);
-        // Either way the draft is not the one the actions behind this chose: they stop.
+        this.transport.committed(draft, write.stamp);
+        // Either way the draft is not the one the actions behind this chose: they stop, and what
+        // is queued behind acts on the draft as it is.
         this.broken = true;
+        this.last = { revision: versions.revision, generation: versions.generation };
 
         // Changed by another tab or window: your newest edit wins, on the draft as it is now.
         // Discarded, submitted or locked since: nothing is sent into another draft.
-        if (versions && versions.generation === guard.baseGeneration) {
-          this.last = { revision: versions.revision, generation: versions.generation };
+        if (versions.generation === guard.baseGeneration) {
           guard = this.guard('chain');
           continue;
         }
@@ -511,18 +688,27 @@ export class DraftWriter {
 
     if (outcome.kind === 'committed') {
       this.settleFields(fields, outcome.revision);
-      this.advance(outcome.revision);
+      this.advance(outcome.revision, write.base.generation);
       this.transport.stale();
 
       return;
     }
 
     if (outcome.kind === 'conflict') {
+      const versions = outcome.draft.versions!;
+
       this.observe(outcome.draft);
-      this.transport.committed(outcome.draft);
+      this.transport.committed(outcome.draft, write.stamp);
+      // What is queued behind it chose another draft: it stops, and acts on the draft as it is.
+      this.broken = true;
+      this.last = { revision: versions.revision, generation: versions.generation };
 
       // Changed elsewhere since, the same draft: its edits are saved again on the draft as it is.
-      if (outcome.draft.versions?.generation === write.base.generation) {
+      if (versions.generation === write.base.generation) {
+        for (const [field, version] of Object.entries(fields) as [Field, number][])
+          if (this.fields[field].queued === version)
+            this.fields[field].queued = this.fields[field].settled;
+
         void this.flush();
 
         return;
@@ -538,7 +724,8 @@ export class DraftWriter {
 
   /**
    * Sends a write and learns its outcome. An answer that says nothing is sent again as it was,
-   * the same id answering once; one still on its way is looked up until it settles.
+   * the same id answering once; one still on its way is looked up until it settles, or until its
+   * deadline, when it is taken as unconfirmed.
    */
   private async dispatch(
     write: Inflight,
@@ -547,16 +734,22 @@ export class DraftWriter {
     this.inflight = [...this.inflight.filter((other) => other.writeId !== write.writeId), write];
     this.changed();
 
-    let outcome = await decode(this.transport.send(write.request), first);
+    const send = (isFirst: boolean) => decode(this.transport.send(write.request), isFirst, write);
+    let outcome = await send(first);
     let attempt = 0;
 
     while (outcome.kind === 'pending' || outcome.kind === 'unknown') {
+      if (Date.now() >= write.deadline) {
+        outcome = { kind: 'refused', error: new ApiError(NOT_CONFIRMED, 0, 'NOT_CONFIRMED') };
+        break;
+      }
+
       await sleep(this.backoff(attempt++));
 
       if (outcome.kind === 'pending') {
         const looked = await this.transport
           .lookup(write.writeId, write.base)
-          .then(fromLookup)
+          .then((answer) => fromLookup(answer, write))
           .catch((): 'resend' => 'resend');
 
         // It never arrived and never can: as refused, nothing saved.
@@ -568,9 +761,8 @@ export class DraftWriter {
           break;
         }
 
-        outcome =
-          looked === 'resend' ? await decode(this.transport.send(write.request), false) : looked;
-      } else outcome = await decode(this.transport.send(write.request), false);
+        outcome = looked === 'resend' ? await send(false) : looked;
+      } else outcome = await send(false);
     }
 
     this.inflight = this.inflight.filter((other) => other.writeId !== write.writeId);
@@ -592,49 +784,32 @@ export class DraftWriter {
     this.changed();
   }
 
-  private failFields(fields: Partial<Record<Field, number>>, reason: string) {
+  /** Marks each field refused, if it still holds the version refused: an edit since is the next save's. */
+  private markFailed(fields: Partial<Record<Field, number>>, reason: string): boolean {
     let failed = false;
 
     for (const [field, version] of Object.entries(fields) as [Field, number][])
-      // An edit since is the next save's to send: this refusal is not its.
       if (this.fields[field].version === version) {
         this.fields[field].failed = reason;
         failed = true;
       }
 
+    return failed;
+  }
+
+  private failFields(fields: Partial<Record<Field, number>>, reason: string) {
+    const failed = this.markFailed(fields, reason);
+
     this.changed();
 
     if (failed) this.transport.refused(reason);
   }
-
-  /** A write that replaced the draft's text (apply, prepare): a refused edit it replaced is retired. */
-  private retireFailed(revision: number) {
-    for (const state of Object.values(this.fields))
-      if (state.failed) {
-        state.failed = null;
-        state.settled = state.version;
-        state.savedAt = revision;
-      }
-
-    this.changed();
-  }
 }
-
-const DISCARDED_ELSEWHERE =
-  'This draft was discarded or submitted elsewhere. Your text is kept here and was not saved.';
-
-const isDraft = (body: unknown): body is ReviewDraft =>
-  typeof body === 'object' && body !== null && 'versions' in body && 'comments' in body;
 
 const guardOf = (guard: Guard) => ({
   writeId: guard.writeId,
   baseRevision: guard.baseRevision,
   baseGeneration: guard.baseGeneration,
-});
-
-const baseOf = (guard: Guard): Base => ({
-  revision: guard.baseRevision,
-  generation: guard.baseGeneration,
 });
 
 function refusalOf(outcome: Outcome): WriteRefused {
@@ -649,17 +824,16 @@ function refusalOf(outcome: Outcome): WriteRefused {
       draft: outcome.draft,
     });
 
-  return new WriteRefused('This write could not be confirmed.');
+  return new WriteRefused(NOT_CONFIRMED, 'NOT_CONFIRMED');
 }
 
-const strip = ({ queued: _queued, ...state }: FieldState) => state;
+const strip = ({ queued: _queued, owned: _owned, ...state }: FieldState) => state;
 
 function readJournal(account: string, prId: string): Journal | null {
   try {
     const text = sessionStorage.getItem(journalKey(account, prId));
-    const journal = text ? (JSON.parse(text) as Journal) : null;
 
-    return journal && Date.now() - journal.written < JOURNAL_TTL_MS ? journal : null;
+    return text ? (JSON.parse(text) as Journal) : null;
   } catch {
     return null;
   }

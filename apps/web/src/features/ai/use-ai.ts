@@ -145,10 +145,10 @@ export function useAi(prId: string | null, account: string) {
       provider?: AiProvider;
       force?: boolean;
     }) => {
-      // The summary is written from the verdict and text as you left them in the writer: saved
-      // first, in the draft's queue, and not started on a draft that refused them.
+      // The summary is written from the verdict and text as you left them in the writer: started
+      // once every save queued before it settled, and not on a draft that refused them.
       if (task === 'draft_summary') {
-        await writer.flush();
+        await writer.settled();
 
         const refusal = writer.failure('event') ?? writer.failure('body');
 
@@ -190,7 +190,12 @@ export function useAi(prId: string | null, account: string) {
       runId,
       ...options
     }: { runId: string; indices: number[] } & PrepareReviewOptions) =>
-      writer.write<ReviewDraft>('prepareAi', run(runId), { ...options, ...forPr }),
+      writer.write<ReviewDraft>(
+        'prepareAi',
+        run(runId),
+        { ...options, ...forPr },
+        { replaces: ['body', 'event'] },
+      ),
     onSettled: () =>
       Promise.all([
         client.invalidateQueries({ queryKey: key }),
@@ -200,7 +205,8 @@ export function useAi(prId: string | null, account: string) {
 
   const applySummary = useMutation({
     mutationKey: applyKey,
-    mutationFn: (runId: string) => writer.write<ReviewDraft>('applyAi', run(runId), forPr),
+    mutationFn: (runId: string) =>
+      writer.write<ReviewDraft>('applyAi', run(runId), forPr, { replaces: ['body'] }),
     onSettled: () => client.invalidateQueries({ queryKey: key }),
   });
 
