@@ -165,8 +165,8 @@ export function useReview(prId: string | null, account: string) {
       body: string;
       expectedHeadOid: string;
       allowNewHead?: boolean;
-      /** The versions of the summary and verdict sent, as `writer.versions` gave them. */
-      carried?: Partial<Record<Field, number>>;
+      /** The versions of the summary and verdict sent, read with them (`writer.carry`). */
+      carried: Record<Field, number>;
     }) =>
       // Carries the summary and verdict as you left them: none is autosaved into the draft it
       // submits meanwhile, nor, once it was accepted, the versions it carried.

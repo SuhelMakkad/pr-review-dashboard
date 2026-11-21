@@ -547,6 +547,101 @@ describe('the draft writer', () => {
     accept();
   });
 
+  it('never rebases expired text after a reload, however recently you typed since', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', 'PR_1', first.transport, instant);
+
+    clock(1_000);
+    writer.observe(draft(2));
+    writer.edit('body', 'Begun long ago');
+    clock(1_000 + ATTEMPT_TTL_MS - 10);
+    first.answers.push(() => new Promise(() => {}));
+    void writer.flush();
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    clock(1_000 + ATTEMPT_TTL_MS);
+
+    const second = server();
+    const resend = held();
+
+    second.answers.push(resend.answer);
+
+    const reloaded = new DraftWriter('you', 'PR_1', second.transport, instant);
+
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    // Typed on while its replay is on its way: new text, but the replayed text is still old.
+    reloaded.edit('body', 'Typed now');
+    resend.release(conflict(draft(5)));
+    await reloaded.settled();
+    await reloaded.flush();
+
+    expect(second.sent.map((request) => request.body.body)).toEqual([
+      'Begun long ago',
+      'Typed now',
+    ]);
+  });
+
+  it('keeps, after a submit is accepted, the outcome of a newer save its text was not', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+    const comment = held();
+
+    writer.observe(draft(1));
+    answers.push(comment.answer, async () => {
+      throw new ApiError('Switch back to do this.', 409, 'ACCOUNT_NOT_ACTIVE');
+    });
+    void writer.write('addComment', pr, { body: 'Ahead of it' });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    writer.edit('body', 'Submitted');
+
+    const carried = writer.carry(undefined).versions;
+
+    // A newer text's save queued behind the comment; the submit, of the older, is accepted.
+    writer.edit('body', 'Newer');
+    void writer.flush();
+    await writer.command(['body', 'event'], async () => 'queued', 'retire', carried);
+
+    // A summary start waits on that save; you type on; then the save is refused.
+    const starting = writer.settled(['body']);
+
+    writer.edit('body', 'Newest');
+    comment.release((request) => ({
+      attempt: { id: request.body.writeId, state: 'committed', revision: 2 },
+    }));
+
+    await expect(starting).resolves.not.toBeNull();
+    await writer.flush();
+  });
+
+  it('only looks up a retry a command came to hold while its lookup was on its way', async () => {
+    const { sent, answers, transport } = server();
+    let accept: () => void = () => {};
+    let sentWhileHeld: number | null = null;
+    const writer: DraftWriter = new DraftWriter('you', 'PR_1', transport, (attempt) => {
+      if (attempt === 2) {
+        sentWhileHeld = sent.length;
+        accept();
+      }
+
+      return 0;
+    });
+
+    writer.observe(draft(1));
+    answers.push(async (request) => ({
+      pending: true,
+      attempt: { id: request.body.writeId, state: 'pending' },
+    }));
+    // A submit takes the field while the lookup is on its way, and the lookup fails.
+    vi.mocked(transport.lookup).mockImplementationOnce(async () => {
+      void writer.command(['event'], () => new Promise<void>((done) => (accept = done)), 'retire');
+
+      throw new Error('Not reachable');
+    });
+    writer.edit('event', 'APPROVE');
+    await writer.settled();
+
+    expect(sentWhileHeld).toBe(1);
+  });
+
   it('clears an expiry once a replay of the same text is confirmed', async () => {
     const first = server();
     const writer = new DraftWriter('you', 'PR_1', first.transport, instant);

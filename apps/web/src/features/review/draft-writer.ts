@@ -206,7 +206,7 @@ interface FieldState {
    * Whether the latest save queued of it committed: what a write that replaces it, or waits on
    * it, depends on, whatever was typed since.
    */
-  lastSave: Promise<boolean> | null;
+  lastSave: { version: number; kept: Promise<boolean> } | null;
 }
 
 /** A field's text as a save carries it. */
@@ -231,6 +231,8 @@ interface Inflight {
   stamp: number;
   /** For a meta save, the field versions it carries: only these are journaled. */
   fields?: Partial<Record<Field, number>>;
+  /** For a meta save, where each field's text began: its rebase after a reload keeps them. */
+  meta?: Partial<Record<Field, Pick<Snapshot, 'generation' | 'since'>>>;
 }
 
 /**
@@ -353,7 +355,7 @@ export class DraftWriter {
 
         // Queued already: a flush meanwhile does not send the same versions twice.
         state.queued = Math.max(state.queued, version);
-        state.lastSave = job.then((done) => done.has(field));
+        state.lastSave = { version, kept: job.then((done) => done.has(field)) };
       }
 
       this.inflight.push(resumed);
@@ -421,6 +423,22 @@ export class DraftWriter {
     return Object.fromEntries(fields.map((field) => [field, this.fields[field].version]));
   }
 
+  /**
+   * The summary and verdict as shown on `draft`, and the versions they hold, read at once: what a
+   * submit sends, and what its acceptance retires.
+   */
+  carry(draft: ReviewDraft | undefined): {
+    body: string;
+    event: ReviewEvent;
+    versions: Record<Field, number>;
+  } {
+    return {
+      body: this.value('body', draft),
+      event: this.value('event', draft),
+      versions: { body: this.fields.body.version, event: this.fields.event.version },
+    };
+  }
+
   /** You typed `value` into `field`: saved after a pause (the body) or at once (the verdict). */
   edit<F extends Field>(field: F, value: FieldValue<F>) {
     const state = this.fields[field];
@@ -466,7 +484,11 @@ export class DraftWriter {
     const base = this.baseNow();
     const job = this.enqueue(() => this.save(snapshot, base));
 
-    for (const field of fields) this.fields[field].lastSave = job.then((done) => done.has(field));
+    for (const field of fields)
+      this.fields[field].lastSave = {
+        version: snapshot[field]!.version,
+        kept: job.then((done) => done.has(field)),
+      };
 
     return job.then(() => {});
   }
@@ -592,8 +614,10 @@ export class DraftWriter {
         if (version > state.settled) {
           state.settled = version;
           state.savedAt = 0;
-          state.lastSave = null;
         }
+
+        // Only the outcome of a save of what it carried is retired: a newer save's still counts.
+        if (state.lastSave && state.lastSave.version <= version) state.lastSave = null;
 
         if (state.version === version) state.failed = null;
       }
@@ -656,7 +680,7 @@ export class DraftWriter {
   private attempt(
     guard: Guard,
     request: WriteRequest,
-    fields?: Partial<Record<Field, number>>,
+    saved?: Pick<Inflight, 'fields' | 'meta'>,
   ): Inflight {
     return {
       writeId: guard.writeId,
@@ -664,7 +688,7 @@ export class DraftWriter {
       base: { revision: guard.baseRevision, generation: guard.baseGeneration },
       deadline: Date.now() + ATTEMPT_TTL_MS,
       stamp: this.transport.stamp(),
-      ...(fields ? { fields } : {}),
+      ...saved,
     };
   }
 
@@ -709,11 +733,12 @@ export class DraftWriter {
     const snapshot: Partial<Record<Field, Snapshot>> = {};
 
     for (const [field, version] of entries(write.fields ?? {})) {
-      const state = this.fields[field];
       const value = write.request.body[field];
+      const began = write.meta?.[field];
 
-      if (version > state.settled && typeof value === 'string')
-        snapshot[field] = { value, version, generation: state.generation, since: state.since };
+      // Where its text began, as it was sent: never renewed by an edit since.
+      if (version > this.fields[field].settled && typeof value === 'string' && began)
+        snapshot[field] = { value, version, ...began };
     }
 
     return snapshot;
@@ -726,7 +751,7 @@ export class DraftWriter {
 
   /** The outcomes of the latest saves queued of `fields`, as of now. */
   private savesOf(fields: Field[]): Promise<boolean[]> {
-    return Promise.all(fields.map((field) => this.fields[field].lastSave ?? true));
+    return Promise.all(fields.map((field) => this.fields[field].lastSave?.kept ?? true));
   }
 
   /** Whether any of `fields` is refused, or its latest save before this was not kept. */
@@ -778,10 +803,13 @@ export class DraftWriter {
 
       const fields = Object.fromEntries(sent.map(([field, saved]) => [field, saved.version]));
       const values = Object.fromEntries(sent.map(([field, saved]) => [field, saved.value]));
+      const meta = Object.fromEntries(
+        sent.map(([field, saved]) => [field, { generation: saved.generation, since: saved.since }]),
+      );
       const write = this.attempt(
         guard,
         { route: 'saveDraft', params: { account: this.account, id: this.prId }, body: values },
-        fields,
+        { fields, meta },
       );
       const outcome = await this.dispatch(write);
 
@@ -894,8 +922,9 @@ export class DraftWriter {
           break;
         }
 
+        // Held again by the time the lookup answered: still only looked up.
         if (looked !== 'resend') outcome = looked;
-        else if (!held) outcome = await send(false);
+        else if (!this.held(write)) outcome = await send(false);
       } else outcome = await send(false);
     }
 

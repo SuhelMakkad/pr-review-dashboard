@@ -381,6 +381,7 @@ describe('drafts and Activity per account', () => {
             event: 'COMMENT',
             body: 'Typed just before',
             expectedHeadOid: 'abc',
+            carried: hook.result.current.writer.carry(undefined).versions,
           })
         : hook.result.current.discard.mutateAsync(),
     );
@@ -417,16 +418,19 @@ describe('drafts and Activity per account', () => {
 
     act(() => hook.result.current.writer.edit('body', 'Sent'));
 
-    const carried = hook.result.current.writer.versions(['body', 'event']);
+    // Read with its values, as the sheet reads them on Submit.
+    const carried = hook.result.current.writer.carry(undefined);
+
+    expect(carried.body).toBe('Sent');
 
     // Typed on before the submit ran: it stays yours to save, not retired with the review.
     act(() => hook.result.current.writer.edit('body', 'Typed after'));
     await act(() =>
       hook.result.current.submit.mutateAsync({
-        event: 'COMMENT',
-        body: 'Sent',
+        event: carried.event,
+        body: carried.body,
         expectedHeadOid: 'abc',
-        carried,
+        carried: carried.versions,
       }),
     );
     await waitFor(() => expect(saved).toEqual(['Typed after']));

@@ -68,9 +68,9 @@ export interface FinishSheetProps {
     body: string;
     expectedHeadOid: string;
     allowNewHead?: boolean;
-    /** The writer's versions of `body` and `event`, captured with them: required, so a submit
-     * never retires text it did not send. */
-    carried: Partial<Record<Field, number>>;
+    /** The writer's versions of `body` and `event`, read with them: required, so a submit never
+     * retires text it did not send. */
+    carried: Record<Field, number>;
   }) => Promise<OperationReceipt>;
   busy: boolean;
   onSubmitted: (result: OperationReceipt) => void;
@@ -139,13 +139,14 @@ export function FinishSheet({
     setProblem(null);
 
     try {
-      // The versions shown, with their values: only those are retired once it is accepted.
+      // The values and their versions, read at once: only those are retired once it is accepted.
+      const carried = writer.carry(draft);
       const result = await submit({
-        event,
-        body,
+        event: carried.event,
+        body: carried.body,
         expectedHeadOid: viewedHeadOid,
         allowNewHead,
-        carried: writer.versions(['body', 'event']),
+        carried: carried.versions,
       });
 
       submitted.current = true;
