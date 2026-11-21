@@ -5,7 +5,7 @@ import { instanceUrl, parseAccount } from '@review-desk/shared/accounts';
 import type { Store } from '@/db/store.js';
 import type { EventBus } from '@/events.js';
 import type { GitHubApi } from '@/github/api.js';
-import { asAccount } from '@/github/credentials.js';
+import { bindForge } from '@/forge/bind.js';
 import { GitHubError } from '@/github/errors.js';
 import type { ViewedRevision } from '@/github/write.js';
 import { ReviewError } from '@/review/errors.js';
@@ -44,6 +44,9 @@ export class PullQueue {
 
     this.state.assertNotCoolingDown(account);
 
+    // Every read below is this account's, whatever is selected meanwhile.
+    const forge = bindForge(this.github, account);
+
     // A read is refused when the PR is removed or reduced after it started; the row left behind
     // can be older than the read, so read again rather than return it.
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -54,14 +57,14 @@ export class PullQueue {
 
       // Where the forge cannot carry the account with each call (GitLab), its sign-in is checked
       // before the read and again before its result is kept.
-      const verify = this.github.verifyAccount?.bind(this.github);
-      const read = () => this.github.snapshot(id, account, cached.sources, cached);
+      const verify = forge.verifyAccount?.bind(forge);
+      const read = () => forge.snapshot(id, account, cached.sources, cached);
       /** Saved before the caller hears of it, so the next request waits too. */
       const keepLimit = (error: unknown) => {
         if (error instanceof GitHubError && error.outcome === 'rate_limit' && error.retryAt)
           this.state.deferUntil(error.retryAt, account);
       };
-      const fetched = await asAccount(account, async () => {
+      const fetched = await (async () => {
         if (!verify)
           return read().catch((error: unknown) => {
             keepLimit(error);
@@ -95,7 +98,7 @@ export class PullQueue {
           keepLimit(error);
           throw error;
         }
-      });
+      })();
       // Keep the stored sources: a PR may have been added or removed by hand during the fetch.
       const outcome = this.snapshots.commit(observation, fetched, {
         fingerprint: null,
@@ -132,6 +135,9 @@ export class PullQueue {
     const login = this.state.knownLogin(account);
 
     this.state.assertNotCoolingDown(login);
+
+    // Every read below is this account's, whatever is selected meanwhile.
+    const client = bindForge(this.github, login);
 
     const { forge, host: accountHost } = parseAccount(login);
     // This account's own GitLab web address, in use or not: another's could have another root.
@@ -170,7 +176,7 @@ export class PullQueue {
     const label = `${repository}${forge === 'gitlab' ? '!' : '#'}${number}`;
     // For GitLab, nothing is saved unless glab is this account before the reads and after them.
     const verify = () =>
-      asAccount(login, async () => this.github.verifyAccount?.(login)).catch((error: unknown) =>
+      (async () => client.verifyAccount?.(login))().catch((error: unknown) =>
         // A limit met by the check itself cannot be tied to the account.
         Promise.reject(unattributed(error)),
       );
@@ -189,7 +195,7 @@ export class PullQueue {
     };
     const reading = async <T>(read: () => Promise<T>): Promise<T> => {
       try {
-        return await asAccount(login, read);
+        return await read();
       } catch (error) {
         await keepLimit(error);
         throw error;
@@ -198,7 +204,7 @@ export class PullQueue {
 
     await verify();
 
-    const resolved = await reading(() => this.github.resolvePull(repository, number));
+    const resolved = await reading(() => client.resolvePull(repository, number));
 
     if (!resolved)
       throw new ReviewError(
@@ -220,7 +226,7 @@ export class PullQueue {
 
     // Fetch before writing anything, so a failure leaves the queue as it was.
     const fetched = await reading(() =>
-      this.github.snapshot(resolved.id, login, ordered([...feeds, 'manual']), cached),
+      client.snapshot(resolved.id, login, ordered([...feeds, 'manual']), cached),
     );
 
     await verify();

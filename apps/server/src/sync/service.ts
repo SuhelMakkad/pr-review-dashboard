@@ -124,6 +124,11 @@ export class SyncService {
     return this.state.knows(account);
   }
 
+  /** What the account's forge supports, as its last sync read it, in use or not. */
+  capabilitiesOf(account: string): SyncStatus['capabilities'] {
+    return this.state.capabilitiesOf(account);
+  }
+
   /** Refuses a read while the account is cooling down after a rate limit. */
   assertNotCoolingDown(account?: string | null): void {
     this.state.assertNotCoolingDown(account);

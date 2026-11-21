@@ -12,7 +12,6 @@ import {
   isSameUser,
   parseAccount,
 } from '@review-desk/shared/accounts';
-import { asAccount, scopedAccount } from '@/github/credentials.js';
 import type {
   BlobText,
   CompareResult,
@@ -176,6 +175,10 @@ export class GitLab implements GitHubApi {
   constructor(
     readonly transport: GitLabTransport,
     private readonly settings: SettingsStore | null = null,
+    /** The account every call is made as, once bound (`as`); null for the host's own client. */
+    private readonly account: string | null = null,
+    /** What every client of this host shares: the release, read once. */
+    private readonly shared: { release: Promise<GitLabVersion | null> | null } = { release: null },
   ) {
     this.writes = createGitLabWriter(transport, {
       mergeRequest: (ref) => this.mergeRequest(ref),
@@ -199,29 +202,38 @@ export class GitLab implements GitHubApi {
     },
   };
 
-  /** Per account once known (every sync and write reads the identity first), else per host. */
-  private localKey(key: string): string {
-    // The account the work runs as names its own state; the last identity read is the fallback.
-    return `gitlab:${scopedAccount() ?? this.login ?? this.host}:${key}`;
+  /**
+   * This host's client, bound to `login`: its local state is that account's, and a write refuses
+   * if glab is signed in as anyone else. glab still signs each request in with its own sign-in, so
+   * reads that must be that account's check it (`verifyAccount`).
+   */
+  as(login: string): GitLab {
+    return login === this.account
+      ? this
+      : new GitLab(this.transport, this.settings, login, this.shared);
   }
 
-  private release: Promise<GitLabVersion | null> | null = null;
+  /** Per account once known (every sync and write reads the identity first), else per host. */
+  private localKey(key: string): string {
+    // The account the client is bound to names its own state; the last identity read is the fallback.
+    return `gitlab:${this.account ?? this.login ?? this.host}:${key}`;
+  }
 
   /** The instance's GitLab release, read once; unknown (null) when it cannot be read. */
   version(): Promise<GitLabVersion | null> {
-    this.release ??= call<{ version?: string }>(
+    this.shared.release ??= call<{ version?: string }>(
       this.transport,
       { path: 'version' },
       'Could not read the GitLab version',
     )
       .then((data) => parseVersion(data.version))
       .catch(() => {
-        this.release = null;
+        this.shared.release = null;
 
         return null;
       });
 
-    return this.release;
+    return this.shared.release;
   }
 
   /** Requesting changes needs GitLab 19.2, which lets a published review set the reviewer state. */
@@ -287,7 +299,7 @@ export class GitLab implements GitHubApi {
 
   /** Refuses when glab is now signed in as someone other than the account the work runs as. */
   private async assertAccount(): Promise<void> {
-    const expected = scopedAccount();
+    const expected = this.account;
 
     if (!expected || parseAccount(expected).forge !== 'gitlab') return;
 
@@ -478,7 +490,8 @@ export class GitLab implements GitHubApi {
     sources: Source[],
     previous?: PullRequestSnapshot,
   ): Promise<PullRequestSnapshot> {
-    return asAccount(login, () => this.readSnapshot(id, login, sources, previous));
+    // Read as the PR's account, so viewed marks and a submission in progress are that account's.
+    return this.as(login).readSnapshot(id, login, sources, previous);
   }
 
   private async readSnapshot(

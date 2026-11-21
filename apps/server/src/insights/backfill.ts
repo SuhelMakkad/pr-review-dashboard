@@ -1,6 +1,6 @@
 import type { EventBus } from '@/events.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
-import { asAccount } from '@/github/credentials.js';
+import { bindForge } from '@/forge/bind.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import { extractActivity } from '@/insights/extract.js';
@@ -52,8 +52,8 @@ export class Backfill {
     if (current) return current;
     if (this.closed) return Promise.resolve();
 
-    // History is read as this account even if you switch accounts while it runs.
-    const run = asAccount(login, () => this.run(login, Boolean(options.force))).finally(() => {
+    // History is read as this account even if you switch accounts while it runs (`run` binds).
+    const run = this.run(login, Boolean(options.force)).finally(() => {
       this.running.delete(login);
       this.events.emit({ type: 'insights.updated', account: login });
     });
@@ -90,7 +90,8 @@ export class Backfill {
         lastError: null,
         ...patch,
       });
-    const github = this.sync.github;
+    // Every read is this account's, whatever is selected meanwhile.
+    const github = bindForge(this.sync.github, login);
     // Where the forge cannot carry the account with each call (GitLab), its sign-in is checked
     // before a window's reads and again before they are saved. A limit met by a check itself
     // cannot be tied to the account.
@@ -149,7 +150,7 @@ export class Backfill {
   }
 
   private async read(login: string, window: string, force: boolean, known: Set<string>) {
-    const github = this.sync.github;
+    const github = bindForge(this.sync.github, login);
     const ids = [
       ...new Set([
         ...(await github.searchPullIds(`is:pr reviewed-by:${login} updated:${window}`)),

@@ -22,12 +22,13 @@ import { AiRunner } from '@/ai/runner.js';
 import { preparedCommentFingerprint } from '@/ai/preparation.js';
 import { jsonSchemaFor } from '@/ai/tasks.js';
 import {
+  archiveAccess,
   extractRepository,
   prepareReviewWorkspace,
   type RepositoryExporter,
 } from '@/ai/workspace.js';
 import { Store } from '@/db/store.js';
-import { FixtureGitHub } from '@/demo/fixture-github.js';
+import { DEMO_SECOND_ACCOUNT, FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { DiffService } from '@/diff/service.js';
 import { EventBus } from '@/events.js';
@@ -591,6 +592,28 @@ describe('Codex plan usage', () => {
 });
 
 describe('AI runner', () => {
+  it('keeps a full review its own account through a switch, from its compare to its archives', async () => {
+    const { github, runner, pr, finished } = await setup();
+    const compared: string[] = [];
+    const compare = github.compare.bind(github);
+
+    vi.spyOn(github, 'compare').mockImplementation(async (...args) => {
+      // Whose the call is, as the fixture answers it.
+      compared.push((await github.identity()).login);
+
+      return compare(...args);
+    });
+
+    const run = await runner.start('you', pr(1839).id, 'full_review');
+
+    // Selected elsewhere while the run prepares its workspace.
+    github.select(DEMO_SECOND_ACCOUNT);
+    await finished(run);
+
+    expect(compared.length).toBeGreaterThan(0);
+    expect(new Set(compared)).toEqual(new Set(['you']));
+  });
+
   it('runs two full reviews in isolated workspaces and queues another until a slot is free', async () => {
     const { runner, providers, pr, finished, root, sync, github } = await setup();
     const controls = holdRuns(providers.codex);
@@ -1386,6 +1409,7 @@ describe('AI runner', () => {
       directory,
       new AbortController().signal,
       exporter,
+      archiveAccess(null),
     );
 
     const context = JSON.parse(readFileSync(join(directory, 'review.json'), 'utf8'));

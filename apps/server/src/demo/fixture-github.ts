@@ -8,7 +8,8 @@ import type {
   ReviewState,
   Source,
 } from '@review-desk/shared/types';
-import { scopedAccount, type CliAccount, type GitHubAccounts } from '@/github/credentials.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import type { CliAccount, GitHubAccounts } from '@/github/credentials.js';
 import type { ThreadInput } from '@/github/write.js';
 import { createHash } from 'node:crypto';
 import type {
@@ -43,6 +44,9 @@ const reviewStates: Record<ReviewEvent, ReviewState> = {
   REQUEST_CHANGES: 'CHANGES_REQUESTED',
   COMMENT: 'COMMENTED',
 };
+
+/** The account a bound view's call is answered as (see `FixtureGitHub.as`). */
+const answeringAs = new AsyncLocalStorage<string>();
 
 /** A GitHub stand-in backed by an in-memory scenario. Used by demo mode and end-to-end tests. */
 export class FixtureGitHub implements GitHubApi, GitHubAccounts {
@@ -126,9 +130,35 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     this.selected = login;
   }
 
-  /** The account a call is answered as: the one its work is scoped to, else the selected one. */
+  /**
+   * The fixture answering as `login`, as a client bound to that account's token would: every call
+   * through it, and everything that call awaits, is that account's. The fixture keeps one state,
+   * so the view runs each call on it with the account it carries.
+   */
+  as(login: string): GitHubApi {
+    return new Proxy(this, {
+      get: (target, property, receiver) => {
+        if (property === 'as') return (other: string) => target.as(other);
+
+        const value = Reflect.get(target, property, receiver);
+
+        return typeof value === 'function'
+          ? (...args: unknown[]) => answeringAs.run(login, () => value.apply(target, args))
+          : value;
+      },
+    });
+  }
+
+  /** With nothing selected, the scenario's viewer, as the GitHub CLI's own account. */
+  async discoverIdentity(): Promise<{ identity: Actor; forge: GitHubApi }> {
+    const forge = this.as(this.effective());
+
+    return { identity: await forge.identity(), forge };
+  }
+
+  /** The account a call is answered as: the one it is bound to, else the selected one. */
   private effective(): string {
-    return scopedAccount() ?? this.selected ?? this.scenario.world.viewer.login;
+    return answeringAs.getStore() ?? this.selected ?? this.scenario.world.viewer.login;
   }
 
   /** True while the call is for the second account: no feed or search returns anything for it. */

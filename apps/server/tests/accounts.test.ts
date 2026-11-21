@@ -6,7 +6,7 @@ import { Store } from '@/db/store.js';
 import { DEMO_SECOND_ACCOUNT, FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { EventBus } from '@/events.js';
-import { asAccount, GhCredentials, GitHubError, safeError } from '@/github/index.js';
+import { GhCredentials, GitHubError, safeError } from '@/github/index.js';
 import { OperationQueue } from '@/operations/queue.js';
 import { SyncService } from '@/sync/service.js';
 import { SELECTED_ACCOUNT } from '@/db/settings.js';
@@ -101,9 +101,7 @@ describe('GitHub CLI accounts', () => {
     expect(run).not.toHaveBeenCalled();
 
     // Work that names an account gets its token, even before anything is picked in the app.
-    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBe(
-      tokens['home-me'],
-    );
+    expect((await credentials.bind('home-me').environment()).GH_TOKEN).toBe(tokens['home-me']);
 
     credentials.select('work-me');
 
@@ -113,9 +111,7 @@ describe('GitHub CLI accounts', () => {
     expect(pinned.GITHUB_TOKEN).toBeUndefined();
 
     // Work that belongs to another account keeps that account's token.
-    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBe(
-      tokens['home-me'],
-    );
+    expect((await credentials.bind('home-me').environment()).GH_TOKEN).toBe(tokens['home-me']);
 
     await credentials.environment();
     expect(tokenReads()).toBe(2);
@@ -134,7 +130,7 @@ describe('GitHub CLI accounts', () => {
     vi.stubEnv('GH_TOKEN', 'environment-token-0123');
 
     // The environment's token is work-me's, verified once with GitHub.
-    const own = await asAccount('work-me', () => credentials.environment());
+    const own = await credentials.bind('work-me').environment();
 
     expect(own.GH_TOKEN).toBe('environment-token-0123');
     expect(run.mock.calls.find(([args]) => args[0] === 'api')?.[0]).toEqual([
@@ -151,9 +147,7 @@ describe('GitHub CLI accounts', () => {
     expect((await credentials.environment()).GH_TOKEN).toBe(tokens['work-me']);
 
     // Another account never gets the environment's token, and its own is read without it.
-    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBe(
-      tokens['home-me'],
-    );
+    expect((await credentials.bind('home-me').environment()).GH_TOKEN).toBe(tokens['home-me']);
 
     const read = run.mock.calls.find(([args]) => args.includes('home-me'));
 
@@ -166,16 +160,14 @@ describe('GitHub CLI accounts', () => {
     credentials.forget();
     credentials.select(null);
 
-    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBe(
-      tokens['home-me'],
-    );
+    expect((await credentials.bind('home-me').environment()).GH_TOKEN).toBe(tokens['home-me']);
 
     const before = probes();
 
     ambient = 'home-me';
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect((await asAccount('home-me', () => credentials.environment())).GH_TOKEN).toBe(
+    expect((await credentials.bind('home-me').environment()).GH_TOKEN).toBe(
       'another-environment-token',
     );
     expect(probes()).toBe(before + 1);
@@ -191,15 +183,13 @@ describe('GitHub CLI accounts', () => {
     vi.stubEnv('GITHUB_TOKEN', '');
     vi.stubEnv('GH_ENTERPRISE_TOKEN', 'enterprise-token-0123');
 
-    expect((await asAccount('work-me', () => credentials.environment())).GH_TOKEN).toBe(
-      tokens['work-me'],
-    );
+    expect((await credentials.bind('work-me').environment()).GH_TOKEN).toBe(tokens['work-me']);
     expect(run.mock.calls.some(([args]) => args[0] === 'api')).toBe(false);
 
     // GITHUB_TOKEN verified as work-me's: that very token goes out, as GH_TOKEN, and nothing else.
     vi.stubEnv('GITHUB_TOKEN', 'environment-token-0123');
 
-    const env = await asAccount('work-me', () => credentials.environment());
+    const env = await credentials.bind('work-me').environment();
     const probe = run.mock.calls.find(([args]) => args[0] === 'api')?.[1];
 
     expect(env.GH_TOKEN).toBe('environment-token-0123');

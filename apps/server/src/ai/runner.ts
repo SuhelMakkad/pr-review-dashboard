@@ -29,7 +29,7 @@ import type { PullRequestDetail, PullRequestSnapshot } from '@review-desk/shared
 import type { AiRunRow } from '@/db/ai-runs.js';
 import type { DiffService } from '@/diff/service.js';
 import type { EventBus } from '@/events.js';
-import { asAccount } from '@/github/credentials.js';
+import { bindForge } from '@/forge/bind.js';
 import { redact, safeError } from '@/github/errors.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
 import { accountNotActive } from '@/review/errors.js';
@@ -49,6 +49,7 @@ import { draftFingerprint, reviewFingerprint } from '@/ai/freshness.js';
 import { draftChanged, planPreparation, preparationRevision } from '@/ai/preparation.js';
 import { instructions, jsonSchemaFor, promptVersions, taskSchemas, timeouts } from '@/ai/tasks.js';
 import {
+  archiveAccess,
   downloadRepository,
   prepareReviewWorkspace,
   type RepositoryExporter,
@@ -815,9 +816,9 @@ export class AiRunner {
 
       if (!id) return;
 
-      // A run keeps its own account's GitHub access if you switch accounts while it runs.
-      const account = this.row(id)?.account;
-      const execution = account ? asAccount(account, () => this.execute(id)) : this.execute(id);
+      // A run keeps its own account's GitHub access if you switch accounts while it runs: it
+      // binds to that account as it starts (`execute`).
+      const execution = this.execute(id);
 
       this.executions.set(id, execution);
       void execution.finally(() => this.executions.delete(id));
@@ -846,6 +847,9 @@ export class AiRunner {
 
     if (!row || !saved) return;
 
+    // Bound as the run starts, and kept to its end whatever is selected meanwhile.
+    const forge = row.account ? bindForge(this.sync.github, row.account) : this.sync.github;
+    const access = archiveAccess(row.account);
     const controller = new AbortController();
     const workDir = join(this.workRoot, id);
     /** When progress was last sent to the app, on the monotonic clock; null before the first. */
@@ -895,12 +899,13 @@ export class AiRunner {
             await rm(join(workDir, path), { recursive: true, force: true });
 
           measured = await prepareReviewWorkspace(
-            this.sync.github,
+            forge,
             snapshot,
             diff,
             workDir,
             controller.signal,
             this.exportRepository,
+            access,
           );
         }
 

@@ -15,7 +15,7 @@ import type {
 } from '@review-desk/shared/types';
 import type { AiRunner } from '@/ai/runner.js';
 import type { AiRunRow, AutoReviewEntry } from '@/db/ai-runs.js';
-import { asAccount } from '@/github/credentials.js';
+import { bindForge } from '@/forge/bind.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import type { Notifier } from '@/notify/notifier.js';
 import { ReviewError } from '@/review/errors.js';
@@ -483,8 +483,10 @@ export class AutoReviewer {
     if (Date.parse(pr.headCommittedAt) <= finished) return true;
 
     // The newest commit came later; an earlier one may have been made while it ran.
-    const compare = await asAccount(account, () =>
-      this.sync.github.compare(pr.repository, run.headOid, pr.headOid),
+    const compare = await bindForge(this.sync.github, account).compare(
+      pr.repository,
+      run.headOid,
+      pr.headOid,
     );
 
     return (

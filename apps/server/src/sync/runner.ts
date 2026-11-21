@@ -7,6 +7,7 @@ import {
   type PullRequestSnapshot,
   type Source,
   type SyncStatus,
+  type Actor,
 } from '@review-desk/shared/types';
 import { forgeOf, forgeTerms, fullRef, parseAccount } from '@review-desk/shared/accounts';
 import { performance } from 'node:perf_hooks';
@@ -14,7 +15,8 @@ import type { Store } from '@/db/store.js';
 import { log } from '@/log.js';
 import type { EventBus } from '@/events.js';
 import type { DetectResult, GitHubApi } from '@/github/api.js';
-import { type GitHubAccounts, unscoped } from '@/github/credentials.js';
+import type { GitHubAccounts } from '@/github/credentials.js';
+import { bindForge, discoverIdentity } from '@/forge/bind.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { ReviewError } from '@/review/errors.js';
 import { laterDeadline, sameAccount, type AccountState } from '@/sync/accounts.js';
@@ -107,8 +109,8 @@ export class SyncRunner {
     if (this.stopped || this.state.cooldown()) return Promise.resolve();
 
     const trigger = options.scheduled ? 'interval' : (options.trigger ?? 'manual');
-    // Always as the selected account, whatever account the caller's work is scoped to.
-    const run = unscoped(() => this.perform(Boolean(options.scheduled), trigger)).finally(() => {
+    // Always as the selected account, which `perform` binds to for the whole sync.
+    const run = this.perform(Boolean(options.scheduled), trigger).finally(() => {
       if (this.running === run) this.running = null;
     });
 
@@ -198,8 +200,12 @@ export class SyncRunner {
     };
 
     try {
-      const account = await this.github.identity();
       const chosen = this.store.settings.get(SELECTED_ACCOUNT);
+      // One account's sync throughout: the one picked in the app, else whoever the CLI's
+      // credentials are now, pinned so a switch meanwhile cannot change whose it is.
+      const { identity: account, forge } = chosen
+        ? await this.bindTo(chosen)
+        : await discoverIdentity(this.github);
 
       timing.forge = forgeOf(account.login) === 'gitlab' ? 'gitlab' : 'github';
 
@@ -216,9 +222,9 @@ export class SyncRunner {
        * account's own token, so they need no check.
        */
       const verify =
-        timing.forge === 'gitlab' && this.github.verifyAccount
+        timing.forge === 'gitlab' && forge.verifyAccount
           ? () =>
-              this.github.verifyAccount!(account.login)
+              forge.verifyAccount!(account.login)
                 // A limit met by the check could be someone else's: never this account's status.
                 .catch((error: unknown) => Promise.reject(unattributed(error)))
           : null;
@@ -246,13 +252,13 @@ export class SyncRunner {
 
       // Kept from the last sync when it cannot be read now.
       target.setCapabilities(
-        (await this.github.capabilities?.().catch(() => this.state.status.capabilities)) ??
+        (await forge.capabilities?.().catch(() => this.state.status.capabilities)) ??
           this.state.status.capabilities,
       );
 
-      await this.refreshTeams(account.login, scheduled);
+      await this.refreshTeams(forge, account.login, scheduled);
 
-      retryAt = await this.discover(account.login, scheduled, verify);
+      retryAt = await this.discover(forge, account.login, scheduled, verify);
       // Discovery checked its reads before writing them: its deadline is the account's.
       confirm();
       timing.discovered = performance.now();
@@ -268,7 +274,7 @@ export class SyncRunner {
       const ciPending = new Set(
         [...previous.values()].filter((pr) => pr.ci === 'pending').map((pr) => pr.id),
       );
-      const detected = await this.detect(ids, ciPending);
+      const detected = await this.detect(forge, ids, ciPending);
 
       // Before detection writes anything: closures, merges and source changes included.
       await verify?.();
@@ -347,14 +353,12 @@ export class SyncRunner {
 
           timing.fetches += 1;
 
-          const snapshot = await this.github
-            .snapshot(id, account.login, sources, latest)
-            .finally(() => {
-              const ms = performance.now() - fetchStarted;
+          const snapshot = await forge.snapshot(id, account.login, sources, latest).finally(() => {
+            const ms = performance.now() - fetchStarted;
 
-              timing.fetchSumMs += ms;
-              timing.fetchMaxMs = Math.max(timing.fetchMaxMs, ms);
-            });
+            timing.fetchSumMs += ms;
+            timing.fetchMaxMs = Math.max(timing.fetchMaxMs, ms);
+          });
 
           return () => {
             try {
@@ -492,6 +496,13 @@ export class SyncRunner {
     }
   }
 
+  /** The selected account, bound, and who it is now: for GitLab, whoever glab is signed in as. */
+  private async bindTo(login: string): Promise<{ identity: Actor; forge: GitHubApi }> {
+    const forge = bindForge(this.github, login);
+
+    return { identity: await forge.identity(), forge };
+  }
+
   /** `sources` with `manual` present exactly when the PR is added by hand right now. */
   private withManual(login: string, id: string, sources: Source[]): Source[] {
     const manual = this.store.manualAddedAt(login, id) !== null;
@@ -502,7 +513,7 @@ export class SyncRunner {
     ]);
   }
 
-  private async refreshTeams(login: string, scheduled: boolean): Promise<void> {
+  private async refreshTeams(forge: GitHubApi, login: string, scheduled: boolean): Promise<void> {
     // Never fetched is due now, whatever the clock reads.
     const fetchedAt = this.teamsFetched.get(login) ?? -Infinity;
 
@@ -511,7 +522,7 @@ export class SyncRunner {
     try {
       const target = this.state.readTarget();
 
-      target.setTeams(await this.github.teams());
+      target.setTeams(await forge.teams());
       this.teamsFetched.set(login, this.clock.now());
     } catch (error) {
       if (error instanceof GitHubError && error.retryAt) throw error;
@@ -527,6 +538,7 @@ export class SyncRunner {
    * previous membership untouched, so a transient search failure never drops a PR's source.
    */
   private async discover(
+    forge: GitHubApi,
     login: string,
     scheduled: boolean,
     verify: (() => Promise<void>) | null = null,
@@ -537,9 +549,7 @@ export class SyncRunner {
         !scheduled ||
         now - (this.feedRuns.get(`${login}:${source}`) ?? -Infinity) >= FEED_INTERVAL_MS[source],
     );
-    const feeds = await Promise.allSettled(
-      due.map((source) => this.github.discover(login, source)),
-    );
+    const feeds = await Promise.allSettled(due.map((source) => forge.discover(login, source)));
     let retryAt: string | null = null;
 
     await verify?.();
@@ -563,6 +573,7 @@ export class SyncRunner {
 
   /** Fingerprints every candidate PR in a few cheap requests. A failure falls back to full fetches. */
   private async detect(
+    forge: GitHubApi,
     ids: string[],
     ciPending: ReadonlySet<string>,
   ): Promise<{
@@ -573,7 +584,7 @@ export class SyncRunner {
     if (ids.length === 0) return { results: new Map(), lowBudget: false, retryAt: null };
 
     try {
-      const { results, budget } = await this.github.detect(ids, { ciPending });
+      const { results, budget } = await forge.detect(ids, { ciPending });
 
       return {
         results: new Map(results.map((result) => [result.id, result])),

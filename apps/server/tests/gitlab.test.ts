@@ -4,7 +4,7 @@ import { deriveItem, emptyTriage } from '@review-desk/shared/attention';
 import { Store } from '@/db/store.js';
 import { ForgeRouter } from '@/forge/router.js';
 import type { GitHubApi } from '@/github/api.js';
-import { asAccount, type CliAccount } from '@/github/credentials.js';
+import type { CliAccount } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { GlabAccounts } from '@/gitlab/accounts.js';
 import { commentPosition, locate, parseDiff } from '@/gitlab/positions.js';
@@ -983,9 +983,7 @@ describe('GitLab merge request snapshots', () => {
     const { client, fake } = gitlab();
 
     // It says which revision and which diff of the file it marked, as a snapshot records them.
-    const marked = await asAccount(VIEWER, () =>
-      client.setFileViewed('MR_7_12', 'src/app.ts', true),
-    );
+    const marked = await client.as(VIEWER).setFileViewed('MR_7_12', 'src/app.ts', true);
 
     expect(marked).toEqual({ headOid: HEAD2, baseOid: START, fileKey: expect.any(String) });
 
@@ -1012,7 +1010,7 @@ describe('GitLab merge request snapshots', () => {
 
     expect(pr.files[0].viewerViewedState).toBe('DISMISSED');
 
-    await asAccount(VIEWER, () => client.setFileViewed('MR_7_12', 'src/app.ts', false));
+    await client.as(VIEWER).setFileViewed('MR_7_12', 'src/app.ts', false);
     pr = await client.snapshot('MR_7_12', VIEWER, []);
 
     expect(pr.files[0].viewerViewedState).toBe('UNVIEWED');
@@ -1057,9 +1055,7 @@ describe('GitLab merge request snapshots', () => {
     });
 
     // Succeeds, so the outbox never sends it again; the diff it marked is still known.
-    expect(
-      await asAccount(VIEWER, () => client.setFileViewed('MR_7_12', 'src/app.ts', true)),
-    ).toMatchObject({
+    expect(await client.as(VIEWER).setFileViewed('MR_7_12', 'src/app.ts', true)).toMatchObject({
       baseOid: null,
       fileKey: expect.any(String),
     });
@@ -1470,7 +1466,7 @@ describe('routing between GitHub and GitLab', () => {
     expect(hosts).toEqual([HOST]);
     // The GitHub CLI keeps its own selection while a GitLab account is in use.
     expect(gh.select).not.toHaveBeenCalled();
-    expect((await asAccount('octo', () => forges.identity())).login).toBe('octo');
+    expect((await forges.as('octo').identity()).login).toBe('octo');
   });
 
   it('lists both CLIs’ accounts, and either one alone when the other is missing', async () => {
@@ -1534,10 +1530,10 @@ describe('routing between GitHub and GitLab', () => {
     );
 
     forges.select('octo');
-    await asAccount(VIEWER, () => forges.replyToThread('MRD_7_12_abc123', 'Thanks'));
+    await forges.as(VIEWER).replyToThread('MRD_7_12_abc123', 'Thanks');
 
     forges.select(VIEWER);
-    await asAccount('octo', () => forges.replyToThread('thread-1', 'Thanks'));
+    await forges.as('octo').replyToThread('thread-1', 'Thanks');
 
     expect(gitlabReply).toHaveBeenCalledWith('MRD_7_12_abc123', 'Thanks');
     expect(github.replyToThread).toHaveBeenCalledWith('thread-1', 'Thanks');
@@ -1879,7 +1875,8 @@ describe('credentials outside the GitLab client', () => {
     const { ReviewService } = await import('@/review/service.js');
     const status: { capabilities?: { requestChanges: boolean } } = {};
     const reviews = new ReviewService(
-      { status, store: {} } as unknown as SyncService,
+      // The named account's own capabilities, as its last sync read them.
+      { status, store: {}, capabilitiesOf: () => status.capabilities } as unknown as SyncService,
       {} as GitHubApi,
       {} as never,
       { emit: () => undefined } as never,
@@ -1987,7 +1984,7 @@ describe('GitLab review follow-ups', () => {
     fake
       .on('POST', `${MR}/draft_notes`, { status: 201, data: { id: 70, note: 'Nothing to add.' } })
       .on('POST', `${MR}/draft_notes/bulk_publish`, { status: 204, data: '' });
-    await asAccount(VIEWER, () => client.submitReview('MRR_7_12', 'COMMENT', 'Nothing to add.'));
+    await client.as(VIEWER).submitReview('MRR_7_12', 'COMMENT', 'Nothing to add.');
     fake.on('GET', `${MR}/draft_notes`, { data: [] }).on('GET', `${MR}/discussions`, {
       data: [
         ...discussions(),
@@ -2171,7 +2168,7 @@ describe('GitLab safety, round three', () => {
     fake.on('GET', 'user', { data: users.ana });
 
     await expect(
-      asAccount(VIEWER, () => client.replyToThread('MRD_7_12_abc123', 'Thanks')),
+      client.as(VIEWER).replyToThread('MRD_7_12_abc123', 'Thanks'),
     ).rejects.toMatchObject({ status: 409, outcome: 'rejected' });
     expect(fake.writes()).toEqual([]);
   });

@@ -1,6 +1,5 @@
 export type { GitHubApi } from '@/github/api.js';
 export {
-  asAccount,
   GhCredentials,
   ghCredentials,
   type CliAccount,
