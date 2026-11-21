@@ -300,6 +300,33 @@ export type AiRunRow = typeof aiRuns.$inferSelect;
 export type DraftCommentRow = typeof draftComments.$inferSelect;
 export type ReviewDraftRow = typeof reviewDrafts.$inferSelect;
 
+/**
+ * Each account's receipt-history epoch: raised in the transaction that deletes its outbox rows (a
+ * demo reset), so a miss for an id first sent in an earlier epoch never proves it was not admitted.
+ */
+export const receiptEpochs = sqliteTable('receipt_epochs', {
+  account: text('account').primaryKey(),
+  epoch: integer('epoch').notNull().default(0),
+});
+
+/**
+ * Submit and discard ids you stopped waiting for: never admitted after, and each with the decision
+ * made when it was stopped. Kept across a demo reset, so a stopped id stays stopped.
+ */
+export const abandonedCommands = sqliteTable(
+  'abandoned_commands',
+  {
+    account: text('account').notNull(),
+    id: text('id').notNull(),
+    prId: text('pr_id').notNull(),
+    type: text('type').$type<'review' | 'discard'>().notNull(),
+    /** Not admitted, as complete receipt history shows; or unknown, history having been lost. */
+    decision: text('decision').$type<'not-admitted' | 'unknown'>().notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.account, table.id] })],
+);
+
 /** Durable GitHub outbox. The document includes immutable input and per-mutation receipts. */
 export const githubOperations = sqliteTable(
   'github_operations',

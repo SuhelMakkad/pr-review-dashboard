@@ -468,7 +468,7 @@ describe('the claim ledger', () => {
 
 describe('the operation receipt', () => {
   it("answers a local discard's outcome and the draft it left, and nothing for an unknown id", async () => {
-    const { call, draftUrl, save, versions } = await demo();
+    const { call, draftUrl, pr, save, versions } = await demo();
     const operationId = randomUUID();
 
     await save({ body: 'Gone soon' });
@@ -479,6 +479,8 @@ describe('the operation receipt', () => {
 
     expect(receipt.json()).toEqual({
       kind: 'local',
+      prId: pr.id,
+      type: 'discard',
       status: 'succeeded',
       draft: { revision, generation },
     });

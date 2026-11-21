@@ -13,7 +13,14 @@ import type { DiffManifest } from '@/diff.js';
 import type { ServerEvent } from '@/events.js';
 import type { Insights } from '@/insights.js';
 import type { NotificationSettings, ReviewNotification } from '@/notify.js';
-import type { GitHubOperation, OperationList, OperationReceipt } from '@/operations.js';
+import type {
+  AbandonedReceipt,
+  AbandonOutcome,
+  CommandReceipt,
+  GitHubOperation,
+  OperationList,
+  OperationReceipt,
+} from '@/operations.js';
 import type { DraftAttempt, DraftComment, ReviewDraft } from '@/review.js';
 import type { LinearIssue, LinearStatus } from '@/tickets.js';
 import type { GitHubAccountList, PullRequestDetail, PullRequestList, SyncStatus } from '@/types.js';
@@ -588,14 +595,28 @@ export const routes = {
     responses: { 200: as<{ operation: GitHubOperation }>() },
   }),
   operationReceipt: json('GET', '/api/accounts/:account/operations/:id/receipt', {
-    responses: {
-      200: as<{
-        kind: 'local' | 'forge';
-        status: GitHubOperation['status'];
-        /** For a finished operation, the draft versions its last write to the draft left. */
-        draft?: { revision: number; generation: number };
-      }>(),
+    responses: { 200: as<CommandReceipt | AbandonedReceipt>() },
+  }),
+  /** The account's receipt-history epoch, read before a command's first send (see `abandon`). */
+  receiptEpoch: json('GET', '/api/accounts/:account/receipt-epoch', {
+    responses: { 200: as<{ epoch: number }>() },
+  }),
+  /**
+   * Stops waiting for a submit or discard sent as `commandId`: admitted already (its receipt), or
+   * never after, with whether complete receipt history shows it was never admitted.
+   */
+  abandonCommand: json('POST', `${pulls}/:id/commands/:commandId/abandon`, {
+    body: {
+      schema: z
+        .object({
+          type: z.enum(['review', 'discard']),
+          /** The epoch read before its first send; null when none was (a legacy id). */
+          epoch: z.number().int().nonnegative().nullable(),
+        })
+        .strict(),
+      invalid: { error: 'Invalid request.', details: true },
     },
+    responses: { 200: as<AbandonOutcome>() },
   }),
   operationCommand: json('POST', '/api/accounts/:account/operations/:id/:command', {
     body: {

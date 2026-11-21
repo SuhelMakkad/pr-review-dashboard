@@ -97,6 +97,32 @@ export interface OperationReceipt {
   operation: GitHubOperation;
 }
 
+/** What the receipt route answers for an id an action was received under. */
+export interface CommandReceipt {
+  kind: 'local' | 'forge';
+  /** The PR and action it was received for: a receipt settles only an attempt that names both. */
+  prId: string;
+  type: GitHubAction['type'];
+  status: OperationStatus;
+  /** For a finished operation, the draft versions its last write to the draft left. */
+  draft?: { revision: number; generation: number };
+}
+
+/**
+ * A submit or discard id you stopped waiting for, with the decision made then: not admitted, as
+ * complete receipt history showed; or unknown, history having been lost. Either way, never after.
+ */
+export interface AbandonedReceipt {
+  kind: 'abandoned';
+  prId: string;
+  type: 'review' | 'discard';
+  decision: 'not-admitted' | 'unknown';
+}
+
+/** What stopping a command answers: admitted already, with its receipt, or its decision. */
+export type AbandonOutcome =
+  { outcome: 'admitted'; receipt: CommandReceipt } | { outcome: AbandonedReceipt['decision'] };
+
 export interface OperationList {
   items: GitHubOperation[];
   nextCursor: string | null;
