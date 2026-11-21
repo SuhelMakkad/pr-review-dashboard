@@ -417,7 +417,7 @@ export class AutoReviewer {
 
   /** The PR's previous automatic review finished and is still being checked for new commits. */
   private checkingPr(account: string, prId: string): boolean {
-    return this.autoLog.withStatus(account, ['checking'], prId).length > 0;
+    return this.autoLog.has(account, prId, 'checking');
   }
 
   /**

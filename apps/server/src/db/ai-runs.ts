@@ -224,6 +224,23 @@ export class AutoReviewLog {
       .all();
   }
 
+  /** True when the PR has an entry in `status`; stops at the first. */
+  has(account: string, prId: string, status: AutoReviewStatus): boolean {
+    return Boolean(
+      this.db
+        .select({ key: autoReviewLog.key })
+        .from(autoReviewLog)
+        .where(
+          and(
+            eq(autoReviewLog.account, account),
+            eq(autoReviewLog.prId, prId),
+            eq(autoReviewLog.status, status),
+          ),
+        )
+        .get(),
+    );
+  }
+
   /** The account's entries for one run, in one of `statuses`. */
   forRun(account: string, runId: string, statuses: AutoReviewStatus[]): AutoReviewEntry[] {
     return this.db
