@@ -4,7 +4,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { lstat, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   codexBlocked,
   defaultAiSettings,
@@ -27,7 +26,7 @@ import {
 import { commentableLines } from '@review-desk/shared/diff';
 import type { DraftComment, PrepareReviewOptions, ReviewDraft } from '@review-desk/shared/review';
 import type { PullRequestDetail, PullRequestSnapshot } from '@review-desk/shared/types';
-import { aiRuns, type AiRunRow } from '@/db/schema.js';
+import type { AiRunRow } from '@/db/ai-runs.js';
 import type { DiffService } from '@/diff/service.js';
 import type { EventBus } from '@/events.js';
 import { asAccount } from '@/github/credentials.js';
@@ -217,35 +216,29 @@ export class AiRunner {
 
     this.opened = true;
 
-    const unfinished = this.db
-      .select()
-      .from(aiRuns)
-      .where(inArray(aiRuns.status, ['queued', 'running']))
-      .all()
+    const unfinished = this.aiRuns
+      .unfinished()
       // Runs queued by this process before it opened are its own, not left over.
       .filter((row) => !this.queue.includes(row.id));
 
     for (const row of unfinished) {
       const resumable = Boolean(row.request && this.providers[row.provider].supportsResume);
 
-      this.db
-        .update(aiRuns)
-        .set(
-          resumable
-            ? {
-                status: 'paused',
-                pauseReason: 'restart',
-                progress: 'Saved after a server restart.',
-                finishedAt: null,
-              }
-            : {
-                status: 'interrupted',
-                progress: null,
-                finishedAt: isoNow(this.clock),
-              },
-        )
-        .where(eq(aiRuns.id, row.id))
-        .run();
+      this.aiRuns.update(
+        row.id,
+        resumable
+          ? {
+              status: 'paused',
+              pauseReason: 'restart',
+              progress: 'Saved after a server restart.',
+              finishedAt: null,
+            }
+          : {
+              status: 'interrupted',
+              progress: null,
+              finishedAt: isoNow(this.clock),
+            },
+      );
     }
 
     this.pump();
@@ -370,8 +363,9 @@ export class AiRunner {
     logWorkspaces(totals);
   }
 
-  private get db() {
-    return this.sync.store.db;
+  /** The runs, as saved (`db/ai-runs.ts`). */
+  private get aiRuns() {
+    return this.sync.store.aiRuns;
   }
 
   /** How long a resume waits for the run's previous agent to have exited before refusing. */
@@ -631,25 +625,11 @@ export class AiRunner {
   }
 
   private completedReview(account: string, prId: string): AiRunRow | null {
-    const rows = this.db
-      .select()
-      .from(aiRuns)
-      .where(
-        and(
-          eq(aiRuns.account, account),
-          eq(aiRuns.prId, prId),
-          eq(aiRuns.task, 'full_review'),
-          eq(aiRuns.status, 'done'),
-        ),
-      )
-      .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
-      .all();
-
-    return rows.find((row) => !this.staleReason(row)) ?? null;
+    return this.aiRuns.doneReviews(account, prId).find((row) => !this.staleReason(row)) ?? null;
   }
 
   private row(id: string): AiRunRow | null {
-    return this.db.select().from(aiRuns).where(eq(aiRuns.id, id)).get() ?? null;
+    return this.aiRuns.get(id);
   }
 
   private update(
@@ -672,9 +652,7 @@ export class AiRunner {
       >
     >,
   ) {
-    if (Object.keys(changes).length === 0) return;
-
-    this.db.update(aiRuns).set(changes).where(eq(aiRuns.id, id)).run();
+    this.aiRuns.update(id, changes);
   }
 
   private emit(row: Pick<AiRunRow, 'account' | 'prId' | 'id'>) {
@@ -756,20 +734,7 @@ export class AiRunner {
         ].join('\u0000'),
       )
       .digest('hex');
-    const findExisting = () =>
-      this.db
-        .select()
-        .from(aiRuns)
-        .where(
-          and(
-            eq(aiRuns.account, account),
-            eq(aiRuns.cacheKey, key),
-            inArray(aiRuns.status, ['queued', 'running', 'paused', 'done']),
-          ),
-        )
-        .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
-        .limit(1)
-        .get();
+    const findExisting = () => this.aiRuns.latestByKey(account, key);
     const existing = findExisting();
 
     if (existing && (!options.force || ['queued', 'running'].includes(existing.status)))
@@ -806,44 +771,34 @@ export class AiRunner {
     if (options.admit && !options.admit(this.detail(account, prId)))
       throw new ReviewError('NOT_ADMITTED', 409, 'This run is no longer wanted.');
 
-    this.db
-      .insert(aiRuns)
-      .values({
-        id,
-        account,
-        prId,
-        task,
-        provider,
-        model,
-        effort: taskSettings.effort,
-        headOid: head,
-        promptVersion: promptVersions[task],
-        cacheKey: key,
-        context,
-        request: {
-          input,
-          snapshot: structuredClone(detail.snapshot),
-          instructions: instructions[task],
-          schema: jsonSchemaFor(task),
-        },
-        status: 'queued',
-        progress: 'Waiting to start…',
-        trigger: options.trigger ?? 'manual',
-        createdAt: isoNow(this.clock),
-      })
-      .run();
-    const superseded = this.db
-      .select()
-      .from(aiRuns)
-      .where(
-        and(
-          eq(aiRuns.account, account),
-          eq(aiRuns.prId, prId),
-          eq(aiRuns.task, task),
-          inArray(aiRuns.status, ['paused', 'failed', 'interrupted']),
-        ),
-      )
-      .all();
+    this.aiRuns.insert({
+      id,
+      account,
+      prId,
+      task,
+      provider,
+      model,
+      effort: taskSettings.effort,
+      headOid: head,
+      promptVersion: promptVersions[task],
+      cacheKey: key,
+      context,
+      request: {
+        input,
+        snapshot: structuredClone(detail.snapshot),
+        instructions: instructions[task],
+        schema: jsonSchemaFor(task),
+      },
+      status: 'queued',
+      progress: 'Waiting to start…',
+      trigger: options.trigger ?? 'manual',
+      createdAt: isoNow(this.clock),
+    });
+    const superseded = this.aiRuns.withStatus(account, prId, task, [
+      'paused',
+      'failed',
+      'interrupted',
+    ]);
 
     for (const previous of superseded) this.cancel(account, previous.id);
     this.queue.push(id);
@@ -1265,18 +1220,7 @@ export class AiRunner {
   async recover(account: string): Promise<void> {
     if (this.closing) return;
 
-    const rows = this.db
-      .select()
-      .from(aiRuns)
-      .where(
-        and(
-          eq(aiRuns.account, account),
-          eq(aiRuns.status, 'paused'),
-          eq(aiRuns.pauseReason, 'restart'),
-        ),
-      )
-      .orderBy(aiRuns.createdAt)
-      .all();
+    const rows = this.aiRuns.pausedByRestart(account);
 
     for (const row of rows) {
       // Its previous agent is still running (a server killed outright left it, and it has not
@@ -1294,34 +1238,14 @@ export class AiRunner {
 
   /** A run of the task on this PR that is queued, running or paused, if there is one. */
   activeRun(account: string, prId: string, task: AiTask): AiRunRow | null {
-    return (
-      this.db
-        .select()
-        .from(aiRuns)
-        .where(
-          and(
-            eq(aiRuns.account, account),
-            eq(aiRuns.prId, prId),
-            eq(aiRuns.task, task),
-            inArray(aiRuns.status, ['queued', 'running', 'paused']),
-          ),
-        )
-        .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
-        .limit(1)
-        .get() ?? null
-    );
+    return this.aiRuns.active(account, prId, task);
   }
 
   /** The latest full review of each tracked PR, for list badges. Restarts are AutoReviewer's. */
   reviewStatuses(
     account: string,
   ): (Omit<AiReviewStatus, 'restartAt'> & { runId: string; status: AiRunStatus })[] {
-    const rows = this.db
-      .select()
-      .from(aiRuns)
-      .where(and(eq(aiRuns.account, account), eq(aiRuns.task, 'full_review')))
-      .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
-      .all();
+    const rows = this.aiRuns.reviews(account);
     const latest = new Map<string, AiRunRow>();
 
     for (const row of rows) if (!latest.has(row.prId)) latest.set(row.prId, row);
@@ -1340,12 +1264,7 @@ export class AiRunner {
   /** Keep the latest attempt and latest completed result so a failed retry never loses a review. */
   runs(account: string, prId: string): AiRun[] {
     const head = this.sync.detailFor(account, prId)?.snapshot.headOid;
-    const rows = this.db
-      .select()
-      .from(aiRuns)
-      .where(and(eq(aiRuns.account, account), eq(aiRuns.prId, prId)))
-      .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
-      .all();
+    const rows = this.aiRuns.forPull(account, prId);
     const latest = new Map<AiTask, AiRunRow>();
     const completed = new Map<AiTask, AiRunRow>();
 

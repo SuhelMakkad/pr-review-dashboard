@@ -1,6 +1,5 @@
 import { isoNow, type Clock } from '@/clock.js';
 import { pullPath, shortRef } from '@review-desk/shared/accounts';
-import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import {
   AUTO_REVIEW_QUIET_MS,
   codexBlocked,
@@ -15,8 +14,7 @@ import type {
   PullRequestSnapshot,
 } from '@review-desk/shared/types';
 import type { AiRunner } from '@/ai/runner.js';
-import { aiRuns, autoReviewLog, type AiRunRow } from '@/db/schema.js';
-import { batches } from '@/db/store.js';
+import type { AiRunRow, AutoReviewEntry } from '@/db/ai-runs.js';
 import { asAccount } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import type { Notifier } from '@/notify/notifier.js';
@@ -24,7 +22,7 @@ import { ReviewError } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import { AUTO_REVIEW_PRIMED } from '@/db/settings.js';
 
-type LogRow = typeof autoReviewLog.$inferSelect;
+type LogRow = AutoReviewEntry;
 
 /** Review requests: first requests (direct, team or assignment) and re-requests after a review. */
 const TRIGGERS = new Set<AttentionReason['kind']>(['first_review', 'requested_again']);
@@ -125,8 +123,9 @@ export class AutoReviewer {
     return this.sync.clock;
   }
 
-  private get db() {
-    return this.sync.store.db;
+  /** The requests handled so far, as saved (`db/ai-runs.ts`). */
+  private get autoLog() {
+    return this.sync.store.autoReviewLog;
   }
 
   /**
@@ -190,17 +189,7 @@ export class AutoReviewer {
     if (!this.runner.settings().autoReview.enabled) return;
 
     // A newer request that found this run in progress is waiting on it too.
-    const entries = this.db
-      .select()
-      .from(autoReviewLog)
-      .where(
-        and(
-          eq(autoReviewLog.account, row.account),
-          eq(autoReviewLog.runId, row.id),
-          inArray(autoReviewLog.status, ['started', 'skipped']),
-        ),
-      )
-      .all();
+    const entries = this.autoLog.forRun(row.account, row.id, ['started', 'skipped']);
 
     for (const entry of entries)
       this.record(row.account, entry, {
@@ -254,11 +243,7 @@ export class AutoReviewer {
 
     if (this.closed || !settings.enabled) return restarts;
 
-    const waiting = this.db
-      .select()
-      .from(autoReviewLog)
-      .where(and(eq(autoReviewLog.account, account), eq(autoReviewLog.status, 'waiting')))
-      .all();
+    const waiting = this.autoLog.withStatus(account, ['waiting']);
 
     for (const entry of waiting) {
       const item = this.sync.detailFor(account, entry.prId)?.item;
@@ -309,45 +294,13 @@ export class AutoReviewer {
     const updatedAt = isoNow(this.clock);
 
     this.sync.store.transaction(() => {
-      for (const batch of batches(keys)) {
-        this.db
-          .insert(autoReviewLog)
-          .values(
-            batch.map(({ key, item }) => ({
-              account,
-              key,
-              prId: item.id,
-              status: 'primed' as const,
-              updatedAt,
-            })),
-          )
-          .onConflictDoNothing()
-          .run();
-
-        // Failures and restarts from an earlier period are backlog too: do not retry them.
-        this.db
-          .update(autoReviewLog)
-          .set({ status: 'primed', updatedAt, headOid: null, restartAt: null })
-          .where(
-            and(
-              eq(autoReviewLog.account, account),
-              inArray(autoReviewLog.status, ['failed', 'waiting']),
-              inArray(
-                autoReviewLog.key,
-                batch.map(({ key }) => key),
-              ),
-            ),
-          )
-          .run();
-      }
-
+      // Failures and restarts from an earlier period are backlog too: they are not retried.
       // Reviews that finished while it was off stand as they are.
-      this.db
-        .update(autoReviewLog)
-        .set({ status: 'started', updatedAt })
-        .where(and(eq(autoReviewLog.account, account), eq(autoReviewLog.status, 'checking')))
-        .run();
-
+      this.autoLog.prime(
+        account,
+        keys.map(({ key, item }) => ({ key, prId: item.id })),
+        updatedAt,
+      );
       this.sync.store.settings.set(AUTO_REVIEW_PRIMED.of(account), since);
     });
 
@@ -355,13 +308,7 @@ export class AutoReviewer {
   }
 
   private log(account: string): Map<string, LogRow> {
-    const rows = this.db
-      .select()
-      .from(autoReviewLog)
-      .where(eq(autoReviewLog.account, account))
-      .all();
-
-    return new Map(rows.map((row) => [row.key, row]));
+    return new Map(this.autoLog.all(account).map((row) => [row.key, row]));
   }
 
   private record(
@@ -383,15 +330,11 @@ export class AutoReviewer {
       updatedAt: isoNow(this.clock),
     };
 
-    this.db
-      .insert(autoReviewLog)
-      .values({ account, key: candidate.key, prId: candidate.prId, ...values })
-      .onConflictDoUpdate({ target: [autoReviewLog.account, autoReviewLog.key], set: values })
-      .run();
+    this.autoLog.record(account, candidate.key, candidate.prId, values);
   }
 
   private run(id: string | null): AiRunRow | null {
-    return id ? (this.db.select().from(aiRuns).where(eq(aiRuns.id, id)).get() ?? null) : null;
+    return id ? this.sync.store.aiRuns.get(id) : null;
   }
 
   /** Lets open pages show the restart, or that it is no longer coming. */
@@ -433,24 +376,7 @@ export class AutoReviewer {
    * the wait. They belong to requests it replaced, so they must never restart or be joined.
    */
   private closeWaits(account: string, prId: string, key: string): void {
-    this.db
-      .update(autoReviewLog)
-      .set({
-        status: 'skipped',
-        headOid: null,
-        restartAt: null,
-        waitingSince: null,
-        updatedAt: isoNow(this.clock),
-      })
-      .where(
-        and(
-          eq(autoReviewLog.account, account),
-          eq(autoReviewLog.prId, prId),
-          eq(autoReviewLog.status, 'waiting'),
-          ne(autoReviewLog.key, key),
-        ),
-      )
-      .run();
+    this.autoLog.closeWaits(account, prId, key, isoNow(this.clock));
   }
 
   /** A wait on the PR whose quiet period has not ended, which a newly found request joins. */
@@ -458,17 +384,8 @@ export class AutoReviewer {
     const now = this.clock.now();
 
     return (
-      this.db
-        .select()
-        .from(autoReviewLog)
-        .where(
-          and(
-            eq(autoReviewLog.account, account),
-            eq(autoReviewLog.prId, prId),
-            eq(autoReviewLog.status, 'waiting'),
-          ),
-        )
-        .all()
+      this.autoLog
+        .withStatus(account, ['waiting'], prId)
         .find(
           (entry) => Date.parse(entry.restartAt ?? '') > now && !this.replacement(account, entry),
         ) ?? null
@@ -495,40 +412,12 @@ export class AutoReviewer {
     since: string,
     except: string | null,
   ): AiRunRow | null {
-    return (
-      this.db
-        .select()
-        .from(aiRuns)
-        .where(
-          and(
-            eq(aiRuns.account, account),
-            eq(aiRuns.prId, prId),
-            eq(aiRuns.task, 'full_review'),
-            ne(aiRuns.id, except ?? ''),
-            gte(aiRuns.createdAt, since),
-          ),
-        )
-        .orderBy(desc(aiRuns.createdAt), desc(sql`rowid`))
-        .limit(1)
-        .get() ?? null
-    );
+    return this.sync.store.aiRuns.reviewStartedSince(account, prId, since, except);
   }
 
   /** The PR's previous automatic review finished and is still being checked for new commits. */
   private checkingPr(account: string, prId: string): boolean {
-    return Boolean(
-      this.db
-        .select()
-        .from(autoReviewLog)
-        .where(
-          and(
-            eq(autoReviewLog.account, account),
-            eq(autoReviewLog.prId, prId),
-            eq(autoReviewLog.status, 'checking'),
-          ),
-        )
-        .get(),
-    );
+    return this.autoLog.withStatus(account, ['checking'], prId).length > 0;
   }
 
   /**
@@ -544,17 +433,7 @@ export class AutoReviewer {
   }
 
   private checking(account: string, runId: string): LogRow[] {
-    return this.db
-      .select()
-      .from(autoReviewLog)
-      .where(
-        and(
-          eq(autoReviewLog.account, account),
-          eq(autoReviewLog.runId, runId),
-          eq(autoReviewLog.status, 'checking'),
-        ),
-      )
-      .all();
+    return this.autoLog.forRun(account, runId, ['checking']);
   }
 
   /**
@@ -646,12 +525,7 @@ export class AutoReviewer {
   /** Completes checks of finished reviews that could not ask GitHub when they finished. */
   private async verifyPending(account: string): Promise<void> {
     const runIds = new Set(
-      this.db
-        .select()
-        .from(autoReviewLog)
-        .where(and(eq(autoReviewLog.account, account), eq(autoReviewLog.status, 'checking')))
-        .all()
-        .map((entry) => entry.runId),
+      this.autoLog.withStatus(account, ['checking']).map((entry) => entry.runId),
     );
 
     for (const runId of runIds) {
@@ -661,17 +535,7 @@ export class AutoReviewer {
 
       // Nothing left to check against; never hold the PR's requests back for it.
       if (!run) {
-        this.db
-          .update(autoReviewLog)
-          .set({ status: 'started', updatedAt: isoNow(this.clock) })
-          .where(
-            and(
-              eq(autoReviewLog.account, account),
-              eq(autoReviewLog.runId, runId ?? ''),
-              eq(autoReviewLog.status, 'checking'),
-            ),
-          )
-          .run();
+        this.autoLog.endChecks(account, runId ?? '', isoNow(this.clock));
         continue;
       }
 
@@ -684,28 +548,13 @@ export class AutoReviewer {
    * account, so turning it on again never restarts anything from before.
    */
   private dropRestarts(): void {
-    const pending = this.db
-      .select()
-      .from(autoReviewLog)
-      .where(inArray(autoReviewLog.status, ['waiting', 'checking']))
-      .all();
+    const pending = this.autoLog.pending();
 
     if (pending.length === 0) return;
 
     const updatedAt = isoNow(this.clock);
 
-    this.sync.store.transaction(() => {
-      this.db
-        .update(autoReviewLog)
-        .set({ status: 'primed', headOid: null, restartAt: null, waitingSince: null, updatedAt })
-        .where(eq(autoReviewLog.status, 'waiting'))
-        .run();
-      this.db
-        .update(autoReviewLog)
-        .set({ status: 'started', updatedAt })
-        .where(eq(autoReviewLog.status, 'checking'))
-        .run();
-    });
+    this.sync.store.transaction(() => this.autoLog.dropPending(updatedAt));
 
     // Each with its own account: this spans every account's waits, those with no run included.
     for (const entry of pending) this.changed(entry.account, entry.prId, entry.runId);
@@ -717,33 +566,15 @@ export class AutoReviewer {
    */
   private followPushes(account: string): void {
     const stoppable = new Map(
-      this.db
-        .select()
-        .from(aiRuns)
-        .where(
-          and(
-            eq(aiRuns.account, account),
-            eq(aiRuns.task, 'full_review'),
-            eq(aiRuns.trigger, 'auto'),
-            inArray(aiRuns.status, ['queued', 'running', 'paused']),
-          ),
-        )
-        .all()
+      this.sync.store.aiRuns
+        .automaticReviewsInFlight(account)
         .filter((run) => this.stoppable(run))
         .map((run) => [run.id, run]),
     );
     // Every request ever reviewed is `started`; only those with a run to stop matter here. A
     // newer request that found the run in progress is `skipped` and waits on it too.
-    const entries = this.db
-      .select()
-      .from(autoReviewLog)
-      .where(
-        and(
-          eq(autoReviewLog.account, account),
-          inArray(autoReviewLog.status, ['started', 'skipped', 'waiting']),
-        ),
-      )
-      .all()
+    const entries = this.autoLog
+      .withStatus(account, ['started', 'skipped', 'waiting'])
       .filter((entry) => entry.status === 'waiting' || stoppable.has(entry.runId ?? ''));
 
     for (const entry of entries) {
