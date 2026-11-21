@@ -18,13 +18,16 @@ import {
   changedWhile,
   dueRequests,
   followPush,
-  outdatedHead,
+  outdated,
   requestedBefore,
   requestStage,
+  resolve,
+  settleCheck,
   startStage,
   stillDue,
   type AutoReviewCandidate,
   type StartAction,
+  type StartOutcome,
 } from '@/ai/auto-review-rules.js';
 import type { AiRunner } from '@/ai/runner.js';
 import type { AiRunRow, AutoReviewEntry } from '@/db/ai-runs.js';
@@ -465,24 +468,29 @@ export class AutoReviewer {
   private settle(account: string, run: AiRunRow, changed: PullRequestSnapshot | null): boolean {
     const entries = this.checking(account, run.id);
     // A review started since this one finished already covers the new commits.
-    const outdated = outdatedHead(
-      changed,
-      () => this.startedSince(account, run.prId, run.finishedAt ?? run.createdAt, run.id) !== null,
+    const waits = resolve((known) => outdated(changed !== null, known), {
+      coveredSince: () =>
+        this.startedSince(account, run.prId, run.finishedAt ?? run.createdAt, run.id) !== null,
+    });
+    const { actions, waited } = settleCheck(
+      entries,
+      waits && changed ? changed.headOid : null,
+      run.finishedAt,
     );
 
     this.sync.store.transaction(() => {
-      for (const entry of entries) {
-        if (outdated) this.wait(account, entry, outdated.headOid, run.finishedAt);
+      for (const action of actions) {
+        if (action.kind === 'wait') this.wait(account, action.entry, action.head, action.began);
         else
-          this.record(account, entry, {
+          this.record(account, action.entry, {
             status: 'started',
-            runId: entry.runId,
-            attempts: entry.attempts,
+            runId: action.entry.runId,
+            attempts: action.entry.attempts,
           });
       }
     });
 
-    return outdated !== null && entries.length > 0;
+    return waited;
   }
 
   /** Completes checks of finished reviews that could not ask GitHub when they finished. */
@@ -618,11 +626,9 @@ export class AutoReviewer {
     if (!this.current(account, since)) return;
 
     const log = this.log(account);
-    const due = dueRequests(
-      autoReviewCandidates(this.sync.listFor(account).items),
-      log,
-      this.clock.now(),
-    );
+    // The clock, read before the list, as the cutoff for this pass's restarts.
+    const now = this.clock.now();
+    const due = dueRequests(autoReviewCandidates(this.sync.listFor(account).items), log, now);
 
     for (const candidate of due) {
       const previous = log.get(candidate.key);
@@ -652,14 +658,15 @@ export class AutoReviewer {
   ): Promise<boolean> {
     const entry = { key: candidate.key, prId: candidate.item.id };
     const prId = candidate.item.id;
-    const stage = requestStage({
-      waiting,
-      previous: previous !== undefined,
-      requestedBeforeSince: () => requestedBefore(this.requestedAt(account, candidate), since),
-      checkingPr: () => this.checkingPr(account, prId),
-      pendingWait: () => this.pendingWait(account, prId),
-      replacement: () => (waiting ? this.replacement(account, waiting) : null),
-    });
+    const stage = resolve(
+      (known) => requestStage({ waiting, previous: previous !== undefined }, known),
+      {
+        requestedBeforeSince: () => requestedBefore(this.requestedAt(account, candidate), since),
+        checkingPr: () => this.checkingPr(account, prId),
+        pendingWait: () => this.pendingWait(account, prId),
+        replacement: () => (waiting ? this.replacement(account, waiting) : null),
+      },
+    );
 
     if (stage.kind === 'primed') {
       this.record(account, entry, { status: 'primed' });
@@ -693,9 +700,10 @@ export class AutoReviewer {
       return true;
     }
 
-    const gate = await startStage({
-      current: () => this.current(account, since),
-      codexReady: () => this.codexReady(),
+    // Codex is asked only while still current; the run in progress is read, and the request
+    // recorded, in the very turn its answer comes, as nothing else may settle in between.
+    const ready = this.current(account, since) && (await this.codexReady());
+    const gate = resolve((known) => startStage(ready, known), {
       // Never replace a run in progress or one you paused; start() would cancel a paused run.
       activeRun: () => this.runner.activeRun(account, prId, 'full_review'),
     });
@@ -710,15 +718,14 @@ export class AutoReviewer {
 
     // The head start() found when it was refused because of another push during the wait.
     let pushed = null as string | null;
-    const settle = (outcome: Parameters<typeof afterStart>[0]) => {
-      const { actions, goOn } = afterStart(outcome, {
-        entry,
-        previous,
-        waiting,
-        pushed,
-        current: () => this.current(account, since),
-        latestHead: () => this.sync.detailFor(account, prId)?.snapshot.headOid,
-      });
+    const settle = (outcome: StartOutcome) => {
+      const { actions, goOn } = resolve(
+        (known) => afterStart(outcome, { entry, previous, waiting, pushed }, known),
+        {
+          current: () => this.current(account, since),
+          latestHead: () => this.sync.detailFor(account, prId)?.snapshot.headOid ?? null,
+        },
+      );
 
       for (const action of actions) this.apply(account, entry, action);
 
@@ -732,16 +739,17 @@ export class AutoReviewer {
         // have been turned off, the PR may have become a draft, you may have started a run, the
         // PR may have new commits since the wait began, or the previous review may have ended.
         admit: (detail) => {
-          const decided = admits({
-            waiting,
-            head: detail.snapshot.headOid,
-            current: () => this.current(account, since),
-            stillDue: () => stillDue(detail.item, candidate.key),
-            activeRun: () => this.runner.activeRun(account, prId, 'full_review'),
-            replacement: () => (waiting ? this.replacement(account, waiting) : null),
-            checkingPr: () => this.checkingPr(account, prId),
-            pendingWait: () => this.pendingWait(account, prId),
-          });
+          const decided = resolve(
+            (known) => admits({ waiting, head: detail.snapshot.headOid }, known),
+            {
+              current: () => this.current(account, since),
+              stillDue: () => stillDue(detail.item, candidate.key),
+              activeRun: () => this.runner.activeRun(account, prId, 'full_review'),
+              replacement: () => (waiting ? this.replacement(account, waiting) : null),
+              checkingPr: () => this.checkingPr(account, prId),
+              pendingWait: () => this.pendingWait(account, prId),
+            },
+          );
 
           pushed = decided.pushed;
 

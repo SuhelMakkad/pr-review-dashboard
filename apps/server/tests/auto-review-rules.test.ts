@@ -8,28 +8,39 @@ import {
   changedWhile,
   dueRequests,
   followPush,
-  outdatedHead,
+  outdated,
   requestStage,
   requestedBefore,
+  resolve,
+  settleCheck,
   startStage,
   type AutoReviewCandidate,
+  type RequestFacts,
+  type Step,
 } from '@/ai/auto-review-rules.js';
 import type { AiRunRow, AutoReviewEntry } from '@/db/ai-runs.js';
 import { GitHubError } from '@/github/errors.js';
 import { ReviewError } from '@/review/errors.js';
 
-/** Facts that say when they are read, in the order they are. */
-function reads() {
+/**
+ * Runs a rule to its decision, answering each fact it names from `facts`, and records the order
+ * it named them in. A fact it names that `facts` lacks fails the test: it read what it should not.
+ */
+function drive<F, D>(rule: (known: Partial<F>) => Step<F, D>, facts: Partial<F>) {
   const order: string[] = [];
-  const fact =
-    <T>(name: string, value: T) =>
-    () => {
-      order.push(name);
+  const read = Object.fromEntries(
+    Object.entries(facts).map(([name, value]) => [
+      name,
+      () => {
+        order.push(name);
 
-      return value;
-    };
+        return value;
+      },
+    ]),
+  ) as { [K in keyof F]: () => F[K] };
+  const decided = resolve(rule, read);
 
-  return { order, fact };
+  return { decided, order };
 }
 
 const item = (id = 'PR_1', changes: Partial<PullRequestItem> = {}) =>
@@ -124,36 +135,22 @@ describe('the due requests', () => {
 });
 
 describe('the request stage', () => {
-  const stage = (
-    waiting: AutoReviewEntry | null,
-    previous: boolean,
-    values: Partial<Record<string, unknown>>,
-  ) => {
-    const { order, fact } = reads();
-    const decided = requestStage({
-      waiting,
-      previous,
-      requestedBeforeSince: fact(
-        'requestedBefore',
-        values.requestedBefore ?? false,
-      ) as () => boolean,
-      checkingPr: fact('checkingPr', values.checkingPr ?? false) as () => boolean,
-      pendingWait: fact('pendingWait', values.pendingWait ?? null) as () => AutoReviewEntry | null,
-      replacement: fact('replacement', values.replacement ?? null) as () => AiRunRow | null,
-    });
-
-    return { decided, order };
+  const none = {
+    requestedBeforeSince: false,
+    checkingPr: false,
+    pendingWait: null,
+    replacement: null,
   };
 
   it.each([
-    ['backlog', null, false, { requestedBefore: true }, 'primed', ['requestedBefore']],
+    ['backlog', null, false, { requestedBeforeSince: true }, 'primed', ['requestedBeforeSince']],
     [
       'held for a check',
       null,
       false,
       { checkingPr: true },
       'hold',
-      ['requestedBefore', 'checkingPr'],
+      ['requestedBeforeSince', 'checkingPr'],
     ],
     [
       'joining a wait',
@@ -161,7 +158,7 @@ describe('the request stage', () => {
       false,
       { pendingWait: entry() },
       'join',
-      ['requestedBefore', 'checkingPr', 'pendingWait'],
+      ['requestedBeforeSince', 'checkingPr', 'pendingWait'],
     ],
     [
       'new and clear',
@@ -169,9 +166,9 @@ describe('the request stage', () => {
       false,
       {},
       'continue',
-      ['requestedBefore', 'checkingPr', 'pendingWait'],
+      ['requestedBeforeSince', 'checkingPr', 'pendingWait'],
     ],
-    ['a failure tried again', null, true, {}, 'continue', ['requestedBefore', 'checkingPr']],
+    ['a failure tried again', null, true, {}, 'continue', ['requestedBeforeSince', 'checkingPr']],
     [
       'a restart replaced',
       entry(),
@@ -184,12 +181,15 @@ describe('the request stage', () => {
       'a restart',
       entry(),
       true,
-      { requestedBefore: true, checkingPr: true },
+      { requestedBeforeSince: true, checkingPr: true },
       'continue',
       ['replacement'],
     ],
   ])('decides %s, reading only what it needs', (_case, waiting, previous, values, kind, order) => {
-    const { decided, order: read } = stage(waiting, previous, values);
+    const { decided, order: read } = drive(
+      (known: Partial<RequestFacts>) => requestStage({ waiting, previous }, known),
+      { ...none, ...(values as Partial<RequestFacts>) },
+    );
 
     expect(decided.kind).toBe(kind);
     expect(read).toEqual(order);
@@ -198,18 +198,14 @@ describe('the request stage', () => {
 
 describe('the start stage', () => {
   it.each([
-    ['not current', false, true, null, 'stop', ['current']],
-    ['Codex not ready', true, false, null, 'stop', ['current', 'codexReady']],
-    ['a run in progress', true, true, run(), 'skip', ['current', 'codexReady', 'activeRun']],
-    ['clear to start', true, true, null, 'start', ['current', 'codexReady', 'activeRun']],
+    ['not ready', false, null, 'stop', []],
+    ['a run in progress', true, run(), 'skip', ['activeRun']],
+    ['clear to start', true, null, 'start', ['activeRun']],
   ])(
-    'decides %s, asking Codex only when current',
-    async (_case, current, ready, active, kind, order) => {
-      const { order: read, fact } = reads();
-      const decided = await startStage({
-        current: fact('current', current),
-        codexReady: () => Promise.resolve(fact('codexReady', ready)()),
-        activeRun: fact('activeRun', active),
+    'decides %s, reading the run in progress only when ready',
+    (_case, ready, active, kind, order) => {
+      const { decided, order: read } = drive((known) => startStage(ready, known), {
+        activeRun: active,
       });
 
       expect(decided.kind).toBe(kind);
@@ -222,22 +218,17 @@ describe('admission', () => {
   const facts = (
     waiting: AutoReviewEntry | null,
     head: string,
-    values: Partial<Record<string, unknown>> = {},
-  ) => {
-    const { order, fact } = reads();
-    const decided = admits({
-      waiting,
-      head,
-      current: fact('current', values.current ?? true) as () => boolean,
-      stillDue: fact('stillDue', values.stillDue ?? true) as () => boolean,
-      activeRun: fact('activeRun', values.activeRun ?? null) as () => AiRunRow | null,
-      replacement: fact('replacement', values.replacement ?? null) as () => AiRunRow | null,
-      checkingPr: fact('checkingPr', values.checkingPr ?? false) as () => boolean,
-      pendingWait: fact('pendingWait', values.pendingWait ?? null) as () => AutoReviewEntry | null,
+    values: Record<string, unknown> = {},
+  ) =>
+    drive((known) => admits({ waiting, head }, known), {
+      current: true,
+      stillDue: true,
+      activeRun: null,
+      replacement: null,
+      checkingPr: false,
+      pendingWait: null,
+      ...values,
     });
-
-    return { decided, order };
-  };
 
   it('refuses first a restart whose PR moved during the wait, with the head it moved to', () => {
     expect(facts(entry(), 'head-2')).toEqual({
@@ -300,15 +291,20 @@ describe('after the start', () => {
       head?: string;
     },
   ) => {
-    const { order, fact } = reads();
-    const decided = afterStart(outcome, {
-      entry: key,
-      previous: options.previous,
-      waiting: options.waiting ?? null,
-      pushed: options.pushed ?? null,
-      current: fact('current', options.current ?? true),
-      latestHead: fact('latestHead', options.head),
-    });
+    const { decided, order } = drive(
+      (known) =>
+        afterStart(
+          outcome,
+          {
+            entry: key,
+            previous: options.previous,
+            waiting: options.waiting ?? null,
+            pushed: options.pushed ?? null,
+          },
+          known,
+        ),
+      { current: options.current ?? true, latestHead: options.head ?? null },
+    );
 
     return { ...decided, order };
   };
@@ -491,12 +487,34 @@ describe('whether a finished review is outdated', () => {
   });
 
   it('asks whether a later review covers it only once its PR changed', () => {
-    const { order, fact } = reads();
+    expect(drive((known) => outdated(false, known), { coveredSince: false })).toEqual({
+      decided: false,
+      order: [],
+    });
+    expect(drive((known) => outdated(true, known), { coveredSince: true })).toEqual({
+      decided: false,
+      order: ['coveredSince'],
+    });
+    expect(drive((known) => outdated(true, known), { coveredSince: false }).decided).toBe(true);
+  });
+});
 
-    expect(outdatedHead(null, fact('covered', false))).toBeNull();
-    expect(order).toEqual([]);
-    expect(outdatedHead(pr(), fact('covered', true))).toBeNull();
-    expect(outdatedHead(pr(), fact('covered', false))).toEqual(pr());
-    expect(order).toEqual(['covered', 'covered']);
+describe('settling a check', () => {
+  it('has each request wait for the outdated head from when the review finished, saying it waited', () => {
+    expect(settleCheck(['a', 'b'], 'head-2', '2026-11-01T00:00:00Z')).toEqual({
+      actions: [
+        { entry: 'a', kind: 'wait', head: 'head-2', began: '2026-11-01T00:00:00Z' },
+        { entry: 'b', kind: 'wait', head: 'head-2', began: '2026-11-01T00:00:00Z' },
+      ],
+      waited: true,
+    });
+  });
+
+  it('lets the review stand when nothing is outdated, and says nothing waited with no requests', () => {
+    expect(settleCheck(['a'], null, null)).toEqual({
+      actions: [{ entry: 'a', kind: 'started' }],
+      waited: false,
+    });
+    expect(settleCheck([], 'head-2', null)).toEqual({ actions: [], waited: false });
   });
 });

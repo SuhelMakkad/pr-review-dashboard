@@ -129,7 +129,7 @@ async function setup() {
     snapshot.updatedAt = now;
   };
 
-  return { store, github, sync, runner, providers, enable, prId, push, askAgain };
+  return { clock, store, github, sync, runner, reviewer, providers, enable, prId, push, askAgain };
 }
 
 describe("the automatic reviewer's reads", () => {
@@ -150,6 +150,42 @@ describe("the automatic reviewer's reads", () => {
 
     expect(plan).toHaveBeenCalled();
     expect(active.mock.calls.filter(([, pr]) => pr === prId)).toEqual([]);
+  });
+
+  it('records a request skipped for the run in progress before that run can settle', async () => {
+    const { store, github, sync, runner, reviewer, providers, enable, prId, askAgain } =
+      await setup();
+
+    providers.codex.delayMs = 60_000;
+    enable();
+    github.advance();
+    github.advance();
+    await sync.sync();
+
+    const inProgress = runner.activeRun('you', prId(), 'full_review')!;
+    const read = runner.activeRun.bind(runner);
+
+    // Asked for again; the run settles the moment the newer request has read it in progress.
+    askAgain();
+    vi.spyOn(runner, 'activeRun').mockImplementation((...args) => {
+      const active = read(...args);
+
+      if (args[1] === prId() && active)
+        queueMicrotask(() =>
+          reviewer.settled({ ...store.aiRuns.get(inProgress.id)!, status: 'done' }),
+        );
+
+      return active;
+    });
+    await sync.sync();
+
+    // The newer request waits on that run's check too: never left skipped past it.
+    expect(
+      store.autoReviewLog
+        .all('you')
+        .filter((entry) => entry.runId === inProgress.id)
+        .map((entry) => entry.status),
+    ).toEqual(['checking', 'checking']);
   });
 
   it('reads the run in progress again inside admission, after start() refreshed the PR', async () => {
@@ -177,6 +213,51 @@ describe("the automatic reviewer's reads", () => {
     await sync.sync();
 
     expect(order.slice(0, 3)).toEqual(['activeRun', 'start', 'activeRun']);
+  });
+});
+
+describe("the automatic reviewer's clock", () => {
+  it('reads the cutoff for its restarts before the list, however long reading the list takes', async () => {
+    const { clock, store, github, sync, runner, providers, enable, prId, push } = await setup();
+
+    providers.codex.delayMs = 60_000;
+    enable();
+    github.advance();
+    github.advance();
+    await sync.sync();
+    // Pushed during the review: it stops, and a fresh one waits for the PR to go quiet.
+    push('during-the-review');
+    await sync.sync();
+
+    const stopped = runner.activeRun('you', prId(), 'full_review');
+
+    expect(stopped).toBeNull();
+
+    // Due a moment after the pass begins: reading the list takes it past. The test clock follows
+    // real time, held still for this pass.
+    const wait = store.autoReviewLog.all('you').find((entry) => entry.status === 'waiting')!;
+    const still = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+
+    clock.advance(Date.parse(wait.restartAt!) - clock.now() - 1);
+
+    const listFor = sync.listFor.bind(sync);
+    // Only the pass's own read of the list is slow: the sync reads it too, before the pass.
+    const slow = vi.spyOn(sync, 'listFor').mockImplementation((...args) => {
+      if (new Error().stack?.includes('AutoReviewer.pass')) clock.advance(2);
+
+      return listFor(...args);
+    });
+
+    await sync.sync();
+
+    expect(runner.activeRun('you', prId(), 'full_review')).toBeNull();
+
+    slow.mockRestore();
+    still.mockRestore();
+    clock.advance(2);
+    await sync.sync();
+
+    expect(runner.activeRun('you', prId(), 'full_review')).not.toBeNull();
   });
 });
 

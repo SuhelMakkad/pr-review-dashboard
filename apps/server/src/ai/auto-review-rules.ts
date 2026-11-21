@@ -94,6 +94,28 @@ export function dueRequests(
 export const requestedBefore = (requestedAt: string, since: string) =>
   Date.parse(requestedAt) < Date.parse(since);
 
+/**
+ * A rule's next step: decided, or the fact it needs next. The rule reads nothing itself: the
+ * caller reads the fact it names, adds it to what is known, and asks again (`resolve`).
+ */
+export type Step<F, D> = { need: keyof F & string } | { decided: D };
+
+/** Runs `rule` to its decision, reading each fact it names, once, in the order it names them. */
+export function resolve<F, D>(
+  rule: (known: Partial<F>) => Step<F, D>,
+  read: { [K in keyof F]: () => F[K] },
+): D {
+  const known: Partial<F> = {};
+
+  for (;;) {
+    const step = rule(known);
+
+    if ('decided' in step) return step.decided;
+
+    known[step.need] = read[step.need]() as F[keyof F & string];
+  }
+}
+
 /** What a due request comes to before anything is asked of Codex. */
 export type RequestStage =
   /** Requested before automatic review was turned on: backlog. */
@@ -106,88 +128,114 @@ export type RequestStage =
   | { kind: 'skip'; run: AiRunRow }
   | { kind: 'continue' };
 
-/**
- * A due request, from what is stored: each fact is read only once the ones before it left the
- * decision open, in this order.
- */
-export function requestStage(facts: {
-  /** Its wait, when it is a restart. */
-  waiting: LogRow | null;
-  /** It has an entry already (a failure being tried again, or a wait). */
-  previous: boolean;
+/** What `requestStage` may need: each read only once the ones before it left it open. */
+export interface RequestFacts {
   /** It was made before automatic review was turned on. */
-  requestedBeforeSince: () => boolean;
+  requestedBeforeSince: boolean;
   /** The PR's previous automatic review is still being checked for new commits. */
-  checkingPr: () => boolean;
+  checkingPr: boolean;
   /** A wait on the PR whose quiet period has not ended. */
-  pendingWait: () => LogRow | null;
+  pendingWait: LogRow | null;
   /** A review started since its wait began. */
-  replacement: () => AiRunRow | null;
-}): RequestStage {
+  replacement: AiRunRow | null;
+}
+
+/** A due request, from what is stored. */
+export function requestStage(
+  given: {
+    /** Its wait, when it is a restart. */
+    waiting: LogRow | null;
+    /** It has an entry already (a failure being tried again, or a wait). */
+    previous: boolean;
+  },
+  known: Partial<RequestFacts>,
+): Step<RequestFacts, RequestStage> {
   // A restart continues a review that was already admitted, so it is never backlog.
-  if (!facts.waiting && facts.requestedBeforeSince()) return { kind: 'primed' };
-  if (!facts.waiting && facts.checkingPr()) return { kind: 'hold' };
+  if (!given.waiting) {
+    if (known.requestedBeforeSince === undefined) return { need: 'requestedBeforeSince' };
+    if (known.requestedBeforeSince) return { decided: { kind: 'primed' } };
+    if (known.checkingPr === undefined) return { need: 'checkingPr' };
+    if (known.checkingPr) return { decided: { kind: 'hold' } };
+  }
 
-  const pending = facts.previous ? null : facts.pendingWait();
+  if (!given.previous) {
+    if (known.pendingWait === undefined) return { need: 'pendingWait' };
+    if (known.pendingWait) return { decided: { kind: 'join', wait: known.pendingWait } };
+  }
 
-  if (pending) return { kind: 'join', wait: pending };
+  if (given.waiting) {
+    if (known.replacement === undefined) return { need: 'replacement' };
+    if (known.replacement) return { decided: { kind: 'skip', run: known.replacement } };
+  }
 
-  const replacement = facts.waiting && facts.replacement();
-
-  if (replacement) return { kind: 'skip', run: replacement };
-
-  return { kind: 'continue' };
+  return { decided: { kind: 'continue' } };
 }
 
 /** What a request that got this far comes to, once Codex is asked. */
 export type StartStage = { kind: 'stop' } | { kind: 'skip'; run: AiRunRow } | { kind: 'start' };
 
 /**
- * Whether to start: never while automatic review is no longer current or Codex cannot run (the
- * pass stops), and never over a run in progress or one you paused. Codex is asked only when still
- * current, and the run only when Codex can run.
+ * Whether to start, once it is known whether automatic review is still current and Codex can
+ * run (`ready`): never otherwise (the pass stops), and never over a run in progress or one you
+ * paused, which it needs only when ready.
  */
-export async function startStage(facts: {
-  current: () => boolean;
-  codexReady: () => Promise<boolean>;
-  activeRun: () => AiRunRow | null;
-}): Promise<StartStage> {
-  if (!facts.current() || !(await facts.codexReady())) return { kind: 'stop' };
+export function startStage(
+  ready: boolean,
+  known: Partial<{ activeRun: AiRunRow | null }>,
+): Step<{ activeRun: AiRunRow | null }, StartStage> {
+  if (!ready) return { decided: { kind: 'stop' } };
+  if (known.activeRun === undefined) return { need: 'activeRun' };
 
-  const active = facts.activeRun();
+  return { decided: known.activeRun ? { kind: 'skip', run: known.activeRun } : { kind: 'start' } };
+}
 
-  return active ? { kind: 'skip', run: active } : { kind: 'start' };
+/** What `admits` may need, each read afresh, in this order. */
+export interface AdmitFacts {
+  current: boolean;
+  stillDue: boolean;
+  activeRun: AiRunRow | null;
+  replacement: AiRunRow | null;
+  checkingPr: boolean;
+  pendingWait: LogRow | null;
 }
 
 /**
  * Whether `start()` may go ahead, as it asks once it has refreshed the PR: refused first for a
  * restart whose PR moved during the wait (with the head it moved to, for the next wait), then by
- * each fact read afresh, in this order.
+ * each fact read afresh.
  */
-export function admits(facts: {
-  waiting: LogRow | null;
-  /** The head `start()` found. */
-  head: string;
-  current: () => boolean;
-  stillDue: () => boolean;
-  activeRun: () => AiRunRow | null;
-  replacement: () => AiRunRow | null;
-  checkingPr: () => boolean;
-  pendingWait: () => LogRow | null;
-}): { admit: boolean; pushed: string | null } {
-  const pushed = facts.waiting && facts.head !== facts.waiting.headOid ? facts.head : null;
-  const admit =
-    !pushed &&
-    facts.current() &&
-    facts.stillDue() &&
-    !facts.activeRun() &&
-    !(facts.waiting && facts.replacement()) &&
-    // The previous review may have finished meanwhile: its check, or the wait it began, comes
-    // first. The next pass joins the wait.
-    !facts.checkingPr() &&
-    (facts.waiting !== null || !facts.pendingWait());
+export function admits(
+  given: { waiting: LogRow | null; /** The head `start()` found. */ head: string },
+  known: Partial<AdmitFacts>,
+): Step<AdmitFacts, { admit: boolean; pushed: string | null }> {
+  const { waiting, head } = given;
+  const pushed = waiting && head !== waiting.headOid ? head : null;
+  const refused = { decided: { admit: false, pushed } };
 
-  return { admit, pushed };
+  if (pushed) return refused;
+  if (known.current === undefined) return { need: 'current' };
+  if (!known.current) return refused;
+  if (known.stillDue === undefined) return { need: 'stillDue' };
+  if (!known.stillDue) return refused;
+  if (known.activeRun === undefined) return { need: 'activeRun' };
+  if (known.activeRun) return refused;
+
+  if (waiting) {
+    if (known.replacement === undefined) return { need: 'replacement' };
+    if (known.replacement) return refused;
+  }
+
+  // The previous review may have finished meanwhile: its check, or the wait it began, comes
+  // first. The next pass joins the wait.
+  if (known.checkingPr === undefined) return { need: 'checkingPr' };
+  if (known.checkingPr) return refused;
+
+  if (!waiting) {
+    if (known.pendingWait === undefined) return { need: 'pendingWait' };
+    if (known.pendingWait) return refused;
+  }
+
+  return { decided: { admit: true, pushed: null } };
 }
 
 /** What a request's start came to, for its entry. */
@@ -205,42 +253,45 @@ export type StartAction =
       entry: Pick<LogRow, 'key' | 'prId'> &
         Partial<Pick<LogRow, 'runId' | 'attempts' | 'status' | 'waitingSince'>>;
       head: string;
-    }
-  /** Stops the pass. */
-  | { kind: 'stop' };
+    };
 
 /** How `start()` answered: a run, or the error it threw. */
 export type StartOutcome =
   { kind: 'run'; run: Pick<AiRunRow, 'id' | 'headOid'> } | { kind: 'error'; error: unknown };
 
-/**
- * What a start comes to, asking for the facts its outcome needs only: the actions, applied in
- * order, and whether the pass goes on.
- */
+/** What `afterStart` may need: whether still current, and the PR's head as last read. */
+export interface AfterStartFacts {
+  current: boolean;
+  /** Null when there is none. */
+  latestHead: string | null;
+}
+
+/** What a start comes to: the actions, applied in order, and whether the pass goes on. */
 export function afterStart(
   outcome: StartOutcome,
-  facts: {
+  given: {
     entry: Pick<LogRow, 'key' | 'prId'>;
     previous: LogRow | undefined;
     waiting: LogRow | null;
     /** The head `admits` refused a restart for: its PR moved during the wait. */
     pushed: string | null;
-    current: () => boolean;
-    /** The PR's head as last read. */
-    latestHead: () => string | undefined;
   },
-): { actions: StartAction[]; goOn: boolean } {
-  const { entry, previous, waiting } = facts;
-  const goOn = (actions: StartAction[] = []) => ({ actions, goOn: true });
-  const stop = { actions: [], goOn: false };
+  known: Partial<AfterStartFacts>,
+): Step<AfterStartFacts, { actions: StartAction[]; goOn: boolean }> {
+  const { entry, previous, waiting } = given;
+  const goOn = (actions: StartAction[] = []) => ({ decided: { actions, goOn: true } });
+  const stop = { decided: { actions: [], goOn: false } };
 
   if (outcome.kind === 'run') {
     const { run } = outcome;
 
     // A saved review returned without asking `admits`: the PR moved to a head reviewed before,
     // which is a push during the wait like any other.
-    if (waiting && run.headOid !== waiting.headOid)
-      return goOn(facts.current() ? [{ kind: 'wait', entry: waiting, head: run.headOid }] : []);
+    if (waiting && run.headOid !== waiting.headOid) {
+      if (known.current === undefined) return { need: 'current' };
+
+      return goOn(known.current ? [{ kind: 'wait', entry: waiting, head: run.headOid }] : []);
+    }
 
     return goOn([{ kind: 'record', status: 'started', runId: run.id }]);
   }
@@ -249,19 +300,25 @@ export function afterStart(
 
   // Not wanted now. Unrecorded, so a PR that is a draft again is reviewed once ready.
   if (error instanceof ReviewError && error.code === 'NOT_ADMITTED') {
-    if (!facts.current()) return stop;
+    if (known.current === undefined) return { need: 'current' };
+    if (!known.current) return stop;
 
     return goOn(
-      waiting && facts.pushed ? [{ kind: 'wait', entry: waiting, head: facts.pushed }] : [],
+      waiting && given.pushed ? [{ kind: 'wait', entry: waiting, head: given.pushed }] : [],
     );
   }
 
   // New commits arrived while the review was being prepared: wait for the PR to go quiet.
   if (error instanceof ReviewError && error.code === 'HEAD_MOVED') {
-    const head = facts.latestHead();
+    if (known.latestHead === undefined) return { need: 'latestHead' };
+
+    const head = known.latestHead;
+
+    if (!head) return goOn();
+    if (known.current === undefined) return { need: 'current' };
 
     return goOn(
-      head && facts.current()
+      known.current
         ? [
             {
               kind: 'wait',
@@ -277,13 +334,16 @@ export function afterStart(
   if (error instanceof GitHubError && STOP_OUTCOMES.has(error.outcome)) return stop;
 
   // Turned off, or off and on again, while it started: what it decided then no longer holds.
-  if (!facts.current()) return stop;
+  if (known.current === undefined) return { need: 'current' };
+  if (!known.current) return stop;
 
   const attempts = (previous?.attempts ?? 0) + 1;
 
   // A restart tries again once the PR has been quiet again, until it runs out of attempts.
   if (waiting && attempts < MAX_ATTEMPTS) {
-    const head = facts.latestHead() ?? waiting.headOid;
+    if (known.latestHead === undefined) return { need: 'latestHead' };
+
+    const head = known.latestHead ?? waiting.headOid;
 
     return goOn(head ? [{ kind: 'wait', entry: { ...waiting, attempts }, head }] : []);
   }
@@ -352,12 +412,39 @@ export function changedAfterCompare(
 }
 
 /**
- * The head a fresh review waits for, once a finished review's PR changed: none when a review
- * started since it finished already covers the new commits (asked only once it changed).
+ * Whether a finished review's changed PR (`changed`) waits for a fresh review: not when a review
+ * started since it finished already covers the new commits, which it needs only once it changed.
  */
-export function outdatedHead(
-  changed: PullRequestSnapshot | null,
-  coveredSince: () => boolean,
-): PullRequestSnapshot | null {
-  return changed && !coveredSince() ? changed : null;
+export function outdated(
+  changed: boolean,
+  known: Partial<{ coveredSince: boolean }>,
+): Step<{ coveredSince: boolean }, boolean> {
+  if (!changed) return { decided: false };
+  if (known.coveredSince === undefined) return { need: 'coveredSince' };
+
+  return { decided: !known.coveredSince };
+}
+
+/** What a finished review's check comes to for each request waiting on it. */
+export type SettleAction<E> =
+  { entry: E; kind: 'wait'; head: string; began: string | null } | { entry: E; kind: 'started' };
+
+/**
+ * Ends the check of a finished review for each of its `entries`: a fresh review waits for
+ * `outdatedHead` to go quiet (from when it finished), or the review stands. `waited` when any
+ * entry now waits, which is what keeps its completion from being announced.
+ */
+export function settleCheck<E>(
+  entries: E[],
+  outdatedHead: string | null,
+  finishedAt: string | null,
+): { actions: SettleAction<E>[]; waited: boolean } {
+  return {
+    actions: entries.map((entry) =>
+      outdatedHead
+        ? { entry, kind: 'wait', head: outdatedHead, began: finishedAt }
+        : { entry, kind: 'started' },
+    ),
+    waited: outdatedHead !== null && entries.length > 0,
+  };
 }
