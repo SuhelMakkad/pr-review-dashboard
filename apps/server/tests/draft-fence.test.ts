@@ -382,16 +382,25 @@ describe('the claim ledger', () => {
   it('says whether an attempt that never arrived could still commit at its base', async () => {
     const { call, draftUrl, save, versions } = await demo();
     const base = versions().revision;
+    // Bare ids, as `main`'s writer sends: a miss of one never proves anything.
     const lookup = async (query: string) =>
       (await call('GET', `${draftUrl}/attempts/${randomUUID()}?${query}`)).json();
 
-    expect(await lookup(`base=${base}`)).toEqual({ arrived: false, fenced: false });
+    expect(await lookup(`base=${base}`)).toEqual({
+      arrived: false,
+      fenced: false,
+      provable: false,
+    });
     // A base the draft has not reached yet could still be met: never fenced.
-    expect(await lookup(`base=${base + 1}`)).toEqual({ arrived: false, fenced: false });
+    expect(await lookup(`base=${base + 1}`)).toEqual({
+      arrived: false,
+      fenced: false,
+      provable: false,
+    });
 
     await save({ body: 'Moved on' });
 
-    expect(await lookup(`base=${base}`)).toEqual({ arrived: false, fenced: true });
+    expect(await lookup(`base=${base}`)).toEqual({ arrived: false, fenced: true, provable: false });
 
     // A generation the draft has moved past is fenced too, its revision aside.
     expect((await call('DELETE', draftUrl, { operationId: randomUUID() })).statusCode).toBe(200);
@@ -401,10 +410,12 @@ describe('the claim ledger', () => {
     expect(await lookup(`base=${now.revision}&generation=${now.generation - 1}`)).toEqual({
       arrived: false,
       fenced: true,
+      provable: false,
     });
     expect(await lookup(`base=${now.revision}&generation=${now.generation}`)).toEqual({
       arrived: false,
       fenced: false,
+      provable: false,
     });
   });
 

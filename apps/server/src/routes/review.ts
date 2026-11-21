@@ -1,8 +1,17 @@
 import type { GitHubAction } from '@review-desk/shared/operations';
 import { routes } from '@review-desk/shared/contract';
 import type { FastifyInstance } from 'fastify';
+import { ABANDONED } from '@/db/draft-writes.js';
+import { parseAttemptId, provable, sealOf } from '@/db/claim-ids.js';
 import { draftVersionsOf, type WriteFence } from '@/db/versions.js';
-import { attemptOf, claimed, fenceFor, type WriteGuard } from '@/routes/claims.js';
+import {
+  attemptOf,
+  claimed,
+  fenceFor,
+  idConflict,
+  invalidAttempt,
+  type WriteGuard,
+} from '@/routes/claims.js';
 import { say } from '@/messages.js';
 import { safeError } from '@/github/errors.js';
 import { failed, ok, serve, type Failed } from '@/http/serve.js';
@@ -205,17 +214,26 @@ export function registerReviewRoutes(
     app,
     routes.draftAttempt,
     ({ account, params, query }) => {
-      // One read: the claim, else whether a late arrival could still commit at that base.
+      const parsed = parseAttemptId(params.attemptId, account, store.draftWrites.secret());
+
+      if (parsed.kind === 'invalid') return invalidAttempt();
+
+      // One read: the claim, else whether a late arrival could still commit at that base, and
+      // whether its history proves it never arrived.
       const answer = store.transaction(() => {
         const claim = store.draftWrites.find(account, params.attemptId);
 
-        if (claim && claim.prId === params.id)
+        if (claim) {
+          // Another PR's, or another kind's: never this attempt's answer.
+          if (claim.prId !== params.id || (query.kind && claim.kind !== query.kind)) return null;
+
           return {
             attempt: {
               ...attemptOf(claim),
               ...(claim.state === 'pending' ? {} : { result: claim.result }),
             },
           };
+        }
 
         // Fenced once the draft has moved past the base: a base it has not reached yet could
         // still be met, and the write commit then.
@@ -225,10 +243,82 @@ export function registerReviewRoutes(
           (versions.revision > query.base ||
             (query.generation !== undefined && versions.generation > query.generation));
 
-        return { arrived: false as const, fenced };
+        return {
+          arrived: false as const,
+          fenced,
+          provable: provable(parsed, store.draftWrites.watermarkOf(account)),
+        };
       });
 
-      return ok(200, answer);
+      return answer ? ok(200, answer) : idConflict();
+    },
+    serving,
+  );
+
+  serve(
+    app,
+    routes.claimCheckpoint,
+    ({ account }) => {
+      const checkpoint = store.draftWrites.checkpoint();
+
+      return ok(200, {
+        checkpoint,
+        seal: sealOf(store.draftWrites.secret(), account, checkpoint),
+      });
+    },
+    serving,
+  );
+
+  // Stops waiting for an attempt: answered by its claim if it was received, else never admitted.
+  serve(
+    app,
+    routes.abandonDraftAttempt,
+    ({ account, params, body }) => {
+      const parsed = parseAttemptId(params.attemptId, account, store.draftWrites.secret());
+
+      if (parsed.kind === 'invalid') return invalidAttempt();
+
+      // In one turn with any claim of the id: received already (its state answers), or never after.
+      const answer = store.transaction(() => {
+        const claim = store.draftWrites.find(account, params.attemptId);
+
+        if (claim) {
+          if (claim.prId !== params.id || claim.kind !== body.kind) return null;
+          if (claim.state === 'pending') return { outcome: 'pending' as const };
+
+          // A stop answered before: its decision again.
+          if (claim.fingerprint === ABANDONED) {
+            const decision = (claim.result as { body?: { decision?: string } }).body?.decision;
+
+            return {
+              outcome:
+                decision === 'not-admitted' ? ('not-admitted' as const) : ('unknown' as const),
+            };
+          }
+
+          return {
+            outcome: claim.state,
+            attempt: { ...attemptOf(claim), result: claim.result },
+          };
+        }
+
+        const decision = provable(parsed, store.draftWrites.watermarkOf(account))
+          ? ('not-admitted' as const)
+          : ('unknown' as const);
+
+        store.draftWrites.abandon({
+          account,
+          id: params.attemptId,
+          prId: params.id,
+          kind: body.kind,
+          decision,
+          createdAt: new Date().toISOString(),
+        });
+
+        return { outcome: decision };
+      });
+
+      return answer ? ok(200, answer) : idConflict();
     },
     serving,
   );
