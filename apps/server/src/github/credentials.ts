@@ -1,21 +1,10 @@
+import type { CliAccount } from '@/forge/types.js';
 import { AccountUnavailable } from '@/forge/account.js';
 import { spawn } from 'node:child_process';
 import { GITHUB_HOST, type Forge } from '@review-desk/shared/accounts';
 import { GitHubError, registerSecret, safeError } from '@/github/errors.js';
 
-/**
- * An account signed in to the GitHub CLI (github.com) or the GitLab CLI (any GitLab host). `login`
- * is the account key: the GitHub login, or `username@host` for GitLab.
- */
-export interface CliAccount {
-  login: string;
-  forge: Forge;
-  host: string;
-  /** The CLI's own account for that host, which `gh` or `glab` uses in a terminal. */
-  cliActive: boolean;
-  /** False when the CLI could not verify this sign-in. */
-  ok: boolean;
-}
+export type { CliAccount };
 
 /** Chooses which CLI account the server works as. */
 export interface GitHubAccounts {

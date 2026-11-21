@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Side } from '@review-desk/shared/review';
-import { GitHubError } from '@/github/errors.js';
-import type { ThreadInput } from '@/github/write.js';
+import { ForgeError } from '@/forge/port.js';
+import type { ThreadInput } from '@/forge/types.js';
 
 /** One line of a unified diff, numbered the way GitLab's diff parser numbers it. */
 export interface DiffLine {
@@ -92,7 +92,7 @@ export function locate(diff: ParsedDiff, side: Side, line: number): DiffLine {
   const newLine = side === 'RIGHT' ? line : line + delta;
 
   if (oldLine < 1 || newLine < 1)
-    throw new GitHubError(`Line ${line} is not part of this file.`, null, 422, 'rejected');
+    throw new ForgeError(`Line ${line} is not part of this file.`, null, 422, 'rejected');
 
   return { kind: 'context', oldLine, newLine, oldPos: oldLine, newPos: newLine };
 }

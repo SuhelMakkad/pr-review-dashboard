@@ -6,8 +6,9 @@ import { forgeRequest } from '@/forge/timing.js';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GitHubError, safeError } from '@/github/errors.js';
-import { parseIncludedResponse, type HttpMethod } from '@/github/transport.js';
+import { ForgeError } from '@/forge/port.js';
+import { safeError } from '@/redact.js';
+import { parseIncludedResponse, type HttpMethod } from '@/forge/http.js';
 
 export interface GitLabRequest {
   method?: HttpMethod;
@@ -93,8 +94,8 @@ export function baseGlabEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
-export function glabUnavailable(error: unknown): GitHubError {
-  return new GitHubError(
+export function glabUnavailable(error: unknown): ForgeError {
+  return new ForgeError(
     `GitLab CLI unavailable: ${safeError(error)}. Install glab and run glab auth login.`,
     null,
     null,
@@ -218,7 +219,7 @@ export class GlabCli implements GitLabTransport {
       request.body === undefined ? undefined : JSON.stringify(request.body),
     );
 
-    if (result.timedOut) throw new GitHubError('GitLab request timed out.');
+    if (result.timedOut) throw new ForgeError('GitLab request timed out.');
 
     // glab exits non-zero on HTTP errors but still prints the status line, headers and body.
     const parsed = parseIncludedResponse(result.stdout);
@@ -229,7 +230,7 @@ export class GlabCli implements GitLabTransport {
           `GitLab request failed. Check glab auth status --hostname ${this.host}.`,
       );
 
-      throw new GitHubError(
+      throw new ForgeError(
         message,
         null,
         null,
@@ -243,11 +244,11 @@ export class GlabCli implements GitLabTransport {
     try {
       data = (isJson && parsed.body ? JSON.parse(parsed.body) : parsed.body) as T;
     } catch {
-      throw new GitHubError('GitLab returned an unreadable response.', null, parsed.status);
+      throw new ForgeError('GitLab returned an unreadable response.', null, parsed.status);
     }
 
     if (parsed.status === 429) {
-      throw new GitHubError(
+      throw new ForgeError(
         'GitLab rate limit reached.',
         gitlabRetryAt(parsed.headers) ??
           new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS).toISOString(),
@@ -271,12 +272,12 @@ export function gitlabMessage(data: unknown): string {
   return typeof message === 'string' ? message : message ? JSON.stringify(message) : '';
 }
 
-/** A failed response as a `GitHubError` whose outcome says whether the request took effect. */
+/** A failed response as a `ForgeError` whose outcome says whether the request took effect. */
 export function responseError(
   response: GitLabResponse<unknown>,
   action: string,
   method: HttpMethod = 'GET',
-): GitHubError {
+): ForgeError {
   const detail = gitlabMessage(response.data);
   const status = response.status;
   const message = safeError(`${action} (HTTP ${status})${detail ? `: ${detail}` : ''}`);
@@ -291,7 +292,7 @@ export function responseError(
           : 'unknown'
         : 'rejected';
 
-  return new GitHubError(message, null, status, outcome);
+  return new ForgeError(message, null, status, outcome);
 }
 
 /** Sends a request and returns its JSON body, throwing for any HTTP error. */
@@ -326,7 +327,7 @@ export async function paginate<T>(
     const response: GitLabResponse<T[]> = await transport.request<T[]>({ path: next });
 
     if (response.status >= 400) throw responseError(response, action);
-    if (!Array.isArray(response.data)) throw new GitHubError(`${action}: unexpected response.`);
+    if (!Array.isArray(response.data)) throw new ForgeError(`${action}: unexpected response.`);
 
     items.push(...response.data);
 

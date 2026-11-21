@@ -6,7 +6,9 @@ import { forgeRequest } from '@/forge/timing.js';
 import { ghCredentials, type CredentialSource } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 
-export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+import { parseIncludedResponse, type HttpMethod } from '@/forge/http.js';
+
+export { parseIncludedResponse, type HttpMethod };
 
 export interface GitHubRequest {
   method?: HttpMethod;
@@ -295,26 +297,4 @@ export class GhCli implements GitHubTransport {
 
     return { status: parsed.status, headers: parsed.headers, data };
   }
-}
-
-export function parseIncludedResponse(
-  output: string,
-): { status: number; headers: Record<string, string>; body: string } | null {
-  const match = /^HTTP\/[\d.]+ (\d{3})[^\n]*\r?\n/.exec(output);
-
-  if (!match) return null;
-
-  const separator = output.search(/\r?\n\r?\n/);
-  const head = separator === -1 ? output : output.slice(0, separator);
-  const body = separator === -1 ? '' : output.slice(separator).replace(/^\r?\n\r?\n/, '');
-  const headers: Record<string, string> = {};
-
-  for (const line of head.split(/\r?\n/).slice(1)) {
-    const index = line.indexOf(':');
-
-    if (index > 0)
-      headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim();
-  }
-
-  return { status: Number(match[1]), headers, body };
 }

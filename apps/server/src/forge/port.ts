@@ -17,8 +17,9 @@ import type {
   RemoteFile,
   ResolvedPull,
   ReviewReceipt,
-} from '@/github/api.js';
-import type { ThreadInput, ViewedRevision } from '@/github/write.js';
+  ThreadInput,
+  ViewedRevision,
+} from '@/forge/types.js';
 
 /**
  * The forge port: what the app asks of GitHub and GitLab alike, under neutral names. The GitHub

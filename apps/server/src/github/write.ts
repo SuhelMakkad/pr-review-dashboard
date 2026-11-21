@@ -1,33 +1,11 @@
+import type { ThreadInput, ViewedRevision } from '@/forge/types.js';
 import type { Side } from '@review-desk/shared/review';
 import type { ForgeWrites } from '@/forge/port.js';
 import { GitHubError } from '@/github/errors.js';
 import { mutations } from '@/github/queries.js';
 import type { GitHubTransport } from '@/github/transport.js';
 
-export interface ThreadInput {
-  path: string;
-  body: string;
-  line?: number | null;
-  side?: Side;
-  startLine?: number | null;
-  startSide?: Side | null;
-  subjectType?: 'LINE' | 'FILE';
-}
-
-/**
- * The PR revision whose diff of a file a viewed write marked: its head and base commits, as a
- * snapshot records them. Null when the forge cannot say, or for an unmark, which holds for every
- * revision.
- */
-export interface ViewedRevision {
-  headOid: string;
-  baseOid: string | null;
-  /**
-   * The `viewedKey` of the file's diff that was marked, where the forge knows it (GitLab). It
-   * decides on its own: a snapshot's head and base and its files are not always read together.
-   */
-  fileKey?: string;
-}
+export type { ThreadInput, ViewedRevision };
 
 /** The forge's writes under their original name (see `ForgeWrites`). */
 export type GitHubWrites = ForgeWrites;

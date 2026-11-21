@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 import { gitlabAccountKey } from '@review-desk/shared/accounts';
-import type { CliAccount } from '@/github/credentials.js';
-import { GitHubError, safeError } from '@/github/errors.js';
+import type { CliAccount } from '@/forge/types.js';
+import { ForgeError } from '@/forge/port.js';
+import { safeError } from '@/redact.js';
 import { baseGlabEnvironment, glabCwd, glabUnavailable } from '@/gitlab/transport.js';
 
 type Run = (args: string[]) => Promise<{ code: number | null; stdout: string; stderr: string }>;
@@ -60,7 +61,7 @@ export class GlabAccounts {
     try {
       parsed = JSON.parse(result.stdout) as typeof parsed;
     } catch {
-      throw new GitHubError(
+      throw new ForgeError(
         safeError(
           result.stderr.trim() ||
             'Could not list GitLab CLI accounts. Update glab: Review Desk needs glab auth status --output json.',
