@@ -38,11 +38,50 @@ const FEED_INTERVAL_MS: Record<FeedSource, number> = {
   mentioned: 300_000,
 };
 
+/** What an automatic-review pass came to: the cutoff it read its due restarts at, if it did. */
+export interface PassOutcome {
+  account: string;
+  /** Null when no pass looked at the account's restarts (superseded, stopped, or not current). */
+  cutoff: number | null;
+}
+
+/** What a sync's follow-up work reports: the automatic-review pass it asked for, if any. */
+export interface AfterSync {
+  pass?: Promise<PassOutcome>;
+}
+
 /** What the sync calls out to: `SyncService`, so a hook keeps the receiver it always had. */
 export interface SyncHooks {
   /** Runs after every sync with the active login (used for notifications). */
-  afterSync: ((login: string) => Promise<unknown>) | null;
+  afterSync: ((login: string) => Promise<AfterSync | void>) | null;
 }
+
+/** How a sync of one's own (`syncOwn`) went. */
+export type SyncRun =
+  | { kind: 'aborted' }
+  | { kind: 'stopped' }
+  /** Another account is in use, before it started or as it found once it ran. */
+  | { kind: 'inactive' }
+  /** The account is cooling down: no sync started. */
+  | { kind: 'cooling'; until: string }
+  /** It ran, and its after-sync work completed with `hooked`. */
+  | { kind: 'synced'; account: string; hooked: AfterSync | void }
+  /** It ran, but ended before its after-sync work completed. */
+  | { kind: 'missed'; account: string };
+
+/** What `perform` did: whose sync it was, and whether its after-sync work completed. */
+interface Performed {
+  account: string | null;
+  hookRan: boolean;
+  hooked?: AfterSync | void;
+}
+
+/** Resolves when `signal` aborts; never otherwise. */
+const aborting = (signal: AbortSignal) =>
+  new Promise<'aborted'>((resolve) => {
+    if (signal.aborted) resolve('aborted');
+    else signal.addEventListener('abort', () => resolve('aborted'), { once: true });
+  });
 
 const SYNC_INTERVAL_MS = 60_000;
 /** Snapshots a GitLab sync reads before checking glab's sign-in and saving them. */
@@ -107,14 +146,74 @@ export class SyncRunner {
     if (this.stopped || this.state.cooldown()) return Promise.resolve();
 
     const trigger = options.scheduled ? 'interval' : (options.trigger ?? 'manual');
-    // Always as the selected account, which `perform` binds to for the whole sync.
-    const run = this.perform(Boolean(options.scheduled), trigger).finally(() => {
-      if (this.running === run) this.running = null;
-    });
+
+    return this.begin(Boolean(options.scheduled), trigger).run;
+  }
+
+  /**
+   * Runs a sync of `account`'s own, never joining one in progress: it waits for the slot, then
+   * starts only while `account` is still in use and not cooling down, and `signal` has not
+   * aborted. Says how that sync went, its after-sync work included (the restart scheduler's).
+   */
+  async syncOwn(account: string, signal: AbortSignal): Promise<SyncRun> {
+    for (;;) {
+      while (this.running) {
+        const ended = this.running.then(
+          () => 'ended' as const,
+          () => 'ended' as const,
+        );
+
+        if ((await Promise.race([ended, aborting(signal)])) === 'aborted')
+          return { kind: 'aborted' };
+      }
+
+      if (signal.aborted) return { kind: 'aborted' };
+      if (this.stopped) return { kind: 'stopped' };
+      if (this.state.status.account?.login !== account) return { kind: 'inactive' };
+
+      const until = this.state.cooldown(account);
+
+      if (until) return { kind: 'cooling', until };
+      // Taken again in the turn it was freed: wait for that one too.
+      if (this.running) continue;
+
+      const { run, performed } = this.begin(true, 'interval');
+
+      // Its failure is this caller's to hear, through `performed`: never left unhandled when no
+      // one else joined the slot.
+      void run.catch(() => undefined);
+
+      const done = await Promise.race([performed.catch(() => null), aborting(signal)]);
+
+      if (done === 'aborted') return { kind: 'aborted' };
+      // Another account found once it ran: its own account is not in use.
+      if (done?.account && !sameAccount(done.account, account)) return { kind: 'inactive' };
+
+      // Ended before its hook completed: failed, or before it even knew whose sync it was.
+      return done?.hookRan
+        ? { kind: 'synced', account, hooked: done.hooked }
+        : { kind: 'missed', account };
+    }
+  }
+
+  /**
+   * Starts `perform` in the slot, always as the selected account, which it binds to throughout:
+   * `run` is what every caller that joins it shares, `performed` what it did.
+   */
+  private begin(
+    scheduled: boolean,
+    trigger: 'interval' | 'start' | 'switch' | 'manual',
+  ): { run: Promise<void>; performed: Promise<Performed> } {
+    const performed = this.perform(scheduled, trigger);
+    const run = performed
+      .then(() => undefined)
+      .finally(() => {
+        if (this.running === run) this.running = null;
+      });
 
     this.running = run;
 
-    return run;
+    return { run, performed };
   }
 
   /**
@@ -170,7 +269,9 @@ export class SyncRunner {
   private async perform(
     scheduled: boolean,
     trigger: 'interval' | 'start' | 'switch' | 'manual',
-  ): Promise<void> {
+  ): Promise<Performed> {
+    const performed: Performed = { account: null, hookRan: false };
+
     this.state.beginSync();
 
     let retryAt: string | null = null;
@@ -206,6 +307,7 @@ export class SyncRunner {
         : await discoverIdentity(this.github);
 
       timing.forge = forgeOf(account.login) === 'gitlab' ? 'gitlab' : 'github';
+      performed.account = account.login;
 
       // glab signed in to the chosen GitLab account's host as someone else: read nothing as them.
       if (chosen && forgeOf(chosen) === 'gitlab' && !sameAccount(account.login, chosen))
@@ -236,7 +338,7 @@ export class SyncRunner {
           timing.outcome = 'rate_limit';
           this.state.setError(this.state.worded(say('sync.cooling-down')));
 
-          return;
+          return performed;
         }
       } else {
         this.state.setProfile(account);
@@ -423,8 +525,16 @@ export class SyncRunner {
       this.sampleQueue(account.login);
 
       if (this.hooks.afterSync) {
-        // Hooks (notifications) must never break a sync.
-        await this.hooks.afterSync(account.login).catch(() => undefined);
+        // Hooks (notifications) must never break a sync. One that threw did not complete.
+        await this.hooks.afterSync(account.login).then(
+          (hooked) => {
+            performed.hookRan = true;
+            performed.hooked = hooked;
+          },
+          () => undefined,
+        );
+      } else {
+        performed.hookRan = true;
       }
 
       this.state.succeeded();
@@ -483,6 +593,8 @@ export class SyncRunner {
       if (login && changed.size > 0)
         this.events.emit({ type: 'pulls.changed', account: login, ids: [...changed] });
     }
+
+    return performed;
   }
 
   /** The selected account, bound, and who it is now: for GitLab, whoever glab is signed in as. */

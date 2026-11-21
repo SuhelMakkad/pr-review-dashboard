@@ -28,6 +28,7 @@ import { FixtureLinear, LinearService, type LinearSource } from '@/linear/servic
 import type { LinearConnector } from '@/linear/oauth.js';
 import { AiRunner } from '@/ai/runner.js';
 import { AutoReviewer } from '@/ai/auto-review.js';
+import { Scheduler } from '@/scheduler/scheduler.js';
 import { FindingsPublisher } from '@/ai/post-findings.js';
 import { downloadRepository, type RepositoryExporter } from '@/ai/workspace.js';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -174,7 +175,9 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   registerLinearRoutes(app, service, linear);
 
   const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);
-  const autoReviewer = new AutoReviewer(service, runner, notifier);
+  // Background work run at its due time: restarts of automatic reviews, for now.
+  const scheduler = new Scheduler(service.store, service.clock, bootId);
+  const autoReviewer = new AutoReviewer(service, runner, notifier, scheduler);
   const publisher = new FindingsPublisher(service, runner, operations);
 
   runner.onSettled = (row) => autoReviewer.settled(row);
@@ -190,11 +193,14 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     await runner.recover(login);
     operations.wake();
 
-    // Starting a review refetches the PR and builds its diff; it never delays a sync.
-    void autoReviewer.afterSync(login);
+    // Starting a review refetches the PR and builds its diff; it never delays a sync. Its pass is
+    // handed back, unawaited, for a restart that asked for this sync.
+    const pass = autoReviewer.afterSync(login);
 
     // History fills in the background; it never delays a sync.
     void backfill.start(login);
+
+    return { pass };
   };
   registerNotifyRoutes(app, service, notifier);
   registerInsightsRoutes(app, service, backfill);
@@ -211,6 +217,8 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     });
     runner.open();
     operations.open();
+    scheduler.open();
+    autoReviewer.open();
   });
 
   // One shutdown. Every part stops taking new work in the same tick, before anything is awaited,
@@ -226,6 +234,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   const stopWork = () =>
     (draining ??= Promise.allSettled([
       service.stop(),
+      scheduler.close(),
       autoReviewer.close(),
       backfill.close(),
       operations.close(),

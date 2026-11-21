@@ -81,7 +81,9 @@ async function setup() {
   cleanups.push(() => runner.close());
   runner.onSettled = (row) => reviewer.settled(row);
   runner.onFinished = (row) => reviewer.finished(row);
-  sync.afterSync = (login) => reviewer.afterSync(login);
+  sync.afterSync = async (login) => {
+    await reviewer.afterSync(login);
+  };
   await sync.sync();
 
   const enable = () => {

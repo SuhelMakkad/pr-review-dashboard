@@ -27,8 +27,14 @@ async function setup(options: { browser?: boolean } = {}) {
 
   if (options.browser !== false) events.subscribe((stored) => received.push(stored.event));
 
-  sync.afterSync = (login) =>
-    notifier.afterSync(login, sync.list().items, sync.mine().items, new Date(2026, 10, 5, 12, 0));
+  sync.afterSync = async (login) => {
+    await notifier.afterSync(
+      login,
+      sync.list().items,
+      sync.mine().items,
+      new Date(2026, 10, 5, 12, 0),
+    );
+  };
 
   const notified = () =>
     received.flatMap((event) => (event.type === 'notify' ? event.notifications : []));

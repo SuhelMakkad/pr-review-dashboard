@@ -22,6 +22,7 @@ import { snapshotCodec, triageCodec } from '@/db/codecs.js';
 import { migrateDatabase } from '@/db/migrate.js';
 import { NotificationLog } from '@/db/notifications.js';
 import { OperationLog } from '@/db/operations.js';
+import { ScheduledWork } from '@/db/scheduled-work.js';
 import { LAST_ACCOUNT, Settings, STATUS } from '@/db/settings.js';
 import {
   activityEvents,
@@ -35,6 +36,7 @@ import {
   prSync,
   queueSamples,
   reviewDrafts,
+  scheduledWork,
   snapshots,
   triage,
 } from '@/db/schema.js';
@@ -74,6 +76,8 @@ export class Store {
   readonly draftWrites: DraftWriteLog;
   /** Submit and discard ids you stopped waiting for, and each account's receipt-history epoch. */
   readonly abandoned: AbandonedCommands;
+  /** When background work next looks at something (`db/scheduled-work.ts`). */
+  readonly scheduledWork: ScheduledWork;
   private transactionDepth = 0;
   /** Effects waiting for the outermost transaction to commit. */
   private committed: (() => void)[] = [];
@@ -92,6 +96,7 @@ export class Store {
     this.operations = new OperationLog(this.db);
     this.draftWrites = new DraftWriteLog(this.db);
     this.abandoned = new AbandonedCommands(this.db);
+    this.scheduledWork = new ScheduledWork(this.db);
     migrateDatabase(this.db, path);
   }
 
@@ -452,6 +457,7 @@ export class Store {
       notificationLog,
       autoReviewLog,
       githubOperations,
+      scheduledWork,
     ];
 
     this.transaction(() => {
