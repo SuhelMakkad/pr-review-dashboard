@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { WorkerPoolContextProvider } from '@pierre/diffs/react';
 import DiffsWorker from '@pierre/diffs/worker/worker.js?worker';
@@ -11,11 +11,13 @@ import {
   PanelRightClose,
   PanelRightOpen,
 } from 'lucide-react';
+import { commentableLines } from '@review-desk/shared/diff';
 import type { DraftComment } from '@review-desk/shared/review';
 import type { ReviewThread } from '@review-desk/shared/types';
 import type { GitHubAction } from '@review-desk/shared/operations';
 import { operationInProgress, operationUnsettled } from '@review-desk/shared/operations';
 import { CommandBanner } from '@/features/review/command-banner';
+import type { AttemptView } from '@/features/review/draft-attempts';
 import { refOf } from '@/lib/pr-ref';
 import { inQueue } from '@/features/pulls/meta';
 import { openActivity } from '@/features/activity/use-operations';
@@ -99,9 +101,22 @@ export function FilesWorkspace() {
 
 /** The PR revision a diff was built from, as its manifest names it. */
 
-/** What the composer is for, with the patch it was opened on. */
+/**
+ * What the composer is for, with the patch it was opened on. A composer adding a kept comment
+ * again names it (`recovers`), and one whose comment was refused, and kept, names that too: both
+ * belong to this composer alone, gone with it.
+ */
 type ComposerState =
-  (((LineTarget & { path: string }) | { path: string; line: null }) & { view?: DiffView }) | null;
+  | (((LineTarget & { path: string }) | { path: string; line: null }) & {
+      view?: DiffView;
+      recovers?: string;
+      refused?: { key: string; text: string };
+      /** Why its last send was refused: this opening's alone. */
+      error?: string;
+      /** This opening's own: its editor, its text and its answers are never another's. */
+      opening?: string;
+    })
+  | null;
 
 function Workspace() {
   const { item } = useCurrentPull();
@@ -114,8 +129,28 @@ function Workspace() {
   const diffRef = useRef<HTMLDivElement>(null);
   const [railOpen, setRailOpen] = useState(() => storage.get('review-desk-rail') !== 'closed');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [composer, setComposer] = useState<ComposerState>(null);
-  const [composerError, setComposerError] = useState<string | null>(null);
+  const [composer, setComposerState] = useState<ComposerState>(null);
+
+  // Each composer opened is a new one: its editor starts from its own text, and an answer to an
+  // earlier one never reaches it.
+  const setComposer = (next: ComposerState | ((current: ComposerState) => ComposerState)) =>
+    setComposerState((current) => {
+      const value = typeof next === 'function' ? next(current) : next;
+
+      return value && !value.opening ? { ...value, opening: crypto.randomUUID() } : value;
+    });
+
+  /**
+   * An answer to the opening `opened`, applied in the very update that checks it is still the one
+   * open: never to a composer opened since, whatever order the updates run in.
+   */
+  const toOpening = (
+    opened: NonNullable<ComposerState>,
+    change: (current: NonNullable<ComposerState>) => ComposerState,
+  ) =>
+    setComposerState((current) =>
+      current && current.opening === opened.opening ? change(current) : current,
+    );
   /** Text kept from a composer closed because its diff changed, for the next one. */
   const [keptBody, setKeptBody] = useState<string | null>(null);
   /** Lines selected for a comment, with the file and patch they were selected in. */
@@ -125,6 +160,10 @@ function Workspace() {
   const [replying, setReplying] = useState<string | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
   const [recoveredBody, setRecoveredBody] = useState('');
+  /** The composer's text as it is now (it says, from when it opens). */
+  const [composerBody, setComposerBody] = useState('');
+  /** A draft comment to bring into view once its file has rendered. */
+  const [focusDraft, setFocusDraft] = useState<string | null>(null);
   const [railTab, setRailTab] = useState<'threads' | 'assist'>('threads');
   const layout = useDefaultLayout({ id: 'files-workspace', storage: layoutStorage() });
 
@@ -216,6 +255,23 @@ function Workspace() {
   const threads = detail.data?.snapshot.threads ?? [];
   const unread = new Set(item?.unreadReplyKeys ?? []);
   const drafts = draft?.comments ?? [];
+
+  // A kept refusal this composer shows with its very text: hidden from the banner meanwhile, and
+  // shown there again once the composer closes or its text changes.
+  const refused = composer?.refused;
+
+  useEffect(() => {
+    if (!refused || composerBody.trim() !== refused.text) return;
+
+    return review.writer.showing(refused.key, refused.text);
+  }, [refused, composerBody, review.writer]);
+
+  // A draft card's edit refused, and kept: hidden while the card shows it as is (stable, so the
+  // card's own effect does not run again on every render).
+  const hideKept = useCallback(
+    (key: string, text: string) => review.writer.showing(key, text),
+    [review.writer],
+  );
 
   const threadsByFile = useMemo(() => {
     const map = new Map<string, ReviewThread[]>();
@@ -317,9 +373,29 @@ function Workspace() {
 
     setRecoveredBody(keptBody ?? '');
     setKeptBody(null);
-    setComposerError(null);
     setComposer(selection ?? { path: current.path, line: null, view: diffView(diff.data) });
   };
+
+  // Bring a draft comment asked for into view once its file has rendered.
+  useEffect(() => {
+    if (!focusDraft) return;
+
+    let tries = 0;
+    const timer = setInterval(() => {
+      const card = diffRef.current?.querySelector<HTMLElement>(
+        `[data-draft-id="${CSS.escape(focusDraft)}"]`,
+      );
+
+      // Shown, or not after a few seconds (gone from the draft): either way, done.
+      if (card || ++tries >= 30) {
+        card?.scrollIntoView({ block: 'center' });
+        clearInterval(timer);
+        setFocusDraft(null);
+      }
+    }, 100);
+
+    return () => clearInterval(timer);
+  }, [focusDraft, current?.path]);
 
   // Bring a focused thread into view once its file has rendered.
   useEffect(() => {
@@ -522,7 +598,34 @@ function Workspace() {
       key={comment.id}
       comment={comment}
       busy={review.editComment.isPending || locked}
-      onEdit={(body) => review.editComment.mutateAsync({ id: comment.id, body })}
+      onEdit={(body) =>
+        review.editComment.mutateAsync({
+          id: comment.id,
+          body,
+          where: {
+            path: comment.path,
+            line: comment.line,
+            side: comment.side,
+            startLine: comment.startLine,
+            // Its lines belong to the comparison shown only when they were made on its head, and
+            // have not moved since: else none is named, and a new comment of it is on its file.
+            ...(() => {
+              const shown = diffView(diff.data);
+
+              // The head names its right side alone: a left side compares with a start this
+              // comment does not record, so it never names one.
+              return shown &&
+                comment.side === 'RIGHT' &&
+                (comment.startLine === null || comment.startSide !== 'LEFT') &&
+                comment.status !== 'stale' &&
+                comment.anchorOid === shown.headOid
+                ? { view: shown }
+                : {};
+            })(),
+          },
+        })
+      }
+      hideKept={hideKept}
       onDelete={() =>
         review.deleteComment.mutate(comment.id, { onError: (error) => toast.error(error.message) })
       }
@@ -539,7 +642,6 @@ function Workspace() {
 
     setKeptBody(body);
     setComposer(null);
-    setComposerError(null);
     toast.error(
       'The diff changed while you were writing. Select the line again; your text is kept.',
     );
@@ -547,16 +649,88 @@ function Workspace() {
     return true;
   };
 
+  /**
+   * A refusal the writer kept, named by it, for the very composer it was sent from: hidden from
+   * the banner while that one shows it as is. Gone with it, never another composer's.
+   */
+  const keepRefused = (opened: NonNullable<ComposerState>, error: unknown, text: string) => {
+    const kept = (error as { details?: { kept?: unknown } }).details?.kept;
+
+    toOpening(opened, (current) => ({
+      ...current,
+      error: (error as Error).message,
+      refused: typeof kept === 'string' ? { key: kept, text } : undefined,
+    }));
+  };
+
+  /** Closes the composer, if it is still the opening `opened` now: never one opened since. */
+  const closeOpening = (opened: NonNullable<ComposerState>) => toOpening(opened, () => null);
+
+  /**
+   * Opens a composer with a kept comment's text, to add it as a new comment: on the lines it was
+   * for when the diff shown is the very comparison they were picked in, else on its file, for you
+   * to pick the lines again.
+   */
+  const addAsNew = (entry: AttemptView) => {
+    const where = entry.where;
+    const text = entry.texts.at(-1) ?? '';
+
+    if (!where || !files.some((file) => file.path === where.path)) {
+      toast.error('Its file is not in this diff. Copy your text instead.');
+
+      return;
+    }
+
+    const picked = { path: where.path, view: where.view as DiffView | undefined };
+    // The lines on their side in the patch shown, which must be the very comparison they were
+    // picked in: else they are other lines, or none.
+    const patchLines = commentableLines(files.find((file) => file.path === where.path)?.patch);
+    const sideLines = where.side === 'LEFT' ? patchLines.left : patchLines.right;
+    const restorable =
+      where.line !== null &&
+      linesShown(picked, where.path, diff.data) &&
+      sideLines.has(where.line) &&
+      (where.startLine === null || sideLines.has(where.startLine));
+
+    selectFile(where.path);
+    setRecoveredBody(text);
+
+    // A collapsed file (generated) shows no lines: opened, so the composer on them is shown too.
+    if (restorable) setExpanded((open) => new Set([...open, where.path]));
+
+    setComposer(
+      restorable && where.line !== null
+        ? {
+            path: where.path,
+            line: where.line,
+            side: where.side,
+            startLine: where.startLine,
+            view: picked.view,
+            recovers: entry.key,
+          }
+        : { path: where.path, line: null, view: diffView(diff.data), recovers: entry.key },
+    );
+
+    if (where.line !== null && !restorable)
+      toast(
+        'The lines it was on are not shown now. Comment on the file, or select the lines again.',
+      );
+  };
+
+  const closeComposer = () => {
+    setComposer(null);
+    setComposerBody('');
+  };
+
   const composerFor = (target: NonNullable<ComposerState>) => (
     <Composer
+      key={target.opening}
       label={target.line === null ? `Comment on ${target.path}` : `Comment on line ${target.line}`}
       initial={recoveredBody}
       busy={review.addComment.isPending || review.commentNow.isPending || locked}
-      error={composerError}
-      onCancel={() => {
-        setComposer(null);
-        setComposerError(null);
-      }}
+      error={target.error ?? null}
+      onChange={setComposerBody}
+      onCancel={closeComposer}
       primary={{
         label: 'Add to review',
         keys: '$mod+Enter',
@@ -564,22 +738,27 @@ function Workspace() {
         run: async (body) => {
           if (lineMoved(target, body)) return;
 
+          const side = target.line === null ? 'RIGHT' : target.side;
+          const startLine = target.line === null ? null : target.startLine;
+
           try {
             await review.addComment.mutateAsync({
               path: target.path,
               line: target.line,
-              side: target.line === null ? 'RIGHT' : target.side,
-              startLine: target.line === null ? null : target.startLine,
+              side,
+              startLine,
               body,
               // The lines are the diff's the composer was opened on; refused for another revision.
               ...(target.line !== null && target.view
                 ? { revision: { headOid: target.view.headOid, baseOid: target.view.baseOid } }
                 : {}),
+              where: { path: target.path, line: target.line, side, startLine, view: target.view },
+              ...(target.recovers ? { recovers: target.recovers } : {}),
             });
-            setComposer(null);
-            setComposerError(null);
+            closeOpening(target);
           } catch (error) {
-            setComposerError((error as Error).message);
+            // Its own composer's, if still open: never shown in one opened since.
+            keepRefused(target, error, body);
           }
         },
       }}
@@ -605,11 +784,10 @@ function Workspace() {
               startLine: target.line === null ? null : target.startLine,
               body,
             });
-            setComposer(null);
-            setComposerError(null);
+            closeOpening(target);
             toast('Comment queued', { action: { label: 'View activity', onClick: openActivity } });
           } catch (error) {
-            setComposerError((error as Error).message);
+            toOpening(target, (current) => ({ ...current, error: (error as Error).message }));
           }
         },
       }}
@@ -845,7 +1023,6 @@ function Workspace() {
 
                     setRecoveredBody(keptBody ?? '');
                     setKeptBody(null);
-                    setComposerError(null);
                     setComposer({ ...target, path: current.path, view: diffView(diff.data) });
                   }}
                   onCommentFile={() => {
@@ -962,7 +1139,26 @@ function Workspace() {
       </Group>
 
       <div className="px-4 empty:hidden">
-        <CommandBanner writer={review.writer} />
+        <CommandBanner
+          writer={review.writer}
+          actions={{
+            addAsNew,
+            hasComment: (id) => drafts.some((comment) => comment.id === id),
+            checkComment: (entry) => {
+              if (!entry.where || !files.some((file) => file.path === entry.where!.path)) {
+                toast.error('Its file is not in this diff.');
+
+                return;
+              }
+
+              selectFile(entry.where.path);
+
+              // An edit names its comment: brought into view, if it is still in the draft.
+              if (entry.commentId) setFocusDraft(entry.commentId);
+            },
+            openFinish: () => setFinishOpen(true),
+          }}
+        />
       </div>
 
       <PendingTray

@@ -23,6 +23,7 @@ export function Composer({
   primary,
   alternate,
   onCancel,
+  onChange,
   busy,
   error,
   className,
@@ -33,6 +34,8 @@ export function Composer({
   primary: ComposerAction;
   alternate?: ComposerAction;
   onCancel: () => void;
+  /** The text as it is now, on every change: what a refusal kept of it can be told apart by. */
+  onChange?: (body: string) => void;
   busy?: boolean;
   error?: string | null;
   className?: string;
@@ -45,6 +48,8 @@ export function Composer({
   useEffect(() => {
     textarea.current?.focus();
     textarea.current?.setSelectionRange(body.length, body.length);
+    // What it holds from the start, before any change.
+    onChange?.(body);
   }, []);
 
   const send = async (action: ComposerAction) => {
@@ -72,7 +77,10 @@ export function Composer({
           value={body}
           aria-label={label}
           placeholder={placeholder ?? 'Leave a comment (Markdown supported)'}
-          onChange={(event) => setBody(event.target.value)}
+          onChange={(event) => {
+            setBody(event.target.value);
+            onChange?.(event.target.value);
+          }}
           onKeyDown={(event) => {
             const mod = event.metaKey || event.ctrlKey;
 

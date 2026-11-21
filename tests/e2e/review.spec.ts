@@ -161,3 +161,54 @@ test('marks files viewed and moves on, and posts a file comment immediately', as
     'SubmitReview',
   ]);
 });
+
+test('keeps a refused comment after its composer closes, and adds it again as a new comment', async ({
+  page,
+}) => {
+  await openFresh(page, '/pr/acme/web/1839/files');
+  await expect(addedLine(page, 5)).toBeVisible();
+
+  // The server refuses the first add for good.
+  let refused = false;
+
+  await page.route('**/api/accounts/you/pulls/*/draft/comments', async (route) => {
+    if (refused || route.request().method() !== 'POST') return route.fallback();
+
+    refused = true;
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: 'This line is no longer in the diff.',
+        code: 'LINE_GONE',
+        attempt: { id: route.request().postDataJSON().writeId, state: 'refused' },
+      }),
+    });
+  });
+
+  await addedLine(page, 5).click();
+  await page.keyboard.press('c');
+
+  const composer = page.getByRole('textbox', { name: 'Comment on line 5' });
+
+  await composer.fill('Keep this thought.');
+  await page.keyboard.press('ControlOrMeta+Enter');
+  await expect(page.getByRole('alert')).toContainText('This line is no longer in the diff.');
+
+  // Shown in its composer: not in the banner too.
+  const changes = page.getByRole('region', { name: /Draft changes/ });
+
+  await expect(changes).toHaveCount(0);
+
+  await composer.press('Escape');
+  await expect(changes).toContainText('was not saved. This line is no longer in the diff.');
+
+  await changes.getByRole('button', { name: 'Add as a new comment' }).click();
+  await expect(page.getByRole('textbox', { name: 'Comment on line 5' })).toHaveValue(
+    'Keep this thought.',
+  );
+  await page.keyboard.press('ControlOrMeta+Enter');
+
+  await expect(page.getByText('in your review, not posted yet')).toBeVisible();
+  await expect(changes).toHaveCount(0);
+});

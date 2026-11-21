@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AlertTriangle, Pencil, Trash2 } from 'lucide-react';
 import type { DraftComment } from '@review-desk/shared/review';
 import { IconButton } from '@/ui/button';
@@ -12,16 +12,29 @@ export function DraftCommentCard({
   comment,
   onEdit,
   onDelete,
+  hideKept,
   busy,
 }: {
   comment: DraftComment;
   onEdit: (body: string) => Promise<unknown>;
   onDelete: () => void;
+  /** Hides a kept refusal from the banner while this card shows its very text: until called. */
+  hideKept?: (key: string, text: string) => () => void;
   busy?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [body, setBody] = useState(comment.body);
+  /** A refusal of this edit, kept by the writer, with the text it was refused with. */
+  const [refused, setRefused] = useState<{ key: string; text: string } | null>(null);
   const stale = comment.status === 'stale';
+
+  // The refused text shown here as is: the banner need not show it too, meanwhile.
+  useEffect(() => {
+    if (!editing || !refused || !hideKept || body.trim() !== refused.text) return;
+
+    return hideKept(refused.key, refused.text);
+  }, [editing, refused, hideKept, body]);
 
   // Editing mounts the composer at once (it takes focus) while the card fades out above it. This
   // lives in the diff virtualizer, so nothing here animates height.
@@ -34,17 +47,25 @@ export function DraftCommentCard({
           initial={comment.body}
           busy={busy}
           error={error}
-          onCancel={() => setEditing(false)}
+          onChange={setBody}
+          onCancel={() => {
+            setEditing(false);
+            setRefused(null);
+          }}
           primary={{
             label: 'Save',
             keys: '$mod+Enter',
             variant: 'primary',
-            run: async (body) => {
+            run: async (text) => {
               try {
-                await onEdit(body);
+                await onEdit(text);
                 setEditing(false);
+                setRefused(null);
               } catch (failure) {
+                const kept = (failure as { details?: { kept?: unknown } }).details?.kept;
+
                 setError((failure as Error).message);
+                setRefused(typeof kept === 'string' ? { key: kept, text } : null);
               }
             },
           }}
