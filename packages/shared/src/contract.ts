@@ -174,6 +174,10 @@ const guard = {
  */
 const runPr = z.string().min(1).max(200).optional();
 
+/** A claimed write to a run's draft names its PR: its outcome is that PR's to look up. */
+const namesItsPr = (value: { writeId?: string; prId?: string }) =>
+  value.writeId === undefined || value.prId !== undefined;
+
 const newComment = z
   .object({
     account,
@@ -323,14 +327,16 @@ export const aiRequests = {
     baseGeneration: guard.baseGeneration,
   }),
   run: z.strictObject({ account }),
-  apply: z.strictObject({ account, ...guard, prId: runPr }),
-  accept: z.strictObject({
-    account,
-    index: z.number().int().min(0),
-    body: z.string().trim().min(1).max(65_536).optional(),
-    ...guard,
-    prId: runPr,
-  }),
+  apply: z.strictObject({ account, ...guard, prId: runPr }).refine(namesItsPr),
+  accept: z
+    .strictObject({
+      account,
+      index: z.number().int().min(0),
+      body: z.string().trim().min(1).max(65_536).optional(),
+      ...guard,
+      prId: runPr,
+    })
+    .refine(namesItsPr),
   prepare: z
     .strictObject({
       account,
@@ -343,7 +349,8 @@ export const aiRequests = {
       ...guard,
       prId: runPr,
     })
-    .refine((value) => !value.replace || Boolean(value.expectedDraftRevision)),
+    .refine((value) => !value.replace || Boolean(value.expectedDraftRevision))
+    .refine(namesItsPr),
 };
 
 /** Triage of the account the path names: the body carries no account of its own. */

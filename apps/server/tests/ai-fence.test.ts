@@ -78,7 +78,7 @@ async function demo() {
   const revision = () => draftVersionsOf(store, 'you', pr.id).revision;
   const save = (body: string) => call('PUT', `/api/accounts/you/pulls/${pr.id}/draft`, { body });
 
-  return { store, pr, call, runs, finished, start, revision, save };
+  return { store, providers, pr, call, runs, finished, start, revision, save };
 }
 
 describe('AI starts under their guard', () => {
@@ -114,7 +114,11 @@ describe('AI starts under their guard', () => {
   });
 
   it('answer two starts that joined one run with that run, after it finished and the draft changed', async () => {
-    const { start, finished, revision, save } = await demo();
+    const { providers, start, finished, revision, save } = await demo();
+
+    // Slow enough that the second attempt joins the run while it is still live.
+    providers.codex.delayMs = 400;
+
     const first = { task: 'brief', attemptId: randomUUID(), baseRevision: revision() };
     const second = { task: 'brief', attemptId: randomUUID(), baseRevision: revision() };
     const a = await start(first);
@@ -122,6 +126,7 @@ describe('AI starts under their guard', () => {
     const b = await start(second);
 
     expect(b.json().id).toBe(a.json().id);
+    expect(b.json().status).toMatch(/queued|running/);
 
     await finished(a.json().id);
     await save('Later');
@@ -151,6 +156,15 @@ describe('AI starts under their guard', () => {
 });
 
 describe('AI draft writes under their guard', () => {
+  it('name their PR whenever they carry an id', async () => {
+    const { call } = await demo();
+    const unnamed = await call('POST', '/api/accounts/you/ai/runs/some-run/summary', {
+      writeId: randomUUID(),
+    });
+
+    expect(unnamed.statusCode).toBe(400);
+  });
+
   it("are claimed under the PR they name: a refusal for an unknown run is found by that PR's lookup", async () => {
     const { pr, call, start, finished } = await demo();
     const writeId = randomUUID();
@@ -209,7 +223,7 @@ describe('AI draft writes under their guard', () => {
     expect(draft.comments).toEqual([]);
 
     // On the draft as it is, with an id: committed, and a retry gets the same answer.
-    const request = { writeId: randomUUID(), baseRevision: revision() };
+    const request = { writeId: randomUUID(), prId: pr.id, baseRevision: revision() };
     const applied = await call('POST', run(summarised.id, 'summary'), request);
 
     expect(applied.statusCode).toBe(200);
