@@ -321,9 +321,9 @@ describe('the draft writer', () => {
     });
   });
 
-  it('stops sending a write at its deadline, and keeps what it carried as unconfirmed', async () => {
+  it('stops sending a write at its deadline, and keeps it to be looked up or stopped', async () => {
     const { sent, answers, transport } = server();
-    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
 
     clock(1_000);
     writer.observe(draft(1));
@@ -334,9 +334,12 @@ describe('the draft writer', () => {
     });
 
     await expect(writer.write('addComment', pr, { body: 'Late' })).rejects.toMatchObject({
-      code: 'NOT_CONFIRMED',
+      code: 'WRITE_UNCONFIRMED',
     });
     expect(sent).toHaveLength(1);
+    expect(writer.writeViews()).toMatchObject([
+      { phase: 'unknown', text: 'Late', canStop: true, canSendAgain: false },
+    ]);
   });
 
   it('shows an answer only under the account-switch stamp its write was first sent at', async () => {
@@ -735,7 +738,7 @@ describe('the draft writer', () => {
     });
 
     await expect(writer.write('addComment', pr, { body: 'Late' })).rejects.toMatchObject({
-      code: 'NOT_CONFIRMED',
+      code: 'WRITE_UNCONFIRMED',
     });
     expect(sent).toHaveLength(1);
   });
@@ -762,6 +765,8 @@ describe('the draft writer', () => {
 
     expect(second.sent).toEqual([]);
     expect(reloaded.state('event')).toBe('error');
+    // It may have been received before the reload: kept to be looked up, or stopped.
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canStop: true }]);
   });
 
   it('never saves text begun more than a week ago, though its pause ends only now', async () => {
@@ -2120,6 +2125,137 @@ describe('comment and AI write recovery', () => {
     expect(journal().writes ?? []).toEqual([]);
   });
 
+  it('never makes twice a write that may have landed: the very same is refused while it is unresolved', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    const input = { ...target, body: 'Once' };
+
+    writer.observe(draft(0));
+    answers.push(unreachable, gap);
+    await expect(writer.write('addComment', comment, input)).rejects.toMatchObject({
+      code: 'WRITE_UNCONFIRMED',
+    });
+
+    // From the composer still open: the very same, its keys in another order too.
+    await expect(
+      writer.write('addComment', comment, { body: 'Once', ...target }),
+    ).rejects.toMatchObject({ code: 'WRITE_UNRESOLVED' });
+    expect(sent).toHaveLength(2);
+
+    // Another write goes ahead.
+    await writer.write('addComment', comment, { ...target, body: 'Other' });
+
+    // Stopped, never received: the same may be asked for again.
+    await writer.stopWrite(writer.writeViews()[0]!.key);
+    await writer.write('addComment', comment, input);
+
+    expect(sent.map((request) => request.body.body)).toEqual(['Once', 'Once', 'Other', 'Once']);
+  });
+
+  it.each([
+    ['unknown', [{ phase: 'lost' }]],
+    ['not-admitted', [{ phase: 'not-saved', reason: expect.stringMatching(/stopped it/) }]],
+  ])(
+    'keeps what a stop decided, its answer lost, when a lookup finds it: %s',
+    async (decision, views) => {
+      const next = server();
+
+      vi.mocked(next.transport.lookup).mockImplementation(async (id) => ({
+        attempt: {
+          id,
+          state: 'refused',
+          result: {
+            status: 409,
+            body: { error: 'You stopped waiting for this.', code: 'WRITE_ABANDONED', decision },
+          },
+        },
+      }));
+
+      const { reloaded } = await reloadedWithSent(next);
+
+      await reloaded.reconcile();
+
+      expect(reloaded.writeViews()).toMatchObject(views);
+    },
+  );
+
+  it('keeps a stop decided unknown when sending again finds it, its answer lost', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+    next.answers.push(async (request) => {
+      throw new ApiError('You stopped waiting for this.', 409, 'WRITE_ABANDONED', {
+        decision: 'unknown',
+        attempt: { id: request.body.writeId, state: 'refused' },
+      });
+    });
+    await reloaded.sendWriteAgain(reloaded.writeViews()[0]!.key);
+
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'lost' }]);
+  });
+
+  it('never moves the queue back to an older commit that sending again replays', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+    reloaded.observe(draft(9));
+    // Its first was received long ago, at revision 3: the answer replays that.
+    next.answers.push(async (request) => ({
+      attempt: { id: request.body.writeId, state: 'committed', revision: 3 },
+    }));
+
+    // Sent again first, a write queued behind it.
+    const again = reloaded.sendWriteAgain(reloaded.writeViews()[0]!.key);
+    const behind = reloaded.write('addComment', comment, { body: 'Behind' });
+
+    await again;
+    await behind;
+    await reloaded.write('addComment', comment, { body: 'After' });
+
+    expect(next.sent.map((request) => [request.body.body, request.body.baseRevision])).toEqual([
+      ['Kept', 2],
+      ['Behind', 9],
+      ['After', 10],
+    ]);
+  });
+
+  it('proves nothing by a lookup it cannot read: looked up again, never offered to send again', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({ arrived: 'maybe' });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+
+    expect(reloaded.writeViews()).toEqual([]);
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: false,
+    });
+    await reloaded.reconcile();
+
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+  });
+
   it('never holds up the draft for a write not confirmed', async () => {
     const { sent, answers, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);
@@ -2259,7 +2395,7 @@ describe('autosaves across a restart', () => {
     expect(writers[1]!.writer.state('body')).not.toBe('saved');
   });
 
-  it('saves afresh, under a new id, an autosave a restarted server no longer knows', async () => {
+  it('keeps for you to confirm an autosave a restarted server no longer knows, never saved afresh', async () => {
     const { sent, answers, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);
 
@@ -2275,15 +2411,26 @@ describe('autosaves across a restart', () => {
     writer.edit('event', 'APPROVE');
     await writer.settled();
 
-    const ids = sent.map((request) => request.body.writeId);
+    expect(sent.map((request) => request.body.writeId)).toEqual([
+      sent[0]!.body.writeId,
+      sent[0]!.body.writeId,
+    ]);
+    expect(writer.state('event')).toBe('error');
+    expect(writer.writeViews()).toMatchObject([
+      { phase: 'unknown', label: 'Your summary or verdict', canStop: true, canSendAgain: false },
+    ]);
 
-    expect(sent.map((request) => request.body.event)).toEqual(['APPROVE', 'APPROVE', 'APPROVE']);
-    expect(ids[1]).toBe(ids[0]);
-    expect(ids[2]).not.toBe(ids[0]);
+    // Found saved after all: settled, and gone from the banner.
+    vi.mocked(transport.lookup).mockResolvedValueOnce({
+      attempt: { id: sent[0]!.body.writeId, state: 'committed', revision: 1, result: { body: {} } },
+    });
+    await writer.reconcile();
+
     expect(writer.state('event')).toBe('saved');
+    expect(writer.writeViews()).toEqual([]);
   });
 
-  it('saves afresh an autosave a reload resent that a restarted server no longer knows', async () => {
+  it('keeps for you to confirm an autosave a reload resent that a restarted server no longer knows', async () => {
     const first = server();
     const writer = new DraftWriter('you', PR, first.transport, instant, NEVER);
 
@@ -2300,12 +2447,41 @@ describe('autosaves across a restart', () => {
 
     const reloaded = new DraftWriter('you', PR, second.transport, instant, NEVER);
 
-    await vi.waitFor(() => expect(reloaded.state('event')).toBe('saved'));
+    await vi.waitFor(() => expect(reloaded.state('event')).toBe('error'));
 
-    expect(second.sent.map((request) => request.body.writeId)).toEqual([
-      first.sent[0]!.body.writeId,
-      expect.not.stringMatching(String(first.sent[0]!.body.writeId)),
-    ]);
+    expect(second.sent).toEqual([first.sent[0]]);
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canStop: true }]);
+  });
+
+  it('only looks up after a reload an autosave whose deadline passed, never sending it', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', PR, first.transport, instant, NEVER);
+
+    clock(1_000);
+    writer.observe(draft(2));
+    first.answers.push(() => new Promise(() => {}));
+    writer.edit('event', 'APPROVE');
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    clock(1_000 + ATTEMPT_TTL_MS);
+
+    const second = server();
+
+    vi.mocked(second.transport.lookup).mockResolvedValue({
+      attempt: {
+        id: first.sent[0]!.body.writeId,
+        state: 'committed',
+        revision: 3,
+        result: { body: {} },
+      },
+    });
+
+    const reloaded = new DraftWriter('you', PR, second.transport, instant, NEVER);
+
+    await reloaded.reconcile();
+    await reloaded.settled();
+
+    expect(second.sent).toEqual([]);
+    expect(reloaded.state('event')).toBe('saved');
   });
 });
 
@@ -2378,14 +2554,16 @@ describe('decoding a write', () => {
     expect(fromLookup({ arrived: false, fenced: true, provable: false }, expected)).toBe('unknown');
     expect(fromLookup({ arrived: false, fenced: false }, expected)).toBe('unknown');
     expect(fromLookup({ arrived: false, fenced: true, provable: 'yes' }, expected)).toBe('unknown');
-    expect(fromLookup({ arrived: false }, expected)).toBe('resend');
-    expect(fromLookup({ fenced: true }, expected)).toBe('resend');
-    expect(fromLookup({ attempt: { id: 'w', state: 'lost' } }, expected)).toBe('resend');
-    expect(fromLookup({ attempt: { id: 'x', state: 'refused' } }, expected)).toBe('resend');
+    // Nothing it can read: proof of nothing.
+    expect(fromLookup('oops', expected)).toBe('unreadable');
+    expect(fromLookup({ arrived: false }, expected)).toBe('unreadable');
+    expect(fromLookup({ fenced: true }, expected)).toBe('unreadable');
+    expect(fromLookup({ attempt: { id: 'w', state: 'lost' } }, expected)).toBe('unreadable');
+    expect(fromLookup({ attempt: { id: 'x', state: 'refused' } }, expected)).toBe('unreadable');
     // A settled attempt without what it recorded is not read as settled.
-    expect(fromLookup({ attempt: { id: 'w', state: 'refused' } }, expected)).toBe('resend');
+    expect(fromLookup({ attempt: { id: 'w', state: 'refused' } }, expected)).toBe('unreadable');
     expect(fromLookup({ attempt: { id: 'w', state: 'committed', revision: 5 } }, expected)).toBe(
-      'resend',
+      'unreadable',
     );
     expect(
       fromLookup(

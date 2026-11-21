@@ -180,4 +180,6 @@ export const ATTEMPT_MESSAGES = {
   notSentReload: 'This was not sent before the page reloaded.',
   neverReceived: 'This did not reach the server, and never can now.',
   stoppedNever: 'You stopped it before it reached the server.',
+  unresolved:
+    'The very same is still waiting to be confirmed, so it was not sent again. Its notice with your draft says what you can do.',
 } as const;

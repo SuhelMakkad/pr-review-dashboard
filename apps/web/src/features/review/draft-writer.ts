@@ -200,16 +200,16 @@ export async function decode(
  * Decodes a lookup's answer. A miss proves something only when the server says it is provable
  * (the id sealed by the server running, its history whole since): `never` means the write did not
  * arrive and never can commit; `resend` that it may yet. A miss that proves nothing is `unknown`.
- * An answer that could not be read is `resend` too: a sealed id sent again answers once.
+ * An answer that could not be read is `unreadable`: it proves nothing either way.
  */
 export function fromLookup(
   answer: unknown,
   expected: Expected,
-): Outcome | 'never' | 'resend' | 'unknown' {
-  if (!isObject(answer)) return 'resend';
+): Outcome | 'never' | 'resend' | 'unknown' | 'unreadable' {
+  if (!isObject(answer)) return 'unreadable';
 
   if (!('attempt' in answer)) {
-    if (answer.arrived !== false || typeof answer.fenced !== 'boolean') return 'resend';
+    if (answer.arrived !== false || typeof answer.fenced !== 'boolean') return 'unreadable';
     if (answer.provable !== true) return 'unknown';
 
     return answer.fenced ? 'never' : 'resend';
@@ -218,10 +218,10 @@ export function fromLookup(
   const attempt = attemptOf(answer.attempt, expected);
   const recorded = isObject(answer.attempt) ? answer.attempt.result : undefined;
 
-  if (!attempt) return 'resend';
+  if (!attempt) return 'unreadable';
   if (attempt.state === 'pending') return { kind: 'pending' };
   // A settled attempt answers with what it recorded: one without it is not read as settled.
-  if (!isObject(recorded)) return 'resend';
+  if (!isObject(recorded)) return 'unreadable';
   if (attempt.state === 'committed')
     return { kind: 'committed', body: recorded.body, revision: attempt.revision };
 
@@ -437,15 +437,10 @@ export class DraftWriter {
     for (const write of saved?.inflight ?? []) {
       const fields = write.fields ?? {};
 
-      if (now >= write.deadline) {
-        this.markFailed(fields, NOT_CONFIRMED);
-        continue;
-      }
-
-      // Journaled by an earlier version, under a bare id: only looked up. Sent again, it could be
-      // admitted afresh, its first received and its record pruned since. Its text is kept, and
-      // not saved on its own, until its outcome is known.
-      if (!isSealed(write.writeId)) {
+      // Past its deadline, or journaled by an earlier version under a bare id: only looked up.
+      // Sent again, a bare one could be admitted afresh, its first received and its record pruned
+      // since. Its text is kept, and not saved on its own, until its outcome is known.
+      if (now >= write.deadline || !isSealed(write.writeId)) {
         for (const [field, version] of entries(fields))
           this.fields[field].queued = Math.max(this.fields[field].queued, version);
 
@@ -715,6 +710,13 @@ export class DraftWriter {
 
     // An unsettled submit or discard, or an open discard: refused now, your input yours to keep.
     if (gate) return Promise.reject(new WriteRefused(gate.message, gate.code));
+
+    // The very same as a write not settled yet (asked for again from a composer still open):
+    // refused, so a write that may have landed is never made twice. Its notice says what to do.
+    const intent = { route, params, body };
+
+    if (this.writes.some((record) => writeNeedsLookup(record) && sameIntent(record.intent, intent)))
+      return Promise.reject(new WriteRefused(ATTEMPT_MESSAGES.unresolved, 'WRITE_UNRESOLVED'));
 
     const record: AttemptRecord = {
       key: crypto.randomUUID(),
@@ -1022,7 +1024,11 @@ export class DraftWriter {
       const outcome = await this.dispatch(write, false, record);
 
       if (outcome.kind === 'committed') {
-        this.advance(outcome.revision, write.base.generation);
+        // An answer may replay a commit made long ago: what is queued after it acts on the draft
+        // as it is, never on an older one.
+        const live = this.tail ?? this.seen ?? ZERO;
+
+        if (outcome.revision > live.revision) this.advance(outcome.revision, write.base.generation);
 
         if (isDraft(outcome.body)) this.transport.committed(outcome.body, write.stamp);
         else this.transport.stale();
@@ -1035,7 +1041,7 @@ export class DraftWriter {
         this.notSaved(record, 'The draft changed since this was first sent, so it was not saved.');
       } else if (outcome.kind === 'unconfirmed')
         this.moveWrite(record, 'unknown', { resendable: false });
-      else this.notSaved(record, refusalOf(outcome).message);
+      else this.refused(record, refusalOf(outcome));
     });
   }
 
@@ -1108,6 +1114,9 @@ export class DraftWriter {
       if (!this.writes.includes(record) || !writeNeedsLookup(record) || record.writeId !== writeId)
         return;
 
+      // Nothing read: looked up again later.
+      if (looked === 'unreadable') return;
+
       if (looked === 'never') this.notSaved(record, ATTEMPT_MESSAGES.neverReceived);
       else if (looked === 'resend' || looked === 'unknown') {
         // Not found: an autosave's text is kept for you to confirm.
@@ -1119,7 +1128,7 @@ export class DraftWriter {
       } else if (looked.kind === 'committed') this.writeCommitted(record, looked.revision);
       else if (looked.kind === 'conflict')
         this.notSaved(record, 'The draft changed since this was sent, so it was not saved.');
-      else if (looked.kind === 'refused') this.notSaved(record, looked.error.message);
+      else if (looked.kind === 'refused') this.refused(record, looked.error);
     } catch {
       // Not reachable: looked up again later.
     }
@@ -1128,7 +1137,7 @@ export class DraftWriter {
   private settleStop(record: AttemptRecord, read: WriteStop) {
     if (read.kind === 'pending') this.moveWrite(record, 'checking');
     else if (read.kind === 'committed') this.writeCommitted(record, read.revision);
-    else if (read.kind === 'refused') this.notSaved(record, read.error.message);
+    else if (read.kind === 'refused') this.refused(record, read.error);
     else if (read.kind === 'not-admitted') this.notSaved(record, ATTEMPT_MESSAGES.stoppedNever);
     else this.moveWrite(record, 'lost');
   }
@@ -1139,6 +1148,20 @@ export class DraftWriter {
 
     this.dropWrite(record);
     this.transport.stale();
+  }
+
+  /**
+   * Refused, as its claim recorded: never saved, unless the refusal is a stop that could not tell
+   * whether it was received before (`WRITE_ABANDONED`, decided `unknown`), which leaves it lost.
+   */
+  private refused(record: AttemptRecord, error: ApiError) {
+    if (error.code === 'WRITE_ABANDONED' && error.details.decision !== 'not-admitted')
+      this.moveWrite(record, 'lost');
+    else
+      this.notSaved(
+        record,
+        error.code === 'WRITE_ABANDONED' ? ATTEMPT_MESSAGES.stoppedNever : error.message,
+      );
   }
 
   /** Never saved: an autosave's fields keep its text for you to confirm; another is shown. */
@@ -1770,7 +1793,6 @@ export class DraftWriter {
     let guard = await this.guard(base);
     // Fields settled by the time they were to be sent: kept, as a commit of them is.
     const kept: Committed = new Set();
-    let afresh = 0;
 
     for (;;) {
       this.sendable(snapshot, guard, kept);
@@ -1816,13 +1838,10 @@ export class DraftWriter {
         return kept;
       }
 
-      // Not found, and the server cannot tell whether it was received: sealed by a server since
-      // restarted, and never received by it. The very text is saved afresh under a new id, on the
-      // draft as it is: a save only sets what it carries, so nothing is applied twice.
-      if (outcome.kind === 'unconfirmed' && afresh < 3) {
-        afresh += 1;
-        guard = await this.guard('chain');
-        continue;
+      if (outcome.kind === 'unconfirmed') {
+        this.keepUnconfirmed(write, fields);
+
+        return kept;
       }
 
       this.failFields(fields, refusalOf(outcome).message);
@@ -1858,8 +1877,11 @@ export class DraftWriter {
       return new Set();
     }
 
-    // Sealed by a server since restarted, and not received by it: saved afresh, as in `save`.
-    if (outcome.kind === 'unconfirmed') return this.save(this.restoredSnapshot(write), 'chain');
+    if (outcome.kind === 'unconfirmed') {
+      this.keepUnconfirmed(write, fields);
+
+      return new Set();
+    }
 
     this.failFields(fields, refusalOf(outcome).message);
 
@@ -1880,12 +1902,18 @@ export class DraftWriter {
     // Whether the id on its way has been sent only once: only then may a gap be sealed afresh.
     let fresh = first;
     let resealed = 0;
-    const send = (isFirst: boolean) => {
+    // Whether it may have been received: sent here, or before (a reload, a send again).
+    let sent = !first;
+    const send = (isFirst: boolean): Promise<Outcome> => {
       fresh = isFirst;
 
-      return Date.now() >= write.deadline
-        ? Promise.resolve(notConfirmed())
-        : decode(this.transport.send(write.request), isFirst, write);
+      // Past its deadline nothing is sent: never sent, it is refused; else only looked up.
+      if (Date.now() >= write.deadline)
+        return Promise.resolve(sent ? { kind: 'unconfirmed' } : notConfirmed());
+
+      sent = true;
+
+      return decode(this.transport.send(write.request), isFirst, write);
     };
     let outcome = await send(first);
     let attempt = 0;
@@ -1916,8 +1944,9 @@ export class DraftWriter {
 
       await sleep(this.backoff(attempt++));
 
+      // Sent, and not settled by its deadline: never sent again, only looked up.
       if (Date.now() >= write.deadline) {
-        outcome = notConfirmed();
+        outcome = { kind: 'unconfirmed' };
         break;
       }
 
@@ -1925,7 +1954,7 @@ export class DraftWriter {
         const looked = await this.transport
           .lookup(write.writeId, write.base)
           .then((answer) => fromLookup(answer, write))
-          .catch((): 'resend' => 'resend');
+          .catch((): 'unreadable' => 'unreadable');
 
         // It never arrived and never can: as refused, nothing saved.
         if (looked === 'never') {
@@ -1942,7 +1971,8 @@ export class DraftWriter {
           break;
         }
 
-        outcome = looked === 'resend' ? await send(false) : looked;
+        // Not received yet, or nothing read: the very same sent again, answering once.
+        outcome = looked === 'resend' || looked === 'unreadable' ? await send(false) : looked;
       } else outcome = await send(false);
     }
 
@@ -1950,6 +1980,26 @@ export class DraftWriter {
     this.changed();
 
     return outcome as Settled;
+  }
+
+  /**
+   * An autosave whose outcome can no longer be learnt on its own: its text kept for you to confirm,
+   * never saved again by itself, and the save only looked up, or stopped, from the banner. Saved
+   * afresh it could put old text over a newer edit, its first having landed.
+   */
+  private keepUnconfirmed(write: Inflight, fields: Partial<Record<Field, number>>) {
+    this.writes.push({
+      key: write.writeId,
+      phase: 'unknown',
+      intent: write.request,
+      writeId: write.writeId,
+      request: write.request,
+      base: write.base,
+      deadline: write.deadline,
+      fields,
+    });
+    this.failFields(fields, NOT_CONFIRMED);
+    this.poll();
   }
 
   /** `write` under a new id: never sent before, so nothing of it can have been received. */
@@ -2046,6 +2096,19 @@ const isEpoch = (value: unknown): value is number =>
 /** Whether a command's outcome, or its cleanup, is still to be looked up. */
 const needsLookup = (command: CommandRecord) =>
   command.phase === 'unknown' || command.phase === 'admitted' || command.phase === 'sending';
+
+/** Whether two writes ask for the very same: route, target and payload. */
+const sameIntent = (a: WriteRequest, b: WriteRequest) => stable(a) === stable(b);
+
+/** `value` as JSON, its keys sorted at every depth. */
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
+  if (!isObject(value)) return JSON.stringify(value) ?? 'undefined';
+
+  const keys = Object.keys(value).sort();
+
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
+}
 
 /** Whether a write may have been received, and is to be looked up. */
 const writeNeedsLookup = (record: AttemptRecord) =>
