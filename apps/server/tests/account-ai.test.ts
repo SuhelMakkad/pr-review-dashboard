@@ -19,6 +19,7 @@ import { AiRunner } from '@/ai/runner.js';
 import { DraftStore } from '@/review/drafts.js';
 import { ReviewService } from '@/review/service.js';
 import { SyncService } from '@/sync/service.js';
+import { BACKFILL } from '@/db/settings.js';
 
 const cleanups: (() => unknown)[] = [];
 
@@ -435,14 +436,17 @@ describe('history imports per account', () => {
 
     vi.spyOn(fixture, 'searchPullIds').mockResolvedValue([]);
 
-    const setSetting = store.setSetting.bind(store);
+    const set = store.settings.set.bind(store.settings);
 
     // The second window's checkpoint fails as it is written, inside its transaction.
-    vi.spyOn(store, 'setSetting').mockImplementation((key, value) => {
-      if (key === 'backfill:you' && (value as { lastError: string | null }).lastError === null)
+    vi.spyOn(store.settings, 'set').mockImplementation((setting, value) => {
+      if (
+        setting.key === 'backfill:you' &&
+        (value as { lastError: string | null }).lastError === null
+      )
         if (++windows === 2) throw new Error('Disk full');
 
-      return setSetting(key, value);
+      return set(setting, value);
     });
 
     await backfill.start('you');
@@ -461,7 +465,7 @@ describe('history imports per account', () => {
     const verifyAccount = vi.fn(async () => undefined);
 
     Object.assign(fixture, { verifyAccount });
-    store.setSetting('backfill:you', {
+    store.settings.set(BACKFILL.of('you'), {
       doneWindows: ['2026-08-07..2026-09-06'],
       finishedAt: null,
       lastError: null,

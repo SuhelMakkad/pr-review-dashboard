@@ -27,6 +27,7 @@ import { ReviewError, ReviewService } from '@/review/service.js';
 import { accountNotActive } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import type { MutationStep, OperationRecord } from './types.js';
+import { WRITE_COOLDOWN } from '@/db/settings.js';
 
 const MUTATIONS = new Set([
   'approveReview',
@@ -796,7 +797,7 @@ export class OperationQueue {
     if (!account) return;
 
     const rows = this.rows(account);
-    const cooldown = this.sync.store.getSetting<string>(`github-write-retry:${account}`);
+    const cooldown = this.sync.store.settings.get(WRITE_COOLDOWN.of(account));
     if (
       Math.max(
         cooldown ? Date.parse(cooldown) : -Infinity,

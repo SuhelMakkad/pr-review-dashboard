@@ -5,7 +5,6 @@ import { dirname } from 'node:path';
 import { and, asc, eq, gte, max } from 'drizzle-orm';
 import { drizzle, type NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite';
 import { emptyTriage } from '@review-desk/shared/attention';
-import { normalizeSnapshot } from '@review-desk/shared/snapshot';
 import type {
   FeedSource,
   LocalTriageState,
@@ -14,7 +13,9 @@ import type {
   SyncStatus,
 } from '@review-desk/shared/types';
 import type { ActivityEvent } from '@/insights/extract.js';
+import { snapshotCodec, triageCodec } from '@/db/codecs.js';
 import { migrateDatabase } from '@/db/migrate.js';
+import { LAST_ACCOUNT, Settings, STATUS } from '@/db/settings.js';
 import {
   activityEvents,
   aiRuns,
@@ -26,7 +27,6 @@ import {
   prSync,
   queueSamples,
   reviewDrafts,
-  settings,
   snapshots,
   triage,
 } from '@/db/schema.js';
@@ -59,6 +59,8 @@ export function* batches<T>(rows: T[]): Generator<T[]> {
 
 export class Store {
   readonly db: Database;
+  /** Every setting, typed through its declaration in `db/settings.ts`. */
+  readonly settings: Settings;
   private transactionDepth = 0;
   /** Effects waiting for the outermost transaction to commit. */
   private committed: (() => void)[] = [];
@@ -70,6 +72,7 @@ export class Store {
 
     client.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.db = drizzle({ client });
+    this.settings = new Settings(this.db);
     migrateDatabase(this.db, path);
   }
 
@@ -139,7 +142,7 @@ export class Store {
       .where(eq(snapshots.account, account))
       .orderBy(asc(snapshots.id))
       .all()
-      .map((row) => normalizeSnapshot(row.data));
+      .map((row) => snapshotCodec.decode(row.data));
   }
 
   /**
@@ -153,7 +156,7 @@ export class Store {
       .where(and(eq(snapshots.account, account), eq(snapshots.state, 'OPEN')))
       .orderBy(asc(snapshots.id))
       .all()
-      .map((row) => normalizeSnapshot(row.data));
+      .map((row) => snapshotCodec.decode(row.data));
   }
 
   snapshot(account: string, id: string): PullRequestSnapshot | null {
@@ -163,7 +166,7 @@ export class Store {
       .where(and(eq(snapshots.account, account), eq(snapshots.id, id)))
       .get();
 
-    return row ? normalizeSnapshot(row.data) : null;
+    return row ? snapshotCodec.decode(row.data) : null;
   }
 
   saveSnapshot(account: string, snapshot: PullRequestSnapshot): void {
@@ -181,7 +184,7 @@ export class Store {
       .where(and(eq(triage.account, account), eq(triage.id, id)))
       .get();
 
-    return row ? { ...emptyTriage(), ...row.data } : emptyTriage();
+    return row ? triageCodec.decode(row.data) : emptyTriage();
   }
 
   saveTriage(account: string, id: string, state: LocalTriageState): void {
@@ -423,33 +426,12 @@ export class Store {
     });
   }
 
-  getSetting<T>(key: string): T | null {
-    const row = this.db
-      .select({ data: settings.data })
-      .from(settings)
-      .where(eq(settings.key, key))
-      .get();
-
-    return row ? (row.data as T) : null;
-  }
-
+  /** Saves the account's status, as not syncing, and remembers it as the last account used. */
   saveStatus(status: SyncStatus): void {
     if (!status.account) return;
 
-    this.setSetting(`status:${status.account.login}`, { ...status, syncing: false });
-    this.setSetting('lastAccount', status.account.login);
-  }
-
-  deleteSetting(key: string): void {
-    this.db.delete(settings).where(eq(settings.key, key)).run();
-  }
-
-  setSetting(key: string, value: unknown): void {
-    this.db
-      .insert(settings)
-      .values({ key, data: value })
-      .onConflictDoUpdate({ target: settings.key, set: { data: value } })
-      .run();
+    this.settings.set(STATUS.of(status.account.login), { ...status, syncing: false });
+    this.settings.set(LAST_ACCOUNT, status.account.login);
   }
 
   close(): void {

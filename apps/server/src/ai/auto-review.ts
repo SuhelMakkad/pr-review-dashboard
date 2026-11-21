@@ -22,6 +22,7 @@ import { GitHubError, safeError } from '@/github/errors.js';
 import type { Notifier } from '@/notify/notifier.js';
 import { ReviewError } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
+import { AUTO_REVIEW_PRIMED } from '@/db/settings.js';
 
 type LogRow = typeof autoReviewLog.$inferSelect;
 
@@ -37,8 +38,6 @@ const STOP_CODES = new Set([
   'ACCOUNT_NOT_ACTIVE',
 ]);
 const STOP_OUTCOMES = new Set<GitHubError['outcome']>(['rate_limit', 'unavailable', 'auth']);
-
-const primedKey = (account: string) => `auto-review-primed:${account}`;
 
 export interface AutoReviewCandidate {
   /** `<PR id>:<reason key>`, one per review request. */
@@ -304,7 +303,7 @@ export class AutoReviewer {
     const { enabled, since } = this.runner.settings().autoReview;
 
     if (!enabled || !since) return false;
-    if (this.sync.store.getSetting<string>(primedKey(account)) === since) return false;
+    if (this.sync.store.settings.get(AUTO_REVIEW_PRIMED.of(account)) === since) return false;
 
     const keys = autoReviewCandidates(this.sync.listFor(account).items);
     const updatedAt = isoNow(this.clock);
@@ -349,7 +348,7 @@ export class AutoReviewer {
         .where(and(eq(autoReviewLog.account, account), eq(autoReviewLog.status, 'checking')))
         .run();
 
-      this.sync.store.setSetting(primedKey(account), since);
+      this.sync.store.settings.set(AUTO_REVIEW_PRIMED.of(account), since);
     });
 
     return true;

@@ -17,15 +17,11 @@ import type { DetectResult, GitHubApi } from '@/github/api.js';
 import { type GitHubAccounts, unscoped } from '@/github/credentials.js';
 import { GitHubError, safeError } from '@/github/errors.js';
 import { ReviewError } from '@/review/errors.js';
-import {
-  laterDeadline,
-  sameAccount,
-  SELECTED_ACCOUNT_KEY,
-  type AccountState,
-} from '@/sync/accounts.js';
+import { laterDeadline, sameAccount, type AccountState } from '@/sync/accounts.js';
 import type { PullReads } from '@/sync/reads.js';
 import type { SnapshotCoordinator } from '@/sync/snapshots.js';
 import { ordered } from '@/sync/sources.js';
+import { SELECTED_ACCOUNT } from '@/db/settings.js';
 
 const signInCommand = (account: string) => {
   const { forge, host } = parseAccount(account);
@@ -203,7 +199,7 @@ export class SyncRunner {
 
     try {
       const account = await this.github.identity();
-      const chosen = this.store.getSetting<string>(SELECTED_ACCOUNT_KEY);
+      const chosen = this.store.settings.get(SELECTED_ACCOUNT);
 
       timing.forge = forgeOf(account.login) === 'gitlab' ? 'gitlab' : 'github';
 

@@ -26,6 +26,7 @@ import {
   type CodexAccountStatus,
 } from '@review-desk/shared/ai';
 import { defaultNotificationSettings, type ReviewNotification } from '@review-desk/shared/notify';
+import { storeRaw } from './raw-settings.js';
 
 const cleanups: (() => unknown)[] = [];
 
@@ -522,7 +523,7 @@ describe('automatic review', () => {
     const { store, runner } = await setup();
     const { autoReview: _ignored, ...older } = runner.settings();
 
-    store.setSetting('ai-settings', older);
+    storeRaw(store, 'ai-settings', older);
 
     expect(runner.settings().autoReview).toEqual({ enabled: false, since: null });
   });

@@ -5,9 +5,9 @@ import type { Backfill } from '@/insights/backfill.js';
 import { accountNotActive } from '@/review/errors.js';
 import { failed, ok, serve } from '@/http/serve.js';
 import type { SyncService } from '@/sync/service.js';
+import { REVIEW_SLA_HOURS } from '@/db/settings.js';
 
 const DAY = 24 * 60 * 60_000;
-const SLA_KEY = 'review-sla-hours';
 
 /**
  * Insights: any account's can be read; a history import starts only for the account in use. The
@@ -25,7 +25,7 @@ export function registerInsightsRoutes(
     routes.insights,
     ({ account, query }) => {
       const days = query.days ?? 30;
-      const slaHours = service.store.getSetting<number>(SLA_KEY) ?? 24;
+      const slaHours = service.store.settings.get(REVIEW_SLA_HOURS) ?? 24;
 
       // Look back further than the range so requests made just before it still pair with reviews.
       const since = new Date(Date.now() - (days + 30) * DAY).toISOString();
@@ -72,7 +72,7 @@ export function registerInsightsRoutes(
     app,
     routes.insightsSettings,
     ({ body }) => {
-      service.store.setSetting(SLA_KEY, body.slaHours);
+      service.store.settings.set(REVIEW_SLA_HOURS, body.slaHours);
       // Every account's Insights measure against it.
       service.events.emit({ type: 'insights.updated', account: null });
 

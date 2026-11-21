@@ -54,11 +54,11 @@ import {
   prepareReviewWorkspace,
   type RepositoryExporter,
 } from '@/ai/workspace.js';
+import { AI_SETTINGS } from '@/db/settings.js';
 
 const MAX_CONCURRENT = 2;
 const PROBE_TTL_MS = 5 * 60_000;
 const ACCOUNT_TTL_MS = 60_000;
-const SETTINGS_KEY = 'ai-settings';
 
 /** The credits a Codex run measured itself spending, from its recorded usage. */
 function creditsUsed(usage: string | null): number | null {
@@ -378,23 +378,9 @@ export class AiRunner {
   agentExitWaitMs = 6_000;
 
   settings(): AiSettings {
-    const saved = this.sync.store.getSetting<Partial<AiSettings>>(SETTINGS_KEY);
-    const defaults = defaultAiSettings();
-
-    return {
-      defaultProvider: saved?.defaultProvider ?? defaults.defaultProvider,
-      tasks: Object.fromEntries(
-        Object.entries(defaults.tasks).map(([task, value]) => [
-          task,
-          { ...value, ...saved?.tasks?.[task as AiTask] },
-        ]),
-      ) as AiSettings['tasks'],
-      autoReview: { ...defaults.autoReview, ...saved?.autoReview },
-      postFindings: saved?.postFindings ?? defaults.postFindings,
-      // Posting used to approve and resolve threads; a choice saved then keeps doing so.
-      approveFindings: saved?.approveFindings ?? saved?.postFindings ?? defaults.approveFindings,
-      resolveThreads: saved?.resolveThreads ?? saved?.postFindings ?? defaults.resolveThreads,
-    };
+    // Saved settings over the defaults, each field on its own. Posting used to approve and resolve
+    // threads, so a choice saved then keeps doing so (see `AI_SETTINGS`).
+    return this.sync.store.settings.get(AI_SETTINGS) ?? defaultAiSettings();
   }
 
   /**
@@ -421,7 +407,7 @@ export class AiRunner {
         ? previous.since
         : isoNow(this.clock);
 
-    this.sync.store.setSetting(SETTINGS_KEY, {
+    this.sync.store.settings.set(AI_SETTINGS, {
       ...settings,
       tasks: {
         ...settings.tasks,

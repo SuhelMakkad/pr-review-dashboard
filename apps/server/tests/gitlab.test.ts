@@ -259,7 +259,7 @@ function gitlab(overrides: { mr?: Record<string, unknown>; diffs?: unknown[] } =
   stores.push(store);
   cleanups.push(() => store.close());
 
-  return { fake, client: new GitLab(fake, store), store };
+  return { fake, client: new GitLab(fake, store.settings.forgeLocal), store };
 }
 
 const cleanups: (() => void)[] = [];

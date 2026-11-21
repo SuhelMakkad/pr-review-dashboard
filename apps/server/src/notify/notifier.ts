@@ -13,8 +13,7 @@ import type { PullRequestItem } from '@review-desk/shared/types';
 import { notificationLog } from '@/db/schema.js';
 import { batches, type Store } from '@/db/store.js';
 import type { EventBus } from '@/events.js';
-
-const SETTINGS_KEY = 'notification-settings';
+import { NOTIFICATION_SETTINGS } from '@/db/settings.js';
 
 const pathFor = (item: { repository: string; number: number }, base: 'inbox/attention' | 'mine') =>
   pullPath(base, item);
@@ -100,14 +99,12 @@ export class Notifier {
   }
 
   settings(): NotificationSettings {
-    const saved = this.store.getSetting<Partial<NotificationSettings>>(SETTINGS_KEY);
-    const defaults = defaultNotificationSettings();
-
-    return { ...defaults, ...saved, kinds: { ...defaults.kinds, ...saved?.kinds } };
+    // Saved settings over the defaults, each field on its own (see `NOTIFICATION_SETTINGS`).
+    return this.store.settings.get(NOTIFICATION_SETTINGS) ?? defaultNotificationSettings();
   }
 
   saveSettings(settings: NotificationSettings): NotificationSettings {
-    this.store.setSetting(SETTINGS_KEY, settings);
+    this.store.settings.set(NOTIFICATION_SETTINGS, settings);
 
     return this.settings();
   }

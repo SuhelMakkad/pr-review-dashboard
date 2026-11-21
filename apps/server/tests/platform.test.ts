@@ -24,6 +24,7 @@ import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
 import { SyncService } from '@/sync/index.js';
 import type { ServerEvent } from '@review-desk/shared/events';
+import { LAST_ACCOUNT, SELECTED_ACCOUNT } from '@/db/settings.js';
 
 const cleanups: (() => void | Promise<void>)[] = [];
 
@@ -123,7 +124,7 @@ describe('database migrations', () => {
     for (let open = 0; open < 2; open += 1) {
       const store = new Store(path);
 
-      expect(store.getSetting('lastAccount')).toBe('me');
+      expect(store.settings.get(LAST_ACCOUNT)).toBe('me');
       expect(store.triage('me', 'pr-1').note).toBe('kept');
       expect(appliedMigrations(store.db.$client)).toEqual(migrations);
       expect(schemaVersion(store.db.$client)).toBe(5);
@@ -514,17 +515,17 @@ describe('nested transactions', () => {
 
     cleanups.push(() => store.close());
     store.transaction(() => {
-      store.setSetting('outer', 'kept');
+      store.settings.set(LAST_ACCOUNT, 'kept');
       expect(() =>
         store.transaction(() => {
-          store.setSetting('inner', 'rolled back');
+          store.settings.set(SELECTED_ACCOUNT, 'rolled back');
           throw new Error('rollback inner');
         }),
       ).toThrow('rollback inner');
     });
 
-    expect(store.getSetting('outer')).toBe('kept');
-    expect(store.getSetting('inner')).toBeNull();
+    expect(store.settings.get(LAST_ACCOUNT)).toBe('kept');
+    expect(store.settings.get(SELECTED_ACCOUNT)).toBeNull();
   });
 });
 

@@ -7,7 +7,16 @@ import type { FixtureProvider } from '@/ai/fixture.js';
 import { DEMO_SECOND_ACCOUNT, type FixtureGitHub } from '@/demo/fixture-github.js';
 import { seedDemoQueue } from '@/demo/history.js';
 import type { LinearService } from '@/linear/service.js';
-import { SELECTED_ACCOUNT_KEY, type SyncService } from '@/sync/service.js';
+import {
+  AI_SETTINGS,
+  AUTO_REVIEW_PRIMED,
+  BACKFILL,
+  NOTIFICATION_SETTINGS,
+  REVIEW_SLA_HOURS,
+  SELECTED_ACCOUNT,
+  STATUS,
+} from '@/db/settings.js';
+import type { SyncService } from '@/sync/service.js';
 import type { OperationQueue } from '@/operations/queue.js';
 
 /** Demo-only controls for stepping the scripted scenario. Never registered against real GitHub. */
@@ -93,15 +102,16 @@ export function registerDevRoutes(
         notifier.reset(login);
       }
 
-      for (const key of [
-        'notification-settings',
-        'ai-settings',
-        'review-sla-hours',
-        SELECTED_ACCOUNT_KEY,
-        `status:${DEMO_SECOND_ACCOUNT}`,
-        ...logins.flatMap((login) => [`backfill:${login}`, `auto-review-primed:${login}`]),
+      // The last account, the primary account's status and both write cooldowns stay.
+      for (const setting of [
+        NOTIFICATION_SETTINGS,
+        AI_SETTINGS,
+        REVIEW_SLA_HOURS,
+        SELECTED_ACCOUNT,
+        STATUS.of(DEMO_SECOND_ACCOUNT),
+        ...logins.flatMap((login) => [BACKFILL.of(login), AUTO_REVIEW_PRIMED.of(login)]),
       ]) {
-        service.store.deleteSetting(key);
+        service.store.settings.delete(setting);
       }
 
       seedDemoQueue(service.store, fixture.scenario.world.viewer.login, Date.now());
