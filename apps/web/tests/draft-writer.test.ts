@@ -642,6 +642,71 @@ describe('the draft writer', () => {
     expect(sentWhileHeld).toBe(1);
   });
 
+  it('never marks refused a queued save of text a submit carried, once it was accepted', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+    const comment = held();
+
+    writer.observe(draft(1));
+    answers.push(comment.answer);
+    void writer.write('addComment', pr, { body: 'Ahead of it' }).catch(() => {});
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    writer.edit('body', 'Submitted');
+    void writer.flush();
+
+    // The submit carrying it is accepted while its save waits behind the comment.
+    await writer.command(['body', 'event'], async () => 'queued', 'retire');
+
+    // The comment then meets the draft the submit locked: a new generation.
+    comment.release(conflict(draft(3, {}, 1)));
+    await writer.settled();
+
+    expect(sent.map((request) => request.route)).toEqual(['addComment']);
+    expect(writer.state('body')).toBe('saved');
+    expect(transport.refused).not.toHaveBeenCalled();
+    await expect(writer.settled(['body'])).resolves.toBeNull();
+  });
+
+  it('never sends a queued save of text a submit carried, once it was accepted', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+    const comment = held();
+
+    writer.observe(draft(1));
+    answers.push(comment.answer);
+    void writer.write('addComment', pr, { body: 'Ahead of it' });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    writer.edit('body', 'Submitted');
+    void writer.flush();
+    await writer.command(['body', 'event'], async () => 'queued', 'retire');
+
+    // The comment commits on the same draft: the retired text is still never sent.
+    comment.release((request) => ({
+      attempt: { id: request.body.writeId, state: 'committed', revision: 2 },
+    }));
+    await writer.settled();
+
+    expect(sent.map((request) => request.route)).toEqual(['addComment']);
+  });
+
+  it('ignores a refusal of a save in flight whose text a submit carried and was accepted', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+    const save = held();
+
+    writer.observe(draft(1));
+    answers.push(save.answer);
+    writer.edit('body', 'Submitted');
+    void writer.flush();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    await writer.command(['body', 'event'], async () => 'queued', 'retire');
+    save.release(conflict(draft(3, {}, 1)));
+    await writer.settled();
+
+    expect(writer.state('body')).toBe('saved');
+    expect(transport.refused).not.toHaveBeenCalled();
+  });
+
   it('clears an expiry once a replay of the same text is confirmed', async () => {
     const first = server();
     const writer = new DraftWriter('you', 'PR_1', first.transport, instant);

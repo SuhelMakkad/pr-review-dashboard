@@ -768,7 +768,7 @@ export class DraftWriter {
    * command (sent again once it releases it), from more than a week ago, or begun on another
    * generation (each kept, refused).
    */
-  private sendable(snapshot: Partial<Record<Field, Snapshot>>, guard: Guard) {
+  private sendable(snapshot: Partial<Record<Field, Snapshot>>, guard: Guard, kept: Committed) {
     const now = Date.now();
 
     for (const [field, saved] of entries(snapshot)) {
@@ -779,7 +779,10 @@ export class DraftWriter {
           ? DISCARDED_ELSEWHERE
           : null;
 
-      if (state.owned.size > 0) {
+      // Settled since it was queued (a submit that carried it was accepted): nothing to send,
+      // and nothing refused.
+      if (saved.version <= state.settled) kept.add(field);
+      else if (state.owned.size > 0) {
         if (state.queued === saved.version) state.queued = state.settled;
       } else if (reason) this.failFields({ [field]: saved.version }, reason);
       else continue;
@@ -793,13 +796,15 @@ export class DraftWriter {
     base: Base | 'chain',
   ): Promise<Committed> {
     let guard = this.guard(base);
+    // Fields settled by the time they were to be sent: kept, as a commit of them is.
+    const kept: Committed = new Set();
 
     for (;;) {
-      this.sendable(snapshot, guard);
+      this.sendable(snapshot, guard, kept);
 
       const sent = entries(snapshot);
 
-      if (sent.length === 0) return new Set();
+      if (sent.length === 0) return kept;
 
       const fields = Object.fromEntries(sent.map(([field, saved]) => [field, saved.version]));
       const values = Object.fromEntries(sent.map(([field, saved]) => [field, saved.value]));
@@ -820,7 +825,7 @@ export class DraftWriter {
         if (isDraft(outcome.body)) this.transport.committed(outcome.body, write.stamp);
         else this.transport.stale();
 
-        return new Set(sent.map(([field]) => field));
+        return new Set([...kept, ...sent.map(([field]) => field)]);
       }
 
       if (outcome.kind === 'conflict') {
@@ -835,12 +840,12 @@ export class DraftWriter {
 
         this.failFields(fields, DISCARDED_ELSEWHERE);
 
-        return new Set();
+        return kept;
       }
 
       this.failFields(fields, refusalOf(outcome).message);
 
-      return new Set();
+      return kept;
     }
   }
 
@@ -954,11 +959,15 @@ export class DraftWriter {
   private markFailed(fields: Partial<Record<Field, number>>, reason: string): boolean {
     let failed = false;
 
-    for (const [field, version] of entries(fields))
-      if (this.fields[field].version === version) {
-        this.fields[field].failed = reason;
+    for (const [field, version] of entries(fields)) {
+      const state = this.fields[field];
+
+      // A refusal of a version settled since (a submit carried it) is late: it no longer holds.
+      if (state.version === version && version > state.settled) {
+        state.failed = reason;
         failed = true;
       }
+    }
 
     return failed;
   }
