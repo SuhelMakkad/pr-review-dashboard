@@ -59,6 +59,7 @@ const catalog = {
 
   // AI reviews.
   'ai.not-reviewed': (f: ForgeTerms) => `You have not reviewed this ${f.short} yet.`,
+  'ai.run-elsewhere': (f: ForgeTerms) => `That AI run is not of this ${f.short}.`,
   'ai.outdated': given(
     ['reason'],
     (f, p) =>

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { say } from '@/messages.js';
 import type { WriteFence } from '@/db/versions.js';
 import { claimed, type WriteGuard } from '@/routes/claims.js';
 import type { AutoReviewer } from '@/ai/auto-review.js';
@@ -67,7 +68,7 @@ export function registerAiRoutes(
   /** Refuses a write naming a PR the run is not of: the claim records it under that PR. */
   const ofPr = (account: string, runId: string, prId?: string) => {
     if (prId !== undefined && runner.runPr(account, runId) !== prId)
-      throw new ReviewError('NOT_FOUND', 404, 'That AI run is not of this PR.');
+      throw new ReviewError('NOT_FOUND', 404, say('ai.run-elsewhere'));
   };
   /** The guard a body carries. */
   const guardOf = (body: WriteGuard & { attemptId?: string }): WriteGuard => ({
