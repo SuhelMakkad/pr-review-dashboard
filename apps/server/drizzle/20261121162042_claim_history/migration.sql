@@ -1,7 +1,6 @@
 CREATE TABLE `claim_ledger` (
 	`id` integer PRIMARY KEY,
-	`last` integer DEFAULT 0 NOT NULL,
-	`secret` text NOT NULL
+	`last` integer DEFAULT 0 NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE `claim_watermarks` (
@@ -18,5 +17,4 @@ FROM (
 ) AS `ordered`
 WHERE `draft_writes`.`account` = `ordered`.`account` AND `draft_writes`.`id` = `ordered`.`id`;
 --> statement-breakpoint
-INSERT INTO `claim_ledger` (`id`, `last`, `secret`)
-	SELECT 1, COALESCE(MAX(`seq`), 0), lower(hex(randomblob(32))) FROM `draft_writes`;
+INSERT INTO `claim_ledger` (`id`, `last`) SELECT 1, COALESCE(MAX(`seq`), 0) FROM `draft_writes`;

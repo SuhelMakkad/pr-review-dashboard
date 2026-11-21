@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "44352a6e-1b12-43de-8b98-af634dd188bd",
+  "id": "47fec45c-6730-4bae-b947-0274664bc8bd",
   "prevIds": [
     "5eb63a5c-a510-4670-8602-c4912b1badef"
   ],
@@ -599,16 +599,6 @@
       "notNull": true,
       "autoincrement": false,
       "default": "0",
-      "generated": null,
-      "entityType": "columns"
-    },
-    {
-      "table": "claim_ledger",
-      "name": "secret",
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
       "generated": null,
       "entityType": "columns"
     },

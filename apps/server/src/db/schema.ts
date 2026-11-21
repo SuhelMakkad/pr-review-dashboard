@@ -213,13 +213,12 @@ export const draftWrites = sqliteTable(
 );
 
 /**
- * The claim ledger's one row: the last `seq` it assigned, kept when every claim is pruned, and
- * the secret its checkpoints are sealed with (see `db/claim-ids.ts`).
+ * The claim ledger's one row: the last `seq` it assigned, kept when every claim is pruned. Its
+ * checkpoints are sealed with a secret only the running process holds (see `db/claim-ids.ts`).
  */
 export const claimLedger = sqliteTable('claim_ledger', {
   id: integer('id').primaryKey(),
   last: integer('last').notNull().default(0),
-  secret: text('secret').notNull(),
 });
 
 /**

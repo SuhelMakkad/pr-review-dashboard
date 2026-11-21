@@ -27,9 +27,9 @@ const headers = {
   'x-review-desk-session': 'test-session',
 };
 
-/** The demo, synced as `you`, served by the app. */
-async function demo() {
-  const store = new Store(':memory:');
+/** The demo, synced as `you`, served by the app: on a database file at `path`, if given. */
+async function demo(path = ':memory:') {
+  const store = new Store(path);
   const fixture = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
   const service = new SyncService(store, fixture, new EventBus(), fixture);
 
@@ -112,19 +112,36 @@ describe('the claim history', () => {
     expect((await lookup(randomUUID())).json()).toMatchObject({ provable: false });
   });
 
-  it('refuses a sealed id that does not verify on every route, never as a bare id', async () => {
+  it('refuses an id out of shape on every route, never as a bare id', async () => {
     const { store, sealed, save, lookup, abandon } = await demo();
     const good = await sealed();
-    const forged = good.replace(/-([0-9a-f]{16})-/, '-0000000000000000-');
     // Sealed by its prefix, yet not in a sealed id's parts: never read as a bare id either.
     const malformed = [good.replace(/-[0-9a-f-]{36}$/, '-not-a-uuid-at-all'), 'ck1-abcdefgh'];
 
-    for (const id of [forged, ...malformed]) {
+    for (const id of malformed) {
       for (const answer of [await save(id), await lookup(id), await abandon(id)])
         expect([answer.statusCode, answer.json().code]).toEqual([400, 'INVALID_ATTEMPT_ID']);
 
       expect(store.draftWrites.find('you', id)).toBeUndefined();
     }
+
+    // Not an attempt id at all (a write's body refuses it as well): no stop is recorded of it.
+    for (const id of ['short', 'has_underscore'])
+      for (const answer of [await lookup(id), await abandon(id)]) {
+        expect([answer.statusCode, answer.json().code]).toEqual([400, 'INVALID_ATTEMPT_ID']);
+        expect(store.draftWrites.find('you', id)).toBeUndefined();
+      }
+  });
+
+  it('never admits, nor proves missing, a sealed id this process did not seal', async () => {
+    const { store, sealed, save, lookup, abandon } = await demo();
+    const forged = (await sealed()).replace(/-([0-9a-f]{16})-/, '-0000000000000000-');
+    const refused = await save(forged);
+
+    expect([refused.statusCode, refused.json().code]).toEqual([409, 'WRITE_HISTORY_GAP']);
+    expect(store.draftWrites.find('you', forged)).toBeUndefined();
+    expect((await lookup(forged)).json()).toMatchObject({ arrived: false, provable: false });
+    expect((await abandon(forged)).json()).toEqual({ outcome: 'unknown' });
   });
 
   it('seals a checkpoint for its account alone', async () => {
@@ -136,8 +153,69 @@ describe('the claim history', () => {
       kind: 'sealed',
       checkpoint: store.draftWrites.checkpoint(),
     });
-    expect(parseAttemptId(id, 'them', secret)).toEqual({ kind: 'invalid' });
+    expect(parseAttemptId(id, 'them', secret)).toEqual({ kind: 'foreign' });
     expect(parseAttemptId(randomUUID(), 'you', secret)).toEqual({ kind: 'bare' });
+  });
+
+  it("answers an earlier process's ids it received, and proves nothing of those it did not", async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'review-desk-claims-'));
+    const path = join(directory, 'state.sqlite');
+
+    cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+
+    const before = await demo(path);
+    const kept = await before.sealed();
+    const unsent = await before.sealed();
+
+    expect((await before.save(kept)).statusCode).toBe(200);
+
+    // Restarted on the same database.
+    for (const cleanup of cleanups.splice(1).reverse()) await cleanup();
+
+    const after = await demo(path);
+
+    expect((await after.lookup(kept)).json()).toMatchObject({ attempt: { state: 'committed' } });
+    expect((await after.save(kept)).statusCode).toBe(200);
+    expect((await after.lookup(unsent)).json()).toMatchObject({ arrived: false, provable: false });
+    expect((await after.save(unsent)).json().code).toBe('WRITE_HISTORY_GAP');
+    // Sealed by this process: provable, and admitted.
+    expect((await after.lookup(await after.sealed())).json()).toMatchObject({ provable: true });
+  });
+
+  it('never proves missing an id received by a database since put back from a backup', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'review-desk-claims-'));
+    const path = join(directory, 'state.sqlite');
+    const backup = join(directory, 'backup.sqlite');
+
+    cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+
+    await demo(path);
+
+    // Backed up, as the README says: stopped, then copied.
+    for (const cleanup of cleanups.splice(1).reverse()) await cleanup();
+    cpSync(path, backup);
+
+    const running = await demo(path);
+    const received = await running.sealed();
+    const stopped = await running.sealed();
+
+    // One received after the backup, one stopped after it: what the backup cannot know.
+    expect((await running.save(received)).statusCode).toBe(200);
+    expect((await running.abandon(stopped)).json()).toEqual({ outcome: 'not-admitted' });
+
+    for (const cleanup of cleanups.splice(1).reverse()) await cleanup();
+
+    // Put back, and started again: neither is known now, and neither is admitted afresh.
+    for (const file of [path, `${path}-wal`, `${path}-shm`]) rmSync(file, { force: true });
+    cpSync(backup, path);
+
+    const restored = await demo(path);
+
+    for (const id of [received, stopped]) {
+      expect((await restored.lookup(id)).json()).toMatchObject({ arrived: false, provable: false });
+      expect((await restored.save(id)).json().code).toBe('WRITE_HISTORY_GAP');
+      expect((await restored.abandon(id)).json()).toEqual({ outcome: 'unknown' });
+    }
   });
 
   it('never admits afresh a sealed id from before pruning reached it, while a bare id keeps its admission', async () => {
@@ -292,7 +370,7 @@ describe('the ledger migration', () => {
     const earlier = join(directory, 'earlier');
     const path = join(directory, 'state.sqlite');
     // The migration this covers: every one before it builds the database it upgrades.
-    const covered = '20261121155525_claim_history';
+    const covered = '20261121162042_claim_history';
 
     cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
 
@@ -333,7 +411,6 @@ describe('the ledger migration', () => {
       { account: 'you', id: 'c', seq: 4 },
     ]);
     expect(store.draftWrites.checkpoint()).toBe(4);
-    expect(store.draftWrites.secret()).toMatch(/^[0-9a-f]{64}$/);
     expect(store.draftWrites.watermarkOf('you')).toBe(0);
 
     store.draftWrites.claim({

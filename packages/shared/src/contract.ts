@@ -624,8 +624,10 @@ export const routes = {
     responses: { 200: as<CommandReceipt | AbandonedReceipt>() },
   }),
   /**
-   * The claim ledger's checkpoint, sealed for the account: a new attempt id carries it
-   * (`ck1-<checkpoint>-<seal>-<uuid>`), so a miss of that id can prove it was never received.
+   * The claim ledger's checkpoint, sealed for the account by this server process: a new attempt
+   * id carries it (`ck1-<checkpoint>-<seal>-<uuid>`), so a miss of that id can prove it was never
+   * received. After a restart it is read again: an id sealed before proves nothing, and is never
+   * admitted afresh (`WRITE_HISTORY_GAP`).
    */
   claimCheckpoint: json('GET', '/api/accounts/:account/claim-checkpoint', {
     responses: { 200: as<{ checkpoint: number; seal: string }>() },

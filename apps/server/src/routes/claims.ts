@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DraftAttempt } from '@review-desk/shared/review';
-import { parseAttemptId } from '@/db/claim-ids.js';
+import { behindHistory, parseAttemptId } from '@/db/claim-ids.js';
 import { ABANDONED, type WriteClaim } from '@/db/draft-writes.js';
 import type { Store } from '@/db/store.js';
 import { draftVersionsOf, type WriteFence } from '@/db/versions.js';
@@ -173,8 +173,7 @@ export async function claimed<B extends object>(
   }
 
   const fingerprint = requestFingerprint(claim.request);
-  // A sealed id must verify, or it is refused outright: it never falls through to a bare id's
-  // admission.
+  // A sealed id out of shape is refused outright: it never falls through to a bare id's admission.
   const parsed = parseAttemptId(id, account, store.draftWrites.secret());
 
   if (parsed.kind === 'invalid') return invalidAttempt();
@@ -184,10 +183,10 @@ export async function claimed<B extends object>(
 
     if (found) return found;
 
-    // A sealed id with no claim, from before pruning reached: an original of it may have been
-    // received and pruned since, so it is never admitted afresh. A bare id keeps its admission.
-    if (parsed.kind === 'sealed' && store.draftWrites.watermarkOf(account) > parsed.checkpoint)
-      return 'gap' as const;
+    // A sealed id with no claim, from before pruning reached, or sealed by an earlier process: an
+    // original of it may have been received and its claim lost since, so it is never admitted
+    // afresh. A bare id keeps its admission.
+    if (behindHistory(parsed, store.draftWrites.watermarkOf(account))) return 'gap' as const;
 
     store.draftWrites.claim({
       account,

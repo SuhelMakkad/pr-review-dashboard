@@ -44,6 +44,9 @@ export const INTERRUPTED = {
  * method is one statement and opens no transaction of its own, so it joins the caller's.
  */
 export class DraftWriteLog {
+  /** The secret this process seals checkpoints with (see `secret`). */
+  private readonly sealing = randomBytes(32).toString('hex');
+
   constructor(private readonly db: Database) {}
 
   find(account: string, id: string): WriteClaim | undefined {
@@ -97,14 +100,11 @@ export class DraftWriteLog {
       .run();
   }
 
-  /**
-   * The ledger's row. The migration makes it; should it ever be missing, it is made here, with a
-   * new secret, before it is read.
-   */
-  private ledger(): { last: number; secret: string } {
+  /** The ledger's row. The migration makes it; should it ever be missing, it is made here. */
+  private ledger(): { last: number } {
     const read = () =>
       this.db
-        .select({ last: claimLedger.last, secret: claimLedger.secret })
+        .select({ last: claimLedger.last })
         .from(claimLedger)
         .where(eq(claimLedger.id, 1))
         .get();
@@ -112,11 +112,7 @@ export class DraftWriteLog {
 
     if (found) return found;
 
-    this.db
-      .insert(claimLedger)
-      .values({ id: 1, last: 0, secret: randomBytes(32).toString('hex') })
-      .onConflictDoNothing()
-      .run();
+    this.db.insert(claimLedger).values({ id: 1, last: 0 }).onConflictDoNothing().run();
 
     return read()!;
   }
@@ -138,9 +134,13 @@ export class DraftWriteLog {
     return this.ledger().last;
   }
 
-  /** The secret checkpoints are sealed with. */
+  /**
+   * The secret checkpoints are sealed with: this process's own, never stored, so a database put
+   * back from a backup cannot vouch for an id sealed against the history it lost (see
+   * `db/claim-ids.ts`).
+   */
   secret(): string {
-    return this.ledger().secret;
+    return this.sealing;
   }
 
   /** The highest `seq` pruning deleted of `account`'s claims: 0 when none. */
