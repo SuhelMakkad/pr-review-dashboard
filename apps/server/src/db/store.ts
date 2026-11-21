@@ -12,6 +12,7 @@ import type {
   Source,
   SyncStatus,
 } from '@review-desk/shared/types';
+import { AbandonedCommands } from '@/db/abandoned.js';
 import { DraftWriteLog } from '@/db/draft-writes.js';
 import { raiseVersions } from '@/db/versions.js';
 import type { ActivityEvent } from '@/insights/extract.js';
@@ -71,6 +72,8 @@ export class Store {
   readonly operations: OperationLog;
   /** Claimed draft writes and AI starts (see `db/draft-writes.ts`). */
   readonly draftWrites: DraftWriteLog;
+  /** Submit and discard ids you stopped waiting for, and each account's receipt-history epoch. */
+  readonly abandoned: AbandonedCommands;
   private transactionDepth = 0;
   /** Effects waiting for the outermost transaction to commit. */
   private committed: (() => void)[] = [];
@@ -88,6 +91,7 @@ export class Store {
     this.notificationLog = new NotificationLog(this.db);
     this.operations = new OperationLog(this.db);
     this.draftWrites = new DraftWriteLog(this.db);
+    this.abandoned = new AbandonedCommands(this.db);
     migrateDatabase(this.db, path);
   }
 
@@ -482,6 +486,8 @@ export class Store {
         raiseVersions(this, account, prId, { revision: true, generation: true });
 
       this.draftWrites.interrupt({ account, prIds: [...prIds] });
+      // Its receipts go with its outbox rows: a miss for an id sent before this proves nothing.
+      this.abandoned.raiseEpoch(account);
 
       for (const table of tables) this.db.delete(table).where(eq(table.account, account)).run();
     });

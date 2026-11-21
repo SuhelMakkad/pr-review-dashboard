@@ -39,18 +39,30 @@ export function registerOperationRoutes(
     app,
     routes.operationReceipt,
     ({ account, params }) => {
-      // Any row with this id, a local receipt included: what an action's outcome was, if any.
-      const row = sync.store.operations.find(account, params.id);
+      // Any row with this id, a local receipt included, or the decision it was stopped with.
+      const receipt = queue.receipt(account, params.id);
 
-      if (!row)
+      if (!receipt)
         return failed(404, { error: 'Nothing was received with this id.', code: 'NOT_FOUND' });
 
-      return ok(200, {
-        kind: row.kind === 'local' ? ('local' as const) : ('forge' as const),
-        status: row.status,
-        ...(row.terminalDraft ? { draft: row.terminalDraft } : {}),
-      });
+      return ok(200, receipt);
     },
+    serving,
+  );
+
+  serve(
+    app,
+    routes.receiptEpoch,
+    ({ account }) => ok(200, { epoch: sync.store.abandoned.epochOf(account) }),
+    serving,
+  );
+
+  // Any account's command can be stopped: it only ever prevents its admission.
+  serve(
+    app,
+    routes.abandonCommand,
+    ({ account, params, body }) =>
+      ok(200, queue.abandon(account, params.commandId, { prId: params.id, ...body })),
     serving,
   );
 

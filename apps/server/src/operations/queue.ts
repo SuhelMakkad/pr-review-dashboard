@@ -1,4 +1,6 @@
 import { performance } from 'node:perf_hooks';
+import type { CommandReceipt } from '@review-desk/shared/operations';
+import type { AbandonDecision } from '@/db/abandoned.js';
 import { draftVersionsOf } from '@/db/versions.js';
 import {
   fingerprint as intentFingerprint,
@@ -196,6 +198,25 @@ const conflict = () =>
     'This action ID was already used for different content.',
   );
 
+/** A stopped id's arrival: refused, recording nothing, whatever its request. */
+const abandoned = () =>
+  new ReviewError(
+    'COMMAND_ABANDONED',
+    409,
+    'You stopped waiting for this, so it was not received. Nothing was sent.',
+  );
+
+/** What a receipt answers about the action under an id: its target, kind and status. */
+function receiptOf(row: OperationRecord): CommandReceipt {
+  return {
+    kind: row.kind === 'local' ? 'local' : 'forge',
+    prId: row.prId,
+    type: row.action.type,
+    status: row.status,
+    ...(row.terminalDraft ? { draft: row.terminalDraft } : {}),
+  };
+}
+
 export class OperationQueue {
   private cancelWake: Cancel | null = null;
   private active: Promise<void> | null = null;
@@ -388,6 +409,8 @@ export class OperationQueue {
     id: string,
     expected: { prId: string; request: unknown; type: GitHubAction['type']; threadId?: string },
   ): OperationReceipt | null {
+    this.assertNotAbandoned(account, id);
+
     const existing = this.existing(account, id);
 
     if (!existing) return null;
@@ -410,6 +433,8 @@ export class OperationQueue {
     id: string,
     expected: { prId: string; request: unknown; type: GitHubAction['type'] },
   ): boolean {
+    this.assertNotAbandoned(account, id);
+
     const existing = this.existing(account, id);
 
     if (existing?.kind !== 'local') return false;
@@ -434,7 +459,9 @@ export class OperationQueue {
     write: () => boolean,
   ): boolean {
     return this.sync.store.transaction(() => {
-      // Taken meanwhile, as a forge operation or a local receipt: never written twice.
+      // Stopped, or taken meanwhile as a forge operation or a local receipt: never written.
+      this.assertNotAbandoned(account, id);
+
       if (this.existing(account, id)) throw conflict();
       if (!write()) return false;
 
@@ -480,6 +507,78 @@ export class OperationQueue {
 
   private existing(account: string, id: string): OperationRecord | undefined {
     return this.log.find(account, id);
+  }
+
+  private assertNotAbandoned(account: string, id: string): void {
+    if (this.sync.store.abandoned.find(account, id)) throw abandoned();
+  }
+
+  /**
+   * Any row with this id, a local receipt included, or the decision you stopped it with: what an
+   * action's outcome was, if any. Null when nothing was received or stopped under it.
+   */
+  receipt(
+    account: string,
+    id: string,
+  ):
+    | CommandReceipt
+    | { kind: 'abandoned'; prId: string; type: 'review' | 'discard'; decision: AbandonDecision }
+    | null {
+    const row = this.existing(account, id);
+
+    if (row) return receiptOf(row);
+
+    const stopped = this.sync.store.abandoned.find(account, id);
+
+    return stopped
+      ? { kind: 'abandoned', prId: stopped.prId, type: stopped.type, decision: stopped.decision }
+      : null;
+  }
+
+  /**
+   * Stops waiting for a submit or discard sent as `id`, in one turn with any admission of it: it
+   * is either admitted already (its receipt answers), or never will be. A miss is decided not
+   * admitted only when receipt history is complete since it was sent (`epoch` is still the
+   * account's), else unknown. A repeat answers as the first did. It must name the same PR and
+   * action, or the id was used for something else.
+   */
+  abandon(
+    account: string,
+    id: string,
+    expected: { prId: string; type: 'review' | 'discard'; epoch: number | null },
+  ): { outcome: 'admitted'; receipt: CommandReceipt } | { outcome: AbandonDecision } {
+    return this.sync.store.transaction(() => {
+      const row = this.existing(account, id);
+
+      if (row) {
+        if (row.prId !== expected.prId || row.action.type !== expected.type) throw conflict();
+
+        return { outcome: 'admitted' as const, receipt: receiptOf(row) };
+      }
+
+      const store = this.sync.store.abandoned;
+      const stopped = store.find(account, id);
+
+      if (stopped) {
+        if (stopped.prId !== expected.prId || stopped.type !== expected.type) throw conflict();
+
+        return { outcome: stopped.decision };
+      }
+
+      const decision: AbandonDecision =
+        expected.epoch === store.epochOf(account) ? 'not-admitted' : 'unknown';
+
+      store.record({
+        account,
+        id,
+        prId: expected.prId,
+        type: expected.type,
+        decision,
+        createdAt: isoNow(this.clock),
+      });
+
+      return { outcome: decision };
+    });
   }
 
   /** The request key as legacy routes made it, plus the action's type and thread. */
@@ -620,6 +719,8 @@ export class OperationQueue {
     this.sync.store.transaction(() => {
       const drafts = new DraftStore(this.sync.store);
 
+      // Stopped while it was on its way: never admitted, in the turn that would admit it.
+      this.assertNotAbandoned(account, id);
       fence();
 
       // Automatic posts never consume the local draft or its pending GitHub review.
