@@ -65,7 +65,6 @@ export function DraftCommentCard({
                 const kept = (failure as { details?: { kept?: unknown } }).details?.kept;
 
                 setError((failure as Error).message);
-                setBody(text);
                 setRefused(typeof kept === 'string' ? { key: kept, text } : null);
               }
             },

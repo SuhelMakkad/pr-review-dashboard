@@ -809,6 +809,17 @@ export class DraftWriter {
     const source = options.recovers
       ? this.writes.find((other) => other.key === options.recovers && this.canAddAsNew(other))
       : undefined;
+
+    // A new comment of a kept one no longer to be added again (settled, or one on its way): never
+    // sent as an ordinary comment instead.
+    if (options.recovers && !source)
+      return Promise.reject(
+        new WriteRefused(
+          'This comment was already added again, or settled meanwhile. Check its notice with your draft.',
+          'RECOVERY_UNAVAILABLE',
+        ),
+      );
+
     const record: AttemptRecord = {
       key: crypto.randomUUID(),
       phase: 'queued',
@@ -817,6 +828,9 @@ export class DraftWriter {
       ...(options.where ? { where: options.where } : {}),
       ...(source ? { recovers: source.key } : {}),
     };
+
+    // A new comment of a kept one: linked to it at once, so even a refusal now is that one's.
+    if (source) source.replacement = { key: record.key };
 
     // An unsettled submit or discard, or an open discard: refused now, your input yours to keep.
     if (gate)
@@ -841,9 +855,7 @@ export class DraftWriter {
       );
     }
 
-    // A new comment of a kept one: linked to it in the same journal write.
-    if (source) source.replacement = { key: record.key };
-
+    // Linked to it in the same journal write as its own record.
     this.writes.push(record);
     this.changed();
 
@@ -979,20 +991,23 @@ export class DraftWriter {
    * caller journals it.
    */
   private foldIntoSource(record: AttemptRecord): boolean {
-    // Linked by the kept one: a new comment of it, or the very same comment on its way it waits on.
-    const source = this.writes.find((other) => other.replacement?.key === record.key);
+    // Linked by kept ones: a new comment of one, or the very same comment on its way they wait on.
+    const sources = this.writes.filter((other) => other.replacement?.key === record.key);
 
-    if (!source) return false;
+    if (sources.length === 0) return false;
 
     const text = textOfIntent(record.intent);
 
     this.writes = this.writes.filter((other) => other !== record);
-    source.replacement = undefined;
-    source.dismissed = false;
-    this.shownRefusals.delete(source.key);
 
-    if (text && !(source.texts ?? []).includes(text))
-      source.texts = [...(source.texts ?? []), text];
+    for (const source of sources) {
+      const texts = textsOf(source);
+
+      source.replacement = undefined;
+      source.dismissed = false;
+      source.texts = text && !texts.includes(text) ? [...texts, text] : texts;
+      this.shownRefusals.delete(source.key);
+    }
 
     return true;
   }
@@ -1011,7 +1026,7 @@ export class DraftWriter {
       record.phase === 'not-saved' &&
       keepsRefusals(record.intent.route) &&
       !record.replacement &&
-      (record.texts?.length ?? 0) > 0
+      textsOf(record).length > 0
     );
   }
 
@@ -1410,13 +1425,12 @@ export class DraftWriter {
             record.phase === 'not-saved' ||
             record.phase === 'lost') &&
           !record.dismissed &&
-          !(record.texts ?? []).includes(this.shownRefusals.get(record.key) ?? '\u0000'),
+          !textsOf(record).includes(this.shownRefusals.get(record.key) ?? '\u0000'),
       )
       .sort((a, b) => (a.record.createdAt ?? 0) - (b.record.createdAt ?? 0) || a.index - b.index)
       .map(({ record }) => {
         const route = record.intent.route;
-        const own = textOfIntent(record.intent);
-        const texts = record.texts?.length ? record.texts : own ? [own] : [];
+        const texts = textsOf(record);
         const comment = keepsRefusals(route);
         const uncertain = record.phase === 'lost' || record.phase === 'unknown';
 
@@ -1515,6 +1529,8 @@ export class DraftWriter {
         if (isDraft(outcome.body)) this.transport.committed(outcome.body, stamp);
         else this.transport.stale();
 
+        // A comment kept ones wait on: they settle with it, in the same journal write.
+        this.dropSourceOf(record);
         this.dropWrite(record);
       } else if (outcome.kind === 'conflict') {
         // Sent on the draft it was first sent on: shown, without stopping what is queued after.
@@ -3311,6 +3327,15 @@ const unsettled = (record: AttemptRecord) =>
 const writeNeedsLookup = (record: AttemptRecord) =>
   (record.phase === 'checking' || record.phase === 'received' || record.phase === 'unknown') &&
   record.writeId !== undefined;
+
+/** Every text a write was tried with, its own first: kept ones, else what it asked for. */
+function textsOf(record: AttemptRecord): string[] {
+  if (record.texts?.length) return record.texts;
+
+  const own = textOfIntent(record.intent);
+
+  return own ? [own] : [];
+}
 
 /** The writes whose definite refusal keeps their text for you: a comment's add or edit. */
 const keepsRefusals = (route: string) => route === 'addComment' || route === 'editComment';

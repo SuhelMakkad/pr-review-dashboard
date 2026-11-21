@@ -3965,6 +3965,114 @@ describe('kept refusals and recovery views', () => {
     expect(answers).toEqual([]);
   });
 
+  it('never sends as an ordinary comment one meant to add again a kept one no longer to be', async () => {
+    const { writer, key, sent } = await kept();
+
+    writer.dismissWrite(key);
+    await expect(
+      writer.write('addComment', pr, { ...target, body: 'Mine, again' }, { recovers: key }),
+    ).rejects.toMatchObject({ code: 'RECOVERY_UNAVAILABLE' });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('keeps in the kept one a new comment of it refused at the click', async () => {
+    const { writer, key, commands } = await kept();
+
+    commands.push(unreachable);
+    await expect(writer.submit(review, carried(writer), null)).rejects.toBeDefined();
+    await expect(
+      writer.write('addComment', pr, { ...target, body: 'Mine, again' }, { recovers: key }),
+    ).rejects.toMatchObject({ code: 'DRAFT_COMMAND_UNKNOWN', details: { kept: key } });
+
+    expect(writer.writeViews()).toMatchObject([
+      { key, texts: ['Mine', 'Mine, again'], canAddAsNew: true },
+    ]);
+  });
+
+  it('releases every kept one waiting on the very same comment once that one is refused', async () => {
+    const first = await kept([locked('Gone too')]);
+    const { writer, answers, transport, sent } = first;
+    const second = await writer
+      .write<never>('addComment', pr, { ...target, body: 'Theirs' })
+      .catch((error: WriteRefused) => String(error.details.kept));
+    const ahead = held();
+
+    answers.push(ahead.answer);
+    void writer.write('addComment', pr, { body: 'Ahead' });
+    await vi.waitFor(() => expect(sent).toHaveLength(3));
+
+    // Both ask for the same new comment, which waits in the queue behind the one ahead.
+    const shared = { ...target, body: 'Shared' };
+    const added = writer
+      .write('addComment', pr, shared, { recovers: first.key })
+      .catch((error) => error);
+
+    await expect(
+      writer.write('addComment', pr, shared, { recovers: second }),
+    ).rejects.toMatchObject({
+      code: 'WRITE_UNRESOLVED',
+    });
+
+    answers.push(locked('Shared refused'));
+    ahead.release((request) => ({
+      attempt: { id: request.body.writeId, state: 'committed', revision: 1 },
+    }));
+    await added;
+
+    expect(
+      writer
+        .writeViews()
+        .filter((view) => view.canAddAsNew)
+        .map((view) => view.key)
+        .sort(),
+    ).toEqual([first.key, second].sort());
+    expect(transport.send).toHaveBeenCalledTimes(4);
+  });
+
+  it('settles a kept comment with a new comment of it that sending again saved', async () => {
+    const { writer, key, transport } = await kept([unreachable, gap]);
+
+    await expect(
+      writer.write('addComment', pr, { ...target, body: 'Mine, again' }, { recovers: key }),
+    ).rejects.toMatchObject({ code: 'WRITE_UNCONFIRMED' });
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+
+    const replacement = writer.writeViews().find((view) => view.key !== key)!;
+
+    await writer.sendWriteAgain(replacement.key);
+
+    expect(writer.writeViews()).toEqual([]);
+  });
+
+  it('offers to add again a comment whose refusal was found after a reload', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', PR, first.transport, instant, NEVER);
+
+    writer.observe(draft(2));
+    first.answers.push(() => new Promise(() => {}));
+    void writer.write('addComment', pr, { ...target, body: 'Kept' }, { where });
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockImplementation(async (id) => ({
+      attempt: { id, state: 'refused', result: { status: 409, body: { error: 'Line gone' } } },
+    }));
+
+    const reloaded = new DraftWriter('you', PR, next.transport, instant, NEVER);
+
+    await reloaded.reconcile();
+
+    expect(reloaded.writeViews()).toMatchObject([
+      { phase: 'not-saved', texts: ['Kept'], canAddAsNew: true, where },
+    ]);
+  });
+
   it('releases, after a reload, a new comment never sent, offering the kept one again', async () => {
     const { writer, key, answers, sent } = await kept();
     const ahead = held();

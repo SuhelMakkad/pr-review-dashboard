@@ -48,6 +48,8 @@ export function Composer({
   useEffect(() => {
     textarea.current?.focus();
     textarea.current?.setSelectionRange(body.length, body.length);
+    // What it holds from the start, before any change.
+    onChange?.(body);
   }, []);
 
   const send = async (action: ComposerAction) => {
