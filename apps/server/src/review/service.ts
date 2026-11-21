@@ -321,7 +321,8 @@ export class ReviewService {
     if (this.drafts.draft(account, prId)?.githubReviewId) return false;
 
     this.drafts.clear(account, prId);
-    this.changed(account, prId);
+    // Inside a caller's transaction (a local discard and its receipt), told once it commits.
+    this.sync.store.afterCommit(() => this.changed(account, prId));
 
     return true;
   }

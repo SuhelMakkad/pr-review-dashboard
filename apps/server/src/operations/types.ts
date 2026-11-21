@@ -13,6 +13,12 @@ export interface MutationStep {
 }
 
 export interface OperationRecord extends Omit<GitHubOperation, 'controls'> {
+  /**
+   * `local`: the receipt of a write made locally that answered an outbox ID, such as discarding a
+   * draft with nothing on the forge. Kept only so a retry of that ID answers as the first time;
+   * Activity never shows one. Absent for forge operations, rows from before receipts included.
+   */
+  kind?: 'local';
   requestKey: string;
   attempts: number;
   steps: MutationStep[];
