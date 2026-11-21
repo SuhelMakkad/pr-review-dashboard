@@ -128,14 +128,26 @@ function Workspace() {
   const [railOpen, setRailOpen] = useState(() => storage.get('review-desk-rail') !== 'closed');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [composer, setComposerState] = useState<ComposerState>(null);
+  /** The composer as it is now, for answers that come later than the render that sent them. */
+  const composerNow = useRef<ComposerState>(null);
+
+  composerNow.current = composer;
+
   // Each composer opened is a new one: its editor starts from its own text, and an answer to an
   // earlier one never reaches it.
   const setComposer = (next: ComposerState | ((current: ComposerState) => ComposerState)) =>
     setComposerState((current) => {
       const value = typeof next === 'function' ? next(current) : next;
+      const opened = value && !value.opening ? { ...value, opening: crypto.randomUUID() } : value;
 
-      return value && !value.opening ? { ...value, opening: crypto.randomUUID() } : value;
+      composerNow.current = opened;
+
+      return opened;
     });
+
+  /** Whether `opened` is the composer open now: an answer to another is no longer its. */
+  const stillOpen = (opened: NonNullable<ComposerState>) =>
+    composerNow.current?.opening === opened.opening;
   const [composerError, setComposerError] = useState<string | null>(null);
   /** Text kept from a composer closed because its diff changed, for the next one. */
   const [keptBody, setKeptBody] = useState<string | null>(null);
@@ -603,6 +615,7 @@ function Workspace() {
               // comment does not record, so it never names one.
               return shown &&
                 comment.side === 'RIGHT' &&
+                (comment.startLine === null || comment.startSide !== 'LEFT') &&
                 comment.status !== 'stale' &&
                 comment.anchorOid === shown.headOid
                 ? { view: shown }
@@ -650,11 +663,9 @@ function Workspace() {
     );
   };
 
-  /** Closes the composer, if it is still the opening `opened`: never one opened since. */
+  /** Closes the composer, if it is still the opening `opened` now: never one opened since. */
   const closeOpening = (opened: NonNullable<ComposerState>) => {
-    if (composer?.opening !== opened.opening) return;
-
-    closeComposer();
+    if (stillOpen(opened)) closeComposer();
   };
 
   /**
@@ -750,6 +761,9 @@ function Workspace() {
             });
             closeOpening(target);
           } catch (error) {
+            // Its own composer's, still open: never shown in one opened since.
+            if (!stillOpen(target)) return;
+
             setComposerError((error as Error).message);
             keepRefused(target, error, body);
           }
@@ -777,11 +791,10 @@ function Workspace() {
               startLine: target.line === null ? null : target.startLine,
               body,
             });
-            setComposer(null);
-            setComposerError(null);
+            closeOpening(target);
             toast('Comment queued', { action: { label: 'View activity', onClick: openActivity } });
           } catch (error) {
-            setComposerError((error as Error).message);
+            if (stillOpen(target)) setComposerError((error as Error).message);
           }
         },
       }}
