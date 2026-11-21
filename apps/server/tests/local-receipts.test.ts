@@ -95,6 +95,8 @@ describe('local receipts', () => {
 
     expect((await discard(threaded.id, id)).statusCode).toBe(200);
     expect(queue.replayedLocally('you', id, same)).toBe(true);
+    // The queue's own lookup hides it too, as every Activity one does.
+    expect(queue.find('you', id)).toBeNull();
     expect(() => queue.replay('you', id, same)).toThrow(
       expect.objectContaining({ code: 'OPERATION_CONFLICT' }),
     );
