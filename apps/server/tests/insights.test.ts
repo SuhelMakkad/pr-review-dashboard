@@ -162,6 +162,10 @@ describe("the demo fixture's history search", () => {
     expect(scoped.length).toBeLessThan(all.length);
     expect(await repositoryOf(scoped)).toEqual(new Set([first]));
 
+    // The history is its viewer's alone: anyone else's search finds nothing, of either kind.
+    for (const kind of ['reviewed', 'authored'] as const)
+      expect(await fixture.searchPullIds({ kind, ...window, login: 'someone-else' })).toEqual([]);
+
     // An empty list names no repository, so it matches none.
     expect(await fixture.searchPullIds({ kind: 'authored', ...window, repositories: [] })).toEqual(
       [],

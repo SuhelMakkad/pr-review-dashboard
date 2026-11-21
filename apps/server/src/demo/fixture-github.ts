@@ -691,11 +691,14 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     return this.receipt('AddComment', { id, url: `${pull.snapshot.url}#issuecomment-${id}` });
   }
 
-  /** Answers the backfill's searches from the scenario plus fictional history. */
+  /**
+   * Answers the backfill's searches from the scenario plus fictional history. Both are its viewer's
+   * alone, so a search for anyone else finds nothing.
+   */
   async searchPullIds(query: HistoryQuery): Promise<string[]> {
-    if (this.outsider) return [];
+    if (this.outsider || !isSameUser(query.login, this.scenario.world.viewer.login)) return [];
 
-    const login = this.scenario.world.viewer.login;
+    const login = query.login;
     const from = Date.parse(query.from);
     const to = Date.parse(query.to) + 24 * 3_600_000;
     const field = query.kind === 'authored' ? 'createdAt' : 'updatedAt';
