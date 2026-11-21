@@ -76,7 +76,10 @@ function github(): Subject {
     isOutdated: false,
     path: 'src/app.ts',
     line: 2,
-    comments: [comment('PRRC_0', 'Can this loop exit early?', at(3))],
+    comments: [
+      comment('PRRC_0', 'Can this loop exit early?', at(3)),
+      comment('PRRC_1', 'Done in the next commit.', at(5)),
+    ],
   };
   const viewed = new Set<string>();
   const url = (id: string) => `https://github.com/acme/api/pull/1#pullrequestreview-${id}`;
@@ -124,6 +127,10 @@ function github(): Subject {
     commits: { nodes: [{ commit: { committedDate: at(2), statusCheckRollup: null } }] },
   });
 
+  /** A write names what it changes: anything but this PR and its thread is refused. */
+  const target = (key: string, value: unknown, expected: string) => {
+    if (value !== expected) throw new Error(`The fake GitHub has no ${key} ${String(value)}.`);
+  };
   const answer = (name: string, variables: Record<string, unknown>) => {
     switch (name) {
       case 'Identity':
@@ -174,6 +181,8 @@ function github(): Subject {
         };
       }
       case 'ReplyToThread': {
+        target('thread', variables.threadId, thread.id);
+
         const reply = comment(`PRRC_${thread.comments.length}`, String(variables.body), at(30));
 
         thread.comments.push(reply);
@@ -185,10 +194,12 @@ function github(): Subject {
         };
       }
       case 'ResolveThread':
+        target('thread', variables.threadId, thread.id);
         thread.isResolved = true;
 
         return { resolveReviewThread: { thread: { id: variables.threadId, isResolved: true } } };
       case 'MarkFileViewed':
+        target('pull request', variables.pullRequestId, 'PR_1');
         viewed.add(String(variables.path));
 
         return {
