@@ -42,6 +42,12 @@ const FEED_INTERVAL_MS: Record<FeedSource, number> = {
   mentioned: 300_000,
 };
 
+/** What the sync calls out to: `SyncService`, so a hook keeps the receiver it always had. */
+export interface SyncHooks {
+  /** Runs after every sync with the active login (used for notifications). */
+  afterSync: ((login: string) => Promise<unknown>) | null;
+}
+
 const SYNC_INTERVAL_MS = 60_000;
 /** Snapshots a GitLab sync reads before checking glab's sign-in and saving them. */
 const GITLAB_SAVE_BATCH = 20;
@@ -58,10 +64,10 @@ export class SyncRunner {
   private stopped = false;
   private readonly feedRuns = new Map<string, number>();
   private readonly teamsFetched = new Map<string, number>();
-  /** Runs after every sync with the active login (used for notifications). */
-  afterSync: ((login: string) => Promise<unknown>) | null = null;
 
   constructor(
+    /** Holds the `afterSync` hook, which runs as its method, as it always has. */
+    private readonly hooks: SyncHooks,
     private readonly store: Store,
     private readonly github: GitHubApi,
     private readonly events: EventBus,
@@ -240,7 +246,14 @@ export class SyncRunner {
         this.state.setProfile(account);
       }
 
-      await this.state.readCapabilities(this.github.capabilities?.bind(this.github));
+      const target = this.state.readTarget();
+
+      // Kept from the last sync when it cannot be read now.
+      target.setCapabilities(
+        (await this.github.capabilities?.().catch(() => this.state.status.capabilities)) ??
+          this.state.status.capabilities,
+      );
+
       await this.refreshTeams(account.login, scheduled);
 
       retryAt = await this.discover(account.login, scheduled, verify);
@@ -420,9 +433,9 @@ export class SyncRunner {
 
       this.sampleQueue(account.login);
 
-      if (this.afterSync) {
+      if (this.hooks.afterSync) {
         // Hooks (notifications) must never break a sync.
-        await this.afterSync(account.login).catch(() => undefined);
+        await this.hooks.afterSync(account.login).catch(() => undefined);
       }
 
       this.state.succeeded();
@@ -505,7 +518,9 @@ export class SyncRunner {
     if (scheduled && this.clock.now() - fetchedAt < TEAMS_REFRESH_MS) return;
 
     try {
-      await this.state.readTeams(() => this.github.teams());
+      const target = this.state.readTarget();
+
+      target.setTeams(await this.github.teams());
       this.teamsFetched.set(login, this.clock.now());
     } catch (error) {
       if (error instanceof GitHubError && error.retryAt) throw error;

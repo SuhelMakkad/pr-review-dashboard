@@ -34,6 +34,8 @@ export class SyncService {
   private readonly reads: PullReads;
   private readonly queue: PullQueue;
   private readonly runner: SyncRunner;
+  /** Runs after every sync with the active login (used for notifications), as this object's method. */
+  afterSync: ((login: string) => Promise<unknown>) | null = null;
 
   constructor(
     readonly store: Store,
@@ -58,6 +60,7 @@ export class SyncService {
 
     this.queue = new PullQueue(store, github, events, clock, this.state, this.reads, snapshots);
     this.runner = new SyncRunner(
+      this,
       store,
       github,
       events,
@@ -85,15 +88,6 @@ export class SyncService {
 
   set bootId(bootId: string) {
     this.state.bootId = bootId;
-  }
-
-  /** Runs after every sync with the active login (used for notifications). */
-  get afterSync(): ((login: string) => Promise<unknown>) | null {
-    return this.runner.afterSync;
-  }
-
-  set afterSync(hook: ((login: string) => Promise<unknown>) | null) {
-    this.runner.afterSync = hook;
   }
 
   /** The last status published, as sent to the browser (see `AccountState.sentStatus`). */

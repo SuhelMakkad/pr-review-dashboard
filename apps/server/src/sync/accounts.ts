@@ -241,21 +241,25 @@ export class AccountState {
   }
 
   /**
-   * Reads the forge's capabilities onto the status in use when the read starts. They are kept from
-   * the last sync when the forge has no reader for them, or the read fails.
+   * Where a read about to start puts its result: the status in use now, as an assignment's target
+   * is chosen before its right-hand side runs. A cooldown that replaces the status while the read
+   * is on its way leaves the result on the previous one. Take it synchronously, just before the
+   * read, and await the read itself, so no turn is added between the reads of a sync.
    */
-  async readCapabilities(read: (() => Promise<ForgeCapabilities>) | undefined): Promise<void> {
+  readTarget(): {
+    setTeams(teams: string[]): void;
+    setCapabilities(capabilities: ForgeCapabilities | undefined): void;
+  } {
     const target = this.status;
 
-    target.capabilities =
-      (await read?.().catch(() => this.status.capabilities)) ?? this.status.capabilities;
-  }
-
-  /** Reads the account's teams onto the status in use when the read starts. */
-  async readTeams(read: () => Promise<string[]>): Promise<void> {
-    const target = this.status;
-
-    target.teams = await read();
+    return {
+      setTeams: (teams) => {
+        target.teams = teams;
+      },
+      setCapabilities: (capabilities) => {
+        target.capabilities = capabilities;
+      },
+    };
   }
 
   /** A warning for the sync in progress, shown when it ends. */
