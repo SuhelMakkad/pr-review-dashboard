@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DraftComment, PrepareReviewOptions, ReviewDraft } from '@review-desk/shared/review';
+import { say } from '@/messages.js';
 import { ReviewError } from '@/review/errors.js';
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -61,11 +62,7 @@ export function planPreparation(
     previous &&
     (draft.githubPendingReview || owned.some((comment) => comment.status === 'pushed'))
   )
-    throw new ReviewError(
-      'PENDING_REVIEW',
-      409,
-      'Finish or discard the pending GitHub review before replacing this prepared review.',
-    );
+    throw new ReviewError('PENDING_REVIEW', 409, say('ai.pending-review'));
 
   const start = content ? draft.body.indexOf(content.summary) : -1;
   const summaryIntact = Boolean(

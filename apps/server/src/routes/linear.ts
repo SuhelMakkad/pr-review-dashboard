@@ -1,4 +1,5 @@
 import { linearCallbackQuery, routes } from '@review-desk/shared/contract';
+import { say } from '@/messages.js';
 import { failed, ok, serve, serveRedirect } from '@/http/serve.js';
 import type { FastifyInstance } from 'fastify';
 import { safeError } from '@/github/errors.js';
@@ -61,7 +62,7 @@ export function registerLinearRoutes(
     async ({ account, params }) => {
       const detail = service.detailFor(account, params.id);
 
-      if (!detail) return failed(404, { error: 'This PR is no longer tracked.' });
+      if (!detail) return failed(404, { error: say('pull.untracked') });
 
       return ok(200, await linear.ticketsFor(detail.snapshot));
     },

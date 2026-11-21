@@ -1,4 +1,5 @@
 import { isSameUser } from '@review-desk/shared/accounts';
+import { render, say } from '@/messages.js';
 import { withoutQuickActions } from '@/gitlab/quick-actions.js';
 import {
   hasBlockingFindings,
@@ -18,8 +19,6 @@ import { traitsOf } from '@review-desk/shared/traits';
 
 /** GitHub refuses comments longer than 65,536 characters; stay clear of the limit. */
 const MAX_BODY = 65_000;
-const TRUNCATED =
-  '\n\n_The rest of this review was cut to fit on GitHub. It is complete in Review Desk._';
 
 const severityLabels: Record<SuggestedComment['severity'], string> = {
   blocking: 'Blocking',
@@ -68,6 +67,8 @@ export function postedReviewBody(
   inputs?: ReviewInputs | null,
   /** Posted after its approval, as a separate write (GitLab): says so on its second line. */
   summarisesApproval = false,
+  /** The account it is posted as, whose forge a cut post names. */
+  account: string | null = null,
 ): string {
   const blocking = hasBlockingFindings(result);
   const verdict = blocking ? 'Changes recommended' : 'No blocking findings';
@@ -80,12 +81,13 @@ export function postedReviewBody(
   const marker = postedReviewMarker(runId);
   const note = !blocking && inputs && !inputs.complete ? coverageNote(inputs) : '';
   const footer = `<sub>Posted automatically by Review Desk when an AI review of ${headOid.slice(0, 7)} finished.</sub>`;
-  const room = MAX_BODY - marker.length - footer.length - TRUNCATED.length - 4;
+  const truncated = `\n\n${render(say('ai.truncated'), account)}`;
+  const room = MAX_BODY - marker.length - footer.length - truncated.length - 4;
   let content = [note, `**AI review** · ${verdict}`, result.overall.trim(), ...findings]
     .filter(Boolean)
     .join('\n\n');
 
-  if (content.length > room) content = content.slice(0, room).trimEnd() + TRUNCATED;
+  if (content.length > room) content = content.slice(0, room).trimEnd() + truncated;
 
   return `${marker}\n${summarisesApproval ? `${approvalSummaryTag}\n` : ''}${content}\n\n${footer}`;
 }
@@ -169,6 +171,7 @@ export class FindingsPublisher {
       result,
       row.inputs,
       event === 'APPROVE' && !carriesSummary,
+      row.account,
     );
     const operationId = postedReviewOperationId(row.id);
 

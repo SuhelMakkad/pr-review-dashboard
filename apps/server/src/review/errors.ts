@@ -1,11 +1,18 @@
+import { render, type Wording } from '@/messages.js';
+
+/** A refusal: its code and status, and what it says, worded for the account it is shown to. */
 export class ReviewError extends Error {
+  /** What the refusal says; `message` holds it in GitHub's words, for logs. */
+  readonly wording: Wording;
+
   constructor(
     readonly code: string,
     readonly status: number,
-    message: string,
+    message: Wording,
     readonly details: Record<string, unknown> = {},
   ) {
-    super(message);
+    super(render(message, null));
+    this.wording = message;
   }
 }
 

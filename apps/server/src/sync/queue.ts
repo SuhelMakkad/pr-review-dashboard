@@ -1,3 +1,4 @@
+import { say } from '@/messages.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
 import { isoNow, type Clock } from '@/clock.js';
 import type { PullRequestDetail, TriageUpdate } from '@review-desk/shared/types';
@@ -117,11 +118,7 @@ export class PullQueue {
       return outcome.snapshot ? this.reads.detailOf(account, outcome.snapshot) : null;
     }
 
-    throw new ReviewError(
-      'QUEUE_CHANGED',
-      409,
-      this.state.worded('This PR kept changing in your queue while it was refreshed. Try again.'),
-    );
+    throw new ReviewError('QUEUE_CHANGED', 409, say('queue.kept-changing'));
   }
 
   /**
@@ -246,13 +243,7 @@ export class PullQueue {
 
       // Removed while it was being added: the removal came later, so it stands.
       if (outcome.status === 'invalidated')
-        throw new ReviewError(
-          'QUEUE_CHANGED',
-          409,
-          this.state.worded(
-            'This PR was removed from your queue while it was being added. Add it again.',
-          ),
-        );
+        throw new ReviewError('QUEUE_CHANGED', 409, say('queue.removed-while-adding'));
 
       // A newer read found it merged or closed: nothing to review, and nothing is added.
       if (outcome.snapshot?.state !== 'OPEN')
@@ -275,14 +266,7 @@ export class PullQueue {
 
     const detail = snapshot ? this.reads.detailOf(login, snapshot) : null;
 
-    if (!detail)
-      throw new ReviewError(
-        'QUEUE_CHANGED',
-        409,
-        this.state.worded(
-          'This PR was removed from your queue while it was being added. Add it again.',
-        ),
-      );
+    if (!detail) throw new ReviewError('QUEUE_CHANGED', 409, say('queue.removed-while-adding'));
 
     // Null when it was already added by hand: an Undo would remove that earlier membership.
     return { ...detail, membershipId };
@@ -316,18 +300,14 @@ export class PullQueue {
 
     // The snapshot's sources count too: a sync can save them just after the manual row changes.
     if (!cached || (!feeds.includes('manual') && !cached.sources.includes('manual')))
-      throw new ReviewError('NOT_ADDED', 409, 'Only PRs you added yourself can be removed.');
+      throw new ReviewError('NOT_ADDED', 409, say('queue.not-added'));
 
     const remaining = ordered(feeds.filter((feed) => feed !== 'manual'));
 
     this.store.transaction(() => {
       // An Undo names the membership its add made: one added again since is not its to remove.
       if (!this.store.removeManual(login, id, membershipId) && membershipId !== undefined)
-        throw new ReviewError(
-          'NOT_ADDED',
-          409,
-          'This PR was added again since, so nothing was removed.',
-        );
+        throw new ReviewError('NOT_ADDED', 409, say('queue.added-again'));
 
       // Reads that started before the removal must not bring the PR or its old sources back.
       this.snapshots.invalidate(login, id);

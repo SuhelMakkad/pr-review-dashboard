@@ -50,7 +50,7 @@ export function registerAccountRoutes(
         return ok(200, await service.switchAccount(body.from, body.to));
       } catch (error) {
         if (error instanceof ReviewError)
-          return failed(error.status, { error: error.message, code: error.code });
+          return failed(error.status, { error: error.wording, code: error.code });
         if (error instanceof GitHubError)
           return failed(502, { error: safeError(error), code: 'GITHUB_ERROR' });
 

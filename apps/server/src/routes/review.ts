@@ -1,7 +1,7 @@
-import { forForge } from '@review-desk/shared/accounts';
 import type { GitHubAction } from '@review-desk/shared/operations';
 import { routes } from '@review-desk/shared/contract';
 import type { FastifyInstance } from 'fastify';
+import { say } from '@/messages.js';
 import { safeError } from '@/github/errors.js';
 import { failed, ok, serve, type Failed } from '@/http/serve.js';
 import { ReviewError, type ReviewService } from '@/review/service.js';
@@ -9,14 +9,10 @@ import type { OperationQueue } from '@/operations/queue.js';
 import { readFailure } from '@/routes/pulls.js';
 import type { SyncService } from '@/sync/service.js';
 
-/** A refusal in the account's forge's words, with its code and details; anything else, the server's. */
-function reviewFailure(error: unknown, account: string): Failed {
+/** A refusal with its code and details; anything else, the server's. */
+function reviewFailure(error: unknown): Failed {
   if (error instanceof ReviewError)
-    return failed(error.status, {
-      error: forForge(error.message, account),
-      code: error.code,
-      ...error.details,
-    });
+    return failed(error.status, { error: error.wording, code: error.code, ...error.details });
 
   return failed(500, { error: safeError(error) });
 }
@@ -260,8 +256,8 @@ export function registerReviewRoutes(
       if (failure) return readFailure((failure as { error: unknown }).error);
 
       if (!sync.detailFor(account, prId))
-        throw new ReviewError('NOT_FOUND', 404, 'This PR is no longer tracked.');
-      if (!shown()) throw new ReviewError('NOT_FOUND', 404, 'That thread is not on this PR.');
+        throw new ReviewError('NOT_FOUND', 404, say('pull.untracked'));
+      if (!shown()) throw new ReviewError('NOT_FOUND', 404, say('pull.thread-elsewhere'));
     }
 
     return ok(202, queue.enqueue(account, prId, operationId, action, request));

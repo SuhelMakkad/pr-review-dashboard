@@ -2,26 +2,36 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type {
   As,
-  ErrorBody,
   JsonRoute,
   Method,
   PathParams,
   RedirectRoute,
   Reply,
 } from '@review-desk/shared/contract';
+import { render, type Wording } from '@/messages.js';
 import { knownAccount, type AccountParams } from '@/routes/pulls.js';
 import { input, type ScopedRequest } from '@/routes/scoped.js';
 import type { SyncService } from '@/sync/service.js';
+
+/**
+ * A refusal's body before `serve` words its message for the request's account: an `ErrorBody`
+ * whose message may be a catalog message.
+ */
+export interface FailedBody {
+  error: Wording;
+  code?: string;
+  [detail: string]: unknown;
+}
 
 /** A refusal a handler returns, or an area's error mapper makes of what a handler threw. */
 export interface Failed {
   failed: true;
   /** An HTTP error status, 400 to 599: never a success, which only `ok` sends, as declared. */
   status: number;
-  body: ErrorBody;
+  body: FailedBody;
 }
 
-export const failed = (status: number, body: ErrorBody): Failed => {
+export const failed = (status: number, body: FailedBody): Failed => {
   if (!Number.isInteger(status) || status < 400 || status > 599)
     throw new Error(`A refusal needs an error status, not ${status}.`);
 
@@ -140,7 +150,16 @@ export function serve<R extends JsonRoute>(
         answer = serving.errors(error, account);
       }
 
-      return reply.code(answer.status).send(answer.body);
+      // A refusal in the words of the account the path names, else of the account in use.
+      const sent =
+        'failed' in answer
+          ? {
+              ...answer.body,
+              error: render(answer.body.error, account || serving.sync.status.account?.login),
+            }
+          : answer.body;
+
+      return reply.code(answer.status).send(sent);
     },
   });
 }

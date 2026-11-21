@@ -15,7 +15,7 @@ import { routes } from '@review-desk/shared/contract';
  */
 function aiFailure(error: unknown): Failed {
   if (error instanceof ReviewError)
-    return failed(error.status, { ...error.details, error: error.message, code: error.code });
+    return failed(error.status, { ...error.details, error: error.wording, code: error.code });
 
   if (error instanceof AccountUnavailable)
     return failed(409, { error: error.message, code: error.code });

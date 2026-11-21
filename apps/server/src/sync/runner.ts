@@ -1,3 +1,4 @@
+import { say } from '@/messages.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
 import { isoNow, type Cancel, type Clock } from '@/clock.js';
 import { isLegacySnapshot } from '@review-desk/shared/snapshot';
@@ -233,11 +234,7 @@ export class SyncRunner {
           retryAt = waiting;
           confirm();
           timing.outcome = 'rate_limit';
-          this.state.setError(
-            this.state.worded(
-              'GitHub rate limit reached. Refresh will resume automatically after the cooldown.',
-            ),
-          );
+          this.state.setError(this.state.worded(say('sync.cooling-down')));
 
           return;
         }
@@ -432,12 +429,7 @@ export class SyncRunner {
 
       this.state.succeeded();
 
-      if (retryAt)
-        this.state.setError(
-          this.state.worded(
-            'GitHub rate limit reached. Refresh will resume automatically after the cooldown.',
-          ),
-        );
+      if (retryAt) this.state.setError(this.state.worded(say('sync.cooling-down')));
     } catch (error) {
       this.state.setError(safeError(error));
       // A failed phase's own deadline goes with it; those of phases checked before it stand.
@@ -595,7 +587,9 @@ export class SyncRunner {
         return { results: new Map(), lowBudget: true, retryAt: error.retryAt };
       }
 
-      this.state.warn(`Change detection unavailable; refetching every PR. ${safeError(error)}`);
+      this.state.warn(
+        this.state.worded(say('sync.no-change-detection', { reason: safeError(error) })),
+      );
 
       return { results: null, lowBudget: false, retryAt: null };
     }

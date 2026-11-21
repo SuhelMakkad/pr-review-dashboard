@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { render, say, type Wording } from '@/messages.js';
 import { isoNow, type Clock } from '@/clock.js';
-import { forForge } from '@review-desk/shared/accounts';
 import type { Actor, ForgeCapabilities, SyncStatus } from '@review-desk/shared/types';
 import {
   initialStatus,
@@ -121,13 +121,9 @@ export class AccountState {
   assertNotCoolingDown(account: string | null = this.status.account?.login ?? null): void {
     const retryAt = this.cooldown(account);
 
+    // In the words of the account cooling down, which need not be the one in use.
     if (retryAt)
-      throw new GitHubError(
-        this.worded('GitHub is rate limited. Saved data is still available.'),
-        retryAt,
-        429,
-        'rate_limit',
-      );
+      throw new GitHubError(render(say('sync.rate-limited'), account), retryAt, 429, 'rate_limit');
   }
 
   /** `account`, refused unless this app has worked as it. */
@@ -158,12 +154,9 @@ export class AccountState {
    * status shows at once.
    */
   applySwitch(from: string | null, login: string): void {
+    // Worded now, for the account the check found: another switch can finish before it is sent.
     if ((this.status.account?.login ?? null) !== from)
-      throw new ReviewError(
-        'ACCOUNT_CHANGED',
-        409,
-        this.worded('GitHub account changed. Refresh before switching.'),
-      );
+      throw new ReviewError('ACCOUNT_CHANGED', 409, this.worded(say('sync.account-changed')));
 
     this.accounts?.select(login);
     this.store.settings.set(SELECTED_ACCOUNT, login);
@@ -325,9 +318,9 @@ export class AccountState {
     this.events.emit({ type: 'status', status: this.sentStatus });
   }
 
-  /** A message written for GitHub, worded for the current account's forge. */
-  worded(text: string): string {
-    return forForge(text, this.status.account?.login);
+  /** A message worded for the forge of the account in use. */
+  worded(message: Wording): string {
+    return render(message, this.status.account?.login);
   }
 
   /**
