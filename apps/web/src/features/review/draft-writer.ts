@@ -197,8 +197,11 @@ interface FieldState {
    */
   generation: number | null;
   since: number | null;
-  /** The running command (submit, discard) that carries `version`: no autosave of it meanwhile. */
-  owned: { token: symbol; version: number } | null;
+  /**
+   * The running commands (submit, discard) that hold it, each with the version it carries: no
+   * autosave of it while any does.
+   */
+  owned: Map<symbol, number>;
   /**
    * Whether the latest save queued of it committed: what a write that replaces it, or waits on
    * it, depends on, whatever was typed since.
@@ -303,7 +306,7 @@ export class DraftWriter {
       failed: null,
       generation: null,
       since: null,
-      owned: null,
+      owned: new Map(),
       lastSave: null,
     });
     // After a reload nothing is queued: an unsaved edit is saved again, besides the very save
@@ -313,7 +316,7 @@ export class DraftWriter {
         ? {
             ...saved.fields[field],
             queued: saved.fields[field].settled,
-            owned: null,
+            owned: new Map(),
             lastSave: null,
           }
         : fresh(field);
@@ -413,6 +416,11 @@ export class DraftWriter {
     return this.fields[field].failed;
   }
 
+  /** The versions `fields` hold now: what a command sent with their values carries. */
+  versions(fields: Field[]): Partial<Record<Field, number>> {
+    return Object.fromEntries(fields.map((field) => [field, this.fields[field].version]));
+  }
+
   /** You typed `value` into `field`: saved after a pause (the body) or at once (the verdict). */
   edit<F extends Field>(field: F, value: FieldValue<F>) {
     const state = this.fields[field];
@@ -447,7 +455,7 @@ export class DraftWriter {
       return (
         state.version > Math.max(state.settled, state.queued) &&
         !state.failed &&
-        state.owned === null
+        state.owned.size === 0
       );
     });
 
@@ -536,30 +544,35 @@ export class DraftWriter {
   }
 
   /**
-   * Runs a command (submit, discard) that carries or drops `fields` as they are now: none of them
-   * is autosaved while it runs, even by a save queued before it. Its failure releases them, to be
-   * saved as before. Its success either retires what it carried (a submit: it is in the review),
-   * or keeps your unsaved text, unsent, until you edit it (a discard: cleanup may yet not happen).
+   * Runs a command (submit, discard) that carries or drops `fields`, at the versions it was sent
+   * with (`carried`, as `versions()` gave them with its values; as they are now if not given):
+   * none of them is autosaved while it runs, even by a save queued or retried before it. Its
+   * failure releases them, to be saved as before. Its success either retires what it carried (a
+   * submit: it is in the review), or keeps your unsaved text, unsent, until you edit it (a
+   * discard: cleanup may yet not happen).
    */
   async command<T>(
     fields: Field[],
     run: () => Promise<T>,
     onSuccess: 'retire' | 'keep',
+    carried: Partial<Record<Field, number>> = this.versions(fields),
   ): Promise<T> {
     if (this.timer) clearTimeout(this.timer);
 
     this.timer = null;
 
     const token = Symbol('command');
-    const owned = new Map(fields.map((field) => [field, this.fields[field].version]));
+    const owned = new Map(
+      fields.map((field) => [field, carried[field] ?? this.fields[field].version]),
+    );
 
-    for (const [field, version] of owned) this.fields[field].owned = { token, version };
+    for (const [field, version] of owned) this.fields[field].owned.set(token, version);
 
     this.changed();
 
+    // Each command releases only its own hold: another running still holds the field.
     const release = () => {
-      for (const field of owned.keys())
-        if (this.fields[field].owned?.token === token) this.fields[field].owned = null;
+      for (const field of owned.keys()) this.fields[field].owned.delete(token);
     };
 
     try {
@@ -691,6 +704,26 @@ export class DraftWriter {
     return snapshot;
   }
 
+  /** What a resumed autosave carried, for each of its fields not settled since. */
+  private restoredSnapshot(write: Inflight): Partial<Record<Field, Snapshot>> {
+    const snapshot: Partial<Record<Field, Snapshot>> = {};
+
+    for (const [field, version] of entries(write.fields ?? {})) {
+      const state = this.fields[field];
+      const value = write.request.body[field];
+
+      if (version > state.settled && typeof value === 'string')
+        snapshot[field] = { value, version, generation: state.generation, since: state.since };
+    }
+
+    return snapshot;
+  }
+
+  /** Whether a command holds any field `write` carries. */
+  private held(write: Inflight): boolean {
+    return entries(write.fields ?? {}).some(([field]) => this.fields[field].owned.size > 0);
+  }
+
   /** The outcomes of the latest saves queued of `fields`, as of now. */
   private savesOf(fields: Field[]): Promise<boolean[]> {
     return Promise.all(fields.map((field) => this.fields[field].lastSave ?? true));
@@ -721,7 +754,7 @@ export class DraftWriter {
           ? DISCARDED_ELSEWHERE
           : null;
 
-      if (state.owned) {
+      if (state.owned.size > 0) {
         if (state.queued === saved.version) state.queued = state.settled;
       } else if (reason) this.failFields({ [field]: saved.version }, reason);
       else continue;
@@ -799,25 +832,11 @@ export class DraftWriter {
     if (outcome.kind === 'conflict') {
       this.conflicted(outcome.draft, write.stamp);
 
-      // Changed elsewhere since, the same draft: its edits are saved again on the draft as it is,
-      // in this job, so what waits behind it waits for that too. A field a newer save is already
-      // queued for is left to it.
-      if (outcome.draft.versions!.generation === write.base.generation) {
-        const again = entries(fields)
-          .filter(([field, version]) => {
-            const state = this.fields[field];
-
-            return (
-              state.queued === version &&
-              state.version > state.settled &&
-              !state.failed &&
-              !state.owned
-            );
-          })
-          .map(([field]) => field);
-
-        return this.save(this.snapshotOf(again), 'chain');
-      }
+      // Changed elsewhere since, the same draft: the very text it carried is saved again on the
+      // draft as it is, in this job, so what waits behind it waits for that too. Anything typed
+      // since is left to its own save.
+      if (outcome.draft.versions!.generation === write.base.generation)
+        return this.save(this.restoredSnapshot(write), 'chain');
 
       this.failFields(fields, DISCARDED_ELSEWHERE);
 
@@ -831,8 +850,10 @@ export class DraftWriter {
 
   /**
    * Sends a write and learns its outcome. An answer that says nothing is sent again as it was,
-   * the same id answering once; one still on its way is looked up until it settles. Nothing is
-   * sent, nor looked up, past its deadline: it is then taken as unconfirmed.
+   * the same id answering once; one still on its way is looked up until it settles. While a
+   * command holds a field it carries, it is only looked up, never sent again: a resend could be
+   * its first delivery. Nothing is sent, nor looked up, past its deadline: it is then taken as
+   * unconfirmed.
    */
   private async dispatch(
     write: Inflight,
@@ -856,7 +877,9 @@ export class DraftWriter {
         break;
       }
 
-      if (outcome.kind === 'pending') {
+      const held = this.held(write);
+
+      if (outcome.kind === 'pending' || held) {
         const looked = await this.transport
           .lookup(write.writeId, write.base)
           .then((answer) => fromLookup(answer, write))
@@ -871,7 +894,8 @@ export class DraftWriter {
           break;
         }
 
-        outcome = looked === 'resend' ? await send(false) : looked;
+        if (looked !== 'resend') outcome = looked;
+        else if (!held) outcome = await send(false);
       } else outcome = await send(false);
     }
 
@@ -889,6 +913,9 @@ export class DraftWriter {
         state.settled = version;
         state.savedAt = revision;
       }
+
+      // Its very text is saved: a refusal of it (an expiry on restore, say) no longer holds.
+      if (version === state.version) state.failed = null;
     }
 
     this.changed();

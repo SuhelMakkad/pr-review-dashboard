@@ -454,34 +454,149 @@ describe('the draft writer', () => {
     expect(sent.map((request) => request.route)).toEqual(['addComment']);
   });
 
-  it('keeps a command holding its text however another command around it ends', async () => {
+  it.each(['first', 'second'])(
+    'keeps a command holding its text when the %s of two around it fails first',
+    async (which) => {
+      const { sent, transport } = server();
+      const writer = new DraftWriter('you', 'PR_1', transport, instant);
+      let accept: () => void = () => {};
+      const failing = () =>
+        writer.command(
+          ['body'],
+          async () => {
+            throw new Error('Refused');
+          },
+          'retire',
+        );
+      const holding = () =>
+        writer.command(
+          ['body'],
+          () => new Promise<void>((resolve) => (accept = resolve)),
+          'retire',
+        );
+
+      writer.observe(draft(1));
+      writer.edit('body', 'Held');
+
+      const [refused, held] =
+        which === 'first'
+          ? [failing(), holding()]
+          : (() => {
+              const kept = holding();
+
+              return [failing(), kept];
+            })();
+
+      await expect(refused).rejects.toThrow('Refused');
+      await writer.flush();
+
+      expect(sent).toEqual([]);
+
+      accept();
+      await held;
+    },
+  );
+
+  it('retires on acceptance only the versions a submit was sent with', async () => {
     const { sent, transport } = server();
     const writer = new DraftWriter('you', 'PR_1', transport, instant);
-    let second: () => void = () => {};
 
     writer.observe(draft(1));
-    writer.edit('body', 'Held');
+    writer.edit('body', 'Sent');
 
-    const first = writer.command(
-      ['body'],
-      async () => {
-        throw new Error('Refused');
-      },
-      'retire',
-    );
-    const holding = writer.command(
-      ['body'],
-      () => new Promise<void>((resolve) => (second = resolve)),
-      'retire',
-    );
+    // Captured with the text it sends; then typed on before the command ran (paused offline).
+    const carried = writer.versions(['body', 'event']);
 
-    await expect(first).rejects.toThrow('Refused');
-    await writer.flush();
+    writer.edit('body', 'Typed after');
+    await writer.command(['body', 'event'], async () => 'queued', 'retire', carried);
+    await writer.settled();
 
-    expect(sent).toEqual([]);
+    expect(sent.map((request) => request.body.body)).toEqual(['Typed after']);
+  });
 
-    second();
-    await holding;
+  it('only looks up, never sends again, an autosave a command came to hold while it was retried', async () => {
+    const { sent, answers, transport } = server();
+    let accept: () => void = () => {};
+    let sentWhileHeld: number | null = null;
+    const writer: DraftWriter = new DraftWriter('you', 'PR_1', transport, (attempt) => {
+      // Its first send said nothing; then a submit takes the field, and later is accepted.
+      if (attempt === 0)
+        void writer.command(
+          ['event'],
+          () => new Promise<void>((done) => (accept = done)),
+          'retire',
+        );
+
+      if (attempt === 2) {
+        sentWhileHeld = sent.length;
+        accept();
+      }
+
+      return 0;
+    });
+
+    writer.observe(draft(1));
+    answers.push(async () => {
+      throw new ApiError('Not reachable', 0);
+    });
+    writer.edit('event', 'APPROVE');
+    await writer.settled();
+
+    expect(sentWhileHeld).toBe(1);
+    expect(transport.lookup).toHaveBeenCalled();
+    accept();
+  });
+
+  it('clears an expiry once a replay of the same text is confirmed', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', 'PR_1', first.transport, instant);
+
+    clock(1_000);
+    writer.observe(draft(2));
+    writer.edit('body', 'Begun long ago');
+    // Sent only days later, and never answered.
+    clock(1_000 + ATTEMPT_TTL_MS - 10);
+    first.answers.push(() => new Promise(() => {}));
+    void writer.flush();
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    clock(1_000 + ATTEMPT_TTL_MS);
+
+    const reloaded = new DraftWriter('you', 'PR_1', server().transport, instant);
+
+    expect(reloaded.state('body')).toBe('error');
+
+    await reloaded.settled();
+
+    expect(reloaded.state('body')).toBe('saved');
+  });
+
+  it('rebases after a reload the very text it resent, leaving what you typed since to its own save', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', 'PR_1', first.transport, instant);
+
+    writer.observe(draft(2));
+    first.answers.push(() => new Promise(() => {}));
+    writer.edit('body', 'A');
+    void writer.flush();
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+
+    const second = server();
+    const resend = held();
+
+    second.answers.push(resend.answer);
+
+    const reloaded = new DraftWriter('you', 'PR_1', second.transport, instant);
+
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    reloaded.edit('body', 'B');
+    resend.release(conflict(draft(5)));
+    await vi.waitFor(() => expect(second.sent).toHaveLength(2));
+
+    expect(second.sent.map((request) => request.body.body)).toEqual(['A', 'A']);
+
+    await reloaded.flush();
+
+    expect(second.sent.map((request) => request.body.body)).toEqual(['A', 'A', 'B']);
   });
 
   it('acts behind a refused save on the draft the queue began on, never on a read meanwhile', async () => {

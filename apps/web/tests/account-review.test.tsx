@@ -392,6 +392,47 @@ describe('drafts and Activity per account', () => {
     client.clear();
   });
 
+  it('retires, once a submit is accepted, only the versions it was sent with', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const saved: string[] = [];
+
+    vi.stubGlobal('fetch', (_path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+      const body = options?.body ? JSON.parse(String(options.body)) : {};
+
+      if (method === 'PUT') saved.push(body.body);
+
+      return Promise.resolve(
+        method === 'POST'
+          ? reply({ operation: { id: body.operationId } }, 202)
+          : method === 'PUT'
+            ? reply({ error: 'Locked.', code: 'DRAFT_LOCKED' }, 409)
+            : reply({ items: [], nextCursor: null }),
+      );
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    act(() => hook.result.current.writer.edit('body', 'Sent'));
+
+    const carried = hook.result.current.writer.versions(['body', 'event']);
+
+    // Typed on before the submit ran: it stays yours to save, not retired with the review.
+    act(() => hook.result.current.writer.edit('body', 'Typed after'));
+    await act(() =>
+      hook.result.current.submit.mutateAsync({
+        event: 'COMMENT',
+        body: 'Sent',
+        expectedHeadOid: 'abc',
+        carried,
+      }),
+    );
+    await waitFor(() => expect(saved).toEqual(['Typed after']));
+    client.clear();
+  });
+
   it('keeps the newer draft whatever is published into its query, as it is published', async () => {
     const { useReview } = await import('@/features/review/use-review');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

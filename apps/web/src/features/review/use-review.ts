@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DiffManifest, DiffMode } from '@review-desk/shared/diff';
 import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/shared/review';
 import { showsViewedTarget, type ViewedTarget } from '@review-desk/shared/operations';
+import type { Field } from '@/features/review/draft-writer';
 import { newerDraft, useDraftWriter } from '@/features/review/use-draft-writer';
 import { ApiError } from '@/lib/api';
 import { routes } from '@review-desk/shared/contract';
@@ -156,15 +157,20 @@ export function useReview(prId: string | null, account: string) {
   });
 
   const submit = useMutation({
-    mutationFn: (input: {
+    mutationFn: ({
+      carried,
+      ...input
+    }: {
       event: ReviewEvent;
       body: string;
       expectedHeadOid: string;
       allowNewHead?: boolean;
+      /** The versions of the summary and verdict sent, as `writer.versions` gave them. */
+      carried?: Partial<Record<Field, number>>;
     }) =>
       // Carries the summary and verdict as you left them: none is autosaved into the draft it
-      // submits meanwhile, nor after it was accepted.
-      writer.command(['body', 'event'], () => command(routes.submit, pr, input), 'retire'),
+      // submits meanwhile, nor, once it was accepted, the versions it carried.
+      writer.command(['body', 'event'], () => command(routes.submit, pr, input), 'retire', carried),
     onSettled: refreshDraft,
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.pulls(account) });

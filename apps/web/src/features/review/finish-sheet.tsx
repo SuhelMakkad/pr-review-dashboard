@@ -11,6 +11,7 @@ import { forgeTerms } from '@review-desk/shared/accounts';
 import type { CiState } from '@review-desk/shared/types';
 import { reviewEventLabels, type ReviewDraft, type ReviewEvent } from '@review-desk/shared/review';
 import type { OperationReceipt } from '@review-desk/shared/operations';
+import type { Field } from '@/features/review/draft-writer';
 import { useDraftWriter } from '@/features/review/use-draft-writer';
 import { openActivity } from '@/features/activity/use-operations';
 import { ApiError } from '@/lib/api';
@@ -67,6 +68,9 @@ export interface FinishSheetProps {
     body: string;
     expectedHeadOid: string;
     allowNewHead?: boolean;
+    /** The writer's versions of `body` and `event`, captured with them: required, so a submit
+     * never retires text it did not send. */
+    carried: Partial<Record<Field, number>>;
   }) => Promise<OperationReceipt>;
   busy: boolean;
   onSubmitted: (result: OperationReceipt) => void;
@@ -135,7 +139,14 @@ export function FinishSheet({
     setProblem(null);
 
     try {
-      const result = await submit({ event, body, expectedHeadOid: viewedHeadOid, allowNewHead });
+      // The versions shown, with their values: only those are retired once it is accepted.
+      const result = await submit({
+        event,
+        body,
+        expectedHeadOid: viewedHeadOid,
+        allowNewHead,
+        carried: writer.versions(['body', 'event']),
+      });
 
       submitted.current = true;
       onSubmitted(result);
