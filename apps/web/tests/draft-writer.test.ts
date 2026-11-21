@@ -2256,6 +2256,115 @@ describe('comment and AI write recovery', () => {
     expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
   });
 
+  it('keeps the very same write reserved while it is on its way, sent again included', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+
+    const resend = held();
+
+    next.answers.push(resend.answer);
+
+    const again = reloaded.sendWriteAgain(reloaded.writeViews()[0]!.key);
+
+    await vi.waitFor(() => expect(next.sent).toHaveLength(1));
+    await expect(
+      reloaded.write('addComment', comment, { ...target, body: 'Kept' }),
+    ).rejects.toMatchObject({ code: 'WRITE_UNRESOLVED' });
+
+    resend.release((request) => ({
+      attempt: { id: request.body.writeId, state: 'committed', revision: 3 },
+    }));
+    await again;
+
+    expect(next.sent).toHaveLength(1);
+  });
+
+  it('sends one again once, as you asked: an answer that says nothing leaves it to its lookups', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+    next.answers.push(unreachable, unreachable);
+    await reloaded.sendWriteAgain(reloaded.writeViews()[0]!.key);
+
+    expect(next.sent).toHaveLength(1);
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+
+    // Its next lookup says whether it may be sent again.
+    await reloaded.reconcile();
+
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: true }]);
+  });
+
+  it('never moves the queue past its base with a commit sending again found on another draft', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+    reloaded.observe(draft(5));
+    // Sent on revision 2, it answers with a commit past the draft the queue acts on.
+    next.answers.push(async (request) => ({
+      attempt: { id: request.body.writeId, state: 'committed', revision: 12 },
+    }));
+
+    const again = reloaded.sendWriteAgain(reloaded.writeViews()[0]!.key);
+    const behind = reloaded.write('addComment', comment, { body: 'Behind' });
+
+    await again;
+    await behind;
+
+    expect(next.sent.map((request) => [request.body.body, request.body.baseRevision])).toEqual([
+      ['Kept', 2],
+      ['Behind', 5],
+    ]);
+  });
+
+  it('never offers to send again one a later lookup found received', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+
+    expect(reloaded.writeViews()).toMatchObject([{ canSendAgain: true }]);
+
+    vi.mocked(next.transport.lookup).mockImplementation(async (id) => ({
+      attempt: { id, state: 'pending' },
+    }));
+    await reloaded.reconcile();
+
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+  });
+
   it('never holds up the draft for a write not confirmed', async () => {
     const { sent, answers, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);
@@ -2428,6 +2537,46 @@ describe('autosaves across a restart', () => {
 
     expect(writer.state('event')).toBe('saved');
     expect(writer.writeViews()).toEqual([]);
+  });
+
+  it('hands an unconfirmed autosave to the banner in one journal write, so a reload never saves it afresh', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', PR, first.transport, instant, NEVER);
+    const setItem = Storage.prototype.setItem;
+
+    writer.observe(draft(0));
+    first.answers.push(
+      async () => {
+        throw new ApiError('Not reachable', 0);
+      },
+      async () => {
+        // From now, any journal that records the write for the banner cannot be written.
+        vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+          this: Storage,
+          key: string,
+          value: string,
+        ) {
+          if (value.includes('"writes"')) throw new Error('Full');
+
+          setItem.call(this, key, value);
+        });
+
+        throw new ApiError('Sealed elsewhere', 409, 'WRITE_HISTORY_GAP');
+      },
+    );
+    writer.edit('event', 'APPROVE');
+    await writer.settled();
+    vi.restoreAllMocks();
+
+    const second = server();
+    const reloaded = new DraftWriter('you', PR, second.transport, instant, NEVER);
+
+    await reloaded.settled();
+
+    // Only ever the id it was first sent with.
+    expect(new Set(second.sent.map((request) => request.body.writeId))).toEqual(
+      new Set(second.sent.length > 0 ? [first.sent[0]!.body.writeId] : []),
+    );
   });
 
   it('keeps for you to confirm an autosave a reload resent that a restarted server no longer knows', async () => {

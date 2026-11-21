@@ -711,11 +711,12 @@ export class DraftWriter {
     // An unsettled submit or discard, or an open discard: refused now, your input yours to keep.
     if (gate) return Promise.reject(new WriteRefused(gate.message, gate.code));
 
-    // The very same as a write not settled yet (asked for again from a composer still open):
-    // refused, so a write that may have landed is never made twice. Its notice says what to do.
+    // The very same as a write not settled yet (asked for again from a composer still open, or
+    // while it is sent again): refused, so a write that may land is never made twice. Its notice
+    // says what to do.
     const intent = { route, params, body };
 
-    if (this.writes.some((record) => writeNeedsLookup(record) && sameIntent(record.intent, intent)))
+    if (this.writes.some((record) => unsettled(record) && sameIntent(record.intent, intent)))
       return Promise.reject(new WriteRefused(ATTEMPT_MESSAGES.unresolved, 'WRITE_UNRESOLVED'));
 
     const record: AttemptRecord = {
@@ -1014,34 +1015,35 @@ export class DraftWriter {
         throw new WriteRefused(ahead.message, ahead.code);
       }
 
-      const write: Inflight = {
-        writeId: record.writeId!,
-        request: record.request!,
-        base: record.base!,
-        deadline: record.deadline!,
-        stamp: this.transport.stamp(),
-      };
-      const outcome = await this.dispatch(write, false, record);
+      const expected = { writeId: record.writeId!, base: record.base! };
+      const stamp = this.transport.stamp();
+      // Sent once, as you asked: an answer that says nothing leaves it to its lookups again.
+      const outcome = await decode(this.transport.send(record.request!), false, expected);
 
       if (outcome.kind === 'committed') {
-        // An answer may replay a commit made long ago: what is queued after it acts on the draft
-        // as it is, never on an older one.
+        // An answer may replay a commit made long ago, or one on a draft the queue has not seen:
+        // what is queued after it moves on with it only when it was sent on the draft the queue
+        // acts on now (a commit is never behind its base).
         const live = this.tail ?? this.seen ?? ZERO;
+        const base = expected.base;
 
-        if (outcome.revision > live.revision) this.advance(outcome.revision, write.base.generation);
+        if (base.revision === live.revision && base.generation === live.generation)
+          this.advance(outcome.revision, base.generation);
 
-        if (isDraft(outcome.body)) this.transport.committed(outcome.body, write.stamp);
+        if (isDraft(outcome.body)) this.transport.committed(outcome.body, stamp);
         else this.transport.stale();
 
         this.dropWrite(record);
       } else if (outcome.kind === 'conflict') {
         // Sent on the draft it was first sent on: shown, without stopping what is queued after.
         this.observe(outcome.draft);
-        this.transport.committed(outcome.draft, write.stamp);
+        this.transport.committed(outcome.draft, stamp);
         this.notSaved(record, 'The draft changed since this was first sent, so it was not saved.');
-      } else if (outcome.kind === 'unconfirmed')
+      } else if (outcome.kind === 'refused') this.refused(record, outcome.error);
+      else {
         this.moveWrite(record, 'unknown', { resendable: false });
-      else this.refused(record, refusalOf(outcome));
+        this.poll();
+      }
     });
   }
 
@@ -1125,6 +1127,9 @@ export class DraftWriter {
         this.moveWrite(record, 'unknown', {
           resendable: looked === 'resend' && isSealed(writeId),
         });
+      } else if (looked.kind === 'pending') {
+        // Received, and may still commit: never offered to be sent again.
+        if (record.resendable) this.moveWrite(record, record.phase, { resendable: false });
       } else if (looked.kind === 'committed') this.writeCommitted(record, looked.revision);
       else if (looked.kind === 'conflict')
         this.notSaved(record, 'The draft changed since this was sent, so it was not saved.');
@@ -1838,11 +1843,8 @@ export class DraftWriter {
         return kept;
       }
 
-      if (outcome.kind === 'unconfirmed') {
-        this.keepUnconfirmed(write, fields);
-
-        return kept;
-      }
+      // Kept for you to confirm, in the banner (see `keepUnconfirmed`).
+      if (outcome.kind === 'unconfirmed') return kept;
 
       this.failFields(fields, refusalOf(outcome).message);
 
@@ -1877,11 +1879,7 @@ export class DraftWriter {
       return new Set();
     }
 
-    if (outcome.kind === 'unconfirmed') {
-      this.keepUnconfirmed(write, fields);
-
-      return new Set();
-    }
+    if (outcome.kind === 'unconfirmed') return new Set();
 
     this.failFields(fields, refusalOf(outcome).message);
 
@@ -1977,6 +1975,11 @@ export class DraftWriter {
     }
 
     this.inflight = this.inflight.filter((other) => other.writeId !== write.writeId);
+
+    // An autosave no longer to be learnt on its own is handed to the banner in the very journal
+    // write that takes it off its way: a reload finds one or the other, never neither.
+    if (outcome.kind === 'unconfirmed' && write.fields) this.keepUnconfirmed(write, write.fields);
+
     this.changed();
 
     return outcome as Settled;
@@ -1998,7 +2001,10 @@ export class DraftWriter {
       deadline: write.deadline,
       fields,
     });
-    this.failFields(fields, NOT_CONFIRMED);
+
+    // Journaled by the caller, at once with the rest.
+    if (this.markFailed(fields, NOT_CONFIRMED)) this.transport.refused(NOT_CONFIRMED);
+
     this.poll();
   }
 
@@ -2109,6 +2115,10 @@ function stable(value: unknown): string {
 
   return `{${keys.map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
 }
+
+/** Whether a write is not settled yet: queued, on its way, or not known. */
+const unsettled = (record: AttemptRecord) =>
+  record.phase !== 'not-saved' && record.phase !== 'lost';
 
 /** Whether a write may have been received, and is to be looked up. */
 const writeNeedsLookup = (record: AttemptRecord) =>
