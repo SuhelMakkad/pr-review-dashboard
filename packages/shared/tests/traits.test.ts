@@ -9,6 +9,7 @@ describe('forge traits', () => {
       'glab auth login --hostname gitlab.example',
     );
 
+    expect(Object.isFrozen(forgeTraits)).toBe(true);
     expect(Object.isFrozen(forgeTraits.github)).toBe(true);
     expect(Object.isFrozen(forgeTraits.github.reference)).toBe(true);
     expect(Object.isFrozen(forgeTraits.gitlab.reference)).toBe(true);

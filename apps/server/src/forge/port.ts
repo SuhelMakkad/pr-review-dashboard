@@ -41,7 +41,8 @@ export class ForgeError extends Error {
 /**
  * One history search, for one inclusive window of days (`YYYY-MM-DD`): the PRs `login` reviewed,
  * by when they were last updated, or those it authored, by when they were created. With
- * `repositories`, only PRs in those (GitHub `owner/repo`, GitLab `group/project`); otherwise any.
+ * `repositories`, only PRs in those (GitHub `owner/repo`, GitLab `group/project`), so an empty list
+ * matches none; without it, any.
  */
 export type HistoryQuery =
   | { kind: 'reviewed'; login: string; from: string; to: string; repositories?: string[] }

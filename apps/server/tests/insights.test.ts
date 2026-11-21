@@ -161,6 +161,11 @@ describe("the demo fixture's history search", () => {
     expect(scoped.length).toBeGreaterThan(0);
     expect(scoped.length).toBeLessThan(all.length);
     expect(await repositoryOf(scoped)).toEqual(new Set([first]));
+
+    // An empty list names no repository, so it matches none.
+    expect(await fixture.searchPullIds({ kind: 'authored', ...window, repositories: [] })).toEqual(
+      [],
+    );
   });
 });
 

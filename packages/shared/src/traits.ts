@@ -34,7 +34,8 @@ export interface ForgeTraits {
 const frozen = (traits: ForgeTraits): ForgeTraits =>
   Object.freeze({ ...traits, reference: Object.freeze({ ...traits.reference }) });
 
-export const forgeTraits: Record<Forge, ForgeTraits> = {
+/** The table is frozen too, so no reader can swap a forge's entry for the others. */
+export const forgeTraits: Readonly<Record<Forge, ForgeTraits>> = Object.freeze({
   github: frozen({
     approvalCarriesSummary: true,
     checksAccount: false,
@@ -55,7 +56,7 @@ export const forgeTraits: Record<Forge, ForgeTraits> = {
     teams: false,
     signIn: (host) => `glab auth login --hostname ${host}`,
   }),
-};
+});
 
 /** The traits of `account`'s forge (`alice` on GitHub, `alice@gitlab.example` on GitLab). */
 export const traitsOf = (account: string): ForgeTraits => forgeTraits[forgeOf(account)];

@@ -1324,7 +1324,10 @@ describe('GitLab merge request snapshots', () => {
     // Named projects are listed one at a time: GitLab's merge request list takes no project filter.
     fake
       .on('GET', 'projects/acme%2Fplatform%2Fweb/merge_requests', { data: [mergeRequest()] })
-      .on('GET', 'projects/acme%2Fother/merge_requests', { data: [] });
+      .on('GET', 'projects/acme%2Fother/merge_requests', {
+        // The same MR again (a list can repeat one), and another project's.
+        data: [mergeRequest(), mergeRequest({ id: 901, iid: 3, project_id: 8 })],
+      });
 
     expect(
       await client.searchPullIds({
@@ -1334,11 +1337,25 @@ describe('GitLab merge request snapshots', () => {
         to: '2026-10-31',
         repositories: ['acme/platform/web', 'acme/other'],
       }),
-    ).toEqual(['MR_7_12']);
+    ).toEqual(['MR_7_12', 'MR_8_3']);
     expect(fake.calls.slice(-2).map((call) => call.path)).toEqual([
       'projects/acme%2Fplatform%2Fweb/merge_requests?state=all&reviewer_username=rev&updated_after=2026-10-01T00%3A00%3A00Z&updated_before=2026-11-01T00%3A00%3A00.000Z&per_page=100',
       'projects/acme%2Fother/merge_requests?state=all&reviewer_username=rev&updated_after=2026-10-01T00%3A00%3A00Z&updated_before=2026-11-01T00%3A00%3A00.000Z&per_page=100',
     ]);
+
+    // An empty list names no project: nothing to list, and nothing asked of GitLab.
+    const sent = fake.calls.length;
+
+    expect(
+      await client.searchPullIds({
+        kind: 'reviewed',
+        login: VIEWER,
+        from: '2026-10-01',
+        to: '2026-10-31',
+        repositories: [],
+      }),
+    ).toEqual([]);
+    expect(fake.calls).toHaveLength(sent);
   });
 });
 

@@ -553,6 +553,9 @@ export class GitHub implements GitHubApi {
   }
 
   async searchPullIds(history: HistoryQuery): Promise<string[]> {
+    // No repository named is no PR to find, not a search without qualifiers across all of GitHub.
+    if (history.repositories?.length === 0) return [];
+
     // GitHub's own search syntax: by update date for reviews, by creation date for authored PRs.
     // Several `repo:` qualifiers match any one of them.
     const scope = (history.repositories ?? []).map((repository) => ` repo:${repository}`).join('');

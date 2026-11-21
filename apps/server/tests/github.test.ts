@@ -110,6 +110,11 @@ describe('GitHub data retrieval', () => {
       repositories: ['acme/api', 'acme/web'],
     });
 
+    // An empty list names no repository: no PR, and no search across all of GitHub.
+    expect(await github.searchPullIds({ kind: 'authored', ...window, repositories: [] })).toEqual(
+      [],
+    );
+
     expect(graphql.mock.calls.map((call) => call[1])).toEqual([
       { query: 'is:pr reviewed-by:octo updated:2026-10-01..2026-10-31', cursor: null },
       { query: 'is:pr author:octo created:2026-10-01..2026-10-31', cursor: null },
