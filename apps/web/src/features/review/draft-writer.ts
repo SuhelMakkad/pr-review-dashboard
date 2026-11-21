@@ -829,13 +829,6 @@ export class DraftWriter {
       ...(source ? { recovers: source.key } : {}),
     };
 
-    // A new comment of a kept one: linked to it at once, so even a refusal now is that one's.
-    if (source) source.replacement = { key: record.key };
-
-    // An unsettled submit or discard, or an open discard: refused now, your input yours to keep.
-    if (gate)
-      return Promise.reject(this.keepRefusal(record, new WriteRefused(gate.message, gate.code)));
-
     // The very same as a write not settled yet (asked for again from a composer still open, or
     // while it is sent again): refused, so a write that may land is never made twice. Its own
     // entry says what became of it, shown again if hidden; a new comment of a kept one now waits
@@ -854,6 +847,13 @@ export class DraftWriter {
         new WriteRefused(ATTEMPT_MESSAGES.unresolved, 'WRITE_UNRESOLVED', { kept: same.key }),
       );
     }
+
+    // A new comment of a kept one: linked to it at once, so even a refusal now is that one's.
+    if (source) source.replacement = { key: record.key };
+
+    // An unsettled submit or discard, or an open discard: refused now, your input yours to keep.
+    if (gate)
+      return Promise.reject(this.keepRefusal(record, new WriteRefused(gate.message, gate.code)));
 
     // Linked to it in the same journal write as its own record.
     this.writes.push(record);

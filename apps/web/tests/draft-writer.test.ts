@@ -3859,6 +3859,28 @@ describe('kept refusals and recovery views', () => {
     expect(writer.writeViews().map((view) => view.key)).toEqual([first!.key]);
   });
 
+  it('points a repeat to the very same comment on its way, gate closed or not, keeping no second entry', async () => {
+    const { answers, commands, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(0));
+    answers.push(unreachable, gap);
+    await expect(writer.write('addComment', pr, { ...target, body: 'Once' })).rejects.toBeDefined();
+
+    const [first] = writer.writeViews();
+
+    commands.push(unreachable);
+    await expect(writer.submit(review, carried(writer), null)).rejects.toBeDefined();
+    await expect(writer.write('addComment', pr, { ...target, body: 'Once' })).rejects.toMatchObject(
+      {
+        code: 'WRITE_UNRESOLVED',
+        details: { kept: first!.key },
+      },
+    );
+
+    expect(writer.writeViews().map((view) => view.key)).toEqual([first!.key]);
+  });
+
   it('hides a kept refusal only while a composer shows its very text', async () => {
     const { answers, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);

@@ -111,6 +111,8 @@ type ComposerState =
       view?: DiffView;
       recovers?: string;
       refused?: { key: string; text: string };
+      /** This opening's own: its editor, its text and its answers are never another's. */
+      opening?: string;
     })
   | null;
 
@@ -125,7 +127,15 @@ function Workspace() {
   const diffRef = useRef<HTMLDivElement>(null);
   const [railOpen, setRailOpen] = useState(() => storage.get('review-desk-rail') !== 'closed');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [composer, setComposer] = useState<ComposerState>(null);
+  const [composer, setComposerState] = useState<ComposerState>(null);
+  // Each composer opened is a new one: its editor starts from its own text, and an answer to an
+  // earlier one never reaches it.
+  const setComposer = (next: ComposerState | ((current: ComposerState) => ComposerState)) =>
+    setComposerState((current) => {
+      const value = typeof next === 'function' ? next(current) : next;
+
+      return value && !value.opening ? { ...value, opening: crypto.randomUUID() } : value;
+    });
   const [composerError, setComposerError] = useState<string | null>(null);
   /** Text kept from a composer closed because its diff changed, for the next one. */
   const [keptBody, setKeptBody] = useState<string | null>(null);
@@ -357,14 +367,21 @@ function Workspace() {
   useEffect(() => {
     if (!focusDraft) return;
 
-    const timer = setTimeout(() => {
-      diffRef.current
-        ?.querySelector<HTMLElement>(`[data-draft-id="${CSS.escape(focusDraft)}"]`)
-        ?.scrollIntoView({ block: 'center' });
-      setFocusDraft(null);
-    }, 150);
+    let tries = 0;
+    const timer = setInterval(() => {
+      const card = diffRef.current?.querySelector<HTMLElement>(
+        `[data-draft-id="${CSS.escape(focusDraft)}"]`,
+      );
 
-    return () => clearTimeout(timer);
+      // Shown, or not after a few seconds (gone from the draft): either way, done.
+      if (card || ++tries >= 30) {
+        card?.scrollIntoView({ block: 'center' });
+        clearInterval(timer);
+        setFocusDraft(null);
+      }
+    }, 100);
+
+    return () => clearInterval(timer);
   }, [focusDraft, current?.path]);
 
   // Bring a focused thread into view once its file has rendered.
@@ -582,7 +599,12 @@ function Workspace() {
             ...(() => {
               const shown = diffView(diff.data);
 
-              return shown && comment.status !== 'stale' && comment.anchorOid === shown.headOid
+              // The head names its right side alone: a left side compares with a start this
+              // comment does not record, so it never names one.
+              return shown &&
+                comment.side === 'RIGHT' &&
+                comment.status !== 'stale' &&
+                comment.anchorOid === shown.headOid
                 ? { view: shown }
                 : {};
             })(),
@@ -622,10 +644,17 @@ function Workspace() {
     const kept = (error as { details?: { kept?: unknown } }).details?.kept;
 
     setComposer((current) =>
-      current === opened
+      current && current.opening === opened.opening
         ? { ...current, refused: typeof kept === 'string' ? { key: kept, text } : undefined }
         : current,
     );
+  };
+
+  /** Closes the composer, if it is still the opening `opened`: never one opened since. */
+  const closeOpening = (opened: NonNullable<ComposerState>) => {
+    if (composer?.opening !== opened.opening) return;
+
+    closeComposer();
   };
 
   /**
@@ -657,6 +686,10 @@ function Workspace() {
     selectFile(where.path);
     setRecoveredBody(text);
     setComposerError(null);
+
+    // A collapsed file (generated) shows no lines: opened, so the composer on them is shown too.
+    if (restorable) setExpanded((open) => new Set([...open, where.path]));
+
     setComposer(
       restorable && where.line !== null
         ? {
@@ -684,6 +717,7 @@ function Workspace() {
 
   const composerFor = (target: NonNullable<ComposerState>) => (
     <Composer
+      key={target.opening}
       label={target.line === null ? `Comment on ${target.path}` : `Comment on line ${target.line}`}
       initial={recoveredBody}
       busy={review.addComment.isPending || review.commentNow.isPending || locked}
@@ -714,7 +748,7 @@ function Workspace() {
               where: { path: target.path, line: target.line, side, startLine, view: target.view },
               ...(target.recovers ? { recovers: target.recovers } : {}),
             });
-            closeComposer();
+            closeOpening(target);
           } catch (error) {
             setComposerError((error as Error).message);
             keepRefused(target, error, body);
