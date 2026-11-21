@@ -1404,13 +1404,19 @@ describe('approvals whose summary is a separate write', () => {
 
     context.setPosting(true);
 
-    // Declared as one combined approval, which the forge refused.
-    github.failNext = 'ApproveReview';
+    // Declared as one combined approval; a resolution before it is refused, so the approval
+    // has no step yet.
+    github.failNext = 'ResolveThread';
 
     const run = await review(2041);
 
     await posted(run.id, 'needs_attention');
     expect(stored(context, run.id).intent?.steps.at(-1)?.method).toBe('approveReview');
+    expect(
+      stored(context, run.id).steps.some(
+        (step: { method: string }) => step.method === 'approveReview',
+      ),
+    ).toBe(false);
     expect(stored(context, run.id).plan).toBeUndefined();
 
     // The forge now sends approvals apart from their summaries.

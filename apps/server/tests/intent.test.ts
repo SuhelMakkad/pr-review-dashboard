@@ -595,7 +595,9 @@ describe('receipts that do not fit their intent', () => {
 
   it.each([
     ['a damaged intent', { version: 1, steps: null }],
+    ['an intent stored as null', null],
     ['an intent of a later version', { version: 2, steps: [] }],
+    ['an intent whose version is not a number', { version: { toString: null }, steps: [] }],
   ])('holds a row with %s, and the queue goes on', async (_name, intent) => {
     const context = await setup();
     const { queue, github, pr, enqueue, settled } = context;
@@ -705,6 +707,17 @@ describe('the intent model', () => {
     expect(
       resolvedArgs(intent.steps[1], [done('addPendingReview', ['PR_1', 'head'], null)], 1),
     ).toBeNull();
+    // A field the result has itself, never one it inherits.
+    const field = intended('submitReview', { step: 0, result: 'field', field: 'toString' });
+
+    expect(resolvedArgs(field, [done('addPendingReview', [], { id: 'R_1' })], 1)).toBeNull();
+    expect(
+      resolvedArgs(
+        intended('submitReview', { step: 0, result: 'field', field: 'id' }),
+        [done('addPendingReview', [], { id: 'R_1' })],
+        1,
+      ),
+    ).toEqual(['R_1']);
     // Never itself: a receipt cannot vouch for the id it was sent with.
     const own: Intent = {
       version: 1,
@@ -718,6 +731,9 @@ describe('the intent model', () => {
 
   it('holds an intent of another version or shape', () => {
     expect(intentProblem({ version: 2, steps: intent.steps } as never, [])).toMatch(/version 2/);
+    expect(intentProblem({ version: { toString: null }, steps: [] } as never, [])).toMatch(
+      /no version/,
+    );
     expect(intentProblem({ version: 1, steps: null } as never, [])).toMatch(/damaged/);
     expect(intentProblem(null as never, [])).toMatch(/damaged/);
     expect(

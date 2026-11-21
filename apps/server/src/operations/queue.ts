@@ -849,7 +849,8 @@ export class OperationQueue {
 
     // Checked before anything is sent or reconciled: reconciling an unfinished step could hide
     // that a later one was sent before it.
-    const problem = row.intent ? intentProblem(row.intent, row.steps) : null;
+    // Present means it must be valid, a stored `null` included; only an absent one is legacy.
+    const problem = row.intent !== undefined ? intentProblem(row.intent, row.steps) : null;
 
     if (problem) {
       this.holdConflict(row, problem);

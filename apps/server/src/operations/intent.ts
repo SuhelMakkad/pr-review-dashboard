@@ -93,7 +93,7 @@ export function storedSteps(steps: unknown): MutationStep[] {
  * steps are replayed by position, as they always were; it never takes an intent.
  */
 export const isLegacy = (row: { intent?: Intent; steps: MutationStep[] }) =>
-  !row.intent && row.steps.length > 0;
+  row.intent === undefined && row.steps.length > 0;
 
 /**
  * The arguments the write declared at `index` resolves to, from the stored results of the steps
@@ -124,7 +124,9 @@ export function resolvedArgs(
 
       args.push(result);
     } else {
-      if (typeof result !== 'object' || result === null || !(arg.field in result)) return null;
+      // The result's own field, never one it inherits (`toString`).
+      if (typeof result !== 'object' || result === null || !Object.hasOwn(result, arg.field))
+        return null;
 
       const field = (result as Record<string, unknown>)[arg.field];
 
@@ -178,8 +180,11 @@ export function intentShapeProblem(intent: unknown): string | null {
 
   const { version, steps } = intent as { version?: unknown; steps?: unknown };
 
+  // Named only when it is a version at all: a damaged one is never turned into text.
   if (version !== 1)
-    return `the intent is version ${String(version)}, which this version cannot run`;
+    return typeof version === 'number' && Number.isInteger(version)
+      ? `the intent is version ${version}, which this version cannot run`
+      : 'the intent has no version this version can run';
   if (!Array.isArray(steps)) return 'the intent is damaged';
 
   for (const [index, step] of steps.entries()) {
