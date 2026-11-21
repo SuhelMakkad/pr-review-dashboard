@@ -166,6 +166,50 @@ export const draftComments = sqliteTable(
   (table) => [index('draft_comments_by_pr').on(table.account, table.prId, table.createdAt)],
 );
 
+/**
+ * Each PR's draft versions, kept when its draft is cleared. `revision` rises with every change to
+ * the draft; `generation` with every clear, lock and unlock as well; `observation` with every
+ * snapshot of the PR committed. Writes from the web are fenced by them (see `db/drafts.ts`).
+ */
+export const draftVersions = sqliteTable(
+  'draft_versions',
+  {
+    account: text('account').notNull(),
+    prId: text('pr_id').notNull(),
+    revision: integer('revision').notNull().default(0),
+    generation: integer('generation').notNull().default(0),
+    observation: integer('observation').notNull().default(0),
+  },
+  (table) => [primaryKey({ columns: [table.account, table.prId] })],
+);
+
+/**
+ * The claim ledger: each draft write or AI start that carries an id, claimed as it arrives and
+ * settled in the transaction that decides it, so a retry answers from the original's outcome
+ * (see `db/draft-writes.ts`).
+ */
+export const draftWrites = sqliteTable(
+  'draft_writes',
+  {
+    account: text('account').notNull(),
+    id: text('id').notNull(),
+    prId: text('pr_id').notNull(),
+    kind: text('kind').$type<'write' | 'start'>().notNull(),
+    /** The request the id was first sent with: a reuse with another is refused. */
+    fingerprint: text('fingerprint').notNull(),
+    baseRevision: integer('base_revision'),
+    baseGeneration: integer('base_generation'),
+    state: text('state').$type<'pending' | 'committed' | 'refused'>().notNull(),
+    /** A commit's revision and result, or a refusal's status and answer. */
+    result: text('result', { mode: 'json' }).$type<unknown>(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.account, table.id] }),
+    index('draft_writes_by_state').on(table.state, table.createdAt),
+  ],
+);
+
 /** AI task runs. `result` and `usage` stay serialised so secrets can be redacted as text. */
 export const aiRuns = sqliteTable(
   'ai_runs',

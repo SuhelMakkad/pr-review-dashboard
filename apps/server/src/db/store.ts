@@ -12,6 +12,8 @@ import type {
   Source,
   SyncStatus,
 } from '@review-desk/shared/types';
+import { DraftWriteLog } from '@/db/draft-writes.js';
+import { raiseVersions } from '@/db/versions.js';
 import type { ActivityEvent } from '@/insights/extract.js';
 import { AiRuns, AutoReviewLog } from '@/db/ai-runs.js';
 import { batches } from '@/db/batches.js';
@@ -26,6 +28,7 @@ import {
   autoReviewLog,
   githubOperations,
   draftComments,
+  draftVersions,
   feedMembership,
   notificationLog,
   prSync,
@@ -66,6 +69,8 @@ export class Store {
   readonly notificationLog: NotificationLog;
   /** The outbox's forge operations and local receipts (`db/operations.ts`). */
   readonly operations: OperationLog;
+  /** Claimed draft writes and AI starts (see `db/draft-writes.ts`). */
+  readonly draftWrites: DraftWriteLog;
   private transactionDepth = 0;
   /** Effects waiting for the outermost transaction to commit. */
   private committed: (() => void)[] = [];
@@ -82,6 +87,7 @@ export class Store {
     this.autoReviewLog = new AutoReviewLog(this.db);
     this.notificationLog = new NotificationLog(this.db);
     this.operations = new OperationLog(this.db);
+    this.draftWrites = new DraftWriteLog(this.db);
     migrateDatabase(this.db, path);
   }
 
@@ -179,11 +185,15 @@ export class Store {
   }
 
   saveSnapshot(account: string, snapshot: PullRequestSnapshot): void {
-    this.db
-      .insert(snapshots)
-      .values({ account, id: snapshot.id, data: snapshot })
-      .onConflictDoUpdate({ target: [snapshots.account, snapshots.id], set: { data: snapshot } })
-      .run();
+    this.transaction(() => {
+      this.db
+        .insert(snapshots)
+        .values({ account, id: snapshot.id, data: snapshot })
+        .onConflictDoUpdate({ target: [snapshots.account, snapshots.id], set: { data: snapshot } })
+        .run();
+      // What the forge shows of the PR changed: a draft answer orders its forge part by this.
+      raiseVersions(this, account, snapshot.id, { observation: true });
+    });
   }
 
   triage(account: string, id: string): LocalTriageState {
@@ -441,6 +451,38 @@ export class Store {
     ];
 
     this.transaction(() => {
+      // Every draft the account had, and every write still on its way to one (a first comment
+      // awaiting its diff read has no draft yet), is fenced: nothing older lands after the clear.
+      const prIds = new Set([
+        ...this.db
+          .select({ prId: reviewDrafts.prId })
+          .from(reviewDrafts)
+          .where(eq(reviewDrafts.account, account))
+          .all()
+          .map((row) => row.prId),
+        ...this.db
+          .select({ prId: draftComments.prId })
+          .from(draftComments)
+          .where(eq(draftComments.account, account))
+          .all()
+          .map((row) => row.prId),
+        ...this.db
+          .select({ prId: draftVersions.prId })
+          .from(draftVersions)
+          .where(eq(draftVersions.account, account))
+          .all()
+          .map((row) => row.prId),
+        ...this.draftWrites
+          .pending()
+          .filter((claim) => claim.account === account)
+          .map((claim) => claim.prId),
+      ]);
+
+      for (const prId of prIds)
+        raiseVersions(this, account, prId, { revision: true, generation: true });
+
+      this.draftWrites.interrupt({ account, prIds: [...prIds] });
+
       for (const table of tables) this.db.delete(table).where(eq(table.account, account)).run();
     });
   }

@@ -160,7 +160,8 @@ export function useAi(prId: string | null, account: string) {
           body: { event: draftEvent, body: draftBody },
         });
 
-        seedDraft(draft, since);
+        // Pending only answers a guarded write, which this save is not.
+        if (!('pending' in draft)) seedDraft(draft, since);
       }
 
       return call(routes.startAi, { params: pr, body: { task, provider, force } });

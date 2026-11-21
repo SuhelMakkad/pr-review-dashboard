@@ -14,7 +14,7 @@ import type { ServerEvent } from '@/events.js';
 import type { Insights } from '@/insights.js';
 import type { NotificationSettings, ReviewNotification } from '@/notify.js';
 import type { GitHubOperation, OperationList, OperationReceipt } from '@/operations.js';
-import type { DraftComment, ReviewDraft } from '@/review.js';
+import type { DraftAttempt, DraftComment, ReviewDraft } from '@/review.js';
 import type { LinearIssue, LinearStatus } from '@/tickets.js';
 import type { GitHubAccountList, PullRequestDetail, PullRequestList, SyncStatus } from '@/types.js';
 
@@ -158,6 +158,16 @@ const operationId = z
   .regex(/^[A-Za-z0-9-]+$/);
 const oid = z.string().min(7).max(64);
 
+/**
+ * A draft write's guard, all optional: the id a retry of it answers by, and the draft revision
+ * (and generation) it saw, which it is refused against once the draft has moved on.
+ */
+const guard = {
+  writeId: operationId.optional(),
+  baseRevision: z.number().int().nonnegative().optional(),
+  baseGeneration: z.number().int().nonnegative().optional(),
+};
+
 const newComment = z
   .object({
     account,
@@ -175,12 +185,24 @@ const newComment = z
 /** The review routes' requests, with the account: their order is the outbox fingerprint's. */
 export const reviewRequests = {
   draft: z
-    .object({ account, body: z.string().max(65_536).optional(), event: event.optional() })
+    .object({
+      account,
+      body: z.string().max(65_536).optional(),
+      event: event.optional(),
+      ...guard,
+    })
     .strict(),
-  comment: newComment,
-  edit: z.object({ account, body: text }).strict(),
-  accountOnly: z.object({ account }).strict(),
-  discard: z.object({ account, operationId }).strict(),
+  comment: newComment.extend(guard).strict(),
+  edit: z.object({ account, body: text, ...guard }).strict(),
+  remove: z.object({ account, ...guard }).strict(),
+  discard: z
+    .object({
+      account,
+      operationId,
+      baseRevision: guard.baseRevision,
+      baseGeneration: guard.baseGeneration,
+    })
+    .strict(),
   submit: z
     .object({
       account,
@@ -189,6 +211,10 @@ export const reviewRequests = {
       expectedHeadOid: oid,
       allowNewHead: z.boolean().optional(),
       operationId,
+      baseRevision: guard.baseRevision,
+      baseGeneration: guard.baseGeneration,
+      /** The pending review the sheet showed (none: null); refused when admission finds another. */
+      expectedPendingReviewId: z.string().min(1).max(200).nullable().optional(),
     })
     .strict(),
   now: newComment
@@ -413,6 +439,9 @@ export const linearCallbackQuery = z.object({
 
 const ok = as<{ ok: true }>();
 const receipt = as<OperationReceipt>();
+/** A guarded draft write's answer carries its outcome; one still pending answers 202. */
+type Attempted = { attempt?: DraftAttempt };
+const pendingAttempt = as<{ pending: true; attempt: DraftAttempt }>();
 const pulls = '/api/accounts/:account/pulls' as const;
 const runs = '/api/accounts/:account/ai/runs/:runId' as const;
 
@@ -473,7 +502,7 @@ export const routes = {
   draft: json('GET', `${pulls}/:id/draft`, { responses: { 200: as<ReviewDraft>() } }),
   saveDraft: json('PUT', `${pulls}/:id/draft`, {
     body: { canonical: reviewRequests.draft },
-    responses: { 200: as<ReviewDraft>() },
+    responses: { 200: as<ReviewDraft & Attempted>(), 202: pendingAttempt },
   }),
   discard: queued('DELETE', `${pulls}/:id/draft`, {
     body: { canonical: reviewRequests.discard },
@@ -482,15 +511,26 @@ export const routes = {
   }),
   addComment: json('POST', `${pulls}/:id/draft/comments`, {
     body: { canonical: reviewRequests.comment },
-    responses: { 200: as<DraftComment>() },
+    responses: { 200: as<DraftComment & Attempted>(), 202: pendingAttempt },
   }),
   editComment: json('PATCH', `${pulls}/:id/draft/comments/:cid`, {
     body: { canonical: reviewRequests.edit },
-    responses: { 200: as<DraftComment>() },
+    responses: { 200: as<DraftComment & Attempted>(), 202: pendingAttempt },
   }),
   deleteComment: json('DELETE', `${pulls}/:id/draft/comments/:cid`, {
-    body: { canonical: reviewRequests.accountOnly },
-    responses: { 200: ok },
+    body: { canonical: reviewRequests.remove },
+    responses: { 200: as<{ ok: true } & Attempted>(), 202: pendingAttempt },
+  }),
+  draftAttempt: json('GET', `${pulls}/:id/draft/attempts/:attemptId`, {
+    query: z.object({
+      base: z.coerce.number().int().nonnegative().optional(),
+      generation: z.coerce.number().int().nonnegative().optional(),
+    }),
+    responses: {
+      200: as<
+        { attempt: DraftAttempt & { result?: unknown } } | { arrived: false; fenced: boolean }
+      >(),
+    },
   }),
   submit: queued('POST', `${pulls}/:id/review`, {
     body: { canonical: reviewRequests.submit },
@@ -524,6 +564,16 @@ export const routes = {
   }),
   operation: json('GET', '/api/accounts/:account/operations/:id', {
     responses: { 200: as<{ operation: GitHubOperation }>() },
+  }),
+  operationReceipt: json('GET', '/api/accounts/:account/operations/:id/receipt', {
+    responses: {
+      200: as<{
+        kind: 'local' | 'forge';
+        status: GitHubOperation['status'];
+        /** For a finished operation, the draft versions its last write to the draft left. */
+        draft?: { revision: number; generation: number };
+      }>(),
+    },
   }),
   operationCommand: json('POST', '/api/accounts/:account/operations/:id/:command', {
     body: {

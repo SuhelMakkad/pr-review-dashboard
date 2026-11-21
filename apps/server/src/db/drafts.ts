@@ -3,6 +3,7 @@ import { and, asc, eq, ne, or, sql } from 'drizzle-orm';
 import { union } from 'drizzle-orm/sqlite-core';
 import type { DraftComment, ReviewDraft, ReviewEvent } from '@review-desk/shared/review';
 import { draftComments, reviewDrafts, type ReviewDraftRow } from '@/db/schema.js';
+import { draftVersionsOf, raiseVersions, type DraftVersions } from '@/db/versions.js';
 import type { Store } from '@/db/store.js';
 import { ReviewError } from '@/review/errors.js';
 
@@ -28,7 +29,11 @@ const commentFields = {
   githubThreadId: draftComments.githubThreadId,
 };
 
-/** Local, unsubmitted review drafts. Nothing here reaches GitHub until the user submits. */
+/**
+ * Local, unsubmitted review drafts. Nothing here reaches GitHub until the user submits. Every
+ * change raises the PR's draft revision in the same transaction; a clear, lock or unlock raises
+ * its generation too.
+ */
 export class DraftStore {
   constructor(
     private readonly store: Store,
@@ -38,6 +43,22 @@ export class DraftStore {
 
   private get db() {
     return this.store.db;
+  }
+
+  /** The PR's draft versions, as every draft answer carries them. */
+  versions(account: string, prId: string): DraftVersions {
+    return draftVersionsOf(this.store, account, prId);
+  }
+
+  /** A change to the draft, with its revision raised (and its generation, for a lifecycle step). */
+  private changed<T>(account: string, prId: string, write: () => T, lifecycle = false): T {
+    return this.store.transaction(() => {
+      const result = write();
+
+      raiseVersions(this.store, account, prId, { revision: true, generation: lifecycle });
+
+      return result;
+    });
   }
 
   draft(account: string, prId: string): (DraftMeta & { comments: DraftComment[] }) | null {
@@ -122,11 +143,13 @@ export class DraftStore {
       preparedReview: changes.preparedReview ?? current?.preparedReview ?? null,
     };
 
-    this.db
-      .insert(reviewDrafts)
-      .values({ account, prId, ...meta })
-      .onConflictDoUpdate({ target: [reviewDrafts.account, reviewDrafts.prId], set: meta })
-      .run();
+    this.changed(account, prId, () =>
+      this.db
+        .insert(reviewDrafts)
+        .values({ account, prId, ...meta })
+        .onConflictDoUpdate({ target: [reviewDrafts.account, reviewDrafts.prId], set: meta })
+        .run(),
+    );
   }
 
   addComment(
@@ -139,26 +162,28 @@ export class DraftStore {
     const now = new Date().toISOString();
     const id = randomUUID();
 
-    this.db
-      .insert(draftComments)
-      .values({
-        id,
-        account,
-        prId,
-        path: input.path,
-        line: input.line,
-        side: input.side,
-        startLine: input.startLine,
-        startSide: input.startSide,
-        subjectType: input.subjectType,
-        body: input.body,
-        origin: input.origin,
-        anchorOid: input.anchorOid,
-        status: 'draft',
-        createdAt: now,
-        updatedAt: now,
-      })
-      .run();
+    this.changed(account, prId, () =>
+      this.db
+        .insert(draftComments)
+        .values({
+          id,
+          account,
+          prId,
+          path: input.path,
+          line: input.line,
+          side: input.side,
+          startLine: input.startLine,
+          startSide: input.startSide,
+          subjectType: input.subjectType,
+          body: input.body,
+          origin: input.origin,
+          anchorOid: input.anchorOid,
+          status: 'draft',
+          createdAt: now,
+          updatedAt: now,
+        })
+        .run(),
+    );
 
     return this.comment(account, id)!;
   }
@@ -189,46 +214,64 @@ export class DraftStore {
 
     if (!current) return;
 
-    this.assertEditable(account, currentPrId(this.store, account, id));
+    const prId = currentPrId(this.store, account, id);
 
-    this.db
-      .update(draftComments)
-      .set({
-        body: changes.body ?? current.body,
-        line: changes.line !== undefined ? changes.line : current.line,
-        startLine: changes.startLine !== undefined ? changes.startLine : current.startLine,
-        status: changes.status ?? current.status,
-        anchorOid: changes.anchorOid ?? current.anchorOid,
-        // Only overwrite the thread id when a new one is given.
-        ...(changes.githubThreadId !== undefined ? { githubThreadId: changes.githubThreadId } : {}),
-        updatedAt: new Date().toISOString(),
-      })
-      .where(and(eq(draftComments.account, account), eq(draftComments.id, id)))
-      .run();
+    this.assertEditable(account, prId);
+
+    this.changed(account, prId, () =>
+      this.db
+        .update(draftComments)
+        .set({
+          body: changes.body ?? current.body,
+          line: changes.line !== undefined ? changes.line : current.line,
+          startLine: changes.startLine !== undefined ? changes.startLine : current.startLine,
+          status: changes.status ?? current.status,
+          anchorOid: changes.anchorOid ?? current.anchorOid,
+          // Only overwrite the thread id when a new one is given.
+          ...(changes.githubThreadId !== undefined
+            ? { githubThreadId: changes.githubThreadId }
+            : {}),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(and(eq(draftComments.account, account), eq(draftComments.id, id)))
+        .run(),
+    );
   }
 
   deleteComment(account: string, id: string): void {
-    this.assertEditable(account, currentPrId(this.store, account, id));
+    const prId = currentPrId(this.store, account, id);
 
-    this.db
-      .delete(draftComments)
-      .where(and(eq(draftComments.account, account), eq(draftComments.id, id)))
-      .run();
+    this.assertEditable(account, prId);
+
+    // Nothing to delete changes nothing: the revision stays.
+    if (!prId) return;
+
+    this.changed(account, prId, () =>
+      this.db
+        .delete(draftComments)
+        .where(and(eq(draftComments.account, account), eq(draftComments.id, id)))
+        .run(),
+    );
   }
 
   clear(account: string, prId: string): void {
     this.assertEditable(account, prId);
 
-    this.store.transaction(() => {
-      this.db
-        .delete(draftComments)
-        .where(and(eq(draftComments.account, account), eq(draftComments.prId, prId)))
-        .run();
-      this.db
-        .delete(reviewDrafts)
-        .where(and(eq(reviewDrafts.account, account), eq(reviewDrafts.prId, prId)))
-        .run();
-    });
+    this.changed(
+      account,
+      prId,
+      () => {
+        this.db
+          .delete(draftComments)
+          .where(and(eq(draftComments.account, account), eq(draftComments.prId, prId)))
+          .run();
+        this.db
+          .delete(reviewDrafts)
+          .where(and(eq(reviewDrafts.account, account), eq(reviewDrafts.prId, prId)))
+          .run();
+      },
+      true,
+    );
   }
 
   assertEditable(account: string, prId: string): void {
@@ -252,27 +295,41 @@ export class DraftStore {
 
   lock(account: string, prId: string, operationId: string): void {
     this.assertEditable(account, prId);
-    this.saveMeta(account, prId, {});
 
-    this.db
-      .update(reviewDrafts)
-      .set({ activeOperationId: operationId })
-      .where(and(eq(reviewDrafts.account, account), eq(reviewDrafts.prId, prId)))
-      .run();
+    this.store.transaction(() => {
+      this.saveMeta(account, prId, {});
+      this.changed(
+        account,
+        prId,
+        () =>
+          this.db
+            .update(reviewDrafts)
+            .set({ activeOperationId: operationId })
+            .where(and(eq(reviewDrafts.account, account), eq(reviewDrafts.prId, prId)))
+            .run(),
+        true,
+      );
+    });
   }
 
   unlock(account: string, prId: string, operationId: string): void {
-    this.db
-      .update(reviewDrafts)
-      .set({ activeOperationId: null })
-      .where(
-        and(
-          eq(reviewDrafts.account, account),
-          eq(reviewDrafts.prId, prId),
-          eq(reviewDrafts.activeOperationId, operationId),
-        ),
-      )
-      .run();
+    this.store.transaction(() => {
+      const { changes } = this.db
+        .update(reviewDrafts)
+        .set({ activeOperationId: null })
+        .where(
+          and(
+            eq(reviewDrafts.account, account),
+            eq(reviewDrafts.prId, prId),
+            eq(reviewDrafts.activeOperationId, operationId),
+          ),
+        )
+        .run();
+
+      // Only an unlock that released this lock is a step in the draft's life.
+      if (changes > 0)
+        raiseVersions(this.store, account, prId, { revision: true, generation: true });
+    });
   }
 }
 

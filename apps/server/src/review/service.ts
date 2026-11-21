@@ -9,6 +9,7 @@ import type {
   SubmitReviewResult,
 } from '@review-desk/shared/review';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
+import type { WriteFence } from '@/db/versions.js';
 import { intended, literal, resultOf, type StepIntent } from '@/operations/intent.js';
 import { say } from '@/messages.js';
 import type { DiffService } from '@/diff/service.js';
@@ -173,17 +174,44 @@ export class ReviewService {
       githubPendingReview: pr.pendingReview
         ? { id: pr.pendingReview.id, commentCount: pr.pendingReview.commentCount }
         : null,
+      versions: this.drafts.versions(account, prId),
     };
+  }
+
+  /**
+   * Makes a draft write, in one transaction with its fence: checked against the draft the web saw,
+   * and recorded with the answer a retry of it gets. Run after every await the write makes.
+   */
+  private commit<T>(
+    fence: WriteFence | undefined,
+    write: () => T,
+    answer?: (result: T) => unknown,
+  ): T {
+    return this.sync.store.transaction(() => {
+      fence?.check();
+
+      const result = write();
+
+      fence?.committed(answer ? answer(result) : result);
+
+      return result;
+    });
   }
 
   async saveDraft(
     account: string,
     prId: string,
     changes: { body?: string; event?: ReviewEvent },
+    fence?: WriteFence,
   ): Promise<ReviewDraft> {
     this.assertSelected(account);
     this.snapshot(account, prId);
-    this.drafts.saveMeta(account, prId, changes);
+    // Its answer is the draft as it is when asked again, so none is kept.
+    this.commit(
+      fence,
+      () => this.drafts.saveMeta(account, prId, changes),
+      () => null,
+    );
     this.changed(account, prId);
 
     return this.draft(account, prId);
@@ -220,7 +248,7 @@ export class ReviewService {
   async addComment(
     prId: string,
     input: NewDraftComment,
-    options: { expectedHeadOid?: string } = {},
+    options: { expectedHeadOid?: string; fence?: WriteFence } = {},
   ): Promise<DraftComment> {
     this.assertSelected(input.account);
 
@@ -253,20 +281,22 @@ export class ReviewService {
     this.assertSelected(input.account);
     assertSameRevision(this.snapshot(input.account, prId));
 
-    const comment = this.drafts.addComment(input.account, prId, {
-      path: input.path,
-      line: input.line,
-      side: input.side ?? 'RIGHT',
-      startLine: input.startLine && input.startLine !== input.line ? input.startLine : null,
-      startSide:
-        input.startLine && input.startLine !== input.line
-          ? (input.startSide ?? input.side ?? 'RIGHT')
-          : null,
-      subjectType: input.line === null ? 'FILE' : 'LINE',
-      body: input.body,
-      origin: input.origin ?? 'user',
-      anchorOid: pr.headOid,
-    });
+    const comment = this.commit(options.fence, () =>
+      this.drafts.addComment(input.account, prId, {
+        path: input.path,
+        line: input.line,
+        side: input.side ?? 'RIGHT',
+        startLine: input.startLine && input.startLine !== input.line ? input.startLine : null,
+        startSide:
+          input.startLine && input.startLine !== input.line
+            ? (input.startSide ?? input.side ?? 'RIGHT')
+            : null,
+        subjectType: input.line === null ? 'FILE' : 'LINE',
+        body: input.body,
+        origin: input.origin ?? 'user',
+        anchorOid: pr.headOid,
+      }),
+    );
 
     this.changed(input.account, prId);
 
@@ -278,6 +308,7 @@ export class ReviewService {
     prId: string,
     id: string,
     body: string,
+    fence?: WriteFence,
   ): Promise<DraftComment> {
     this.assertSelected(account);
 
@@ -286,16 +317,30 @@ export class ReviewService {
       throw new ReviewError('ALREADY_SENT', 409, say('review.already-sent'));
     }
 
-    this.drafts.updateComment(account, id, { body });
+    const updated = this.commit(fence, () => {
+      this.drafts.updateComment(account, id, { body });
+
+      return this.drafts.comment(account, id)!;
+    });
+
     this.changed(account, prId);
 
-    return this.drafts.comment(account, id)!;
+    return updated;
   }
 
-  async deleteComment(account: string, prId: string, id: string): Promise<void> {
+  async deleteComment(
+    account: string,
+    prId: string,
+    id: string,
+    fence?: WriteFence,
+  ): Promise<void> {
     this.assertSelected(account);
     this.ownComment(account, prId, id);
-    this.drafts.deleteComment(account, id);
+    this.commit(
+      fence,
+      () => this.drafts.deleteComment(account, id),
+      () => ({ ok: true }),
+    );
     this.changed(account, prId);
   }
 
