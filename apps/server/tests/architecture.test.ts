@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
@@ -66,10 +66,10 @@ function nodes(tree: ts.Node): ts.Node[] {
  * The module specifiers a source depends on, in every form: static and side-effect imports,
  * re-exports, `import()` calls and types, `import x = require()` and `require()`.
  */
-function specifiers(source: Source): string[] {
-  const found: string[] = [];
+function specifierNodes(source: Source): ts.StringLiteralLike[] {
+  const found: ts.StringLiteralLike[] = [];
   const add = (node: ts.Node | undefined) => {
-    if (node && ts.isStringLiteralLike(node)) found.push(node.text);
+    if (node && ts.isStringLiteralLike(node)) found.push(node);
   };
 
   for (const node of nodes(source.tree)) {
@@ -92,6 +92,8 @@ function specifiers(source: Source): string[] {
   return found;
 }
 
+const specifiers = (source: Source) => specifierNodes(source).map((node) => node.text);
+
 /**
  * Where a specifier leads: a repository path for a relative or `@/` one (`apps/server/src/...`),
  * else the package name as written.
@@ -101,7 +103,8 @@ function target(source: Source, specifier: string, packageRoot: string): string 
     return relative(root, resolve(root, dirname(source.file), specifier))
       .split(sep)
       .join('/');
-  if (specifier.startsWith('@/')) return `${aliases[packageRoot]}/${specifier.slice(2)}`;
+  if (specifier.startsWith('@/'))
+    return posix.normalize(`${aliases[packageRoot]}/${specifier.slice(2)}`);
 
   return specifier;
 }
@@ -109,6 +112,17 @@ function target(source: Source, specifier: string, packageRoot: string): string 
 /** The repository paths and package names `source` depends on. */
 const targets = (source: Source, packageRoot: string) =>
   specifiers(source).map((specifier) => target(source, specifier, packageRoot));
+
+/** An expression without the assertions and parentheses around it (`true as const`). */
+function unwrapped(node: ts.Expression): ts.Expression {
+  return ts.isAsExpression(node) ||
+    ts.isSatisfiesExpression(node) ||
+    ts.isTypeAssertionExpression(node) ||
+    ts.isNonNullExpression(node) ||
+    ts.isParenthesizedExpression(node)
+    ? unwrapped(node.expression)
+    : node;
+}
 
 const server = sources('apps/server/src');
 const inServer = (directory: string) => (to: string) =>
@@ -171,7 +185,7 @@ describe('server boundaries', () => {
               ts.isPropertyAssignment(node) &&
               (ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name)) &&
               node.name.text === 'failed' &&
-              node.initializer.kind === ts.SyntaxKind.TrueKeyword,
+              unwrapped(node.initializer).kind === ts.SyntaxKind.TrueKeyword,
           )
           .map(() => file.path),
       );
@@ -184,66 +198,92 @@ describe('server boundaries', () => {
    * why. Everywhere else, such words come from `messages.ts`, worded for the account they are shown
    * to. An allowance that matches nothing any more fails too.
    */
-  const allowed: { path: string; wording: RegExp; reason: string }[] = [
+  const allowed: { path: string; reason: string; wordings: RegExp[] }[] = [
     {
       path: 'ai/context.ts',
-      wording: /Review the complete PR using review\.json/,
       reason: "the agent's prompt, never shown to users",
+      wordings: [/Review the complete PR using review\.json/],
     },
     {
       path: 'ai/tasks.ts',
-      wording: /pull request|\bPRs?\b|as you would on GitHub/,
       reason: "the agent's task prompts, never shown to users",
+      wordings: [
+        /full pull request code review/,
+        /about to review this pull request/,
+        /earlier version of this pull request/,
+        /as you would on GitHub/,
+        /the author of this pull request/,
+      ],
     },
     {
       path: 'ai/fixture.ts',
-      wording: /^Largest change in this PR\.$/,
       reason: "the demo's AI answers",
+      wordings: [/^Largest change in this PR\.$/],
     },
     {
       path: 'ai/post-findings.ts',
-      wording: /\bPRs?\b/,
       reason: 'skip reasons stored on AI runs, to be worded per account (follow-up)',
+      wordings: [
+        /^This PR is no longer tracked\.$/,
+        /^The PR or its discussion changed while this review ran\.$/,
+        /^Draft PRs are not approved automatically\.$/,
+        /^You had already approved this PR\.$/,
+        /^You cannot approve your own PR\.$/,
+      ],
     },
     {
       path: 'ai/workspace.ts',
-      wording: /\bPR\b/,
       reason: 'AI workspace errors stored on runs, to be worded per account (follow-up)',
+      wordings: [
+        /^The repository or commit is invalid\. Refresh this PR and try again\.$/,
+        /^The PR base commit is unavailable\. Refresh and try again\.$/,
+        /^The PR merge base could not be found\. Refresh and try again\.$/,
+      ],
     },
     {
       path: 'db/settings.ts',
-      wording: /^Only GitLab state/,
       reason: "GitLab's own state, named for what it is",
+      wordings: [/^Only GitLab state, under its own prefix/],
     },
     {
       path: 'diff/service.ts',
-      wording: /^(GitHub|GitLab)$/,
       reason: "the forge named from the PR's own address",
+      wordings: [/^GitHub$/, /^GitLab$/],
     },
     {
       path: 'forge/account.ts',
-      wording: /GitLab CLI is signed in as|which GitLab account/,
       reason: "GitLab's sign-in check, which only GitLab has",
+      wordings: [/^The GitLab CLI is signed in as/, /which GitLab account it was for/],
     },
     {
       path: 'operations/queue.ts',
-      wording: /Check GitLab: the approval|reached GitLab/,
       reason: "recoveries of GitLab's split approvals",
+      wordings: [
+        /^Stopped\. Check GitLab: the approval/,
+        /reached GitLab: the step that sent both/,
+      ],
     },
     {
       path: 'sync/queue.ts',
-      wording: /^PR$|looks like a GitLab merge request|another GitLab on/,
       reason: 'adding a PR from another forge, host or instance names both',
+      wordings: [
+        /^PR$/,
+        /looks like a GitLab merge request/,
+        /^That link is for another GitLab on/,
+      ],
     },
   ];
-  const forgeWords = /\b(GitHub|GitLab|pull requests?|merge requests?|PRs?|MRs?)\b/;
+  const forgeWords = /\b(GitHub|GitLab|[Pp]ull requests?|[Mm]erge requests?|PRs?|MRs?)\b/;
 
   /** Every string literal and template's text in `source`, outside imports and literal types. */
-  const texts = (source: Source) =>
-    nodes(source.tree)
+  const texts = (source: Source) => {
+    const modules = new Set<ts.Node>(specifierNodes(source));
+
+    return nodes(source.tree)
       .filter(
         (node) =>
           node.parent !== undefined &&
+          !modules.has(node) &&
           !ts.isImportDeclaration(node.parent) &&
           !ts.isExportDeclaration(node.parent) &&
           !ts.isLiteralTypeNode(node.parent) &&
@@ -256,6 +296,7 @@ describe('server boundaries', () => {
             ? [[node.head.text, ...node.templateSpans.map((span) => span.literal.text)].join('…')]
             : [],
       );
+  };
 
   it('takes words that name the forge from the message catalog', () => {
     const own = (path: string) =>
@@ -268,22 +309,22 @@ describe('server boundaries', () => {
           .map((text) => ({ path: file.path, text })),
       );
 
+    const permits = (path: string, wording: RegExp) => (found: { path: string; text: string }) =>
+      found.path === path && wording.test(found.text);
     const unexplained = named
       .filter(
         (found) =>
-          !allowed.some(
-            (allowance) => allowance.path === found.path && allowance.wording.test(found.text),
+          !allowed.some((allowance) =>
+            allowance.wordings.some((wording) => permits(allowance.path, wording)(found)),
           ),
       )
       .map((found) => `${found.path}: ${found.text.slice(0, 80)}`);
-    const unused = allowed
-      .filter(
-        (allowance) =>
-          !named.some(
-            (found) => found.path === allowance.path && allowance.wording.test(found.text),
-          ),
-      )
-      .map((allowance) => `${allowance.path}: ${allowance.wording}`);
+    // Each permitted wording must still be there: none keeps an exception alive for another.
+    const unused = allowed.flatMap((allowance) =>
+      allowance.wordings
+        .filter((wording) => !named.some(permits(allowance.path, wording)))
+        .map((wording) => `${allowance.path}: ${wording}`),
+    );
 
     expect(unexplained).toEqual([]);
     expect(unused).toEqual([]);
