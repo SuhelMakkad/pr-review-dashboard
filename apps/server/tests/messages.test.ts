@@ -6,7 +6,7 @@ import { EventBus } from '@/events.js';
 import { SELECTED_ACCOUNT, WRITE_COOLDOWN } from '@/db/settings.js';
 import { Store } from '@/db/store.js';
 import type { GitHubApi } from '@/github/api.js';
-import { GitHubError } from '@/github/errors.js';
+import { GitHubError, safeError } from '@/github/errors.js';
 import {
   messageIds,
   render,
@@ -34,7 +34,7 @@ afterEach(async () => {
 });
 
 /** Parameters for any entry: each takes the ones it names. */
-const SAMPLE = { login: 'ana', reason: 'a reason.', path: 'src/app.ts', approving: true };
+const SAMPLE = { login: 'ana', reason: 'a reason.', path: 'src/app.ts' };
 const sample = (id: (typeof messageIds)[number]) => ({ id, params: SAMPLE }) as Message;
 
 describe('the message catalog', () => {
@@ -62,7 +62,7 @@ describe('the message catalog', () => {
   });
 
   it('words a message given as a parameter for the same account, and starts its sentence', () => {
-    const stopped = say('stop.nothing-more', { reason: say('stop.untracked'), approving: true });
+    const stopped = say('stop.nothing-more-approving', { reason: say('stop.untracked') });
 
     expect(render(stopped, GITLAB)).toBe(
       'This MR is no longer tracked. Nothing more is sent; check the MR, then approve it yourself if it still applies.',
@@ -88,6 +88,30 @@ describe('the message catalog', () => {
     expect(render({ id: 'toString' } as never, GITLAB)).toBe(UNKNOWN_MESSAGE);
     expect(render({ text: 'no id' } as never, GITLAB)).toBe(UNKNOWN_MESSAGE);
     expect(render(null as never, GITLAB)).toBe(UNKNOWN_MESSAGE);
+
+    // A message the catalog has, stored without the parameters its entry names.
+    for (const params of [undefined, {}, { path: 7 }, { path: null }, ['src/app.ts'], 'src/app.ts'])
+      expect(render({ id: 'outbox.viewed-file-gone', params } as never, GITLAB)).toBe(
+        UNKNOWN_MESSAGE,
+      );
+
+    // One damaged inside another is the part it cannot show.
+    expect(
+      render({ id: 'outbox.not-posted', params: { reason: { id: 'x' } } } as never, GITLAB),
+    ).toBe(`Not posted: ${UNKNOWN_MESSAGE}`);
+  });
+
+  it('is made with the parameters its ID names, even from an ID of several kinds', () => {
+    const id = 'pull.untracked' as 'pull.untracked' | 'review.cli-changed';
+
+    // @ts-expect-error: `review.cli-changed` needs its `login`.
+    expect(say(id)).toEqual({ id: 'pull.untracked' });
+    // @ts-expect-error: and `pull.untracked` takes none.
+    say('pull.untracked', { login: 'ana' });
+    expect(say('review.cli-changed', { login: 'ana' })).toEqual({
+      id: 'review.cli-changed',
+      params: { login: 'ana' },
+    });
   });
 
   it("words a stored row's text as Activity always has, and its messages from the catalog", () => {
@@ -111,6 +135,19 @@ describe('a refusal', () => {
     expect(refusal.wording).toEqual({ id: 'queue.not-added' });
     expect(refusal.message).toBe('Only PRs you added yourself can be removed.');
     expect(wordingOf(refusal, () => 'redacted')).toEqual({ id: 'queue.not-added' });
+
+    // Its text parameters are redacted as any error text is, nested ones included.
+    const token = `ghp_${'a'.repeat(36)}`;
+    const leaked = new ReviewError(
+      'ACCOUNT_CHANGED',
+      409,
+      say('outbox.not-posted', { reason: say('review.cli-changed', { login: token }) }),
+    );
+
+    expect(wordingOf(leaked, safeError)).toEqual({
+      id: 'outbox.not-posted',
+      params: { reason: { id: 'review.cli-changed', params: { login: '[redacted]' } } },
+    });
 
     // Any other error, or a refusal in plain text, is its redacted message.
     expect(wordingOf(new Error('token=secret'), () => 'redacted')).toBe('redacted');
@@ -182,9 +219,18 @@ async function gitlabApp(options: { feedLimit?: string } = {}) {
 
 const mrs = `/api/accounts/${encodeURIComponent(GITLAB)}/pulls`;
 
+/** Puts a GitHub account in use. The GitLab account stays known, by the status it saved. */
+function useGitHub(service: SyncService) {
+  service.status = { ...service.status, account: { login: GITHUB } } as typeof service.status;
+
+  expect(service.status.account?.login).toBe(GITHUB);
+}
+
 describe("the server's answers", () => {
-  it('refuse in the words of the account the path names', async () => {
-    const { call } = await gitlabApp();
+  it('refuse in the words of the account the path names, not the one in use', async () => {
+    const { service, call } = await gitlabApp();
+
+    useGitHub(service);
 
     // A refusal a handler returns.
     const missing = await call('GET', `${mrs}/mr-404`);
@@ -202,8 +248,8 @@ describe("the server's answers", () => {
     });
   });
 
-  it('refuse in the words of the account in use where the path names none', async () => {
-    const { call } = await gitlabApp();
+  it('refuse a stale switch in the words of the account its check found', async () => {
+    const { service, call } = await gitlabApp();
     const stale = await call('POST', '/api/accounts/switch', { from: 'someone', to: GITLAB });
 
     expect(stale.statusCode).toBe(409);
@@ -211,10 +257,20 @@ describe("the server's answers", () => {
       code: 'ACCOUNT_CHANGED',
       error: 'GitLab account changed. Refresh before switching.',
     });
+
+    // Worded when the check failed: a switch that finishes before it is sent changes nothing.
+    const refusal = await service.switchAccount('someone', GITLAB).catch((error) => error);
+
+    useGitHub(service);
+    expect(render((refusal as ReviewError).wording, GITHUB)).toBe(
+      'GitLab account changed. Refresh before switching.',
+    );
   });
 
-  it("show each field of an Activity row in its account's words", async () => {
+  it("show each field of an Activity row in its account's words, not the one in use", async () => {
     const { store, service, call } = await gitlabApp();
+
+    useGitHub(service);
     const queue = new OperationQueue(service, { mutationIntervalMs: 0 });
     const row = (id: string, fields: Partial<OperationRecord>): OperationRecord => ({
       id,
@@ -271,6 +327,28 @@ describe("the server's answers", () => {
       // The old string, as `forForge` words it: "PR" was never reworded.
       error: { message: 'Not posted: this PR is no longer tracked.' },
     });
+
+    // A damaged field says it cannot be shown; the row, and Activity, still show.
+    store.operations.insert(
+      row('damaged', {
+        progress: { id: 'outbox.viewed-file-gone' } as never,
+        error: { code: 'X', message: say('outbox.unconfirmed') },
+      }),
+    );
+
+    const damaged = await call(
+      'GET',
+      `/api/accounts/${encodeURIComponent(GITLAB)}/operations/damaged`,
+    );
+
+    expect(damaged.statusCode).toBe(200);
+    expect(damaged.json().operation).toMatchObject({
+      progress: UNKNOWN_MESSAGE,
+      error: { message: 'Unconfirmed. Open GitLab to verify before taking another action.' },
+    });
+    expect(
+      (await call('GET', `/api/accounts/${encodeURIComponent(GITLAB)}/operations`)).statusCode,
+    ).toBe(200);
   });
 
   it("say a GitLab account's cooldown in GitLab's words", async () => {

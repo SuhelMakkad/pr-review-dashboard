@@ -154,7 +154,9 @@ function stopped(
     code,
     attention: summary
       ? say('stop.summary-held', { reason: skipped })
-      : say('stop.nothing-more', { reason: skipped, approving }),
+      : approving
+        ? say('stop.nothing-more-approving', { reason: skipped })
+        : say('stop.nothing-more', { reason: skipped }),
   };
 }
 

@@ -3,11 +3,23 @@ import { forForge, forgeTerms, type ForgeTerms } from '@review-desk/shared/accou
 /** A reason that starts a sentence. */
 const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 
+/** An entry worded with parameters: their names, each a text, and the wording. */
+interface Parameterised<Name extends string> {
+  params: readonly Name[];
+  text: (forge: ForgeTerms, params: Record<Name, string>) => string;
+}
+
+/** An entry with the parameters `params`, so a stored message is checked before it is worded. */
+const given = <const Name extends string>(
+  params: readonly Name[],
+  text: (forge: ForgeTerms, params: Record<Name, string>) => string,
+): Parameterised<Name> => ({ params, text });
+
 /**
  * Every user-facing server message that names the forge or its terms, written once for any forge:
  * `f.name` (GitHub, GitLab), `f.short` (PR, MR), `f.long` (pull request, merge request) and
- * `f.cli` (gh, glab). An entry's parameters are inserted as given; one given as a message is
- * worded for the same account first.
+ * `f.cli` (gh, glab). An entry's parameters are named (`given`), each a text inserted as given;
+ * one given as a message is worded for the same account first.
  *
  * Activity rows store these IDs, so an ID is never removed or given another meaning: reword its
  * text, or add an ID.
@@ -24,8 +36,10 @@ const catalog = {
   // Review writes.
   'review.rate-limited': (f: ForgeTerms) =>
     `Too many ${f.name} writes in a minute. Try again shortly.`,
-  'review.cli-changed': (f: ForgeTerms, p: { login: string }) =>
-    `The ${f.name} CLI is now logged in as ${p.login}. Nothing was posted.`,
+  'review.cli-changed': given(
+    ['login'],
+    (f, p) => `The ${f.name} CLI is now logged in as ${p.login}. Nothing was posted.`,
+  ),
   'review.not-commentable': (f: ForgeTerms) =>
     `${f.name} only accepts comments on lines that are part of this ${f.short}’s diff. Comment on the whole file instead, or pick a changed line.`,
   'review.suggestion-outdated': (f: ForgeTerms) =>
@@ -34,8 +48,10 @@ const catalog = {
     `The ${f.short} changed while you were commenting. Reload the diff, then comment again.`,
   'review.already-sent': (f: ForgeTerms) =>
     `This comment is already on ${f.name} as part of your pending review.`,
-  'review.check-failed': (f: ForgeTerms, p: { reason: string }) =>
-    `Could not check the ${f.short} before submitting: ${p.reason}`,
+  'review.check-failed': given(
+    ['reason'],
+    (f, p) => `Could not check the ${f.short} before submitting: ${p.reason}`,
+  ),
   'review.pending-exists': (f: ForgeTerms) =>
     `You have a pending review on ${f.name}. Add this comment to your review instead.`,
   'review.not-author': (f: ForgeTerms) =>
@@ -43,8 +59,11 @@ const catalog = {
 
   // AI reviews.
   'ai.not-reviewed': (f: ForgeTerms) => `You have not reviewed this ${f.short} yet.`,
-  'ai.outdated': (f: ForgeTerms, p: { reason: string }) =>
-    `This review is out of date. ${p.reason} Regenerate it before preparing a ${f.name} review.`,
+  'ai.outdated': given(
+    ['reason'],
+    (f, p) =>
+      `This review is out of date. ${p.reason} Regenerate it before preparing a ${f.name} review.`,
+  ),
   'ai.new-commits': (f: ForgeTerms) =>
     `New commits arrived. Regenerate this review before preparing a ${f.name} review.`,
   'ai.pending-review': (f: ForgeTerms) =>
@@ -55,8 +74,10 @@ const catalog = {
     `Generate a new review to verify that it covers the current ${f.short}.`,
   'ai.changed-since': (f: ForgeTerms) =>
     `The ${f.short} or its review discussion changed after this was generated.`,
-  'ai.stale-summary': (_f: ForgeTerms, p: { reason: string }) =>
-    `${p.reason} Generate a new summary before using it.`,
+  'ai.stale-summary': given(
+    ['reason'],
+    (_f, p) => `${p.reason} Generate a new summary before using it.`,
+  ),
   'ai.automatic-failed': (f: ForgeTerms) =>
     `Automatic AI review failed. Open the ${f.short} to run it again.`,
   'ai.truncated': (f: ForgeTerms) =>
@@ -95,11 +116,16 @@ const catalog = {
   'outbox.already-submitted': (f: ForgeTerms) =>
     `This review was submitted on ${f.name}. Its saved content is preserved in Activity.`,
   'outbox.untracked': (f: ForgeTerms) => `Not posted: this ${f.short} is no longer tracked.`,
-  'outbox.not-posted': (_f: ForgeTerms, p: { reason: string }) => `Not posted: ${p.reason}`,
-  'outbox.viewed-file-gone': (f: ForgeTerms, p: { path: string }) =>
-    `Not marked viewed: ${p.path} is no longer part of this ${f.short}.`,
-  'outbox.viewed-file-changed': (_f: ForgeTerms, p: { path: string }) =>
-    `Not marked viewed: ${p.path} changed after you viewed it. Look at the new diff first.`,
+  'outbox.not-posted': given(['reason'], (_f, p) => `Not posted: ${p.reason}`),
+  'outbox.viewed-file-gone': given(
+    ['path'],
+    (f, p) => `Not marked viewed: ${p.path} is no longer part of this ${f.short}.`,
+  ),
+  'outbox.viewed-file-changed': given(
+    ['path'],
+    (_f, p) =>
+      `Not marked viewed: ${p.path} changed after you viewed it. Look at the new diff first.`,
+  ),
   'outbox.approving': (f: ForgeTerms) => `Approving the ${f.short} with the AI review.`,
   'outbox.posting-review': (f: ForgeTerms) =>
     `Posting the AI review to the ${f.short} conversation.`,
@@ -128,10 +154,20 @@ const catalog = {
     `the ${f.short} or its discussion changed after this review. Run it again to review it.`,
   'stop.draft': (f: ForgeTerms) => `the ${f.short} was turned into a draft.`,
   'stop.own': (f: ForgeTerms) => `you cannot approve your own ${f.short}.`,
-  'stop.nothing-more': (f: ForgeTerms, p: { reason: string; approving: boolean }) =>
-    `${sentence(p.reason)} Nothing more is sent; check the ${f.short}${p.approving ? ', then approve it yourself if it still applies' : ''}.`,
-  'stop.summary-held': (f: ForgeTerms, p: { reason: string }) =>
-    `${sentence(p.reason)} The ${f.short} was approved, but its summary was not posted; check the ${f.short}.`,
+  'stop.nothing-more': given(
+    ['reason'],
+    (f, p) => `${sentence(p.reason)} Nothing more is sent; check the ${f.short}.`,
+  ),
+  'stop.nothing-more-approving': given(
+    ['reason'],
+    (f, p) =>
+      `${sentence(p.reason)} Nothing more is sent; check the ${f.short}, then approve it yourself if it still applies.`,
+  ),
+  'stop.summary-held': given(
+    ['reason'],
+    (f, p) =>
+      `${sentence(p.reason)} The ${f.short} was approved, but its summary was not posted; check the ${f.short}.`,
+  ),
   'stop.approval-unknown': (f: ForgeTerms) =>
     `Review Desk could not record which approval this post gave, so its summary was not posted. Check the ${f.short}.`,
   'stop.approval-gone': (f: ForgeTerms) =>
@@ -149,8 +185,10 @@ const catalog = {
   'sync.cooling-down': (f: ForgeTerms) =>
     `${f.name} rate limit reached. Refresh will resume automatically after the cooldown.`,
   'sync.account-changed': (f: ForgeTerms) => `${f.name} account changed. Refresh before switching.`,
-  'sync.no-change-detection': (f: ForgeTerms, p: { reason: string }) =>
-    `Change detection unavailable; refetching every ${f.short}. ${p.reason}`,
+  'sync.no-change-detection': given(
+    ['reason'],
+    (f, p) => `Change detection unavailable; refetching every ${f.short}. ${p.reason}`,
+  ),
   'queue.kept-changing': (f: ForgeTerms) =>
     `This ${f.short} kept changing in your queue while it was refreshed. Try again.`,
   'queue.removed-while-adding': (f: ForgeTerms) =>
@@ -158,7 +196,11 @@ const catalog = {
   'queue.not-added': (f: ForgeTerms) => `Only ${f.short}s you added yourself can be removed.`,
   'queue.added-again': (f: ForgeTerms) =>
     `This ${f.short} was added again since, so nothing was removed.`,
-} satisfies Record<string, (forge: ForgeTerms, params: never) => string>;
+} satisfies Record<
+  string,
+  | ((forge: ForgeTerms) => string)
+  | { params: readonly string[]; text: (forge: ForgeTerms, params: never) => string }
+>;
 
 type Catalog = typeof catalog;
 
@@ -167,12 +209,15 @@ export type MessageId = keyof Catalog;
 /** Every message the catalog has. */
 export const messageIds = Object.keys(catalog) as MessageId[];
 
-/** What an entry is worded with: nothing, or its parameters. */
-type ParamsOf<K extends MessageId> =
-  Parameters<Catalog[K]> extends [ForgeTerms, infer P] ? P : undefined;
+/** What an entry is worded with: nothing, or its named parameters. */
+type ParamsOf<K extends MessageId> = Catalog[K] extends { params: readonly (infer Name)[] }
+  ? Name extends string
+    ? Record<Name, string>
+    : never
+  : undefined;
 
-/** An entry's parameters as given: each text either as is, or a message worded first. */
-type Given<P> = { [Name in keyof P]: P[Name] extends string ? string | Message : P[Name] };
+/** An entry's parameters as given: each a text as is, or a message worded first. */
+type Given<P> = { [Name in keyof P]: string | Message };
 
 /** A catalog message and its parameters, as stored in an Activity row. */
 export type Message = {
@@ -188,12 +233,14 @@ export type Message = {
  */
 export type Wording = string | Message;
 
+/** What `say` takes: each ID with its own parameters, so an ID of several kinds cannot drop them. */
+type Said = {
+  [K in MessageId]: ParamsOf<K> extends undefined ? [id: K] : [id: K, params: Given<ParamsOf<K>>];
+}[MessageId];
+
 /** The message `id`, with its parameters. */
-export function say<K extends MessageId>(
-  id: K,
-  ...params: ParamsOf<K> extends undefined ? [] : [Given<ParamsOf<K>>]
-): Message {
-  return (params.length ? { id, params: params[0] } : { id }) as Message;
+export function say(...[id, params]: Said): Message {
+  return (params === undefined ? { id } : { id, params }) as Message;
 }
 
 /** What a message no longer in the catalog says: one from a later version, or a damaged row. */
@@ -202,26 +249,39 @@ export const UNKNOWN_MESSAGE = 'Review Desk could not show this message.';
 const isMessage = (value: unknown): value is Message =>
   typeof value === 'object' && value !== null && typeof (value as Message).id === 'string';
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /**
  * Words `wording` for `account`'s forge (GitHub's without an account): a catalog message from its
- * entry, a string as it is.
+ * entry, a string as it is. A message the catalog does not have, or one without each parameter
+ * its entry names as a text or a message, says `UNKNOWN_MESSAGE` instead: a damaged stored field
+ * never stops the rest of a page.
  */
 export function render(wording: Wording, account: string | null | undefined): string {
   if (typeof wording === 'string') return wording;
   if (!isMessage(wording) || !Object.hasOwn(catalog, wording.id)) return UNKNOWN_MESSAGE;
 
-  const entry = catalog[wording.id] as (forge: ForgeTerms, params: unknown) => string;
-  const given = 'params' in wording ? (wording.params as Record<string, unknown>) : undefined;
-  const params =
-    given &&
-    Object.fromEntries(
-      Object.entries(given).map(([name, value]) => [
-        name,
-        isMessage(value) ? render(value, account) : value,
-      ]),
-    );
+  const entry = catalog[wording.id] as ((forge: ForgeTerms) => string) | Parameterised<string>;
+  const terms = forgeTerms(account);
 
-  return entry(forgeTerms(account), params);
+  if (typeof entry === 'function') return entry(terms);
+
+  const given = (wording as { params?: unknown }).params;
+
+  if (!isRecord(given)) return UNKNOWN_MESSAGE;
+
+  const params: Record<string, string> = {};
+
+  for (const name of entry.params) {
+    const value = given[name];
+
+    if (typeof value === 'string') params[name] = value;
+    else if (isMessage(value)) params[name] = render(value, account);
+    else return UNKNOWN_MESSAGE;
+  }
+
+  return entry.text(terms, params);
 }
 
 /**
@@ -233,12 +293,32 @@ export function renderStored(wording: Wording, account: string): string {
   return typeof wording === 'string' ? forForge(wording, account) : render(wording, account);
 }
 
+/** `message` with each text parameter, nested ones included, passed through `redacted`. */
+function redactedMessage(message: Message, redacted: (text: string) => string): Message {
+  const given = (message as { params?: unknown }).params;
+
+  if (!isRecord(given)) return message;
+
+  const params = Object.fromEntries(
+    Object.entries(given).map(([name, value]) => [
+      name,
+      typeof value === 'string'
+        ? redacted(value)
+        : isMessage(value)
+          ? redactedMessage(value, redacted)
+          : value,
+    ]),
+  );
+
+  return { ...message, params } as Message;
+}
+
 /**
- * What an error says, as a wording: a refusal's own (see `ReviewError`), otherwise its redacted
- * message.
+ * What an error says, as a wording to store: a refusal's own message (see `ReviewError`), its
+ * text parameters redacted as any error text is, otherwise the error's redacted message.
  */
 export function wordingOf(error: unknown, redacted: (error: unknown) => string): Wording {
   const own = (error as { wording?: unknown } | null)?.wording;
 
-  return isMessage(own) ? own : redacted(error);
+  return isMessage(own) ? redactedMessage(own, redacted) : redacted(error);
 }

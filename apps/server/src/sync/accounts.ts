@@ -154,8 +154,9 @@ export class AccountState {
    * status shows at once.
    */
   applySwitch(from: string | null, login: string): void {
+    // Worded now, for the account the check found: another switch can finish before it is sent.
     if ((this.status.account?.login ?? null) !== from)
-      throw new ReviewError('ACCOUNT_CHANGED', 409, say('sync.account-changed'));
+      throw new ReviewError('ACCOUNT_CHANGED', 409, this.worded(say('sync.account-changed')));
 
     this.accounts?.select(login);
     this.store.settings.set(SELECTED_ACCOUNT, login);
