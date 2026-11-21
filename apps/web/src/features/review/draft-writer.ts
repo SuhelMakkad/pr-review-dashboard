@@ -263,6 +263,8 @@ interface Journal {
   inflight: Omit<Inflight, 'stamp'>[];
   /** Submit and discard commands not yet settled: each restored, never sent again on its own. */
   commands?: CommandRecord[];
+  /** Legacy ids settled before they were journaled: their outcome, recorded. */
+  settledLegacy?: string[];
 }
 
 const DEBOUNCE_MS = 800;
@@ -317,8 +319,15 @@ export class DraftWriter {
   private poller: ReturnType<typeof setInterval> | null = null;
   /** Commands being looked up now: never two lookups of one at once. */
   private readonly checking = new Set<string>();
-  /** Forgets adopted legacy ids where an earlier version kept them, once they are journaled. */
-  private unjournaled: (() => void) | null = null;
+  /**
+   * Legacy ids adopted, each with how to forget it where an earlier version kept it: forgotten
+   * only once this writer's journal holds it, or holds its outcome (`settledLegacy`).
+   */
+  private readonly unjournaled = new Map<string, () => void>();
+  /** Legacy ids settled before the journal held them: journaled, so their outcome is durable. */
+  private settledLegacy: string[] = [];
+  /** How each command settled, while its caller may still be waiting on it. */
+  private readonly outcomes = new WeakMap<CommandRecord, 'admitted' | 'refused' | 'lost'>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly listeners = new Set<() => void>();
   /** Raised on every change, so a subscriber can tell one state from the next. */
@@ -439,17 +448,25 @@ export class DraftWriter {
         .filter((write) => write.fields)
         .map(({ stamp: _stamp, ...write }) => write),
       commands: this.commands,
+      ...(this.settledLegacy.length > 0 ? { settledLegacy: this.settledLegacy } : {}),
     });
 
-    // Adopted ids now journaled: the earlier version's record of them may go.
-    if (written && this.unjournaled) {
-      const forget = this.unjournaled;
+    if (!written) return false;
 
-      this.unjournaled = null;
-      forget();
-    }
+    // Each adopted id the journal now holds, or holds the outcome of: the earlier version's record
+    // of it may go.
+    const held = new Set([...this.commands.map((command) => command.id), ...this.settledLegacy]);
 
-    return written;
+    for (const [id, forget] of [...this.unjournaled])
+      if (held.has(id)) {
+        this.unjournaled.delete(id);
+        forget();
+      }
+
+    // Forgotten there: its outcome need not be kept here any longer (pruned at the next write).
+    this.settledLegacy = this.settledLegacy.filter((id) => this.unjournaled.has(id));
+
+    return true;
   }
 
   /** A draft read or written: what the next write acts on while nothing is queued. */
@@ -459,6 +476,10 @@ export class DraftWriter {
     if (!versions) return;
     if (!this.seen || versions.revision >= this.seen.revision)
       this.seen = { revision: versions.revision, generation: versions.generation };
+
+    // A legacy id's base is the first draft seen with it: text begun there is the draft it held.
+    for (const command of this.commands)
+      if (command.legacy && !command.base) command.base = { ...this.seen! };
 
     // A field whose save the draft now shows: shown from the draft again.
     this.changed();
@@ -703,6 +724,7 @@ export class DraftWriter {
         legacy: Boolean(command.legacy),
         canSendAgain: this.canSendAgain(command),
         carried: command.carried,
+        missing: Boolean(command.missing),
         ...(command.status ? { status: command.status } : {}),
       }));
   }
@@ -737,7 +759,7 @@ export class DraftWriter {
   async stop(id: string): Promise<void> {
     const command = this.commands.find((other) => other.id === id);
 
-    if (!command || command.phase !== 'unknown') return;
+    if (!command || (command.phase !== 'unknown' && !command.missing)) return;
 
     const read = readAbandon(
       await this.transport.abandon(command.id, command.kind, command.epoch),
@@ -769,10 +791,13 @@ export class DraftWriter {
           from,
           epoch: null,
           legacy: true,
+          ...(this.seen ? { base: { ...this.seen } } : {}),
         })),
     );
 
-    this.unjournaled = forget;
+    for (const command of legacy)
+      if (!known.has(command.id)) this.unjournaled.set(command.id, forget);
+
     this.changed();
     this.poll();
     void this.reconcile();
@@ -885,10 +910,11 @@ export class DraftWriter {
     const base = this.tail ?? this.seen ?? ZERO;
     const epoch = await beforeDeadline(this.transport.epoch(), deadline).catch(() => null);
 
-    if (!Number.isInteger(epoch) || Date.now() >= deadline)
+    if (!isEpoch(epoch) || Date.now() >= deadline)
       return release(new WriteRefused(COMMAND_MESSAGES.notSent, 'NOT_SENT'));
 
     command.epoch = epoch;
+    command.base = base;
     command.request = this.requestOf(command, base);
     command.phase = 'sending';
     command.firstSent = Date.now();
@@ -907,9 +933,13 @@ export class DraftWriter {
     const settled = await beforeDeadline(answer, deadline).catch(() => null);
 
     if (!settled) {
-      // Not answered in time: not known, and settled by its answer, should it still come.
-      this.unknown(command);
+      // Not answered in time: settled by its answer, should it still come.
       void answer.then((late) => this.settleCommand(command, late));
+
+      // Settled meanwhile by its receipt (admitted, or a discard being cleaned up): as such.
+      if (this.outcomes.get(command) === 'admitted' || phaseOf(command) === 'admitted') return {};
+
+      if (this.active(command)) this.settleCommand(command, { kind: 'unknown', error: null });
 
       throw this.unknownError(command);
     }
@@ -985,14 +1015,24 @@ export class DraftWriter {
       if (!read || !this.active(command)) return;
 
       // Known received, and now missing: lost only when receipt history changed since it was
-      // sent (a reset); otherwise the lookup crossed its admission, and proves nothing.
+      // sent (a reset); otherwise the lookup crossed its admission, and proves nothing. With no
+      // epoch to tell (a legacy id), it is offered "Stop it", which fences it.
       if (read.kind === 'none') {
-        if (knownReceived && command.epoch !== null) {
-          const epoch = await this.transport.epoch();
+        if (!knownReceived) return;
 
-          if (epoch !== command.epoch && this.active(command))
-            this.lose(command, COMMAND_MESSAGES.keptForConfirmation);
+        if (command.epoch === null) {
+          if (!command.missing) {
+            command.missing = true;
+            this.changed();
+          }
+
+          return;
         }
+
+        const epoch = await this.transport.epoch();
+
+        if (isEpoch(epoch) && epoch !== command.epoch && this.active(command))
+          this.lose(command, COMMAND_MESSAGES.keptForConfirmation);
 
         return;
       }
@@ -1025,6 +1065,7 @@ export class DraftWriter {
     if (!isFinal(read.status)) {
       command.phase = 'admitted';
       command.status = read.status;
+      command.missing = false;
       this.changed();
       this.poll();
 
@@ -1036,6 +1077,7 @@ export class DraftWriter {
 
   /** A submit admitted: what it carried is retired; what you typed since is kept to confirm. */
   private admitSubmit(command: CommandRecord) {
+    this.outcomes.set(command, 'admitted');
     this.drop(command);
     this.retire(command);
     this.keepParked(COMMAND_MESSAGES.keptAfterSubmit);
@@ -1076,10 +1118,15 @@ export class DraftWriter {
     for (const [field, state] of entries(this.fields)) {
       if (state.version <= state.settled || state.failed) continue;
 
-      // Typed behind it: saved on the draft it left. Typed before it and not carried (a legacy
-      // id's), after it succeeded: that draft is gone, so kept for you to confirm. Cancelled, the
-      // draft is yours again, so all of it is saved on it.
-      if (state.version > command.from[field] || !succeeded) state.generation = stamp.generation;
+      // Only text begun on the draft it locked is handed to the draft it left: typed behind it,
+      // or, cancelled, carried by it too. Text from another draft (another tab cleared it), or
+      // from before a legacy id with no base, is kept for you to confirm.
+      const ours =
+        command.base !== undefined &&
+        (state.generation === null || state.generation === command.base.generation);
+      const handed = state.version > command.from[field] || !succeeded;
+
+      if (ours && handed) state.generation = stamp.generation;
       else state.failed = COMMAND_MESSAGES.keptForConfirmation;
     }
 
@@ -1090,6 +1137,7 @@ export class DraftWriter {
 
   /** Released, unsent or refused: your edits are saved as before, on the draft they began on. */
   private release(command: CommandRecord) {
+    this.outcomes.set(command, 'refused');
     this.drop(command);
     this.changed();
     void this.flush();
@@ -1100,6 +1148,7 @@ export class DraftWriter {
    * lifts; your edits are kept for you to confirm, and it is shown until you dismiss it.
    */
   private lose(command: CommandRecord, reason: string) {
+    this.outcomes.set(command, 'lost');
     command.phase = 'lost';
     this.keepParked(reason);
     this.changed();
@@ -1107,6 +1156,10 @@ export class DraftWriter {
 
   private drop(command: CommandRecord) {
     this.commands = this.commands.filter((other) => other !== command);
+
+    // A legacy id settled: its outcome is journaled, so the earlier record of it may go too.
+    if (command.legacy && this.unjournaled.has(command.id))
+      this.settledLegacy = [...this.settledLegacy, command.id];
   }
 
   /** The versions a command carried, retired: never saved by a field's autosave after. */
@@ -1527,6 +1580,13 @@ function refusalOf(outcome: Outcome): WriteRefused {
 
 const strip = ({ queued: _queued, lastSave: _lastSave, ...state }: FieldState) => state;
 
+/** A command's phase, read afresh: it may move while a send of it is awaited. */
+const phaseOf = (command: CommandRecord): CommandRecord['phase'] => command.phase;
+
+/** A receipt-history epoch as the server issues it: anything else is no evidence. */
+const isEpoch = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0;
+
 /** Whether a command's outcome, or its cleanup, is still to be looked up. */
 const needsLookup = (command: CommandRecord) =>
   command.phase === 'unknown' || command.phase === 'admitted' || command.phase === 'sending';
@@ -1569,6 +1629,7 @@ function writeJournal(account: string, prId: string, journal: Journal): boolean 
     const empty =
       journal.inflight.length === 0 &&
       (journal.commands ?? []).length === 0 &&
+      (journal.settledLegacy ?? []).length === 0 &&
       journal.fields.body.version <= journal.fields.body.settled &&
       journal.fields.event.version <= journal.fields.event.settled;
 

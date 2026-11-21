@@ -55,6 +55,13 @@ export interface CommandRecord {
   from: { body: number; event: number };
   /** Sent again by you: a late refusal of its first send then proves nothing. */
   resent?: boolean;
+  /** Its base, for a command sent: the draft whose generation it may hand edits back to. */
+  base?: Base;
+  /**
+   * A discard known received whose receipt is now missing with no epoch to say why (a legacy id's
+   * after a reset): offered "Stop it", which fences it and keeps your edits to confirm.
+   */
+  missing?: boolean;
   input?: SubmitInput;
   /** The pending review the sheet showed, for a submit. */
   expectedPendingReviewId?: string | null;
@@ -68,6 +75,12 @@ export interface CommandRecord {
   status?: string;
 }
 
+/** A draft's revision and generation (as `draft-writer`'s `Base`). */
+export interface Base {
+  revision: number;
+  generation: number;
+}
+
 /** What the banner shows of a command. */
 export interface CommandView {
   id: string;
@@ -78,6 +91,8 @@ export interface CommandView {
   canSendAgain: boolean;
   carried: Carried | null;
   status?: string;
+  /** Known received, its receipt since missing: "Stop it" is offered. */
+  missing: boolean;
 }
 
 /** What a command's answer decodes to. */

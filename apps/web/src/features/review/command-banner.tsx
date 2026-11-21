@@ -29,6 +29,8 @@ export function CommandBanner({ writer }: { writer: DraftWriter }) {
 function headline(command: CommandView): string {
   const what = command.kind === 'submit' ? 'Submitting your review' : 'Discarding your draft';
 
+  if (command.phase === 'admitted' && command.missing)
+    return 'Discarding your draft was received, but its record is gone. Stop it to save your edits on the current draft.';
   if (command.phase === 'admitted')
     return command.status === 'needs_attention'
       ? 'Discarding your draft needs your attention in Activity. Your edits wait until it is done.'
@@ -83,7 +85,7 @@ function CommandNotice({ writer, command }: { writer: DraftWriter; command: Comm
             Send again
           </Button>
         )}
-        {command.phase === 'unknown' && (
+        {(command.phase === 'unknown' || command.missing) && (
           <Button
             size="sm"
             variant="ghost"
