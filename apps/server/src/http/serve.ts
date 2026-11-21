@@ -2,7 +2,6 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type {
   As,
-  ErrorBody,
   JsonRoute,
   Method,
   PathParams,
@@ -14,8 +13,15 @@ import { knownAccount, type AccountParams } from '@/routes/pulls.js';
 import { input, type ScopedRequest } from '@/routes/scoped.js';
 import type { SyncService } from '@/sync/service.js';
 
-/** A refusal's body before `serve` words its message for the request's account. */
-export type FailedBody = Omit<ErrorBody, 'error'> & { error: Wording };
+/**
+ * A refusal's body before `serve` words its message for the request's account: an `ErrorBody`
+ * whose message may be a catalog message.
+ */
+export interface FailedBody {
+  error: Wording;
+  code?: string;
+  [detail: string]: unknown;
+}
 
 /** A refusal a handler returns, or an area's error mapper makes of what a handler threw. */
 export interface Failed {

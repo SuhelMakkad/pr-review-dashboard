@@ -209,11 +209,11 @@ export type MessageId = keyof Catalog;
 /** Every message the catalog has. */
 export const messageIds = Object.keys(catalog) as MessageId[];
 
-/** What an entry is worded with: nothing, or its named parameters. */
-type ParamsOf<K extends MessageId> = Catalog[K] extends { params: readonly (infer Name)[] }
-  ? Name extends string
-    ? Record<Name, string>
-    : never
+/** What an entry is worded with: nothing, or every one of its named parameters. */
+type ParamsOf<K extends MessageId> = Catalog[K] extends {
+  params: readonly (infer Name extends string)[];
+}
+  ? Record<Name, string>
   : undefined;
 
 /** An entry's parameters as given: each a text as is, or a message worded first. */

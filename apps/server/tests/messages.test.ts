@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { forgeTraits } from '@review-desk/shared/traits';
 import { createApp } from '@/app.js';
+import { failed } from '@/http/serve.js';
 import { EventBus } from '@/events.js';
 import { SELECTED_ACCOUNT, WRITE_COOLDOWN } from '@/db/settings.js';
 import { Store } from '@/db/store.js';
@@ -108,6 +109,10 @@ describe('the message catalog', () => {
     expect(say(id)).toEqual({ id: 'pull.untracked' });
     // @ts-expect-error: and `pull.untracked` takes none.
     say('pull.untracked', { login: 'ana' });
+    // A refusal's code stays a text.
+    // @ts-expect-error: a code is a string.
+    failed(409, { error: say('pull.untracked'), code: 7 });
+
     expect(say('review.cli-changed', { login: 'ana' })).toEqual({
       id: 'review.cli-changed',
       params: { login: 'ana' },
