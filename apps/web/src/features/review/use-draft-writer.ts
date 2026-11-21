@@ -20,6 +20,7 @@ const writeRoutes = {
   acceptAi: routes.acceptAi,
   prepareAi: routes.prepareAi,
   applyAi: routes.applyAi,
+  startAi: routes.startAi,
 } as const;
 
 /**
@@ -77,20 +78,22 @@ function transport(client: QueryClient, account: string, prId: string): Transpor
         writeRoutes[request.route as keyof typeof writeRoutes] as never,
         { params: request.params, body: request.body, strict: true } as never,
       ),
-    // Every write the writer looks up is a draft write: another kind under its id is a conflict.
-    lookup: (writeId, base) =>
+    // Each lookup names its kind (a draft write's unless said): another kind under its id is a
+    // conflict.
+    lookup: (writeId, base, kind = 'write') =>
       call(routes.draftAttempt, {
         params: { account, id: prId, attemptId: writeId },
-        query: { base: base.revision, generation: base.generation, kind: 'write' },
+        query: { base: base.revision, generation: base.generation, kind },
         strict: true,
       }),
     checkpoint: () => call(routes.claimCheckpoint, { params: { account }, strict: true }),
-    abandonWrite: (writeId) =>
+    abandonWrite: (writeId, kind = 'write') =>
       call(routes.abandonDraftAttempt, {
         params: { account, id: prId, attemptId: writeId },
-        body: { kind: 'write' },
+        body: { kind },
         strict: true,
       }),
+    started: () => void client.invalidateQueries({ queryKey: queryKeys.ai(account, prId) }),
     stamp: accountSwitches,
     // An answer to a write sent before a switch must not refill the drafts it dropped: read again.
     committed: (draft, stamp) => {

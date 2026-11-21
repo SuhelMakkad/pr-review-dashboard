@@ -53,6 +53,19 @@ function server() {
 
       if (answer) return answer(request);
 
+      // A start joins or makes a run, on the draft as it is: it moves no revision.
+      if (request.route === 'startAi')
+        return {
+          id: 'run-1',
+          task: 'draft_summary',
+          status: 'queued',
+          attempt: {
+            id: request.body.attemptId,
+            state: 'committed',
+            revision: Number(request.body.baseRevision),
+          },
+        };
+
       const at = next(request);
 
       return {
@@ -68,6 +81,7 @@ function server() {
     })),
     checkpoint: vi.fn(async (): Promise<unknown> => ({ checkpoint: 7, seal: '0123456789abcdef' })),
     abandonWrite: vi.fn(async (): Promise<unknown> => ({ outcome: 'not-admitted' })),
+    started: vi.fn(),
     stamp: vi.fn(() => 0),
     committed: vi.fn(),
     stale: vi.fn(),
@@ -1812,6 +1826,24 @@ describe('comment and AI write recovery', () => {
     expect(transport.checkpoint).toHaveBeenCalledTimes(2);
   });
 
+  it('waits as long as the checkpoint takes, for a write with no bound', async () => {
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(0));
+    // A real answer takes a moment: never taken as no answer.
+    vi.mocked(transport.checkpoint).mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ checkpoint: 7, seal: '0123456789abcdef' }), 30),
+        ),
+    );
+    await writer.write('addComment', comment, { body: 'One' });
+
+    expect(transport.checkpoint).toHaveBeenCalledTimes(1);
+    expect(sent.map((request) => request.body.writeId)).toEqual([expect.stringMatching(SEALED)]);
+  });
+
   it('sends nothing unsealed: it waits for a checkpoint it cannot read yet', async () => {
     const { sent, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);
@@ -2681,6 +2713,33 @@ describe('autosaves across a restart', () => {
     expect(reloaded.state('body')).toBe('error');
   });
 
+  it('journals an autosave under its new id before sending it, once resealed', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    const journaled: unknown[] = [];
+
+    writer.observe(draft(0));
+    answers.push(
+      async () => {
+        throw new ApiError('Sealed elsewhere', 409, 'WRITE_HISTORY_GAP');
+      },
+      async (request) => {
+        const saved = JSON.parse(sessionStorage.getItem(`review-desk-draft-writer:you:${PR}`)!) as {
+          inflight: { writeId: string }[];
+        };
+
+        journaled.push(...saved.inflight.map((write) => write.writeId));
+
+        return { attempt: { id: request.body.writeId, state: 'committed', revision: 1 } };
+      },
+    );
+    writer.edit('event', 'APPROVE');
+    await writer.settled();
+
+    expect(journaled).toEqual([sent[1]!.body.writeId]);
+    expect(sent[1]!.body.writeId).not.toBe(sent[0]!.body.writeId);
+  });
+
   it('keeps for you to confirm an autosave a restarted server no longer knows, never saved afresh', async () => {
     const { sent, answers, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);
@@ -2808,6 +2867,889 @@ describe('autosaves across a restart', () => {
 
     expect(second.sent).toEqual([]);
     expect(reloaded.state('event')).toBe('saved');
+  });
+});
+
+describe('the summary start', () => {
+  const NEVER = 2_000_000_000;
+  const SEALED = /^ck1-7-0123456789abcdef-[0-9a-f-]{36}$/;
+  const routes = (sent: WriteRequest[]) => sent.map((request) => request.route);
+  const journal = () =>
+    JSON.parse(sessionStorage.getItem(`review-desk-draft-writer:you:${PR}`) ?? '{}') as {
+      starts?: { phase: string; preflight?: { phase: string } }[];
+    };
+  const unreachable = async () => {
+    throw new ApiError('Not reachable', 0);
+  };
+
+  it('saves the text shown at the click first, then starts once on the draft that save left', async () => {
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(3));
+    writer.edit('body', 'Asked on this');
+
+    const started = writer.startSummary({ force: true });
+
+    // Typed after the click: never in what the start saves, and saved after it as usual.
+    writer.edit('body', 'Typed after');
+
+    await expect(started).resolves.toMatchObject({ id: 'run-1' });
+    await writer.settled();
+
+    expect(
+      sent.map((request) => [request.route, request.body.body, request.body.baseRevision]),
+    ).toEqual([
+      ['saveDraft', 'Asked on this', 3],
+      ['startAi', undefined, 4],
+      ['saveDraft', 'Typed after', 4],
+    ]);
+    expect(sent[0]!.body.writeId).toMatch(SEALED);
+    expect(sent[1]!.body).toMatchObject({
+      task: 'draft_summary',
+      force: true,
+      attemptId: expect.stringMatching(SEALED),
+      baseGeneration: 0,
+    });
+    expect(transport.started).toHaveBeenCalled();
+    expect(writer.startViews()).toEqual([]);
+  });
+
+  it('starts on the draft as the queue left it, saving nothing, when what it captured is saved', async () => {
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(5));
+    writer.edit('event', 'APPROVE');
+    await writer.settled();
+    await writer.startSummary({});
+
+    expect(sent.map((request) => [request.route, request.body.baseRevision])).toEqual([
+      ['saveDraft', 5],
+      ['startAi', 6],
+    ]);
+  });
+
+  it('never starts on text refused, or not kept by a save it waited on, and keeps that text', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    answers.push(async (request) => {
+      throw new ApiError('Locked', 409, 'DRAFT_LOCKED', {
+        attempt: { id: request.body.writeId, state: 'refused' },
+      });
+    });
+    writer.edit('event', 'APPROVE');
+
+    // Queued behind the save of the verdict, which is refused.
+    await expect(writer.startSummary({})).rejects.toMatchObject({ message: 'Locked' });
+    // Refused already at the click.
+    await expect(writer.startSummary({})).rejects.toMatchObject({ message: 'Locked' });
+
+    expect(routes(sent)).toEqual(['saveDraft']);
+    expect(writer.state('event')).toBe('error');
+  });
+
+  it('never saves for a start text that grew more than a week old while it waited', async () => {
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    clock(1_000);
+    writer.observe(draft(1));
+    writer.edit('body', 'From long ago');
+    clock(1_000 + ATTEMPT_TTL_MS);
+
+    await expect(writer.startSummary({})).rejects.toMatchObject({ code: 'DRAFT_EDIT_UNSAVED' });
+
+    expect(sent).toEqual([]);
+    expect(writer.failure('body')).toMatch(/more than a week ago/);
+  });
+
+  it('refuses the start on a change elsewhere, keeping the text for you to confirm, never rebased', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    writer.edit('body', 'Mine');
+    await writer.settled();
+    vi.useFakeTimers();
+    writer.edit('body', 'Asked on');
+    answers.push(conflict(draft(4)));
+
+    await expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'DRAFT_REVISION_CONFLICT',
+    });
+    vi.useRealTimers();
+    await writer.settled();
+
+    expect(routes(sent)).toEqual(['saveDraft', 'saveDraft']);
+    expect(writer.state('body')).toBe('error');
+    expect(writer.failure('body')).toMatch(/changed since you asked for the summary/);
+  });
+
+  it('hands a preflight not known in time to the banner, and releases the start unsent', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    // The summary's own save waits for a pause: the click reserves it for the start's preflight.
+    writer.edit('body', 'Asked on');
+    answers.push(() => new Promise(() => {}));
+
+    const started = writer.startSummary({});
+    const refused = expect(started).rejects.toMatchObject({ code: 'NOT_SENT' });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await refused;
+
+    expect(routes(sent)).toEqual(['saveDraft']);
+    expect(writer.state('body')).toBe('error');
+    expect(writer.writeViews()).toMatchObject([
+      { phase: 'unknown', label: 'Your summary or verdict', text: 'Asked on' },
+    ]);
+    expect(writer.startViews()).toEqual([]);
+    expect(journal().starts ?? []).toEqual([]);
+  });
+
+  it('leaves a start not answered in time not known, holding up only another start, and settles it by a late answer', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    let admit: () => void = () => {};
+
+    writer.observe(draft(1));
+    answers.push(
+      (request) =>
+        new Promise((resolve) => {
+          admit = () =>
+            resolve({
+              id: 'run-1',
+              attempt: { id: request.body.attemptId, state: 'committed', revision: 1 },
+            });
+        }),
+    );
+
+    const started = writer.startSummary({});
+    const unknown = expect(started).rejects.toMatchObject({ code: 'SUMMARY_START_UNKNOWN' });
+
+    expect(writer.summaryStarting()).toBe(true);
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+
+    expect(writer.summaryStarting()).toBe(false);
+    expect(writer.startViews()).toMatchObject([
+      { phase: 'unknown', canStop: true, canSendAgain: false },
+    ]);
+
+    // Nothing else waits on it: a comment and an edit go ahead, another start does not.
+    vi.useRealTimers();
+    await writer.write('addComment', pr, { body: 'Still sent' });
+    writer.edit('event', 'APPROVE');
+    await writer.settled();
+    await expect(writer.startSummary({})).rejects.toMatchObject({ code: 'SUMMARY_START_UNKNOWN' });
+    expect(writer.blocked()).toBeNull();
+
+    admit();
+    await vi.waitFor(() => expect(writer.startViews()).toEqual([]));
+
+    expect(transport.started).toHaveBeenCalled();
+    expect(routes(sent)).toEqual(['startAi', 'addComment', 'saveDraft']);
+  });
+
+  it('tells the caller of a start refused at once, with no notice besides', async () => {
+    const { answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    answers.push(async (request) => {
+      throw new ApiError('Plan limit reached', 429, 'PLAN_LIMIT', {
+        attempt: { id: request.body.attemptId, state: 'refused' },
+      });
+    });
+
+    await expect(writer.startSummary({})).rejects.toMatchObject({ code: 'PLAN_LIMIT' });
+    expect(writer.startViews()).toEqual([]);
+    expect(writer.summaryStarting()).toBe(false);
+  });
+
+  it('keeps the queue while its claim is looked up, answering with the run the lookup finds', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    answers.push(async (request) => ({
+      pending: true,
+      attempt: { id: request.body.attemptId, state: 'pending' },
+    }));
+    vi.mocked(transport.lookup)
+      .mockImplementationOnce(async (id) => ({ attempt: { id, state: 'pending' } }))
+      .mockImplementationOnce(async (id) => ({
+        attempt: { id, state: 'committed', revision: 1, result: { body: { id: 'run-2' } } },
+      }));
+
+    const started = writer.startSummary({});
+    const behind = writer.write('addComment', pr, { body: 'Behind' });
+
+    await expect(started).resolves.toEqual({ id: 'run-2' });
+    await behind;
+
+    // Sent only once the start was found admitted.
+    const lastLookup = Math.max(...vi.mocked(transport.lookup).mock.invocationCallOrder);
+    const commentSend = vi.mocked(transport.send).mock.invocationCallOrder[1]!;
+
+    expect(routes(sent)).toEqual(['startAi', 'addComment']);
+    expect(commentSend).toBeGreaterThan(lastLookup);
+    expect(writer.startViews()).toEqual([]);
+  });
+
+  it('never waits on a save before the start past its bound, however long its backoff', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, () => 10 * COMMAND_BOUND_MS, NEVER);
+
+    writer.observe(draft(1));
+    writer.edit('body', 'Asked on');
+    answers.push(unreachable);
+
+    const refused = expect(writer.startSummary({})).rejects.toMatchObject({ code: 'NOT_SENT' });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await refused;
+
+    expect(routes(sent)).toEqual(['saveDraft']);
+    expect(writer.writeViews()).toMatchObject([{ phase: 'unknown', text: 'Asked on' }]);
+  });
+
+  it('lets the queue go on when a start sent again is not answered in time', async () => {
+    const { writer, transport, answers, sent } = await unknownStart();
+
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    vi.useFakeTimers();
+    answers.push(() => new Promise(() => {}));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+    const behind = writer.write('addComment', pr, { body: 'Behind' });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await again;
+    await behind;
+
+    expect(routes(sent)).toEqual(['startAi', 'startAi', 'addComment']);
+    expect(writer.startViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+  });
+
+  it('never sends again a start its first answer settled while the resend waited in the queue', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    let admit: () => void = () => {};
+
+    writer.observe(draft(1));
+    answers.push(
+      (request) =>
+        new Promise((resolve) => {
+          admit = () =>
+            resolve({
+              id: 'run-1',
+              attempt: { id: request.body.attemptId, state: 'committed', revision: 1 },
+            });
+        }),
+    );
+
+    const unknown = expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'SUMMARY_START_UNKNOWN',
+    });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+    vi.useRealTimers();
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+
+    // A write ahead in the queue holds the resend back while the first send's answer comes.
+    const ahead = held();
+
+    answers.push(ahead.answer);
+
+    const blocking = writer.write('addComment', pr, { body: 'Ahead' });
+
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+
+    admit();
+    await vi.waitFor(() => expect(transport.started).toHaveBeenCalled());
+    ahead.release((request) => ({
+      attempt: { id: request.body.writeId, state: 'committed', revision: 2 },
+    }));
+    await blocking;
+    await again;
+
+    expect(routes(sent)).toEqual(['startAi', 'addComment']);
+  });
+
+  it('never reopens a start its first answer refused while its resend waited for an answer', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    let refuse: () => void = () => {};
+
+    writer.observe(draft(1));
+    answers.push(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          refuse = () =>
+            reject(
+              new ApiError('Plan limit reached', 429, 'PLAN_LIMIT', {
+                attempt: { id: request.body.attemptId, state: 'refused' },
+              }),
+            );
+        }),
+    );
+
+    const unknown = expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'SUMMARY_START_UNKNOWN',
+    });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    answers.push(() => new Promise(() => {}));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+
+    await vi.advanceTimersByTimeAsync(1);
+    // The first send's refusal, recorded under its id, comes while the resend waits.
+    refuse();
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await again;
+
+    expect(writer.startViews()).toMatchObject([{ phase: 'not-started' }]);
+    vi.useRealTimers();
+    await expect(writer.startSummary({})).resolves.toMatchObject({ id: 'run-1' });
+    expect(routes(sent)).toEqual(['startAi', 'startAi', 'startAi']);
+  });
+
+  it('keeps the queue while a start sent again is looked up, its one send answered without an outcome', async () => {
+    const { writer, transport, answers, sent } = await unknownStart();
+
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    answers.push(async (request) => ({
+      pending: true,
+      attempt: { id: request.body.attemptId, state: 'pending' },
+    }));
+    vi.mocked(transport.lookup).mockImplementationOnce(async (id) => ({
+      attempt: { id, state: 'committed', revision: 1, result: { body: { id: 'run-1' } } },
+    }));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+    const behind = writer.write('addComment', pr, { body: 'Behind' });
+
+    await again;
+    await behind;
+
+    expect(routes(sent)).toEqual(['startAi', 'startAi', 'addComment']);
+    expect(writer.startViews()).toEqual([]);
+    expect(transport.started).toHaveBeenCalled();
+  });
+
+  it('stops reading the checkpoint once a start gave up at its bound', async () => {
+    vi.useFakeTimers();
+
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, () => 1_000, NEVER);
+
+    writer.observe(draft(1));
+    vi.mocked(transport.checkpoint).mockRejectedValue(new ApiError('Not reachable', 0));
+
+    const refused = expect(writer.startSummary({})).rejects.toMatchObject({ code: 'NOT_SENT' });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await refused;
+
+    const reads = vi.mocked(transport.checkpoint).mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(10 * COMMAND_BOUND_MS);
+
+    expect(vi.mocked(transport.checkpoint).mock.calls).toHaveLength(reads);
+    expect(sent).toEqual([]);
+  });
+
+  it('lets the queue go on at once when a start sent again is settled by its first answer', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    let admit: () => void = () => {};
+
+    writer.observe(draft(1));
+    answers.push(
+      (request) =>
+        new Promise((resolve) => {
+          admit = () =>
+            resolve({
+              id: 'run-1',
+              attempt: { id: request.body.attemptId, state: 'committed', revision: 1 },
+            });
+        }),
+    );
+
+    const unknown = expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'SUMMARY_START_UNKNOWN',
+    });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+    vi.useRealTimers();
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    // The resend's own answer never comes.
+    answers.push(() => new Promise(() => {}));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+    const behind = writer.write('addComment', pr, { body: 'Behind' });
+
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    admit();
+    await again;
+    await behind;
+
+    expect(routes(sent)).toEqual(['startAi', 'startAi', 'addComment']);
+    expect(writer.startViews()).toEqual([]);
+  });
+
+  it('reads nothing more of a resent start settled while its lookup slept', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, () => 1_000, NEVER);
+    let admit: () => void = () => {};
+
+    writer.observe(draft(1));
+    answers.push(
+      (request) =>
+        new Promise((resolve) => {
+          admit = () =>
+            resolve({
+              id: 'run-1',
+              attempt: { id: request.body.attemptId, state: 'committed', revision: 1 },
+            });
+        }),
+    );
+
+    const unknown = expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'SUMMARY_START_UNKNOWN',
+    });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    // The resend is answered without its outcome: its claim is looked up after a backoff.
+    answers.push(async (request) => ({
+      pending: true,
+      attempt: { id: request.body.attemptId, state: 'pending' },
+    }));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent).toHaveLength(2);
+
+    const reads = vi.mocked(transport.lookup).mock.calls.length;
+
+    // Settled by the first send's late answer while the lookup sleeps.
+    admit();
+    await again;
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(vi.mocked(transport.lookup).mock.calls).toHaveLength(reads);
+    expect(writer.startViews()).toEqual([]);
+  });
+
+  it('is held back by a submit not known, as any write is', async () => {
+    const { sent, commands, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    commands.push(unreachable);
+    await expect(writer.submit(review, carried(writer), null)).rejects.toMatchObject({
+      code: 'COMMAND_UNKNOWN',
+    });
+    await expect(writer.startSummary({})).rejects.toMatchObject({ code: 'DRAFT_COMMAND_UNKNOWN' });
+
+    expect(routes(sent)).toEqual(['submit']);
+  });
+
+  /** A start sent, its answer never coming, the bound passed: not known. */
+  async function unknownStart() {
+    vi.useFakeTimers();
+
+    const next = server();
+    const writer = new DraftWriter('you', PR, next.transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    next.answers.push(() => new Promise(() => {}));
+
+    const unknown = expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'SUMMARY_START_UNKNOWN',
+    });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+    vi.useRealTimers();
+
+    return { ...next, writer, attemptId: String(next.sent[0]!.body.attemptId) };
+  }
+
+  it.each([
+    [
+      'started',
+      (id: string) => ({ attempt: { id, state: 'committed', revision: 1, result: { body: {} } } }),
+      [],
+    ],
+    [
+      'never received',
+      () => ({ arrived: false, fenced: true, provable: true }),
+      [{ phase: 'not-started' }],
+    ],
+    [
+      'not received yet',
+      () => ({ arrived: false, fenced: false, provable: true }),
+      [{ phase: 'unknown', canSendAgain: true }],
+    ],
+    [
+      'beyond what the server can tell',
+      () => ({ arrived: false, fenced: false, provable: false }),
+      [{ phase: 'unknown', canSendAgain: false }],
+    ],
+  ])('looks a start not known up as a start: %s', async (_case, answer, views) => {
+    const { writer, transport, attemptId } = await unknownStart();
+
+    vi.mocked(transport.lookup).mockImplementation(async (id) => answer(id));
+    await writer.reconcile();
+
+    expect(transport.lookup).toHaveBeenCalledWith(
+      attemptId,
+      { revision: 1, generation: 0 },
+      'start',
+    );
+    expect(writer.startViews()).toMatchObject(views);
+  });
+
+  it('sends a start again only by your choice, the very same, once; a bare refusal after says nothing', async () => {
+    const { writer, transport, sent, answers, attemptId } = await unknownStart();
+
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    answers.push(async () => {
+      throw new ApiError('Not active', 409, 'ACCOUNT_NOT_ACTIVE');
+    });
+    // Its claim is looked up within the bound, finding nothing more.
+    vi.useFakeTimers();
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await again;
+
+    expect(sent.map((request) => request.body.attemptId)).toEqual([attemptId, attemptId]);
+    expect(writer.startViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+  });
+
+  it.each([
+    ['not admitted', { outcome: 'not-admitted' }, [{ phase: 'not-started', canStop: false }]],
+    ['unknown', { outcome: 'unknown' }, [{ phase: 'lost', canStop: false }]],
+  ])(
+    'stops a start, as its stop answers: %s, touching none of your edits',
+    async (_case, answer, views) => {
+      const { writer, transport, sent, attemptId } = await unknownStart();
+
+      vi.mocked(transport.abandonWrite).mockResolvedValueOnce(answer);
+      await writer.stopStart(writer.startViews()[0]!.key);
+
+      expect(transport.abandonWrite).toHaveBeenCalledWith(attemptId, 'start');
+      expect(writer.startViews()).toMatchObject(views);
+
+      writer.edit('body', 'Saved as ever');
+      await writer.settled();
+
+      expect(writer.state('body')).toBe('saved');
+      expect(sent.at(-1)!.body.body).toBe('Saved as ever');
+
+      writer.dismissStart(writer.startViews()[0]!.key);
+
+      expect(writer.startViews()).toEqual([]);
+    },
+  );
+
+  it('keeps a start sent again not known when its first send is refused late, before its claim', async () => {
+    vi.useFakeTimers();
+
+    const { writer, transport, answers } = await (async () => {
+      const next = server();
+      const writer = new DraftWriter('you', PR, next.transport, instant, NEVER);
+
+      writer.observe(draft(1));
+
+      return { ...next, writer };
+    })();
+    let refuse: () => void = () => {};
+
+    answers.push(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = () => reject(new ApiError('Not active', 409, 'ACCOUNT_NOT_ACTIVE'));
+        }),
+    );
+
+    const unknown = expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'SUMMARY_START_UNKNOWN',
+    });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+    vi.useRealTimers();
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    answers.push(() => new Promise(() => {}));
+    void writer.sendStartAgain(writer.startViews()[0]!.key);
+    await vi.waitFor(() => expect(writer.summaryStarting()).toBe(true));
+
+    // The first send's bare refusal, late: the resend may be the one received.
+    refuse();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(writer.startViews()).toEqual([]);
+    expect(writer.summaryStarting()).toBe(true);
+  });
+
+  it('refuses to start on text a reload kept unconfirmed, saying why', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', PR, first.transport, instant, NEVER);
+
+    writer.observe(draft(0));
+    first.answers.push(unreachable, async () => {
+      throw new ApiError('Sealed elsewhere', 409, 'WRITE_HISTORY_GAP');
+    });
+    writer.edit('event', 'APPROVE');
+    await writer.settled();
+
+    const second = server();
+
+    vi.mocked(second.transport.lookup).mockImplementation(() => new Promise(() => {}));
+
+    const reloaded = new DraftWriter('you', PR, second.transport, instant, NEVER);
+
+    await expect(reloaded.startSummary({})).rejects.toMatchObject({
+      message: expect.stringMatching(/could not be confirmed as saved/),
+    });
+    expect(second.sent).toEqual([]);
+  });
+
+  it('seals a start afresh when its first send is refused before its claim', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    answers.push(async () => {
+      throw new ApiError('Sealed elsewhere', 409, 'WRITE_HISTORY_GAP');
+    });
+    vi.mocked(transport.checkpoint)
+      .mockResolvedValueOnce({ checkpoint: 7, seal: '0123456789abcdef' })
+      .mockResolvedValueOnce({ checkpoint: 9, seal: 'fedcba9876543210' });
+
+    await expect(writer.startSummary({})).resolves.toMatchObject({ id: 'run-1' });
+
+    expect(sent.map((request) => String(request.body.attemptId).slice(0, 6))).toEqual([
+      'ck1-7-',
+      'ck1-9-',
+    ]);
+  });
+
+  it('never sends a resealed start once its bound passed while it was recorded', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    const setItem = Storage.prototype.setItem;
+    const now = Date.now();
+
+    writer.observe(draft(1));
+    answers.push(async () => {
+      throw new ApiError('Sealed elsewhere', 409, 'WRITE_HISTORY_GAP');
+    });
+    vi.mocked(transport.checkpoint)
+      .mockResolvedValueOnce({ checkpoint: 7, seal: '0123456789abcdef' })
+      .mockResolvedValueOnce({ checkpoint: 9, seal: 'fedcba9876543210' });
+    // Recording the new id takes the rest of the bound.
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      if (value.includes('fedcba9876543210')) clock(now + COMMAND_BOUND_MS + 1);
+
+      setItem.call(this, key, value);
+    });
+
+    await expect(writer.startSummary({})).rejects.toMatchObject({ code: 'NOT_SENT' });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('after a reload, only looks up a preflight that may have been sent, holding its text, and releases its start', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', PR, first.transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    writer.edit('body', 'Asked on');
+    first.answers.push(() => new Promise(() => {}));
+    void writer.startSummary({});
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+
+    expect(journal().starts).toMatchObject([{ phase: 'queued', preflight: { phase: 'sending' } }]);
+
+    const second = server();
+
+    vi.mocked(second.transport.lookup).mockImplementation(() => new Promise(() => {}));
+
+    const reloaded = new DraftWriter('you', PR, second.transport, instant, NEVER);
+
+    reloaded.observe(draft(1));
+    await reloaded.flush();
+    await reloaded.settled();
+
+    expect(second.sent).toEqual([]);
+    expect(second.transport.lookup).toHaveBeenCalledWith(first.sent[0]!.body.writeId, {
+      revision: 1,
+      generation: 0,
+    });
+    expect(reloaded.startViews()).toEqual([]);
+    expect(reloaded.summaryStarting()).toBe(false);
+  });
+
+  it('after a reload, only looks up a start that may have been sent', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', PR, first.transport, instant, NEVER);
+
+    writer.observe(draft(1));
+    first.answers.push(() => new Promise(() => {}));
+    void writer.startSummary({});
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+
+    const second = server();
+
+    vi.mocked(second.transport.lookup).mockResolvedValue({
+      attempt: {
+        id: first.sent[0]!.body.attemptId,
+        state: 'committed',
+        revision: 1,
+        result: { body: {} },
+      },
+    });
+
+    const reloaded = new DraftWriter('you', PR, second.transport, instant, NEVER);
+
+    await reloaded.reconcile();
+
+    expect(second.sent).toEqual([]);
+    expect(second.transport.started).toHaveBeenCalled();
+    expect(reloaded.startViews()).toEqual([]);
+  });
+
+  it('gives back only the reservation it still owns, so a newer save is never made twice', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    const ahead = held();
+
+    writer.observe(draft(1));
+    // The newer save is not confirmed: a second save of it would be sent under a fresh id.
+    answers.push(ahead.answer, unreachable, async () => {
+      throw new ApiError('Sealed elsewhere', 409, 'WRITE_HISTORY_GAP');
+    });
+
+    const comment = writer.write('addComment', pr, { body: 'Ahead' });
+
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    writer.edit('body', 'Asked on');
+
+    const started = writer.startSummary({});
+
+    // Typed after the click, saved behind the start.
+    writer.edit('body', 'Newer');
+    void writer.flush();
+    // The write ahead of it meets a change elsewhere: the start is refused at the front.
+    ahead.release(conflict(draft(6)));
+    await expect(comment).rejects.toBeDefined();
+    await expect(started).rejects.toMatchObject({ code: 'DRAFT_CHANGED_LOCALLY' });
+    await writer.settled();
+
+    const newer = sent.filter((request) => request.body.body === 'Newer');
+
+    // Its own send and its same-id resend, never another id.
+    expect(newer).toHaveLength(2);
+    expect(new Set(newer.map((request) => request.body.writeId)).size).toBe(1);
+    expect(sent.some((request) => request.route === 'startAi')).toBe(false);
+  });
+
+  it('lets a later action go ahead once a held save of its text is found saved', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(0));
+    answers.push(unreachable, async () => {
+      throw new ApiError('Sealed elsewhere', 409, 'WRITE_HISTORY_GAP');
+    });
+    writer.edit('event', 'APPROVE');
+    await writer.settled();
+
+    expect(writer.state('event')).toBe('error');
+
+    vi.mocked(transport.lookup).mockResolvedValueOnce({
+      attempt: { id: sent[0]!.body.writeId, state: 'committed', revision: 1, result: { body: {} } },
+    });
+    await writer.reconcile();
+    await expect(writer.startSummary({})).resolves.toMatchObject({ id: 'run-1' });
   });
 });
 

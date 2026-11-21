@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { reviewEventLabels } from '@review-desk/shared/review';
 import type { AttemptView } from '@/features/review/draft-attempts';
 import type { CommandView } from '@/features/review/draft-commands';
+import type { StartView } from '@/features/review/summary-start';
 import type { DraftWriter } from '@/features/review/draft-writer';
 import { openActivity } from '@/features/activity/use-operations';
 import { Button } from '@/ui/button';
@@ -17,8 +18,9 @@ import { Button } from '@/ui/button';
 export function CommandBanner({ writer }: { writer: DraftWriter }) {
   const commands = writer.commandViews();
   const writes = writer.writeViews();
+  const starts = writer.startViews();
 
-  if (commands.length === 0 && writes.length === 0) return null;
+  if (commands.length === 0 && writes.length === 0 && starts.length === 0) return null;
 
   return (
     <div className="space-y-2">
@@ -36,6 +38,77 @@ export function CommandBanner({ writer }: { writer: DraftWriter }) {
           ))}
         </section>
       )}
+      {starts.length > 0 && (
+        <section aria-label="Summary starts not yet confirmed" className="space-y-2">
+          {starts.map((start) => (
+            <StartNotice key={start.key} writer={writer} start={start} />
+          ))}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function startHeadline(start: StartView): string {
+  if (start.phase === 'not-started')
+    return `The summary did not start.${start.reason ? ` ${start.reason}` : ''}`;
+  if (start.phase === 'lost')
+    return 'Starting the summary was stopped, but it may have started before. It can no longer start now.';
+  if (start.canSendAgain)
+    return 'Starting the summary could not be confirmed. It has not arrived yet, and is never sent again unless you choose to.';
+
+  return 'Starting the summary could not be confirmed. Check its runs, or stop it to be sure it never starts.';
+}
+
+function StartNotice({ writer, start }: { writer: DraftWriter; start: StartView }) {
+  const [busy, setBusy] = useState(false);
+  const act = (run: () => Promise<void>, failure: string) => async () => {
+    setBusy(true);
+
+    try {
+      await run();
+    } catch (error) {
+      toast.error(error instanceof Error && error.message ? error.message : failure);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      role="status"
+      className="space-y-2 rounded-sm border border-pending/40 bg-pending/5 p-3 text-xs"
+    >
+      <p className="flex items-start gap-1.5 text-fg">
+        <AlertTriangle size={13} aria-hidden="true" className="mt-0.5 shrink-0 text-pending" />
+        {startHeadline(start)}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {start.canSendAgain && (
+          <Button
+            size="sm"
+            disabled={busy}
+            onClick={act(() => writer.sendStartAgain(start.key), 'Could not send it again.')}
+          >
+            Send again
+          </Button>
+        )}
+        {start.canStop && (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={act(() => writer.stopStart(start.key), 'Could not stop it. Try again.')}
+          >
+            Stop it
+          </Button>
+        )}
+        {start.phase !== 'unknown' && (
+          <Button size="sm" variant="ghost" onClick={() => writer.dismissStart(start.key)}>
+            Dismiss
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
