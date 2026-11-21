@@ -12,11 +12,19 @@ const PREFIX = 'review-desk-pending-command:';
 const RETIRED = 'review-desk-retired-command:';
 const LEGACY_KEY = 'review-desk-pending-command-ids';
 
+/** An id chosen for an action, and whether it came from the earlier versions' map. */
+interface Chosen {
+  id: string;
+  /** From the shared map: retired once it settles, so it is never reused. */
+  legacy: boolean;
+}
+
 /**
- * Ids this tab set and has not cleared, saved or not: a retry here reuses its id even when
- * storage could not be written. Never written back to storage.
+ * Ids this tab set and has not cleared, saved or not: a retry here reuses its id, even when
+ * storage could not be written, and even when another tab has since retired it (the server then
+ * answers from its receipt). Never written back to storage.
  */
-const memory = new Map<string, string>();
+const memory = new Map<string, Chosen>();
 /** Shared-map ids retired in this tab whose mark could not be saved: still retired here. */
 const retiredHere = new Set<string>();
 
@@ -69,26 +77,43 @@ function legacyMap(): Map<string, string> {
 /** Whether a shared-map id was retired: its own mark, read directly, or this tab's record. */
 const retired = (id: string) => retiredHere.has(id) || read(RETIRED + id) !== null;
 
-/** `id`, unless it is a retired one: wherever it was read from, a retired id is never reused. */
-const usable = (id: string | null | undefined) =>
-  id !== null && id !== undefined && !retired(id) ? id : undefined;
+/** What an action's own entry holds: its id and where it came from. */
+function own(key: string): Chosen | null {
+  const text = read(PREFIX + key);
 
-/**
- * The id saved for `key` now: its own entry's, else the shared map's, either only unless retired
- * (a tab may have saved a copy of an id another had just retired).
- */
-function savedId(key: string): string | undefined {
-  const own = read(PREFIX + key);
-
-  return own !== null ? usable(own) : usable(legacyMap().get(key));
-}
-
-/** Saves `id` for `key`, under its own entry; kept in this tab either way. True once saved. */
-function save(key: string, id: string): boolean {
-  memory.set(key, id);
+  if (text === null) return null;
 
   try {
-    localStorage.setItem(PREFIX + key, id);
+    const saved = JSON.parse(text) as Partial<Chosen>;
+
+    if (typeof saved.id === 'string') return { id: saved.id, legacy: saved.legacy === true };
+  } catch {
+    // A bare id, as an entry may hold.
+  }
+
+  return { id: text, legacy: false };
+}
+
+/**
+ * The id saved in storage for `key` now: its own entry's, else the shared map's, either only
+ * unless retired (a tab may have saved a copy of an id another had just retired).
+ */
+function savedChoice(key: string): Chosen | undefined {
+  const entry = own(key);
+
+  if (entry) return retired(entry.id) ? undefined : entry;
+
+  const legacy = legacyMap().get(key);
+
+  return legacy !== undefined && !retired(legacy) ? { id: legacy, legacy: true } : undefined;
+}
+
+/** Saves `chosen` for `key`, under its own entry; kept in this tab either way. True once saved. */
+function save(key: string, chosen: Chosen): boolean {
+  memory.set(key, chosen);
+
+  try {
+    localStorage.setItem(PREFIX + key, JSON.stringify(chosen));
 
     return true;
   } catch {
@@ -103,12 +128,12 @@ function save(key: string, id: string): boolean {
  * change is saved.
  */
 function forget(key: string, id: string, retire: boolean): boolean {
-  if (memory.get(key) === id) memory.delete(key);
+  if (memory.get(key)?.id === id) memory.delete(key);
 
   let saved = true;
 
   try {
-    if (localStorage.getItem(PREFIX + key) === id) localStorage.removeItem(PREFIX + key);
+    if (own(key)?.id === id) localStorage.removeItem(PREFIX + key);
   } catch {
     saved = false;
   }
@@ -172,18 +197,17 @@ export async function githubCommand<T = OperationReceipt>(
   method: 'POST' | 'DELETE' = 'POST',
 ): Promise<T> {
   const key = JSON.stringify({ path, body, method });
-  // Saved before, by this tab or another, or held by this tab though it could not be saved: never
-  // a retired one.
-  const operationId = savedId(key) ?? usable(memory.get(key)) ?? crypto.randomUUID();
-  // One the earlier versions' map held: retired once it settles, so it is never reused.
-  const retire = legacyMap().get(key) === operationId;
+  // This tab's own request not yet settled, as it was first sent; else one saved before, by any
+  // tab, unless retired; else a new one. Where it came from goes with it to its settlement.
+  const chosen = memory.get(key) ?? savedChoice(key) ?? { id: crypto.randomUUID(), legacy: false };
+  const operationId = chosen.id;
 
-  save(key, operationId);
+  save(key, chosen);
 
   try {
     const result = await api<T>(path, { method, body: { ...body, operationId } });
 
-    forget(key, operationId, retire);
+    forget(key, operationId, chosen.legacy);
 
     return result;
   } catch (error) {
@@ -193,7 +217,7 @@ export async function githubCommand<T = OperationReceipt>(
       error.status < 500 &&
       !RETRYABLE.has(error.code ?? '')
     ) {
-      forget(key, operationId, retire);
+      forget(key, operationId, chosen.legacy);
     }
 
     throw error;

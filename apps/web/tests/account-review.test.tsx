@@ -142,6 +142,63 @@ describe('action IDs across the move to account routes', () => {
     vi.restoreAllMocks();
   });
 
+  it('retries an unsettled request with its own id, though another tab retired it meanwhile', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Sent once' };
+    const key = JSON.stringify({ path, body, method: 'POST' });
+    const sent: string[] = [];
+
+    localStorage.setItem('review-desk-pending-command-ids', JSON.stringify([[key, 'legacy']]));
+    vi.resetModules();
+
+    const first = await import('@/lib/operation-command');
+
+    vi.resetModules();
+
+    const second = await import('@/lib/operation-command');
+
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      // This tab's first answer is lost; the server accepted it.
+      if (sent.length === 1) throw new TypeError('Failed to fetch');
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+
+    await expect(first.githubCommand(path, body)).rejects.toThrow();
+    // Another tab replays it, and retires it once its receipt answers.
+    await second.githubCommand(path, body);
+    // This tab's own retry: the same request, never a second reply.
+    await first.githubCommand(path, body);
+
+    expect(sent).toEqual(['legacy', 'legacy', 'legacy']);
+  });
+
+  it('retires a legacy id it settled though the earlier versions’ map became unreadable meanwhile', async () => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Once' };
+    const key = JSON.stringify({ path, body, method: 'POST' });
+
+    localStorage.setItem('review-desk-pending-command-ids', JSON.stringify([[key, 'legacy']]));
+    vi.resetModules();
+
+    const { githubCommand } = await import('@/lib/operation-command');
+    const getItem = Storage.prototype.getItem;
+    let reads = 0;
+
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, name) {
+      if (name === 'review-desk-pending-command-ids' && ++reads > 1) throw new Error('Unreadable');
+
+      return getItem.call(this, name);
+    });
+    vi.stubGlobal('fetch', async () => reply({ operation: { id: 'legacy' } }, 202));
+    await githubCommand(path, body);
+
+    vi.restoreAllMocks();
+    expect(localStorage.getItem('review-desk-retired-command:legacy')).not.toBeNull();
+  });
+
   it('never reuses a live copy of an id another tab retired', async () => {
     const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
     const body = { prId: 'p1', body: 'New reply' };
