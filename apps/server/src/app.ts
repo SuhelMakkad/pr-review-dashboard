@@ -1,4 +1,5 @@
 import Fastify, { type FastifyReply } from 'fastify';
+import { CLAIM_RETENTION_MS } from '@/db/draft-writes.js';
 import { knownRoutes, log } from '@/log.js';
 import fastifyStatic from '@fastify/static';
 import { randomUUID } from 'node:crypto';
@@ -202,6 +203,12 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   // or injects), and only in the process that owns the data directory: `index.ts` takes the lock
   // before the store is opened.
   app.addHook('onReady', async () => {
+    // A claim still pending was left by a process that is gone: it never committed. Settled before
+    // any request can ask about it; settled claims past their retention go.
+    service.store.transaction(() => {
+      service.store.draftWrites.interrupt();
+      service.store.draftWrites.prune(new Date(Date.now() - CLAIM_RETENTION_MS).toISOString());
+    });
     runner.open();
     operations.open();
   });

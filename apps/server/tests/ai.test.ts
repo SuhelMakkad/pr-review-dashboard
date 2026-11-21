@@ -1,3 +1,4 @@
+import type { ReviewDraft } from '@review-desk/shared/review';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
@@ -48,6 +49,12 @@ import {
   type FullReviewResult,
   type SinceReviewResult,
 } from '@review-desk/shared/ai';
+
+/** The draft as it was: content, revision and generation unchanged; its PR may have been read since. */
+const unchanged = (draft: ReviewDraft) => ({
+  ...draft,
+  versions: { ...draft.versions!, observation: expect.any(Number) },
+});
 
 const cleanups: (() => void)[] = [];
 
@@ -908,7 +915,7 @@ describe('AI runner', () => {
     await expect(runner.prepareReview('you', first.id, [0])).rejects.toMatchObject({
       code: 'DRAFT_CHANGED',
     });
-    expect(reviews.draft('you', first.prId)).toEqual(draft);
+    expect(reviews.draft('you', first.prId)).toEqual(unchanged(draft));
 
     await reviews.submit(second.prId, {
       account: 'you',
@@ -997,7 +1004,7 @@ describe('AI runner', () => {
 
       expect(conflict).toBeInstanceOf(ReviewError);
       expect(conflict).toMatchObject({ code: 'PREPARED_REVIEW_EDITED', status: 409 });
-      expect(reviews.draft('you', run.prId)).toEqual(saved);
+      expect(reviews.draft('you', run.prId)).toEqual(unchanged(saved));
 
       const replacement = await runner.prepareReview('you', run.id, [], {
         replace: true,
@@ -1032,7 +1039,7 @@ describe('AI runner', () => {
         expectedDraftRevision: (conflict as ReviewError).details.draftRevision as string,
       }),
     ).rejects.toMatchObject({ code: 'DRAFT_CHANGED', status: 409 });
-    expect(reviews.draft('you', run.prId)).toEqual(saved);
+    expect(reviews.draft('you', run.prId)).toEqual(unchanged(saved));
   });
 
   it('requires confirmation to replace legacy prepared content and keeps its saved copy', async () => {
@@ -1052,7 +1059,7 @@ describe('AI runner', () => {
     const conflict = await runner.prepareReview('you', run.id, []).catch((error: unknown) => error);
 
     expect(conflict).toMatchObject({ code: 'PREPARED_REVIEW_EDITED', status: 409 });
-    expect(reviews.draft('you', run.prId)).toEqual(saved);
+    expect(reviews.draft('you', run.prId)).toEqual(unchanged(saved));
 
     const replacement = await runner.prepareReview('you', run.id, [], {
       replace: true,
@@ -1103,7 +1110,7 @@ describe('AI runner', () => {
       await expect(preparing).rejects.toMatchObject({
         code: change === 'queue' ? 'REVIEW_QUEUED' : 'DRAFT_CHANGED',
       });
-      expect(reviews.draft('you', run.prId)).toEqual(saved);
+      expect(reviews.draft('you', run.prId)).toEqual(unchanged(saved));
     },
   );
 
@@ -1139,7 +1146,7 @@ describe('AI runner', () => {
     await expect(runner.prepareReview('you', run.id, [])).rejects.toMatchObject({
       code: 'PENDING_REVIEW',
     });
-    expect(reviews.draft('you', run.prId)).toEqual(saved);
+    expect(reviews.draft('you', run.prId)).toEqual(unchanged(saved));
     expect(github.writes).toEqual([]);
   });
 

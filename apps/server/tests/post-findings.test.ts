@@ -1,3 +1,4 @@
+import type { ReviewDraft } from '@review-desk/shared/review';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,6 +32,12 @@ import type { DiffFile } from '@review-desk/shared/diff';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubOperation, OperationList } from '@review-desk/shared/operations';
 import { storeRaw } from './raw-settings.js';
+
+/** The draft as it was: content, revision and generation unchanged; its PR may have been read since. */
+const unchanged = (draft: ReviewDraft) => ({
+  ...draft,
+  versions: { ...draft.versions!, observation: expect.any(Number) },
+});
 
 const cleanups: (() => unknown)[] = [];
 
@@ -289,7 +296,7 @@ describe('posting finished reviews', () => {
       'ApproveReview',
     ]);
     expect(pull(2041).snapshot.threads.every((thread) => thread.isResolved)).toBe(true);
-    expect(reviews.draft('you', snapshot.id)).toEqual(draft);
+    expect(reviews.draft('you', snapshot.id)).toEqual(unchanged(draft));
   });
 
   it.each(['assessment', 'finding'] as const)(

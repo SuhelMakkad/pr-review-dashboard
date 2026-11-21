@@ -37,6 +37,25 @@ export function registerOperationRoutes(
 
   serve(
     app,
+    routes.operationReceipt,
+    ({ account, params }) => {
+      // Any row with this id, a local receipt included: what an action's outcome was, if any.
+      const row = sync.store.operations.find(account, params.id);
+
+      if (!row)
+        return failed(404, { error: 'Nothing was received with this id.', code: 'NOT_FOUND' });
+
+      return ok(200, {
+        kind: row.kind === 'local' ? ('local' as const) : ('forge' as const),
+        status: row.status,
+        ...(row.terminalDraft ? { draft: row.terminalDraft } : {}),
+      });
+    },
+    serving,
+  );
+
+  serve(
+    app,
     routes.operationCommand,
     async ({ account, params, body }) => {
       const command = commands.safeParse(params.command);

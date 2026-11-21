@@ -23,8 +23,30 @@ export interface DraftComment {
   githubThreadId?: string | null;
 }
 
+/**
+ * A PR's draft versions. `revision` rises with every change to the draft and `generation` with
+ * every clear, lock and unlock; `observation` rises with every snapshot of the PR, ordering
+ * `githubPendingReview`. A draft write can name the revision and generation it saw, and is
+ * refused (`DRAFT_REVISION_CONFLICT`) when the draft has moved on.
+ */
+export interface DraftVersions {
+  revision: number;
+  generation: number;
+  observation: number;
+}
+
+/**
+ * A guarded draft write's outcome, as its answer, its replays and the attempt lookup carry it: a
+ * commit with the draft revision it made.
+ */
+export type DraftAttempt =
+  | { id: string; state: 'committed'; revision: number }
+  | { id: string; state: 'pending' | 'refused' };
+
 export interface ReviewDraft {
   prId: string;
+  /** The draft's versions when it was read. Absent from answers of older servers. */
+  versions?: DraftVersions;
   body: string;
   event: ReviewEvent;
   comments: DraftComment[];
@@ -39,6 +61,11 @@ export interface ReviewDraft {
   } | null;
   /** A pending review that already exists on GitHub (started there or by an interrupted submit). */
   githubPendingReview: { id: string; commentCount: number } | null;
+  /**
+   * The draft's own pending review, kept with its local revision: the one a submit adds to, over
+   * the forge's (`githubPendingReview`). Absent from answers of older servers.
+   */
+  githubReviewId?: string | null;
   activeOperationId?: string | null;
 }
 

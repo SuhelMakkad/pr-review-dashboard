@@ -27,6 +27,12 @@ export interface OperationRecord extends Omit<GitHubOperation, 'controls' | 'pro
    */
   intent?: Intent;
   /**
+   * The draft's versions as the action's last write to it left them: a local discard's clear, a
+   * completion's cleanup, or a cancellation's unlock. The web takes them as the base for edits it
+   * queued behind the action. Absent while it runs, and for rows from before.
+   */
+  terminalDraft?: { revision: number; generation: number };
+  /**
    * `local`: the receipt of a write made locally that answered an outbox ID, such as discarding a
    * draft with nothing on the forge. Kept only so a retry of that ID answers as the first time;
    * Activity never shows one. Absent for forge operations, rows from before receipts included.

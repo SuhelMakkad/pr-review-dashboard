@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { draftVersionsOf } from '@/db/versions.js';
 import {
   fingerprint as intentFingerprint,
   fullyReceipted,
@@ -344,6 +345,7 @@ export class OperationQueue {
       attempts: _attempts,
       steps: _steps,
       intent: _intent,
+      terminalDraft: _terminal,
       pendingReviewBackup: _backup,
       ...operation
     } = row;
@@ -462,10 +464,18 @@ export class OperationQueue {
         steps: [],
         attempts: 0,
         requestKey: fingerprint({ prId, request }),
+        terminalDraft: this.draftNow(account, prId),
       });
 
       return true;
     });
+  }
+
+  /** The draft's revision and generation now, as a terminal write left them. */
+  private draftNow(account: string, prId: string): { revision: number; generation: number } {
+    const { revision, generation } = draftVersionsOf(this.sync.store, account, prId);
+
+    return { revision, generation };
   }
 
   private existing(account: string, id: string): OperationRecord | undefined {
@@ -512,6 +522,8 @@ export class OperationQueue {
     id: string,
     action: GitHubAction,
     request: unknown = action,
+    /** Checked in the transaction that admits the action (a draft's fence), never for a replay. */
+    fence: () => void = () => undefined,
   ): OperationReceipt {
     return this.insert(
       account,
@@ -522,6 +534,7 @@ export class OperationQueue {
       () => this.sync.detailFor(account, prId)?.snapshot,
       // Only new work needs the account in use; a replay above it returns its receipt.
       () => this.assertSelected(account),
+      fence,
     );
   }
 
@@ -551,6 +564,7 @@ export class OperationQueue {
     request: unknown,
     lookup: () => PullRequestSnapshot | undefined,
     admit: () => void = () => undefined,
+    fence: () => void = () => undefined,
   ): OperationReceipt {
     const requestKey = fingerprint({ prId, request });
     const existing = this.existing(account, id);
@@ -605,6 +619,8 @@ export class OperationQueue {
 
     this.sync.store.transaction(() => {
       const drafts = new DraftStore(this.sync.store);
+
+      fence();
 
       // Automatic posts never consume the local draft or its pending GitHub review.
       if (CONTENT_ACTIONS.has(action.type) && action.type !== 'ai_review')
@@ -750,10 +766,13 @@ export class OperationQueue {
       this.save({ ...row, dismissedAt: isoNow(this.clock) });
     } else {
       this.sync.store.transaction(() => {
+        // Unlocked first, so the row records what the unlock left.
+        new DraftStore(this.sync.store).unlock(account, row.prId, id);
         this.save({
           ...row,
           status: 'cancelled',
           finishedAt: isoNow(this.clock),
+          terminalDraft: this.draftNow(account, row.prId),
           progress:
             command === 'reopen'
               ? 'Returned to your draft. Saved content is available here.'
@@ -769,7 +788,6 @@ export class OperationQueue {
                         ? say('outbox.cancelled-approved')
                         : 'Cancelled. Nothing was posted.',
         });
-        new DraftStore(this.sync.store).unlock(account, row.prId, id);
       });
     }
 
@@ -789,6 +807,7 @@ export class OperationQueue {
         ...row,
         status: 'cancelled',
         finishedAt: isoNow(this.clock),
+        terminalDraft: this.draftNow(row.account, row.prId),
         progress: 'Pending-review cleanup queued. Your content is preserved.',
       });
 
@@ -1955,6 +1974,7 @@ export class OperationQueue {
         result,
         error: null,
         finishedAt: isoNow(this.clock),
+        terminalDraft: this.draftNow(row.account, row.prId),
         progress:
           row.action.type === 'discard'
             ? row.action.restoreOperationId
