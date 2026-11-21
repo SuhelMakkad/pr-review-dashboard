@@ -554,10 +554,36 @@ export const routes = {
     query: z.object({
       base: z.coerce.number().int().nonnegative().optional(),
       generation: z.coerce.number().int().nonnegative().optional(),
+      /** When given, a claim of another kind under the id is a conflict, not its answer. */
+      kind: z.enum(['write', 'start']).optional(),
     }),
     responses: {
       200: as<
-        { attempt: DraftAttempt & { result?: unknown } } | { arrived: false; fenced: boolean }
+        | { attempt: DraftAttempt & { result?: unknown } }
+        | {
+            arrived: false;
+            fenced: boolean;
+            /** The miss proves it was never received: a sealed id no pruning has reached. */
+            provable: boolean;
+          }
+      >(),
+    },
+  }),
+  /**
+   * Stops waiting for a draft write or AI start sent as `attemptId`: its claim's state if it was
+   * received, else a marker that refuses every later arrival of it, with whether its history
+   * proves it was never received.
+   */
+  abandonDraftAttempt: json('POST', `${pulls}/:id/draft/attempts/:attemptId/abandon`, {
+    body: {
+      schema: z.object({ kind: z.enum(['write', 'start']) }).strict(),
+      invalid: { error: 'Invalid request.', details: true },
+    },
+    responses: {
+      200: as<
+        | { outcome: 'pending' }
+        | { outcome: 'committed' | 'refused'; attempt: DraftAttempt & { result?: unknown } }
+        | { outcome: 'not-admitted' | 'unknown' }
       >(),
     },
   }),
@@ -596,6 +622,15 @@ export const routes = {
   }),
   operationReceipt: json('GET', '/api/accounts/:account/operations/:id/receipt', {
     responses: { 200: as<CommandReceipt | AbandonedReceipt>() },
+  }),
+  /**
+   * The claim ledger's checkpoint, sealed for the account by this server process: a new attempt
+   * id carries it (`ck1-<checkpoint>-<seal>-<uuid>`), so a miss of that id can prove it was never
+   * received. After a restart it is read again: an id sealed before proves nothing, and is never
+   * admitted afresh (`WRITE_HISTORY_GAP`).
+   */
+  claimCheckpoint: json('GET', '/api/accounts/:account/claim-checkpoint', {
+    responses: { 200: as<{ checkpoint: number; seal: string }>() },
   }),
   /** The account's receipt-history epoch, read before a command's first send (see `abandon`). */
   receiptEpoch: json('GET', '/api/accounts/:account/receipt-epoch', {

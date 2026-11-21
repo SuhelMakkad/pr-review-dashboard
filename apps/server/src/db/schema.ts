@@ -203,12 +203,32 @@ export const draftWrites = sqliteTable(
     /** A commit's revision and result, or a refusal's status and answer. */
     result: text('result', { mode: 'json' }).$type<unknown>(),
     createdAt: text('created_at').notNull(),
+    /** Its place in the ledger, assigned as it is claimed: see `claimLedger`. */
+    seq: integer('seq'),
   },
   (table) => [
     primaryKey({ columns: [table.account, table.id] }),
     index('draft_writes_by_state').on(table.state, table.createdAt),
   ],
 );
+
+/**
+ * The claim ledger's one row: the last `seq` it assigned, kept when every claim is pruned. Its
+ * checkpoints are sealed with a secret only the running process holds (see `db/claim-ids.ts`).
+ */
+export const claimLedger = sqliteTable('claim_ledger', {
+  id: integer('id').primaryKey(),
+  last: integer('last').notNull().default(0),
+});
+
+/**
+ * Per account, the highest `seq` pruning deleted: a missing claim newer than it was never
+ * received, one at or older than it may have been and pruned since.
+ */
+export const claimWatermarks = sqliteTable('claim_watermarks', {
+  account: text('account').primaryKey(),
+  watermark: integer('watermark').notNull().default(0),
+});
 
 /** AI task runs. `result` and `usage` stay serialised so secrets can be redacted as text. */
 export const aiRuns = sqliteTable(

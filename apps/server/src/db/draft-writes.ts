@@ -1,5 +1,6 @@
-import { and, eq, inArray, lt } from 'drizzle-orm';
-import { draftWrites } from '@/db/schema.js';
+import { randomBytes } from 'node:crypto';
+import { and, eq, inArray, lt, max, ne, sql } from 'drizzle-orm';
+import { claimLedger, claimWatermarks, draftWrites } from '@/db/schema.js';
 import type { Database } from '@/db/store.js';
 
 export type ClaimState = 'pending' | 'committed' | 'refused';
@@ -16,7 +17,14 @@ export interface WriteClaim {
   state: ClaimState;
   result: unknown;
   createdAt: string;
+  seq?: number | null;
 }
+
+/** The fingerprint of a claim recorded by a stop, not by a request: an abandonment marker. */
+export const ABANDONED = 'abandoned';
+
+/** What a stop decided of a claim it found missing. */
+export type AbandonDecision = 'not-admitted' | 'unknown';
 
 /** What a settled claim keeps: a commit's revision and answer, or a refusal's status and answer. */
 export type ClaimResult = { revision: number; body: unknown } | { status: number; body: unknown };
@@ -36,6 +44,9 @@ export const INTERRUPTED = {
  * method is one statement and opens no transaction of its own, so it joins the caller's.
  */
 export class DraftWriteLog {
+  /** The secret this process seals checkpoints with (see `secret`). */
+  private readonly sealing = randomBytes(32).toString('hex');
+
   constructor(private readonly db: Database) {}
 
   find(account: string, id: string): WriteClaim | undefined {
@@ -46,12 +57,101 @@ export class DraftWriteLog {
       .get() as WriteClaim | undefined;
   }
 
-  /** Claims a new id, pending. The caller has checked there is no claim for it yet. */
-  claim(claim: Omit<WriteClaim, 'state' | 'result'>): void {
+  /** Claims a new id, pending, at the ledger's next `seq`. The caller has checked there is none. */
+  claim(claim: Omit<WriteClaim, 'state' | 'result' | 'seq'>): void {
     this.db
       .insert(draftWrites)
-      .values({ ...claim, state: 'pending', result: null })
+      .values({ ...claim, state: 'pending', result: null, seq: this.next() })
       .run();
+  }
+
+  /**
+   * Records a stop of an id never received: a refused claim (an abandonment marker) that answers
+   * every later arrival of it, never pruned. The caller has checked there is none.
+   */
+  abandon(marker: {
+    account: string;
+    id: string;
+    prId: string;
+    kind: 'write' | 'start';
+    decision: AbandonDecision;
+    createdAt: string;
+  }): void {
+    const { decision, ...claim } = marker;
+
+    this.db
+      .insert(draftWrites)
+      .values({
+        ...claim,
+        fingerprint: ABANDONED,
+        baseRevision: null,
+        baseGeneration: null,
+        state: 'refused',
+        result: {
+          status: 409,
+          body: {
+            error: 'You stopped waiting for this, so it can no longer be saved.',
+            code: 'WRITE_ABANDONED',
+            decision,
+          },
+        },
+        seq: this.next(),
+      })
+      .run();
+  }
+
+  /** The ledger's row. The migration makes it; should it ever be missing, it is made here. */
+  private ledger(): { last: number } {
+    const read = () =>
+      this.db
+        .select({ last: claimLedger.last })
+        .from(claimLedger)
+        .where(eq(claimLedger.id, 1))
+        .get();
+    const found = read();
+
+    if (found) return found;
+
+    this.db.insert(claimLedger).values({ id: 1, last: 0 }).onConflictDoNothing().run();
+
+    return read()!;
+  }
+
+  /** The ledger's next `seq`, assigned. */
+  private next(): number {
+    this.ledger();
+
+    return this.db
+      .update(claimLedger)
+      .set({ last: sql`${claimLedger.last} + 1` })
+      .where(eq(claimLedger.id, 1))
+      .returning({ last: claimLedger.last })
+      .get()!.last;
+  }
+
+  /** The last `seq` the ledger assigned: a checkpoint every claim after it is newer than. */
+  checkpoint(): number {
+    return this.ledger().last;
+  }
+
+  /**
+   * The secret checkpoints are sealed with: this process's own, never stored, so a database put
+   * back from a backup cannot vouch for an id sealed against the history it lost (see
+   * `db/claim-ids.ts`).
+   */
+  secret(): string {
+    return this.sealing;
+  }
+
+  /** The highest `seq` pruning deleted of `account`'s claims: 0 when none. */
+  watermarkOf(account: string): number {
+    return (
+      this.db
+        .select({ watermark: claimWatermarks.watermark })
+        .from(claimWatermarks)
+        .where(eq(claimWatermarks.account, account))
+        .get()?.watermark ?? 0
+    );
   }
 
   /** Settles a pending claim, true when it did; one already settled keeps its outcome. */
@@ -108,16 +208,34 @@ export class DraftWriteLog {
       .run();
   }
 
-  /** Removes settled claims created before `before`. A pending claim is never removed. */
+  /**
+   * Removes settled claims created before `before`, raising each account's watermark to the
+   * highest `seq` removed, in the caller's transaction. A pending claim is never removed, nor an
+   * abandonment marker, which must answer its id for good.
+   */
   prune(before: string): void {
-    this.db
-      .delete(draftWrites)
-      .where(
-        and(
-          inArray(draftWrites.state, ['committed', 'refused']),
-          lt(draftWrites.createdAt, before),
-        ),
-      )
-      .run();
+    const old = and(
+      inArray(draftWrites.state, ['committed', 'refused']),
+      lt(draftWrites.createdAt, before),
+      ne(draftWrites.fingerprint, ABANDONED),
+    );
+    const removed = this.db
+      .select({ account: draftWrites.account, seq: max(draftWrites.seq) })
+      .from(draftWrites)
+      .where(old)
+      .groupBy(draftWrites.account)
+      .all();
+
+    for (const { account, seq } of removed)
+      this.db
+        .insert(claimWatermarks)
+        .values({ account, watermark: seq ?? 0 })
+        .onConflictDoUpdate({
+          target: claimWatermarks.account,
+          set: { watermark: sql`max(${claimWatermarks.watermark}, ${seq ?? 0})` },
+        })
+        .run();
+
+    this.db.delete(draftWrites).where(old).run();
   }
 }

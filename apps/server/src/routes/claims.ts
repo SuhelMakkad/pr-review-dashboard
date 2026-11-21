@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DraftAttempt } from '@review-desk/shared/review';
-import type { WriteClaim } from '@/db/draft-writes.js';
+import { behindHistory, parseAttemptId } from '@/db/claim-ids.js';
+import { ABANDONED, type WriteClaim } from '@/db/draft-writes.js';
 import type { Store } from '@/db/store.js';
 import { draftVersionsOf, type WriteFence } from '@/db/versions.js';
 import { failed, ok, type Failed } from '@/http/serve.js';
@@ -105,6 +106,17 @@ function answerOf(claim: WriteClaim): { status: number; body: unknown } | Failed
   return ok(200, { ...(result?.body as object), attempt: attemptOf(claim) });
 }
 
+/** An id used before for another request, PR or kind. */
+export const idConflict = () =>
+  failed(409, {
+    error: 'This write id was already used for another request.',
+    code: 'WRITE_ID_CONFLICT',
+  });
+
+/** A sealed id that does not verify. */
+export const invalidAttempt = () =>
+  failed(400, { error: 'This attempt id is not valid.', code: 'INVALID_ATTEMPT_ID' });
+
 /**
  * Runs a draft write, or AI start, under its guard. With a write id, it is claimed as it arrives,
  * before any await: a retry answers from the original's outcome, never from its own path. The
@@ -161,10 +173,20 @@ export async function claimed<B extends object>(
   }
 
   const fingerprint = requestFingerprint(claim.request);
+  // A sealed id out of shape is refused outright: it never falls through to a bare id's admission.
+  const parsed = parseAttemptId(id, account, store.draftWrites.secret());
+
+  if (parsed.kind === 'invalid') return invalidAttempt();
+
   const existing = store.transaction(() => {
     const found = store.draftWrites.find(account, id);
 
     if (found) return found;
+
+    // A sealed id with no claim, from before pruning reached, or sealed by an earlier process: an
+    // original of it may have been received and its claim lost since, so it is never admitted
+    // afresh. A bare id keeps its admission.
+    if (behindHistory(parsed, store.draftWrites.watermarkOf(account))) return 'gap' as const;
 
     store.draftWrites.claim({
       account,
@@ -180,13 +202,18 @@ export async function claimed<B extends object>(
     return null;
   });
 
-  if (existing)
-    return existing.fingerprint === fingerprint
-      ? answerOf(existing)
-      : failed(409, {
-          error: 'This write id was already used for another request.',
-          code: 'WRITE_ID_CONFLICT',
-        });
+  if (existing === 'gap')
+    return failed(409, {
+      error:
+        'This can no longer be confirmed or saved under its id. Check the draft, then try again.',
+      code: 'WRITE_HISTORY_GAP',
+    });
+
+  // A stopped id answers its stop's refusal, for its own PR and kind only.
+  if (existing?.fingerprint === ABANDONED)
+    return existing.prId === prId && existing.kind === kind ? answerOf(existing) : idConflict();
+
+  if (existing) return existing.fingerprint === fingerprint ? answerOf(existing) : idConflict();
 
   try {
     await run(fence);
