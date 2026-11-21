@@ -273,8 +273,6 @@ export class OperationQueue {
   open(): void {
     if (this.opened || this.closed) return;
 
-    this.opened = true;
-
     for (const data of this.log.interrupted()) {
       const uncertain = data.steps.some((step) => !step.completedAt && step.uncertain);
 
@@ -287,6 +285,9 @@ export class OperationQueue {
       });
     }
 
+    // Open only once every interrupted action is recovered: until then, nothing is armed, so
+    // nothing is sent beside an action still marked running.
+    this.opened = true;
     // A cooldown ending, or another account in use, can make an action due.
     this.unsubscribe = this.sync.events.subscribe(({ event }) => {
       if (event.type === 'status') this.wake();
@@ -914,8 +915,7 @@ export class OperationQueue {
       });
     }
 
-    this.wake();
-
+    // Woken by its save once that commits: never on a change a caller's transaction may undo.
     return { operation: this.public(this.row(account, id)) };
   }
 

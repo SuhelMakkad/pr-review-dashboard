@@ -372,8 +372,8 @@ describe('GitHub actions across a switch', () => {
     expect(queue.inProgress('you')).toBe(1);
     expect(fixture.writes.filter((write) => write.op === 'SubmitReview')).toHaveLength(1);
 
+    // Woken by the switch's status, with nothing else to wake it.
     await service.switchAccount(DEMO_SECOND_ACCOUNT, 'you');
-    queue.wake();
     await vi.waitFor(() => expect(queue.get('you', waiting.id).status).toBe('succeeded'), {
       timeout: 2500,
     });

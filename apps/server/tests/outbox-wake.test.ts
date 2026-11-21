@@ -373,6 +373,61 @@ describe('the outbox sleeps until an action is due', () => {
     expect(clock.wakes()).toEqual([100]);
   });
 
+  it('arms nothing, and sends nothing, when recovering interrupted actions fails', async () => {
+    const { clock, store, sync, queue, prs, view, sent } = await setup();
+
+    await queue.pause();
+
+    // Left mid-send by a process that is gone.
+    for (const action of [view(prs[0]), view(prs[1])])
+      store.operations.update({ ...store.operations.find('you', action.id)!, status: 'running' });
+
+    await queue.close();
+
+    const restarted = new OperationQueue(sync, { mutationIntervalMs: 0 });
+    const update = store.operations.update.bind(store.operations);
+    let saves = 0;
+
+    cleanups.push(() => restarted.close());
+    vi.spyOn(store.operations, 'update').mockImplementation((row) => {
+      if (++saves === 2) throw new Error('disk I/O error');
+
+      return update(row);
+    });
+
+    expect(() => restarted.open()).toThrow('disk I/O error');
+    expect(clock.wakes()).toEqual([]);
+
+    // Nothing wakes it afterwards either: it never opened.
+    restarted.wake();
+    sync.events.emit({ type: 'status', status: sync.status });
+
+    expect(clock.wakes()).toEqual([]);
+    expect(sent()).toBe(0);
+  });
+
+  it("keeps its wake when a cancel in a caller's transaction is rolled back", async () => {
+    const { clock, store, queue, view, status, sent } = await setup();
+    const action = view();
+
+    expect(clock.wakes()).toEqual([100]);
+    expect(() =>
+      store.transaction(() => {
+        void queue.control('you', action.id, 'cancel');
+
+        throw new Error('rolled back');
+      }),
+    ).toThrow('rolled back');
+
+    expect(status(action.id)).toBe('queued');
+    expect(clock.wakes()).toEqual([100]);
+
+    clock.fire();
+
+    expect(await ticked(clock, () => status(action.id) === 'succeeded')).toEqual([]);
+    expect(sent()).toBe(1);
+  });
+
   it('stops listening for status changes once closed', async () => {
     const { sync, queue } = await setup();
     const before = sync.events.subscriberCount;
