@@ -68,38 +68,63 @@ describe('action IDs across the move to account routes', () => {
     expect(scopedKey('not json')).toBe('not json');
   });
 
-  it('never brings back an id another tab forgot, as it forgets or saves its own', async () => {
-    const key = (path: string) => JSON.stringify({ path, body: {}, method: 'POST' });
-    const saved = () =>
-      new Map(
-        JSON.parse(localStorage.getItem('review-desk-pending-command-ids')!) as [string, string][],
-      );
+  it('never brings back an id another tab forgot, however their changes interleave', async () => {
+    const key = (id: string) =>
+      JSON.stringify({ path: `/api/accounts/me/pulls/${id}/review`, body: {}, method: 'POST' });
 
+    // An earlier version's shared map, holding A and B.
     localStorage.setItem(
       'review-desk-pending-command-ids',
       JSON.stringify([
-        [key('/api/accounts/me/pulls/a/review'), 'a'],
-        [key('/api/accounts/me/pulls/b/review'), 'b'],
+        [key('a'), 'a'],
+        [key('b'), 'b'],
       ]),
     );
     vi.resetModules();
 
-    const { forgetLegacy, githubCommand } = await import('@/lib/operation-command');
+    const first = await import('@/lib/operation-command');
 
-    // Another tab forgets A, after this one read both.
-    localStorage.setItem(
-      'review-desk-pending-command-ids',
-      JSON.stringify([[key('/api/accounts/me/pulls/b/review'), 'b']]),
-    );
+    vi.resetModules();
 
-    expect(forgetLegacy(key('/api/accounts/me/pulls/b/review'), 'b')).toBe(true);
-    expect(saved().size).toBe(0);
+    const second = await import('@/lib/operation-command');
+    const left = () =>
+      ['a', 'b'].flatMap((id) => first.legacyIds(`/api/accounts/me/pulls/${id}/review`, 'POST'));
 
-    // Its own command's id is kept and forgotten the same way, never restoring A.
-    vi.stubGlobal('fetch', async () => reply({ operation: { id: 'x' } }, 202));
-    await githubCommand('/api/accounts/me/pulls/c/viewed', {});
+    // One tab forgets A while the other forgets B and keeps, then clears, an id of its own.
+    vi.stubGlobal('fetch', async () => reply({ operation: { id: 'c' } }, 202));
+    expect(first.forgetLegacy(key('a'), 'a')).toBe(true);
 
-    expect(saved().size).toBe(0);
+    const sending = second.githubCommand('/api/accounts/me/pulls/c/viewed', {});
+
+    expect(second.forgetLegacy(key('b'), 'b')).toBe(true);
+    await sending;
+
+    expect(left()).toEqual([]);
+  });
+
+  it('sends a retry with the id it was first sent with, though storage could not keep it', async () => {
+    const { githubCommand } = await import('@/lib/operation-command');
+    const sent: string[] = [];
+
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('Quota exceeded');
+    });
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      if (sent.length === 1) throw new TypeError('Failed to fetch');
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+
+    await expect(githubCommand(path, { prId: 'p1', body: 'Once' })).rejects.toThrow();
+    await githubCommand(path, { prId: 'p1', body: 'Once' });
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toBe(sent[0]);
+    vi.restoreAllMocks();
   });
 
   it('sends an ID saved by an earlier version again on the account’s route', async () => {
@@ -513,7 +538,13 @@ describe('drafts and Activity per account', () => {
     expect(hook.result.current.writer.commandViews()).toMatchObject([
       { id: 'kept-before', kind: 'submit', legacy: true, canSendAgain: false },
     ]);
-    expect(JSON.parse(localStorage.getItem('review-desk-pending-command-ids')!)).toEqual([]);
+    // Forgotten there once recorded: never offered for adoption again.
+    expect(
+      (await import('@/lib/operation-command')).legacyIds(
+        '/api/accounts/me/pulls/p1/review',
+        'POST',
+      ),
+    ).toEqual([]);
     client.clear();
   });
 

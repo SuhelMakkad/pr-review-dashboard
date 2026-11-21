@@ -1,9 +1,22 @@
 import type { OperationReceipt } from '@review-desk/shared/operations';
 import { api, ApiError } from '@/lib/api';
-import { storage } from '@/lib/storage';
 
-const STORAGE_KEY = 'review-desk-pending-command-ids';
-let pending = new Map<string, string>();
+/**
+ * Each command's id is kept, across reloads, under its own storage key: setting or forgetting one
+ * never rewrites another, so no tab's change can undo another's. Earlier versions kept every id
+ * in one shared map (`LEGACY_KEY`): it is only read now, and an id of it forgotten here is marked
+ * so under its own key, never written back into it.
+ */
+const PREFIX = 'review-desk-pending-command:';
+const LEGACY_KEY = 'review-desk-pending-command-ids';
+/** The mark an id of the shared map leaves once forgotten here. */
+const FORGOTTEN = '!';
+
+/**
+ * Ids this tab set and has not cleared, saved or not: a retry here reuses its id even when
+ * storage could not be written. Never written back to storage.
+ */
+const memory = new Map<string, string>();
 
 /**
  * The key a command saved by an earlier version, on a legacy route that named its account in the
@@ -30,47 +43,90 @@ export function scopedKey(key: string): string {
   }
 }
 
-try {
-  pending = new Map(
-    (JSON.parse(storage.get(STORAGE_KEY) ?? '[]') as [string, string][]).map(([key, id]) => [
-      scopedKey(key),
-      id,
-    ]),
-  );
-} catch {
-  // An invalid saved identifier must not prevent opening the application.
-}
-
-/**
- * The saved ids as storage holds them now: another tab may have added or forgotten some since this
- * one read them. This tab's own copy when storage cannot be read.
- */
-function current(): Map<string, string> {
+/** The earlier versions' shared map, as storage holds it now; empty when unreadable. */
+function legacyMap(): Map<string, string> {
   try {
-    const text = localStorage.getItem(STORAGE_KEY);
-
     return new Map(
-      (JSON.parse(text ?? '[]') as [string, string][]).map(([key, id]) => [scopedKey(key), id]),
+      (JSON.parse(localStorage.getItem(LEGACY_KEY) ?? '[]') as [string, string][]).map(
+        ([key, id]) => [scopedKey(key), id],
+      ),
     );
   } catch {
-    return new Map(pending);
+    return new Map();
+  }
+}
+
+/** What storage holds for `key` now under its own entry: an id, its forgotten mark, or nothing. */
+function entry(key: string): string | null {
+  try {
+    return localStorage.getItem(PREFIX + key);
+  } catch {
+    return null;
+  }
+}
+
+/** The id saved for `key` now: its own entry's, else the shared map's unless forgotten here. */
+function savedId(key: string): string | undefined {
+  const own = entry(key);
+
+  if (own !== null) return own.startsWith(FORGOTTEN) ? undefined : own;
+
+  return legacyMap().get(key);
+}
+
+/** Every id saved now, by key. */
+function savedIds(): Map<string, string> {
+  const ids = new Map<string, string>();
+  const forgotten = new Set<string>();
+
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const name = localStorage.key(index);
+
+      if (!name?.startsWith(PREFIX)) continue;
+
+      const value = localStorage.getItem(name) ?? '';
+      const key = name.slice(PREFIX.length);
+
+      if (value.startsWith(FORGOTTEN)) forgotten.add(key);
+      else ids.set(key, value);
+    }
+  } catch {
+    // Unreadable: only what this tab holds.
+  }
+
+  for (const [key, id] of legacyMap()) if (!ids.has(key) && !forgotten.has(key)) ids.set(key, id);
+
+  return ids;
+}
+
+/** Saves `id` for `key`, under its own entry; kept in this tab either way. True once saved. */
+function save(key: string, id: string): boolean {
+  memory.set(key, id);
+
+  try {
+    localStorage.setItem(PREFIX + key, id);
+
+    return true;
+  } catch {
+    return false;
   }
 }
 
 /**
- * Sets (`id`) or forgets (null; only while it is still `only`, when given) one saved id, in storage
- * as it is now, every other entry kept: one tab's change never undoes another's. True once saved.
+ * Forgets `id` for `key`, only while it is still that id: its own entry removed, or, for an id the
+ * shared map holds, marked forgotten. True once the change is saved.
  */
-function update(key: string, id: string | null, only?: string): boolean {
-  const next = current();
-
-  if (id !== null) next.set(key, id);
-  else if (only === undefined || next.get(key) === only) next.delete(key);
-
-  pending = next;
+function forget(key: string, id: string): boolean {
+  if (memory.get(key) === id) memory.delete(key);
 
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([...next]));
+    const own = entry(key);
+
+    if (own !== null && own !== id) return true;
+
+    if (legacyMap().get(key) === id) localStorage.setItem(PREFIX + key, FORGOTTEN + id);
+    else localStorage.removeItem(PREFIX + key);
 
     return true;
   } catch {
@@ -83,7 +139,7 @@ function update(key: string, id: string | null, only?: string): boolean {
  * which its writer sends): each with its key, to be forgotten once its new owner recorded it.
  */
 export function legacyIds(path: string, method: 'POST' | 'DELETE'): { key: string; id: string }[] {
-  return [...current()].flatMap(([key, id]) => {
+  return [...savedIds()].flatMap(([key, id]) => {
     try {
       const sent = JSON.parse(key) as { path: string; method: string };
 
@@ -99,7 +155,7 @@ export function legacyIds(path: string, method: 'POST' | 'DELETE'): { key: strin
  * the deletion is saved, false if it was not.
  */
 export function forgetLegacy(key: string, id: string): boolean {
-  return update(key, null, id);
+  return forget(key, id);
 }
 
 /**
@@ -122,14 +178,15 @@ export async function githubCommand<T = OperationReceipt>(
   method: 'POST' | 'DELETE' = 'POST',
 ): Promise<T> {
   const key = JSON.stringify({ path, body, method });
-  const operationId = current().get(key) ?? crypto.randomUUID();
+  // Saved before, by this tab or another, or held by this tab though it could not be saved.
+  const operationId = savedId(key) ?? memory.get(key) ?? crypto.randomUUID();
 
-  update(key, operationId);
+  save(key, operationId);
 
   try {
     const result = await api<T>(path, { method, body: { ...body, operationId } });
 
-    update(key, null, operationId);
+    forget(key, operationId);
 
     return result;
   } catch (error) {
@@ -139,7 +196,7 @@ export async function githubCommand<T = OperationReceipt>(
       error.status < 500 &&
       !RETRYABLE.has(error.code ?? '')
     ) {
-      update(key, null, operationId);
+      forget(key, operationId);
     }
 
     throw error;
