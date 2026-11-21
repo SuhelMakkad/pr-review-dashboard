@@ -17,15 +17,15 @@ import type {
   CompareResult,
   DetectOptions,
   DetectResult,
-  GitHubApi,
   PinnedFiles,
   RateBudget,
   RemoteFile,
   ResolvedPull,
   ReviewReceipt,
-} from '@/github/api.js';
-import { GitHubError } from '@/github/errors.js';
-import type { ThreadInput } from '@/github/write.js';
+} from '@/forge/types.js';
+import type { ForgePort } from '@/forge/port.js';
+import { ForgeError } from '@/forge/port.js';
+import type { ThreadInput } from '@/forge/types.js';
 import type { ReviewEvent } from '@review-desk/shared/review';
 import { diffKey, fingerprint } from '@/gitlab/fingerprint.js';
 import {
@@ -91,7 +91,7 @@ const CLOCK_SKEW_MS = 2 * 60_000;
  */
 function unlessMissing<T>(work: Promise<T>, fallback: () => T | Promise<T>): Promise<T> {
   return work.catch((error: unknown) =>
-    error instanceof GitHubError && error.status === 404 ? fallback() : Promise.reject(error),
+    error instanceof ForgeError && error.status === 404 ? fallback() : Promise.reject(error),
   );
 }
 const SHA = /^[0-9a-f]{40,64}$/i;
@@ -164,7 +164,7 @@ function searchFilters(history: HistoryQuery): string[] {
  * the app as pull requests; see `ids.ts` for how their ids are formed and `snapshot.ts` for how
  * GitLab's notes, reviewers and approvals become reviews, requests and verdicts.
  */
-export class GitLab implements GitHubApi {
+export class GitLab implements ForgePort {
   /** An approval takes no text: its summary is a separate note (see `ForgeTraits`). */
   readonly traits = forgeTraits.gitlab;
 
@@ -304,7 +304,7 @@ export class GitLab implements GitHubApi {
     const { login } = await this.identity();
 
     if (login.toLowerCase() !== expected.toLowerCase())
-      throw new GitHubError(
+      throw new ForgeError(
         `The GitLab CLI is now signed in as ${login}, not ${expected}. Nothing was sent; sign in as ${expected} again or switch accounts.`,
         null,
         409,
@@ -502,7 +502,7 @@ export class GitLab implements GitHubApi {
     const response = await this.transport.request<RawMergeRequest>({ path: mergeRequestPath(ref) });
 
     if (response.status === 404)
-      throw new GitHubError(
+      throw new ForgeError(
         `MR ${previous?.number ?? ref.iid} is unavailable; its cached record was retained.`,
       );
     if (response.status >= 400) throw responseError(response, 'Could not load the merge request');
@@ -585,7 +585,7 @@ export class GitLab implements GitHubApi {
           continue;
         }
 
-        throw new GitHubError(
+        throw new ForgeError(
           'The merge request changed while it was read. It is read again shortly.',
           null,
           null,
@@ -609,7 +609,7 @@ export class GitLab implements GitHubApi {
                 ? (response.data.commit?.id ?? null)
                 : undefined,
           (error: unknown) => {
-            if (error instanceof GitHubError && error.outcome === 'rate_limit') throw error;
+            if (error instanceof ForgeError && error.outcome === 'rate_limit') throw error;
 
             return undefined;
           },
@@ -768,14 +768,14 @@ export class GitLab implements GitHubApi {
     // Up to 10,000 notes; past that, absence cannot be shown.
     for (let page = 0; next; page++) {
       if (page === 100)
-        throw new GitHubError('The conversation is too long to check for an earlier post.');
+        throw new ForgeError('The conversation is too long to check for an earlier post.');
 
       const response: GitLabResponse<RawNote[]> = await this.transport.request<RawNote[]>({
         path: next,
       });
 
       if (response.status >= 400) throw responseError(response, 'Could not read the notes');
-      if (!Array.isArray(response.data)) throw new GitHubError('Could not read the notes.');
+      if (!Array.isArray(response.data)) throw new ForgeError('Could not read the notes.');
 
       const found = response.data.find(
         (note) =>
@@ -807,7 +807,7 @@ export class GitLab implements GitHubApi {
           : null;
 
       if (link && !nextPage && !next)
-        throw new GitHubError('The next page of notes could not be followed.');
+        throw new ForgeError('The next page of notes could not be followed.');
     }
 
     return null;
@@ -857,7 +857,7 @@ export class GitLab implements GitHubApi {
 
     // GitLab stops comparing large ranges early; a partial list would hide changed files.
     if (comparison.data.compare_timeout)
-      throw new GitHubError(
+      throw new ForgeError(
         'GitLab could not finish comparing these commits. Try again, or review the full diff.',
         null,
         null,
@@ -1063,7 +1063,7 @@ export class GitLab implements GitHubApi {
   /** GitLab has no API for viewed files, so marks live in Review Desk with the diff they saw. */
   private markViewed(prId: string, path: string, mark: string | null): void {
     if (!this.settings)
-      throw new GitHubError('Viewed files cannot be saved here.', null, null, 'rejected');
+      throw new ForgeError('Viewed files cannot be saved here.', null, null, 'rejected');
 
     const viewed = { ...this.viewed(prId) };
 

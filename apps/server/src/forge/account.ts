@@ -1,4 +1,4 @@
-import { GitHubError } from '@/github/errors.js';
+import { ForgeError } from '@/forge/port.js';
 
 /**
  * A forge CLI is signed in as someone other than the account a read was for. Nothing from that
@@ -25,9 +25,9 @@ export class AccountUnavailable extends Error {
  * account's cooldown.
  */
 export function unattributed(error: unknown): unknown {
-  if (!(error instanceof GitHubError) || error.outcome !== 'rate_limit') return error;
+  if (!(error instanceof ForgeError) || error.outcome !== 'rate_limit') return error;
 
-  return new GitHubError(
+  return new ForgeError(
     `${error.message} Review Desk could not confirm which GitLab account it was for, so it will try again.`,
     null,
     error.status,

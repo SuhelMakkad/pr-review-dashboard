@@ -1,4 +1,4 @@
-import { GitHubError } from '@/github/errors.js';
+import { ForgeError } from '@/forge/port.js';
 
 /**
  * GitLab objects get ids in the same opaque, URL-safe style as GitHub node ids, carrying what a
@@ -28,8 +28,8 @@ export const reviewNoteId = (noteId: number) => `MRN_${noteId}`;
 const MERGE_REQUEST = /^MR[R]?_(\d+)_(\d+)$/;
 const DISCUSSION = /^MRD_(\d+)_(\d+)_([0-9a-f]+)$/i;
 
-function invalid(kind: string, id: string): GitHubError {
-  return new GitHubError(`Not a GitLab ${kind} id: ${id.slice(0, 80)}`, null, 400, 'rejected');
+function invalid(kind: string, id: string): ForgeError {
+  return new ForgeError(`Not a GitLab ${kind} id: ${id.slice(0, 80)}`, null, 400, 'rejected');
 }
 
 /** The merge request behind an `MR_` id or an `MRR_` pending review id. */

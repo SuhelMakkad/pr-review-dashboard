@@ -13,7 +13,7 @@ import type {
 } from '@review-desk/shared/types';
 import { accountHandle, isSameUser } from '@review-desk/shared/accounts';
 import { SNAPSHOT_VERSION } from '@review-desk/shared/snapshot';
-import type { RemoteFile } from '@/github/api.js';
+import type { RemoteFile } from '@/forge/types.js';
 import { diffKey } from '@/gitlab/fingerprint.js';
 import {
   discussionId,

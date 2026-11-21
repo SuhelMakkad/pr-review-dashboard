@@ -1,6 +1,8 @@
 import type { ReviewEvent } from '@review-desk/shared/review';
-import { GitHubError, safeError } from '@/github/errors.js';
-import type { GitHubWrites, ThreadInput } from '@/github/write.js';
+import { ForgeError } from '@/forge/port.js';
+import { safeError } from '@/redact.js';
+import type { ForgeWrites } from '@/forge/port.js';
+import type { ThreadInput } from '@/forge/types.js';
 import { diffKey } from '@/gitlab/fingerprint.js';
 import {
   discussionId,
@@ -32,9 +34,9 @@ import {
   type GitLabTransport,
 } from '@/gitlab/transport.js';
 import { reviewFeatures, type GitLabVersion } from '@/gitlab/version.js';
-import type { HttpMethod } from '@/github/transport.js';
+import type { HttpMethod } from '@/forge/http.js';
 
-export type GitLabWrites = GitHubWrites;
+export type GitLabWrites = ForgeWrites;
 
 /** A review submission that has started, kept so an interrupted one can be confirmed later. */
 export interface Submission {
@@ -73,7 +75,7 @@ export const submissionKey = (reviewId: string) => `submission:${reviewId}`;
 const headKey = (reviewId: string) => `head:${reviewId}`;
 
 const rejected = (message: string, status = 422) =>
-  new GitHubError(message, null, status, 'rejected');
+  new ForgeError(message, null, status, 'rejected');
 
 export const REQUEST_CHANGES_UNSUPPORTED =
   'This GitLab’s API cannot request changes (that needs GitLab 19.2 or later). Submit the review as a comment that says what needs to change.';
@@ -259,7 +261,7 @@ export function createGitLabWriter(
         ),
       ]);
     } catch (error) {
-      throw new GitHubError(
+      throw new ForgeError(
         `Your review was published, but whether GitLab recorded the change request could not be checked (${safeError(error)}). Check it on GitLab.`,
         null,
         null,
@@ -282,7 +284,7 @@ export function createGitLabWriter(
       );
 
     if (!recorded)
-      throw new GitHubError(
+      throw new ForgeError(
         'Your review was published, but GitLab did not record the change request; you may not be allowed to request changes on this merge request. Check it on GitLab.',
         null,
         null,
@@ -431,7 +433,7 @@ export function createGitLabWriter(
         if (response.status >= 400) {
           const error = responseError(response, 'GitLab did not publish the whole review', 'POST');
 
-          throw new GitHubError(error.message, null, error.status, 'unknown');
+          throw new ForgeError(error.message, null, error.status, 'unknown');
         }
 
         if (event === 'REQUEST_CHANGES') await confirmChangesRequested(ref, submission);
