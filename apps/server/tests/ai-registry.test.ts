@@ -7,6 +7,7 @@ import { aiTaskLabels, type AiTask } from '@review-desk/shared/ai';
 import type { DiffManifest } from '@review-desk/shared/diff';
 import type { ReviewDraft } from '@review-desk/shared/review';
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
+import { draftFingerprint } from '@/ai/freshness.js';
 import { FixtureProvider } from '@/ai/fixture.js';
 import { AiRunner } from '@/ai/runner.js';
 import { jsonSchemaFor, TASKS, type Evidence, type TaskDefinition } from '@/ai/tasks.js';
@@ -269,6 +270,60 @@ describe('the runner, from the registry', () => {
     store.db.update(aiRuns).set({ promptVersion: 0 }).where(eq(aiRuns.id, run.id)).run();
 
     await expect(runner.resume('you', run.id)).rejects.toThrow('instructions changed');
+  });
+
+  it('keys each answer as main did, so answers cached before the registry are reused', async () => {
+    const { store, runner, pr, finished } = await setup();
+    // Computed by main's runner (3aee652) for the same PR: a summary's key also holds the id of
+    // the full review it built on, which differs on every run.
+    const main = {
+      brief: 'ec7776b9a3132fed036596309bd1dd9d7e8127850936bcf5140af5d252d7d74a',
+      draft_comments: 'a7860478ec267fec27dca1488dfefc23401d8dcafa6aa8bfc972e8ac81702aba',
+      author_feedback: '55cdbe1bd50c6920e541b68ad9e2005e628fe6116c866036fcaed806b7b244a3',
+      full_review: '77441c2bbb08defd80439897b7e3a8f4141fd6381541e07cd27952bdc1658801',
+    } as const;
+
+    for (const task of Object.keys(main) as (keyof typeof main)[]) {
+      const run = await finished(await runner.start('you', pr(1839).id, task));
+
+      expect([task, store.aiRuns.get(run.id)!.cacheKey]).toEqual([task, main[task]]);
+    }
+  });
+
+  it('builds a summary from the draft it captured, though the draft changes while the diff is read', async () => {
+    const { store, diffs, reviews, runner, providers, pr } = await setup();
+    const id = pr(1839).id;
+    const before = reviews.draft('you', id);
+    const manifest = diffs.manifest.bind(diffs);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+
+    providers.codex.delayMs = 5_000;
+    providers.claude.delayMs = 5_000;
+    vi.spyOn(diffs, 'manifest').mockImplementationOnce(async (...args) => {
+      await held;
+
+      return manifest(...args);
+    });
+
+    const starting = runner.start('you', id, 'draft_summary');
+
+    await vi.waitFor(() => expect(diffs.manifest).toHaveBeenCalled());
+    await reviews.saveDraft('you', id, {
+      event: before.event === 'APPROVE' ? 'COMMENT' : 'APPROVE',
+    });
+    release();
+
+    const run = await starting;
+    const row = store.aiRuns.get(run.id)!;
+
+    // Its prompt and its context, both from the draft as it was captured.
+    expect(row.context!.draft).toBe(draftFingerprint(before));
+    expect(row.request!.input).toContain(`<verdict>${before.event}</verdict>`);
+    expect(runner.runs('you', id).find((other) => other.id === run.id)).toMatchObject({
+      stale: true,
+      staleReason: expect.stringContaining('verdict'),
+    });
   });
 
   it('gives the first reason in order when a summary is stale on more than one', async () => {

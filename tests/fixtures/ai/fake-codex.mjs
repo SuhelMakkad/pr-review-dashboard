@@ -94,7 +94,10 @@ function playTurn() {
     }
 
     if (message.method === 'item/completed' && message.params.item.type === 'agentMessage') {
-      message.params.item.text = JSON.stringify(answer());
+      // A recorded answer, replayed as given; else the known one.
+      message.params.item.text = process.env.FAKE_CODEX_ANSWER
+        ? readFileSync(process.env.FAKE_CODEX_ANSWER, 'utf8')
+        : JSON.stringify(answer());
       history.turn.items.push(message.params.item);
     }
 

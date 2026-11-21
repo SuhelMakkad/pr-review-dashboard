@@ -25,7 +25,7 @@ import {
   type FullReviewResult,
   type ReviewInputs,
 } from '@review-desk/shared/ai';
-import { commentableLines, type DiffManifest } from '@review-desk/shared/diff';
+import type { DiffManifest } from '@review-desk/shared/diff';
 import type { DraftComment, PrepareReviewOptions, ReviewDraft } from '@review-desk/shared/review';
 import type { PullRequestDetail, PullRequestSnapshot } from '@review-desk/shared/types';
 import type { AiRunRow } from '@/db/ai-runs.js';
@@ -1008,8 +1008,9 @@ export class AiRunner {
         throw new Error('The agent returned an answer in an unexpected shape.');
       }
 
-      const output = TASKS[row.task].anchors
-        ? await this.anchor(row, parsed.data as DraftCommentsResult, forge)
+      const definition = TASKS[row.task];
+      const output = definition.anchor
+        ? await this.anchor(row, definition, parsed.data, forge)
         : parsed.data;
       controller.signal.throwIfAborted();
 
@@ -1097,32 +1098,23 @@ export class AiRunner {
     this.update(id, { publication });
   }
 
-  /** Keeps only anchors GitHub would accept; the rest stay as unanchored suggestions. */
+  /**
+   * The answer, anchored by its task to the full diff of the run's own snapshot, read with the
+   * run's own binding: as the account the run started as, whatever is in use now.
+   */
   private async anchor(
     row: AiRunRow,
-    result: DraftCommentsResult,
-    /** The run's own binding, so anchoring reads as the account the run started as. */
+    definition: TaskDefinition,
+    result: unknown,
     forge: GitHubApi,
-  ): Promise<DraftCommentsResult> {
-    // The run's own snapshot, since the active account may have changed while it ran.
+  ): Promise<unknown> {
     const snapshot = row.request?.snapshot ?? this.sync.detailFor(row.account, row.prId)?.snapshot;
 
     if (!snapshot) return result;
 
     const full = await this.diffs.manifest(snapshot, 'full', null, row.account, forge);
 
-    return {
-      ...result,
-      comments: result.comments.map((comment) => {
-        const file = full.files.find((candidate) => candidate.path === comment.path);
-        const lines = commentableLines(file?.patch);
-        const visible = comment.side === 'LEFT' ? lines.left : lines.right;
-
-        return file && comment.line !== null && visible.has(comment.line)
-          ? comment
-          : { ...comment, line: null };
-      }),
-    };
+    return definition.anchor!(result, full);
   }
 
   cancel(account: string, id: string): void {

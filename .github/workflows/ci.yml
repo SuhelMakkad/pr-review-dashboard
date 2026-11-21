@@ -23,6 +23,9 @@ jobs:
         with:
           # Nothing after checkout needs the token; the pull request's own code runs below.
           persist-credentials: false
+          # A pull request's merge commit and its first parent, the branch it merges into, whose
+          # prompt pins the check below compares with.
+          fetch-depth: 2
 
       # Actions are pinned to reviewed commits. The pnpm version comes from `packageManager` in
       # package.json.
@@ -42,6 +45,10 @@ jobs:
       - run: pnpm test
 
       - run: pnpm db:check
+
+      # A prompt's pinned digest may change only with its version, against the branch it merges into.
+      - if: github.event_name == 'pull_request'
+        run: pnpm prompt:pins HEAD^1
 
   e2e:
     name: End-to-end (Linux, without screenshots)
