@@ -16,27 +16,46 @@ function memoryStore() {
 }
 
 describe('the notification log', () => {
-  it('remembers a delivery per account and key, keeping the first', () => {
+  it('remembers a notification per account and key, keeping the first', () => {
     const store = memoryStore();
     const notifications = Array.from({ length: 250 }, (_, index) => ({
       key: `reply:${index}`,
       prId: `pr-${index}`,
     }));
+    const row = (account: string, key: string) =>
+      store.db.$client
+        .prepare(
+          'SELECT pr_id AS prId, channel, sent_at AS sentAt FROM notification_log WHERE account = ? AND key = ?',
+        )
+        .get(account, key);
 
     store.notificationLog.remember('you', notifications, 'app', '2026-11-21T10:00:00.000Z');
     store.notificationLog.remember(
+      'other',
+      [{ key: 'reply:0', prId: 'pr-other' }],
+      'macos',
+      '2026-11-21T10:30:00.000Z',
+    );
+    // A second record of the same key changes nothing.
+    store.notificationLog.remember(
       'you',
-      notifications.slice(0, 1),
+      [{ key: 'reply:0', prId: 'pr-changed' }],
       'macos',
       '2026-11-21T11:00:00.000Z',
     );
 
-    expect(store.notificationLog.seen('you', 'reply:0')).toBe(true);
     expect(store.notificationLog.seen('you', 'reply:249')).toBe(true);
-    expect(store.notificationLog.seen('other', 'reply:0')).toBe(false);
-    expect(
-      store.db.$client.prepare('SELECT channel FROM notification_log WHERE key = ?').get('reply:0'),
-    ).toEqual({ channel: 'app' });
+    expect(store.notificationLog.seen('other', 'reply:1')).toBe(false);
+    expect(row('you', 'reply:0')).toEqual({
+      prId: 'pr-0',
+      channel: 'app',
+      sentAt: '2026-11-21T10:00:00.000Z',
+    });
+    expect(row('other', 'reply:0')).toEqual({
+      prId: 'pr-other',
+      channel: 'macos',
+      sentAt: '2026-11-21T10:30:00.000Z',
+    });
   });
 });
 

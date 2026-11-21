@@ -4,13 +4,14 @@ import { notificationLog } from '@/db/schema.js';
 import type { Database } from '@/db/store.js';
 
 /**
- * Notifications already delivered, so each one is sent at most once per account and key. Opens no
- * transaction of its own: the notifier records each delivery in one.
+ * Notifications already handled, whether delivered or held back, with one row per account and key:
+ * the first one recorded stays. Opens no transaction of its own; the notifier records each batch
+ * in one.
  */
 export class NotificationLog {
   constructor(private readonly db: Database) {}
 
-  /** True when a notification with this key was delivered to the account. */
+  /** True when a notification with this key was recorded for the account. */
   seen(account: string, key: string): boolean {
     return Boolean(
       this.db
@@ -21,7 +22,7 @@ export class NotificationLog {
     );
   }
 
-  /** Records `notifications` as delivered on `channel`; one already recorded stays as it was. */
+  /** Records `notifications` as handled on `channel`; one already recorded stays as it was. */
   remember(
     account: string,
     notifications: { key: string; prId: string }[],
