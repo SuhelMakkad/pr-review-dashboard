@@ -229,7 +229,7 @@ describe('the draft fence', () => {
       draft: { body: 'Changed elsewhere' },
     });
 
-    // The draft's own pending review stands over a forge that shows none.
+    // The draft's own pending review stands over a forge that shows none: the draft says which.
     drafts.saveMeta('you', pr.id, { githubReviewId: 'R_local' });
 
     const none = await submit({ expectedPendingReviewId: null });
@@ -237,9 +237,13 @@ describe('the draft fence', () => {
     expect(none.statusCode).toBe(409);
     expect(none.json().code).toBe('PENDING_REVIEW_CHANGED');
 
+    const read = (await call('GET', `/api/accounts/you/pulls/${pr.id}/draft`)).json();
+
+    expect(read).toMatchObject({ githubReviewId: 'R_local', githubPendingReview: null });
+
     const local = await submit({
-      baseRevision: versions().revision,
-      expectedPendingReviewId: 'R_local',
+      baseRevision: read.versions.revision,
+      expectedPendingReviewId: read.githubReviewId ?? read.githubPendingReview?.id ?? null,
     });
 
     expect(local.statusCode).toBe(202);
@@ -254,15 +258,17 @@ describe('the claim ledger', () => {
     const first = await save({ body: 'Mine', writeId, baseRevision: base });
 
     expect(first.statusCode).toBe(200);
-    expect(first.json().attempt).toEqual({ id: writeId, state: 'committed' });
+    expect(first.json().attempt).toEqual({ id: writeId, state: 'committed', revision: base + 1 });
+    expect(first.json().body).toBe('Mine');
 
     await save({ body: 'Later' });
 
-    // Its response was lost: the retry answers as the commit did, never as a conflict.
+    // Its response was lost: the retry answers exactly as the commit did, with the revision it
+    // made and the draft as it left it, never with the draft as it is now.
     const retry = await save({ body: 'Mine', writeId, baseRevision: base });
 
     expect(retry.statusCode).toBe(200);
-    expect(retry.json().attempt).toEqual({ id: writeId, state: 'committed' });
+    expect(retry.json()).toEqual(first.json());
     expect((await call('GET', draftUrl)).json().body).toBe('Later');
   });
 
@@ -307,6 +313,46 @@ describe('the claim ledger', () => {
     expect((await call('GET', draftUrl)).json().comments).toHaveLength(1);
   });
 
+  it('never commits a claimed write an account reset interrupted while it awaited', async () => {
+    const { store, call, draftUrl, pr } = await demo();
+    const manifest = DiffService.prototype.manifest;
+    let release = () => {};
+    const reading = new Promise<void>((resolve) => (release = resolve));
+
+    vi.spyOn(DiffService.prototype, 'manifest').mockImplementation(async function (
+      this: DiffService,
+      ...args: Parameters<DiffService['manifest']>
+    ) {
+      await reading;
+
+      return manifest.apply(this, args);
+    });
+
+    const writeId = randomUUID();
+    // No base: only its claim can stop it.
+    const adding = call('POST', `${draftUrl}/comments`, {
+      path: pr.files[0].path,
+      line: 1,
+      body: 'Across a reset',
+      writeId,
+    });
+
+    await vi.waitFor(() => expect(DiffService.prototype.manifest).toHaveBeenCalled());
+    // As a reset records it, the PR itself still there: only the claim stands in the way.
+    store.draftWrites.interrupt({ account: 'you', prIds: [pr.id] });
+    release();
+
+    const added = await adding;
+
+    expect(added.statusCode).toBe(409);
+    expect(added.json()).toMatchObject({
+      code: 'INTERRUPTED',
+      attempt: { id: writeId, state: 'refused' },
+    });
+    expect(store.draftWrites.find('you', writeId)?.state).toBe('refused');
+    expect(new DraftStore(store).comments('you', pr.id)).toEqual([]);
+  });
+
   it('refuses a write id reused for another request, and answers a refusal as recorded', async () => {
     const { save, versions } = await demo();
     const writeId = randomUUID();
@@ -335,15 +381,26 @@ describe('the claim ledger', () => {
       (await call('GET', `${draftUrl}/attempts/${randomUUID()}?${query}`)).json();
 
     expect(await lookup(`base=${base}`)).toEqual({ arrived: false, fenced: false });
-    // A base of another generation is fenced too, its revision aside.
-    expect(await lookup(`base=${base}&generation=${versions().generation + 1}`)).toEqual({
-      arrived: false,
-      fenced: true,
-    });
+    // A base the draft has not reached yet could still be met: never fenced.
+    expect(await lookup(`base=${base + 1}`)).toEqual({ arrived: false, fenced: false });
 
     await save({ body: 'Moved on' });
 
     expect(await lookup(`base=${base}`)).toEqual({ arrived: false, fenced: true });
+
+    // A generation the draft has moved past is fenced too, its revision aside.
+    expect((await call('DELETE', draftUrl, { operationId: randomUUID() })).statusCode).toBe(200);
+
+    const now = versions();
+
+    expect(await lookup(`base=${now.revision}&generation=${now.generation - 1}`)).toEqual({
+      arrived: false,
+      fenced: true,
+    });
+    expect(await lookup(`base=${now.revision}&generation=${now.generation}`)).toEqual({
+      arrived: false,
+      fenced: false,
+    });
   });
 
   it('settles a claim its process left pending as interrupted before serving, and prunes old ones', async () => {

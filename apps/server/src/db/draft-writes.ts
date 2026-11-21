@@ -54,9 +54,14 @@ export class DraftWriteLog {
       .run();
   }
 
-  /** Settles a pending claim; one already settled keeps its outcome. */
-  settle(account: string, id: string, state: 'committed' | 'refused', result: ClaimResult): void {
-    this.db
+  /** Settles a pending claim, true when it did; one already settled keeps its outcome. */
+  settle(
+    account: string,
+    id: string,
+    state: 'committed' | 'refused',
+    result: ClaimResult,
+  ): boolean {
+    const { changes } = this.db
       .update(draftWrites)
       .set({ state, result })
       .where(
@@ -67,6 +72,8 @@ export class DraftWriteLog {
         ),
       )
       .run();
+
+    return changes > 0;
   }
 
   /** The PRs with a claim still pending, every account's. */

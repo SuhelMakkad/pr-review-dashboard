@@ -59,6 +59,11 @@ export interface ReviewDraft {
   } | null;
   /** A pending review that already exists on GitHub (started there or by an interrupted submit). */
   githubPendingReview: { id: string; commentCount: number } | null;
+  /**
+   * The draft's own pending review, kept with its local revision: the one a submit adds to, over
+   * the forge's (`githubPendingReview`). Absent from answers of older servers.
+   */
+  githubReviewId?: string | null;
   activeOperationId?: string | null;
 }
 

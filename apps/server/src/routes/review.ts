@@ -2,7 +2,7 @@ import type { GitHubAction } from '@review-desk/shared/operations';
 import { routes } from '@review-desk/shared/contract';
 import type { FastifyInstance } from 'fastify';
 import { draftVersionsOf, type WriteFence } from '@/db/versions.js';
-import { claimed, fenceFor, type WriteGuard } from '@/routes/claims.js';
+import { attemptOf, claimed, fenceFor, type WriteGuard } from '@/routes/claims.js';
 import { say } from '@/messages.js';
 import { safeError } from '@/github/errors.js';
 import { failed, ok, serve, type Failed } from '@/http/serve.js';
@@ -42,7 +42,6 @@ export function registerReviewRoutes(
     body: WriteGuard,
     request: unknown,
     run: (fence: WriteFence) => Promise<B>,
-    replayed?: () => unknown,
   ) =>
     claimed(
       store,
@@ -56,7 +55,6 @@ export function registerReviewRoutes(
           baseGeneration: body.baseGeneration,
         },
         request,
-        replayed,
         current: () => reviews.draft(account, prId),
       },
       run,
@@ -91,7 +89,6 @@ export function registerReviewRoutes(
         { route: 'saveDraft', prId: params.id, body },
         (fence) =>
           reviews.saveDraft(body.account, params.id, { body: body.body, event: body.event }, fence),
-        () => reviews.draft(body.account, params.id),
       ),
     serving,
   );
@@ -111,7 +108,9 @@ export function registerReviewRoutes(
 
       if (replay) return ok(202, replay);
 
-      assertBase(discard.account, prId, discard);
+      // Admitted only for the draft the user acted on: checked in the transaction that clears or
+      // locks it.
+      const fence = () => assertBase(discard.account, prId, discard);
 
       // Nothing on the forge: cleared at once, in this turn, never calling it, with a receipt.
       if (
@@ -121,7 +120,11 @@ export function registerReviewRoutes(
           discard.operationId,
           { type: 'discard', reviewId: '' },
           discard,
-          () => reviews.clearLocal(discard.account, prId),
+          () => {
+            fence();
+
+            return reviews.clearLocal(discard.account, prId);
+          },
         )
       )
         return ok(200, { ok: true as const });
@@ -136,6 +139,7 @@ export function registerReviewRoutes(
           discard.operationId,
           { type: 'discard', reviewId },
           discard,
+          fence,
         ),
       );
     },
@@ -202,17 +206,18 @@ export function registerReviewRoutes(
         if (claim && claim.prId === params.id)
           return {
             attempt: {
-              id: claim.id,
-              state: claim.state,
+              ...attemptOf(claim),
               ...(claim.state === 'pending' ? {} : { result: claim.result }),
             },
           };
 
+        // Fenced once the draft has moved past the base: a base it has not reached yet could
+        // still be met, and the write commit then.
         const versions = draftVersionsOf(store, account, params.id);
         const fenced =
           query.base !== undefined &&
-          (versions.revision !== query.base ||
-            (query.generation !== undefined && versions.generation !== query.generation));
+          (versions.revision > query.base ||
+            (query.generation !== undefined && versions.generation > query.generation));
 
         return { arrived: false as const, fenced };
       });
@@ -248,17 +253,24 @@ export function registerReviewRoutes(
         githubReviewId: draft?.githubReviewId ?? pending?.id ?? null,
       };
 
-      // Admitted only for the draft the user acted on, and the pending review it showed: the
-      // one frozen into the action, the draft's own before the forge's.
-      assertBase(submit.account, prId, submit);
+      // Admitted only for the draft the user acted on, and the pending review it showed (the one
+      // frozen into the action: the draft's own before the forge's), in the admitting transaction.
+      const fence = () => {
+        assertBase(submit.account, prId, submit);
 
-      if (
-        submit.expectedPendingReviewId !== undefined &&
-        submit.expectedPendingReviewId !== frozen.githubReviewId
-      )
-        throw new ReviewError('PENDING_REVIEW_CHANGED', 409, say('outbox.pending-review-changed'), {
-          draft: reviews.draft(submit.account, prId),
-        });
+        if (
+          submit.expectedPendingReviewId !== undefined &&
+          submit.expectedPendingReviewId !== frozen.githubReviewId
+        )
+          throw new ReviewError(
+            'PENDING_REVIEW_CHANGED',
+            409,
+            say('outbox.pending-review-changed'),
+            {
+              draft: reviews.draft(submit.account, prId),
+            },
+          );
+      };
 
       return ok(
         202,
@@ -277,6 +289,7 @@ export function registerReviewRoutes(
             draft: frozen,
           },
           submit,
+          fence,
         ),
       );
     },

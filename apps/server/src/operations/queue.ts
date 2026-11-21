@@ -522,6 +522,8 @@ export class OperationQueue {
     id: string,
     action: GitHubAction,
     request: unknown = action,
+    /** Checked in the transaction that admits the action (a draft's fence), never for a replay. */
+    fence: () => void = () => undefined,
   ): OperationReceipt {
     return this.insert(
       account,
@@ -532,6 +534,7 @@ export class OperationQueue {
       () => this.sync.detailFor(account, prId)?.snapshot,
       // Only new work needs the account in use; a replay above it returns its receipt.
       () => this.assertSelected(account),
+      fence,
     );
   }
 
@@ -561,6 +564,7 @@ export class OperationQueue {
     request: unknown,
     lookup: () => PullRequestSnapshot | undefined,
     admit: () => void = () => undefined,
+    fence: () => void = () => undefined,
   ): OperationReceipt {
     const requestKey = fingerprint({ prId, request });
     const existing = this.existing(account, id);
@@ -615,6 +619,8 @@ export class OperationQueue {
 
     this.sync.store.transaction(() => {
       const drafts = new DraftStore(this.sync.store);
+
+      fence();
 
       // Automatic posts never consume the local draft or its pending GitHub review.
       if (CONTENT_ACTIONS.has(action.type) && action.type !== 'ai_review')

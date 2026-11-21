@@ -16,10 +16,18 @@ export interface WriteGuard {
   baseGeneration?: number;
 }
 
-/** A write's state as its answer carries it. */
+/** A write's outcome as its answer carries it: a commit with the revision it made. */
 export interface AttemptState {
   id: string;
   state: WriteClaim['state'];
+  revision?: number;
+}
+
+/** A claim settled before its write could commit (an account reset): its outcome stands. */
+class ClaimSettled extends Error {
+  constructor(readonly claim: WriteClaim) {
+    super('This write was settled before it could be saved.');
+  }
 }
 
 /** The fence of a write guarded by `guard`, for `account`'s draft of `prId`. */
@@ -29,8 +37,19 @@ export function fenceFor(
   prId: string,
   guard: WriteGuard,
 ): WriteFence {
+  const id = guard.writeId;
+  // A claimed write commits only while its claim is pending: one an account reset recorded as
+  // interrupted keeps that outcome, base or none.
+  const assertPending = () => {
+    const claim = id ? store.draftWrites.find(account, id) : undefined;
+
+    if (claim && claim.state !== 'pending') throw new ClaimSettled(claim);
+  };
+
   return {
     check() {
+      assertPending();
+
       if (guard.baseRevision === undefined) return;
 
       const versions = draftVersionsOf(store, account, prId);
@@ -47,12 +66,15 @@ export function fenceFor(
         );
     },
     committed(body) {
-      if (!guard.writeId) return;
+      if (!id) return;
 
-      store.draftWrites.settle(account, guard.writeId, 'committed', {
+      const settled = store.draftWrites.settle(account, id, 'committed', {
         revision: draftVersionsOf(store, account, prId).revision,
         body,
       });
+
+      // Settled meanwhile: the write rolls back with the transaction, and the outcome stands.
+      if (!settled) throw new ClaimSettled(store.draftWrites.find(account, id)!);
     },
   };
 }
@@ -61,43 +83,36 @@ export function fenceFor(
 export const requestFingerprint = (request: unknown) =>
   createHash('sha256').update(JSON.stringify(request)).digest('hex');
 
-const attempt = (id: string, state: WriteClaim['state']): { attempt: AttemptState } => ({
-  attempt: { id, state },
-});
+/** A claim's outcome, as every answer about it carries it: a commit with its revision. */
+export function attemptOf(claim: WriteClaim): AttemptState {
+  const result = claim.result as { revision?: number } | null;
 
-/** The answer a claim already made gives, to a retry of the same request. */
-function answerOf(
-  claim: WriteClaim,
-  fingerprint: string,
-  replayed: () => unknown,
-): { status: number; body: unknown } | Failed {
-  if (claim.fingerprint !== fingerprint)
-    return failed(409, {
-      error: 'This write id was already used for another request.',
-      code: 'WRITE_ID_CONFLICT',
-    });
+  return claim.state === 'committed'
+    ? { id: claim.id, state: 'committed', revision: result?.revision }
+    : { id: claim.id, state: claim.state };
+}
 
-  if (claim.state === 'pending') return ok(202, { pending: true, ...attempt(claim.id, 'pending') });
+/** The answer a claim gives: to a retry of its request, or once its write settled it. */
+function answerOf(claim: WriteClaim): { status: number; body: unknown } | Failed {
+  if (claim.state === 'pending') return ok(202, { pending: true, attempt: attemptOf(claim) });
 
   const result = claim.result as { status?: number; body?: unknown } | null;
 
   if (claim.state === 'refused')
     return failed(result?.status ?? 409, {
       ...(result?.body as { error: string }),
-      ...attempt(claim.id, 'refused'),
+      attempt: attemptOf(claim),
     });
 
-  // A commit answers with what it answered; one that kept no answer (a meta save) with the draft now.
-  const body = (result?.body ?? replayed()) as Record<string, unknown>;
-
-  return ok(200, { ...body, ...attempt(claim.id, 'committed') });
+  // A commit answers with what it answered when it committed, never with the draft as it is now.
+  return ok(200, { ...(result?.body as object), attempt: attemptOf(claim) });
 }
 
 /**
  * Runs a draft write, or AI start, under its guard. With a write id, it is claimed as it arrives,
  * before any await: a retry answers from the original's outcome, never from its own path. The
- * write commits through its fence; a refusal is recorded as the claim's outcome. Without an id, it
- * runs as it always did.
+ * write commits through its fence, which records the claim with its answer and revision; a
+ * refusal is recorded as the claim's outcome. Without an id, it runs as it always did.
  */
 export async function claimed<B extends object>(
   store: Store,
@@ -108,8 +123,6 @@ export async function claimed<B extends object>(
     guard: WriteGuard;
     /** The request as received: a reuse of its id with another is refused. */
     request: unknown;
-    /** The answer to a replayed commit that kept none (a meta save): the current draft. */
-    replayed?: () => unknown;
     /** The draft now, which a revision conflict answers with so the web can rebase on it. */
     current?: () => unknown;
   },
@@ -156,18 +169,28 @@ export async function claimed<B extends object>(
     return null;
   });
 
-  if (existing) return answerOf(existing, fingerprint, claim.replayed ?? (() => ({})));
+  if (existing)
+    return existing.fingerprint === fingerprint
+      ? answerOf(existing)
+      : failed(409, {
+          error: 'This write id was already used for another request.',
+          code: 'WRITE_ID_CONFLICT',
+        });
 
   try {
-    const body = await run(fence);
-
-    return ok(200, { ...body, ...attempt(id, 'committed') });
+    await run(fence);
   } catch (error) {
+    if (error instanceof ClaimSettled) return answerOf(error.claim);
+
     const answer = refused(error);
 
-    // Settled now: the write's own transaction rolled back, or it threw before writing.
+    // Recorded now: the write's own transaction rolled back, or it threw before writing. A claim
+    // settled meanwhile (an account reset) keeps that outcome instead.
     store.draftWrites.settle(account, id, 'refused', { status: answer.status, body: answer.body });
 
-    return failed(answer.status, { ...answer.body, ...attempt(id, 'refused') });
+    return answerOf(store.draftWrites.find(account, id)!);
   }
+
+  // Answered as the commit recorded it, so a retry gets the very same answer.
+  return answerOf(store.draftWrites.find(account, id)!);
 }

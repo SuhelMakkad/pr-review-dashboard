@@ -170,6 +170,8 @@ export class ReviewService {
       comments: draft?.comments ?? [],
       updatedAt: draft?.updatedAt ?? null,
       activeOperationId: draft?.activeOperationId ?? null,
+      // The draft's own pending review, which submit prefers over the forge's.
+      githubReviewId: draft?.githubReviewId ?? null,
       preparedReview: draft?.preparedReview ?? null,
       githubPendingReview: pr.pendingReview
         ? { id: pr.pendingReview.id, commentCount: pr.pendingReview.commentCount }
@@ -206,15 +208,17 @@ export class ReviewService {
   ): Promise<ReviewDraft> {
     this.assertSelected(account);
     this.snapshot(account, prId);
-    // Its answer is the draft as it is when asked again, so none is kept.
-    this.commit(
-      fence,
-      () => this.drafts.saveMeta(account, prId, changes),
-      () => null,
-    );
+    // Answered with the draft as this save left it, read in its own transaction: a retry gets
+    // the same, whatever changed since.
+    const draft = this.commit(fence, () => {
+      this.drafts.saveMeta(account, prId, changes);
+
+      return this.draft(account, prId);
+    });
+
     this.changed(account, prId);
 
-    return this.draft(account, prId);
+    return draft;
   }
 
   /** GitHub only accepts line comments on lines that appear in the PR's diff. */
