@@ -28,6 +28,7 @@ import { accountNotActive } from '@/review/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import type { MutationStep, OperationRecord } from './types.js';
 import { WRITE_COOLDOWN } from '@/db/settings.js';
+import { AccountUnavailable, unattributed } from '@/forge/account.js';
 
 const MUTATIONS = new Set([
   'approveReview',
@@ -837,12 +838,32 @@ export class OperationQueue {
     forge: GitHubApi,
     account: string,
     id: string,
+    /** True where an identity check has just opened the bracket (reconciliation's). */
+    opened = false,
   ): Promise<ReviewReceipt | null> {
-    await forge.verifyAccount?.(account);
+    // A limit met by a check itself cannot be tied to the account: it is nobody's cooldown.
+    const check = async () =>
+      forge.verifyAccount?.(account).catch((error: unknown) => Promise.reject(unattributed(error)));
 
-    const receipt = await forge.reviewReceipt(id);
+    if (!opened) await check();
 
-    await forge.verifyAccount?.(account);
+    let receipt: ReviewReceipt | null;
+
+    try {
+      receipt = await forge.reviewReceipt(id);
+    } catch (error) {
+      if (error instanceof AccountUnavailable) throw error;
+
+      // A limit the read met is the account's only if glab is still signed in as it.
+      const confirmed = await check().then(
+        () => true,
+        () => false,
+      );
+
+      throw confirmed ? error : unattributed(error);
+    }
+
+    await check();
 
     return receipt;
   }
@@ -918,7 +939,7 @@ export class OperationQueue {
           );
 
         // A read started now: an older read still in flight can no longer be saved over it.
-        return (await this.sync.refresh(row.prId, row.account))?.snapshot;
+        return (await this.sync.refresh(row.prId, row.account, forge))?.snapshot;
       };
       const pr = await preflight().catch((error: unknown) => {
         this.coolDown(row.account, error);
@@ -1105,7 +1126,7 @@ export class OperationQueue {
               row.action.type === 'viewed' &&
               row.action.target
             ) {
-              const pr = (await this.sync.refresh(row.prId, row.account))?.snapshot;
+              const pr = (await this.sync.refresh(row.prId, row.account, forge))?.snapshot;
 
               row = this.row(row.account, row.id);
               if (row.status === 'cancelled') throw new Cancelled();
@@ -1129,7 +1150,7 @@ export class OperationQueue {
               method === 'submitReview' &&
               (row.action.type === 'review' || row.action.type === 'comment')
             ) {
-              await this.sync.refresh(row.prId, row.account);
+              await this.sync.refresh(row.prId, row.account, forge);
               const expected =
                 row.action.type === 'review'
                   ? row.action.review.expectedHeadOid
@@ -1436,7 +1457,7 @@ export class OperationQueue {
         : null;
     }
 
-    await read(() => this.sync.refresh(row.prId, row.account));
+    await read(() => this.sync.refresh(row.prId, row.account, forge));
 
     row = this.row(row.account, row.id);
     if (row.status === 'cancelled') throw new Cancelled();
@@ -1514,7 +1535,7 @@ export class OperationQueue {
    */
   private async bindApproval(forge: GitHubApi, row: OperationRecord): Promise<OperationRecord> {
     try {
-      await this.sync.refresh(row.prId, row.account);
+      await this.sync.refresh(row.prId, row.account, forge);
     } catch (error) {
       // A rate limit holds everything until its time, and stops this attempt; the approval's
       // receipt is kept. Any other failure leaves it unnamed, and the summary waits.
@@ -1861,7 +1882,7 @@ export class OperationQueue {
       let result: unknown = null;
 
       if (step.method === 'submitReview') {
-        const receipt = await this.checkedReceipt(forge, row.account, String(step.args[0]));
+        const receipt = await this.checkedReceipt(forge, row.account, String(step.args[0]), true);
         const states: Record<string, string> = {
           APPROVE: 'APPROVED',
           COMMENT: 'COMMENTED',
@@ -1888,9 +1909,10 @@ export class OperationQueue {
           return;
         }
       } else if (step.method === 'deleteReview') {
-        confirmed = (await this.checkedReceipt(forge, row.account, String(step.args[0]))) === null;
+        confirmed =
+          (await this.checkedReceipt(forge, row.account, String(step.args[0]), true)) === null;
       } else if (step.method === 'approveReview' && row.action.type === 'ai_review') {
-        await this.sync.refresh(row.prId, row.account);
+        await this.sync.refresh(row.prId, row.account, forge);
 
         const action = row.action;
         const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
@@ -1946,7 +1968,7 @@ export class OperationQueue {
         // approve over someone else's resolution, and sending it again over their reopening.
         // It waits for you (`confirmed` stays false).
       } else if (step.method === 'setFileViewed' || step.method === 'setThreadResolved') {
-        await this.sync.refresh(row.prId, row.account);
+        await this.sync.refresh(row.prId, row.account, forge);
         const pr = this.sync.detailFor(row.account, row.prId)?.snapshot;
 
         const viewedState = pr?.files.find((file) => file.path === step.args[1])?.viewerViewedState;

@@ -178,9 +178,9 @@ export class GhCredentials implements GitHubAccounts, CredentialSource {
         if (ambient === undefined) {
           const found = await this.ambientLogin();
 
-          // An unanswered check settles nothing: the stored sign-in is used, and it is asked again.
-          if (found?.login === login) ambient = found.token;
-          else if (found || !(process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) ambient = null;
+          // Settled by this first call either way: an unanswered check means the stored sign-in,
+          // and this binding keeps it, so its access never changes midway. A new one asks again.
+          ambient = found?.login === login ? found.token : null;
         }
 
         // Exactly the token that was verified, whatever else the environment holds.

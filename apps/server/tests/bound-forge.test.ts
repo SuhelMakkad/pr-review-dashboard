@@ -6,7 +6,8 @@ import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { prepareReviewWorkspace, type RepositoryExporter } from '@/ai/workspace.js';
 import { githubOperations } from '@/db/schema.js';
-import { initialStatus, STATUS } from '@/db/settings.js';
+import { initialStatus, STATUS, WRITE_COOLDOWN } from '@/db/settings.js';
+import { DraftStore } from '@/db/drafts.js';
 import { Store } from '@/db/store.js';
 import { DEMO_SECOND_ACCOUNT, FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
@@ -90,6 +91,34 @@ describe('bound GitHub credentials', () => {
     expect(reads()).toBe(before + 1);
   });
 
+  it('keep the stored sign-in once a binding has used it, while a new binding checks again', async () => {
+    let ambient: string | null = null;
+    const run = vi.fn(async (args: string[]) => {
+      if (args[0] === 'api')
+        return ambient
+          ? { code: 0, stdout: `${ambient}\n`, stderr: '' }
+          : { code: 1, stdout: '', stderr: 'HTTP 502' };
+
+      return { code: 0, stdout: `${tokens['home-me']}\n`, stderr: '' };
+    });
+    const credentials = new GhCredentials(run);
+
+    vi.stubEnv('GH_TOKEN', 'environment-token-0123');
+
+    const bound = credentials.bind('home-me');
+
+    // The check of the environment's token goes unanswered: the stored sign-in is used.
+    expect((await bound.environment()).GH_TOKEN).toBe(tokens['home-me']);
+
+    // Answerable now, and the token is home-me's, but this binding's access does not change.
+    ambient = 'home-me';
+    credentials.forget();
+    expect((await bound.environment()).GH_TOKEN).toBe(tokens['home-me']);
+    expect((await credentials.bind('home-me').environment()).GH_TOKEN).toBe(
+      'environment-token-0123',
+    );
+  });
+
   it('pin the token gh uses now, so its active account can switch without changing the work', async () => {
     let active = 'work-me';
     const credentials = new GhCredentials(fakeGh(() => active));
@@ -129,7 +158,7 @@ describe('the router', () => {
       teams: vi.fn(async () => [`${login}/team`]),
     }) as unknown as GitHubApi;
 
-  function router({ stored = true, token = true } = {}) {
+  function router({ stored = true, token = true, pin = true } = {}) {
     const gh = {
       list: vi.fn(async () =>
         stored
@@ -164,8 +193,12 @@ describe('the router', () => {
       glab,
       (host) => client(`rev@${host}`),
       {
-        bound: (login) => client(login),
-        pinned: async () => (signedIn ? client(stored ? 'octo' : 'env-only') : null),
+        // Tagged, so a test can tell a client bound by name from the others.
+        bound: (login) => ({ client: client(`bound-${login}`), credentials: null }),
+        pinned: async () =>
+          signedIn && pin
+            ? { client: client(stored ? 'octo' : 'env-only'), credentials: null }
+            : null,
       },
     );
 
@@ -181,6 +214,14 @@ describe('the router', () => {
     forges.select('someone-else');
 
     expect(await forge.teams()).toEqual(['octo/team']);
+  });
+
+  it('binds to the login it found by name when there was nothing to pin', async () => {
+    // Signed in just as the sync started: no token could be pinned, yet the CLI now answers.
+    const { identity, forge } = await router({ pin: false }).discoverIdentity();
+
+    expect(identity.login).toBe('selected');
+    expect(await forge.teams()).toEqual(['bound-selected/team']);
   });
 
   it('works as an environment-only login with no stored sign-in', async () => {
@@ -199,6 +240,78 @@ describe('the router', () => {
 });
 
 describe('work bound to an account', () => {
+  it("reads through the caller's own binding when it passes one, never binding again", async () => {
+    const store = new Store(':memory:');
+    const fixture = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
+    const sync = new SyncService(store, fixture, new EventBus());
+
+    cleanups.push(() => store.close());
+    await sync.sync();
+
+    const pull = sync.detail(sync.list().items[0].id)!.snapshot;
+    const bound = fixture.as('you');
+    const as = vi.spyOn(fixture, 'as');
+    const snapshot = vi.spyOn(bound, 'snapshot');
+    const files = vi.spyOn(bound, 'pullFiles');
+
+    await sync.refresh(pull.id, 'you', bound);
+    await new DiffService(fixture).manifest(pull, 'full', null, 'you', bound);
+
+    expect(snapshot).toHaveBeenCalled();
+    expect(files).toHaveBeenCalled();
+    expect(as).not.toHaveBeenCalled();
+  });
+
+  it("keeps a rate limit met by a receipt's account check out of the account's cooldown", async () => {
+    const store = new Store(':memory:');
+    const github = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
+    const sync = new SyncService(store, github, new EventBus());
+
+    cleanups.push(() => store.close());
+    await sync.sync();
+
+    const queue = new OperationQueue(sync, { mutationIntervalMs: 0, retryDelaysMs: [60_000] });
+
+    cleanups.push(() => queue.close());
+    queue.open();
+    await queue.pause();
+
+    const pull = sync.detail(sync.list().items[0].id)!.snapshot;
+
+    new DraftStore(store).saveMeta('you', pull.id, { body: 'Pending', githubReviewId: 'PRR_x' });
+
+    const { operation } = queue.enqueue(
+      'you',
+      pull.id,
+      randomUUID(),
+      { type: 'discard', reviewId: 'PRR_x' },
+      { account: 'you', operationId: 'discard' },
+    );
+
+    let checks = 0;
+
+    // The preflight refresh's two checks pass. The receipt's own check is then rate limited: it
+    // may have run as anyone, so it is nobody's limit.
+    Object.assign(github, {
+      verifyAccount: vi.fn(async () => {
+        if (++checks < 3) return;
+
+        throw new GitHubError(
+          'Rate limited.',
+          new Date(Date.now() + 60 * 60_000).toISOString(),
+          429,
+          'rate_limit',
+        );
+      }),
+    });
+    queue.resume();
+
+    await vi.waitFor(() => expect(queue.get('you', operation.id).status).not.toBe('queued'));
+    await vi.waitFor(() => expect(queue.get('you', operation.id).status).not.toBe('running'));
+    expect(store.settings.get(WRITE_COOLDOWN.of('you'))).toBeNull();
+    expect(sync.status.retryAt).toBeNull();
+  });
+
   it("checks a verdict against the named account's own forge, not the one in use", () => {
     const store = new Store(':memory:');
     const github = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
@@ -345,10 +458,11 @@ describe('work bound to an account', () => {
 
     let checks = 0;
 
-    // glab signed in as someone else between the receipt read and the check after it.
+    // Reconciliation's identity read opens the bracket; glab signs in as someone else before the
+    // check that closes it, after the receipt read.
     Object.assign(github, {
       verifyAccount: vi.fn(async (account: string) => {
-        if (++checks === 2) throw new AccountUnavailable(account, 'someone-else');
+        if (++checks === 1) throw new AccountUnavailable(account, 'someone-else');
       }),
     });
 
@@ -367,6 +481,6 @@ describe('work bound to an account', () => {
       .get()!;
 
     expect(saved.data.steps[0]).toMatchObject({ uncertain: true, completedAt: null });
-    expect(checks).toBe(2);
+    expect(checks).toBe(1);
   });
 });

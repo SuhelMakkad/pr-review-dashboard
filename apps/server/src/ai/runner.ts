@@ -55,6 +55,7 @@ import {
   type RepositoryExporter,
 } from '@/ai/workspace.js';
 import { AI_SETTINGS } from '@/db/settings.js';
+import type { GitHubApi } from '@/github/api.js';
 
 const MAX_CONCURRENT = 2;
 const PROBE_TTL_MS = 5 * 60_000;
@@ -849,7 +850,8 @@ export class AiRunner {
 
     // Bound as the run starts, and kept to its end whatever is selected meanwhile.
     const forge = row.account ? bindForge(this.sync.github, row.account) : this.sync.github;
-    const access = archiveAccess(row.account);
+    // The archives share the run's credentials: the same source, not a second binding.
+    const access = archiveAccess(row.account, forge);
     const controller = new AbortController();
     const workDir = join(this.workRoot, id);
     /** When progress was last sent to the app, on the monotonic clock; null before the first. */
@@ -893,7 +895,7 @@ export class AiRunner {
           this.emit(row);
 
           const snapshot = saved.snapshot;
-          const diff = await this.diffs.manifest(snapshot, 'full', null, row.account);
+          const diff = await this.diffs.manifest(snapshot, 'full', null, row.account, forge);
 
           for (const path of ['before', 'after', 'review.json'])
             await rm(join(workDir, path), { recursive: true, force: true });
@@ -951,7 +953,7 @@ export class AiRunner {
 
       const output =
         row.task === 'draft_comments' || row.task === 'full_review'
-          ? await this.anchor(row, parsed.data as DraftCommentsResult)
+          ? await this.anchor(row, parsed.data as DraftCommentsResult, forge)
           : parsed.data;
       controller.signal.throwIfAborted();
 
@@ -1040,13 +1042,18 @@ export class AiRunner {
   }
 
   /** Keeps only anchors GitHub would accept; the rest stay as unanchored suggestions. */
-  private async anchor(row: AiRunRow, result: DraftCommentsResult): Promise<DraftCommentsResult> {
+  private async anchor(
+    row: AiRunRow,
+    result: DraftCommentsResult,
+    /** The run's own binding, so anchoring reads as the account the run started as. */
+    forge: GitHubApi,
+  ): Promise<DraftCommentsResult> {
     // The run's own snapshot, since the active account may have changed while it ran.
     const snapshot = row.request?.snapshot ?? this.sync.detailFor(row.account, row.prId)?.snapshot;
 
     if (!snapshot) return result;
 
-    const full = await this.diffs.manifest(snapshot, 'full', null, row.account);
+    const full = await this.diffs.manifest(snapshot, 'full', null, row.account, forge);
 
     return {
       ...result,

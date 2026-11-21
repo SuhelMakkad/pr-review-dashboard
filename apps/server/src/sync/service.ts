@@ -135,8 +135,12 @@ export class SyncService {
   }
 
   /** Refetches one PR now (see `PullQueue.refresh`). */
-  refresh(id: string, account?: string | null): Promise<PullRequestDetail | null> {
-    return this.queue.refresh(id, account);
+  refresh(
+    id: string,
+    account?: string | null,
+    forge?: GitHubApi,
+  ): Promise<PullRequestDetail | null> {
+    return this.queue.refresh(id, account, forge);
   }
 
   /** Adds a PR to the queue by hand (see `PullQueue.track`). */

@@ -90,11 +90,17 @@ const forges = fixture
       (host) => GitLab.forHost(host, store.settings.forgeLocal),
       // Work for one account keeps that account's credentials for as long as it runs.
       {
-        bound: (login) => new GitHub(new GhCli(undefined, ghCredentials.bind(login))),
-        pinned: async () => {
-          const source = await ghCredentials.pin();
+        bound: (login) => {
+          const credentials = ghCredentials.bind(login);
 
-          return source ? new GitHub(new GhCli(undefined, source)) : null;
+          return { client: new GitHub(new GhCli(undefined, credentials)), credentials };
+        },
+        pinned: async () => {
+          const credentials = await ghCredentials.pin();
+
+          return credentials
+            ? { client: new GitHub(new GhCli(undefined, credentials)), credentials }
+            : null;
         },
       },
     );

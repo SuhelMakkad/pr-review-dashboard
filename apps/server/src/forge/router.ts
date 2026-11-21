@@ -2,19 +2,25 @@ import type { Actor, PullRequestSnapshot, FeedSource, Source } from '@review-des
 import { parseAccount } from '@review-desk/shared/accounts';
 import type { ReviewEvent } from '@review-desk/shared/review';
 import type { DetectOptions, GitHubApi } from '@/github/api.js';
-import type { CliAccount, GitHubAccounts } from '@/github/credentials.js';
+import type { CliAccount, CredentialSource, GitHubAccounts } from '@/github/credentials.js';
 import { GitHubError } from '@/github/errors.js';
 import type { ThreadInput } from '@/github/write.js';
 import type { GlabAccounts } from '@/gitlab/accounts.js';
 
 type AccountLister = Pick<GitHubAccounts, 'list' | 'select'>;
 
+/** A GitHub client and the credentials it holds (null where they are not GitHub's own). */
+export interface GitHubClient {
+  client: GitHubApi;
+  credentials: CredentialSource | null;
+}
+
 /** How the router reaches GitHub as one account (see `GhCredentials.bind` and `pin`). */
 export interface GitHubBinding {
   /** A client whose every call is made as `login`. */
-  bound(login: string): GitHubApi;
+  bound(login: string): GitHubClient;
   /** A client holding the credentials gh would use right now, or null with none at all. */
-  pinned(): Promise<GitHubApi | null>;
+  pinned(): Promise<GitHubClient | null>;
 }
 
 /** Every forge call, sent to the client `target()` names when the call is made. */
@@ -146,6 +152,8 @@ export class BoundForge extends ForgeView {
     readonly account: string,
     private readonly client: GitHubApi,
     private readonly router: ForgeRouter,
+    /** The GitHub credentials every call uses, which work beside the forge shares (archives). */
+    readonly credentials: CredentialSource | null = null,
   ) {
     super();
   }
@@ -185,7 +193,10 @@ export class ForgeRouter extends ForgeView implements GitHubAccounts {
     private readonly glab: Pick<GlabAccounts, 'list'>,
     private readonly gitlab: (host: string) => GitHubApi,
     /** Without one, GitHub calls go as the selected account whatever they are bound to (tests). */
-    private readonly binding: GitHubBinding = { bound: () => github, pinned: async () => github },
+    private readonly binding: GitHubBinding = {
+      bound: () => ({ client: github, credentials: null }),
+      pinned: async () => ({ client: github, credentials: null }),
+    },
   ) {
     super();
   }
@@ -216,12 +227,14 @@ export class ForgeRouter extends ForgeView implements GitHubAccounts {
   /** Every call made as `login`, for as long as the work holding it runs. */
   as(login: string): BoundForge {
     const { forge, host } = parseAccount(login);
-    const client =
-      forge === 'github'
-        ? this.binding.bound(login)
-        : (this.gitlabFor(host).as?.(login) ?? this.gitlabFor(host));
 
-    return new BoundForge(login, client, this);
+    if (forge === 'github') {
+      const { client, credentials } = this.binding.bound(login);
+
+      return new BoundForge(login, client, this, credentials);
+    }
+
+    return new BoundForge(login, this.gitlabFor(host).as?.(login) ?? this.gitlabFor(host), this);
   }
 
   /**
@@ -245,11 +258,23 @@ export class ForgeRouter extends ForgeView implements GitHubAccounts {
       return { identity: await forge.identity(), forge };
     }
 
-    // No credentials to pin: the GitHub CLI's own answer, which explains the missing sign-in.
-    const pinned = (await this.binding.pinned()) ?? this.github;
-    const identity = await pinned.identity();
+    const pinned = await this.binding.pinned();
 
-    return { identity, forge: new BoundForge(identity.login, pinned, this) };
+    if (pinned) {
+      const identity = await pinned.client.identity();
+
+      return {
+        identity,
+        forge: new BoundForge(identity.login, pinned.client, this, pinned.credentials),
+      };
+    }
+
+    // Nothing to pin: the GitHub CLI's own answer explains the missing sign-in. Should it find
+    // someone after all (signed in just now), the rest is bound to that login by name, never to
+    // whoever the CLI holds next.
+    const identity = await this.github.identity();
+
+    return { identity, forge: this.as(identity.login) };
   }
 
   private account(): string | null {

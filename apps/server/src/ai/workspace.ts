@@ -17,6 +17,7 @@ import { baseGlabEnvironment, glabCwd } from '@/gitlab/transport.js';
 import { AgentError } from '@/ai/provider.js';
 import { log } from '@/log.js';
 import { observeInputs } from '@/ai/inputs.js';
+import { BoundForge } from '@/forge/router.js';
 
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 512 * 1024 * 1024;
@@ -31,14 +32,17 @@ export interface ArchiveAccess {
   credentials: CredentialSource | null;
 }
 
-/** The archive access of a run for `account`; with none, the selected account's. */
-export function archiveAccess(account: string | null): ArchiveAccess {
+/**
+ * The archive access of a run for `account`, with no account the selected one's. A run's forge
+ * bound to GitHub lends its own credentials, so the archives are read with the same source.
+ */
+export function archiveAccess(account: string | null, forge?: GitHubApi): ArchiveAccess {
   if (!account) return { account: null, credentials: ghCredentials };
+  if (parseAccount(account).forge !== 'github') return { account, credentials: null };
 
-  return {
-    account,
-    credentials: parseAccount(account).forge === 'github' ? ghCredentials.bind(account) : null,
-  };
+  const shared = forge instanceof BoundForge ? forge.credentials : null;
+
+  return { account, credentials: shared ?? ghCredentials.bind(account) };
 }
 
 export type RepositoryExporter = (

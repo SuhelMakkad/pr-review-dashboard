@@ -5,6 +5,7 @@ import { GitHubError, safeError } from '@/github/errors.js';
 import type { SyncService } from '@/sync/service.js';
 import { extractActivity } from '@/insights/extract.js';
 import { BACKFILL } from '@/db/settings.js';
+import type { GitHubApi } from '@/github/api.js';
 
 const DAY = 24 * 60 * 60_000;
 const WINDOW_DAYS = 30;
@@ -122,7 +123,7 @@ export class Backfill {
 
         await check();
 
-        const snapshots = await this.read(login, window, force, known);
+        const snapshots = await this.read(github, login, window, force, known);
 
         await check();
 
@@ -149,8 +150,14 @@ export class Backfill {
     }
   }
 
-  private async read(login: string, window: string, force: boolean, known: Set<string>) {
-    const github = bindForge(this.sync.github, login);
+  private async read(
+    /** The import's own binding to `login`, kept for every window. */
+    github: GitHubApi,
+    login: string,
+    window: string,
+    force: boolean,
+    known: Set<string>,
+  ) {
     const ids = [
       ...new Set([
         ...(await github.searchPullIds(`is:pr reviewed-by:${login} updated:${window}`)),

@@ -39,13 +39,15 @@ export class PullQueue {
   async refresh(
     id: string,
     account: string | null = this.state.status.account?.login ?? null,
+    /** The caller's own binding to `account`, kept for its whole operation; else one is made. */
+    forge?: GitHubApi,
   ): Promise<PullRequestDetail | null> {
     if (!account) return null;
 
     this.state.assertNotCoolingDown(account);
 
     // Every read below is this account's, whatever is selected meanwhile.
-    const forge = bindForge(this.github, account);
+    const bound = forge ?? bindForge(this.github, account);
 
     // A read is refused when the PR is removed or reduced after it started; the row left behind
     // can be older than the read, so read again rather than return it.
@@ -57,8 +59,8 @@ export class PullQueue {
 
       // Where the forge cannot carry the account with each call (GitLab), its sign-in is checked
       // before the read and again before its result is kept.
-      const verify = forge.verifyAccount?.bind(forge);
-      const read = () => forge.snapshot(id, account, cached.sources, cached);
+      const verify = bound.verifyAccount?.bind(bound);
+      const read = () => bound.snapshot(id, account, cached.sources, cached);
       /** Saved before the caller hears of it, so the next request waits too. */
       const keepLimit = (error: unknown) => {
         if (error instanceof GitHubError && error.outcome === 'rate_limit' && error.retryAt)

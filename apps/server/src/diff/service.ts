@@ -153,10 +153,12 @@ export class DiffService {
     mode: DiffMode,
     reviewOid: string | null,
     account: string | null = null,
+    /** The caller's own binding to `account`, kept for its whole operation; else one is made. */
+    forge?: GitHubApi,
   ): Promise<DiffManifest> {
     const build: Build = {
       account,
-      forge: account ? bindForge(this.github, account) : this.github,
+      forge: forge ?? (account ? bindForge(this.github, account) : this.github),
       staged: [],
     };
     const work = async () => {
