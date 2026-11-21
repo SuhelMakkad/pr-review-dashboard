@@ -4,19 +4,21 @@ import { api, ApiError } from '@/lib/api';
 /**
  * Each command's id is kept, across reloads, under its own storage key: setting or forgetting one
  * never rewrites another, so no tab's change can undo another's. Earlier versions kept every id
- * in one shared map (`LEGACY_KEY`): it is only read now, and an id of it forgotten here is marked
- * so under its own key, never written back into it.
+ * in one shared map (`LEGACY_KEY`): it is only read now. An id of it retired here is marked under a
+ * key of its own, by that very id (`RETIRED`), apart from the ids in use, so nothing sent for the
+ * same action later can ever clear that mark.
  */
 const PREFIX = 'review-desk-pending-command:';
+const RETIRED = 'review-desk-retired-command:';
 const LEGACY_KEY = 'review-desk-pending-command-ids';
-/** The mark an id of the shared map leaves once forgotten here. */
-const FORGOTTEN = '!';
 
 /**
  * Ids this tab set and has not cleared, saved or not: a retry here reuses its id even when
  * storage could not be written. Never written back to storage.
  */
 const memory = new Map<string, string>();
+/** Shared-map ids retired in this tab whose mark could not be saved: still retired here. */
+const retiredHere = new Set<string>();
 
 /**
  * The key a command saved by an earlier version, on a legacy route that named its account in the
@@ -43,6 +45,14 @@ export function scopedKey(key: string): string {
   }
 }
 
+const read = (name: string): string | null => {
+  try {
+    return localStorage.getItem(name);
+  } catch {
+    return null;
+  }
+};
+
 /** The earlier versions' shared map, as storage holds it now; empty when unreadable. */
 function legacyMap(): Map<string, string> {
   try {
@@ -56,48 +66,18 @@ function legacyMap(): Map<string, string> {
   }
 }
 
-/** What storage holds for `key` now under its own entry: an id, its forgotten mark, or nothing. */
-function entry(key: string): string | null {
-  try {
-    return localStorage.getItem(PREFIX + key);
-  } catch {
-    return null;
-  }
-}
+/** Whether a shared-map id was retired: its own mark, read directly, or this tab's record. */
+const retired = (id: string) => retiredHere.has(id) || read(RETIRED + id) !== null;
 
-/** The id saved for `key` now: its own entry's, else the shared map's unless forgotten here. */
+/** The id saved for `key` now: its own entry's, else the shared map's unless that id is retired. */
 function savedId(key: string): string | undefined {
-  const own = entry(key);
+  const own = read(PREFIX + key);
 
-  if (own !== null) return own.startsWith(FORGOTTEN) ? undefined : own;
+  if (own !== null) return own;
 
-  return legacyMap().get(key);
-}
+  const legacy = legacyMap().get(key);
 
-/** Every id saved now, by key. */
-function savedIds(): Map<string, string> {
-  const ids = new Map<string, string>();
-  const forgotten = new Set<string>();
-
-  try {
-    for (let index = 0; index < localStorage.length; index++) {
-      const name = localStorage.key(index);
-
-      if (!name?.startsWith(PREFIX)) continue;
-
-      const value = localStorage.getItem(name) ?? '';
-      const key = name.slice(PREFIX.length);
-
-      if (value.startsWith(FORGOTTEN)) forgotten.add(key);
-      else ids.set(key, value);
-    }
-  } catch {
-    // Unreadable: only what this tab holds.
-  }
-
-  for (const [key, id] of legacyMap()) if (!ids.has(key) && !forgotten.has(key)) ids.set(key, id);
-
-  return ids;
+  return legacy !== undefined && !retired(legacy) ? legacy : undefined;
 }
 
 /** Saves `id` for `key`, under its own entry; kept in this tab either way. True once saved. */
@@ -114,32 +94,42 @@ function save(key: string, id: string): boolean {
 }
 
 /**
- * Forgets `id` for `key`, only while it is still that id: its own entry removed, or, for an id the
- * shared map holds, marked forgotten. True once the change is saved.
+ * Forgets `id` for `key`: its own entry removed while it is still that id, and, for an id the
+ * shared map holds, that id retired by a mark of its own (kept in this tab when the mark could
+ * not be saved). True once every change is saved.
  */
 function forget(key: string, id: string): boolean {
   if (memory.get(key) === id) memory.delete(key);
 
+  let saved = true;
+
   try {
-    const own = entry(key);
-
-    if (own !== null && own !== id) return true;
-
-    if (legacyMap().get(key) === id) localStorage.setItem(PREFIX + key, FORGOTTEN + id);
-    else localStorage.removeItem(PREFIX + key);
-
-    return true;
+    if (localStorage.getItem(PREFIX + key) === id) localStorage.removeItem(PREFIX + key);
   } catch {
-    return false;
+    saved = false;
   }
+
+  if (legacyMap().get(key) === id) {
+    try {
+      localStorage.setItem(RETIRED + id, '1');
+    } catch {
+      retiredHere.add(id);
+      saved = false;
+    }
+  }
+
+  return saved;
 }
 
 /**
- * The ids an earlier version kept for actions now owned elsewhere (a draft's submit and discard,
- * which its writer sends): each with its key, to be forgotten once its new owner recorded it.
+ * The ids an earlier version kept, in its shared map, for actions now owned elsewhere (a draft's
+ * submit and discard, which its writer sends), each read directly against its own retirement mark:
+ * with its key, to be forgotten once its new owner recorded it.
  */
 export function legacyIds(path: string, method: 'POST' | 'DELETE'): { key: string; id: string }[] {
-  return [...savedIds()].flatMap(([key, id]) => {
+  return [...legacyMap()].flatMap(([key, id]) => {
+    if (retired(id)) return [];
+
     try {
       const sent = JSON.parse(key) as { path: string; method: string };
 

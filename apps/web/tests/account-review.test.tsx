@@ -102,6 +102,46 @@ describe('action IDs across the move to account routes', () => {
     expect(left()).toEqual([]);
   });
 
+  it.each([
+    ['its retirement saved', false],
+    ['its retirement kept only in this tab, storage full', true],
+  ])('never sends an earlier version’s id again once it was retired: %s', async (_case, full) => {
+    const path = `/api/accounts/me/threads/${crypto.randomUUID()}/replies`;
+    const body = { prId: 'p1', body: 'Same reply' };
+    const sent: string[] = [];
+
+    // An earlier version kept this reply's id in its shared map.
+    localStorage.setItem(
+      'review-desk-pending-command-ids',
+      JSON.stringify([[JSON.stringify({ path, body, method: 'POST' }), 'legacy']]),
+    );
+    vi.resetModules();
+
+    const { githubCommand, legacyIds } = await import('@/lib/operation-command');
+
+    vi.stubGlobal('fetch', async (_path: string, options: RequestInit) => {
+      sent.push(JSON.parse(String(options.body)).operationId);
+
+      return reply({ operation: { id: sent.at(-1) } }, 202);
+    });
+
+    if (full)
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('Quota exceeded');
+      });
+
+    // Its own retry, then the same reply sent twice more, on purpose.
+    await githubCommand(path, body);
+    await githubCommand(path, body);
+    await githubCommand(path, body);
+
+    expect(sent[0]).toBe('legacy');
+    expect(sent.slice(1)).not.toContain('legacy');
+    expect(new Set(sent).size).toBe(3);
+    expect(legacyIds(path, 'POST')).toEqual([]);
+    vi.restoreAllMocks();
+  });
+
   it('sends a retry with the id it was first sent with, though storage could not keep it', async () => {
     const { githubCommand } = await import('@/lib/operation-command');
     const sent: string[] = [];
