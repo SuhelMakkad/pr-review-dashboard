@@ -371,7 +371,8 @@ export interface SavedBackfill {
 
 const forcedBackfill = z.strictObject({
   id: z.string(),
-  at: z.string(),
+  // Its windows are counted from it: an unreadable time would read none and call that done.
+  at: time,
   windows: z.array(z.string()),
 }) satisfies z.ZodType<ForcedBackfill>;
 

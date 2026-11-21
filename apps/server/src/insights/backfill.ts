@@ -68,16 +68,23 @@ export class Backfill {
     };
   }
 
-  /** After a sync: imports what is new, joining an import in progress. Returns immediately. */
+  /**
+   * After a sync: imports what is new, joining an import in progress. Returns immediately, and
+   * never throws: one that cannot be asked for now is asked for by the next sync.
+   */
   request(login: string): void {
-    this.sync.store.transaction(() =>
-      this.scheduler.request(BACKFILL_WORK, login, {
-        account: login,
-        at: isoNow(this.clock),
-        join: true,
-      }),
-    );
-    this.changed(login);
+    try {
+      this.sync.store.transaction(() => {
+        this.scheduler.request(BACKFILL_WORK, login, {
+          account: login,
+          at: isoNow(this.clock),
+          join: true,
+        });
+        this.sync.store.afterCommit(() => this.changed(login));
+      });
+    } catch {
+      // Never breaks a sync's follow-up work, nor hides what else it started.
+    }
   }
 
   /**
@@ -90,8 +97,9 @@ export class Backfill {
     this.sync.store.transaction(() => {
       this.write(login, (live) => ({ ...live, force: { id: randomUUID(), at, windows: [] } }));
       this.scheduler.request(BACKFILL_WORK, login, { account: login, at });
+      // Told only once it is saved: a refresh rolled back was never asked for.
+      this.sync.store.afterCommit(() => this.changed(login));
     });
-    this.changed(login);
   }
 
   /**
@@ -126,15 +134,15 @@ export class Backfill {
     if (!login || !this.saved(login).force) return;
 
     try {
-      this.sync.store.transaction(() =>
+      this.sync.store.transaction(() => {
         this.scheduler.request(BACKFILL_WORK, login, {
           account: login,
           at: isoNow(this.clock),
           notBefore: this.sync.cooldown(login),
           join: true,
-        }),
-      );
-      this.changed(login);
+        });
+        this.sync.store.afterCommit(() => this.changed(login));
+      });
     } catch {
       // Never breaks a status change; the next sync asks again.
     }

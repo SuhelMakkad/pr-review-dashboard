@@ -8,6 +8,7 @@ import { EventBus } from '@/events.js';
 import { GitHubError } from '@/github/errors.js';
 import { SyncService } from '@/sync/index.js';
 import { historyImporter } from './history-importer.js';
+import { storeRaw } from './raw-settings.js';
 
 const cleanups: (() => unknown)[] = [];
 
@@ -221,6 +222,56 @@ describe('history imports on the scheduler', () => {
     sync.deferUntil(stamp(60_000), 'you');
 
     expect(backfill.state('you').running).toBe(false);
+  });
+
+  it("never fails a sync's routine ask it cannot save, while a refresh you ask for does", async () => {
+    const { store, backfill } = await setup();
+
+    vi.spyOn(store.scheduledWork, 'request').mockImplementation(() => {
+      throw new Error('disk I/O error');
+    });
+
+    expect(() => backfill.request('you')).not.toThrow();
+    expect(() => backfill.refresh('you')).toThrow('disk I/O error');
+  });
+
+  it('tells the page of an ask only once it is saved', async () => {
+    const { store, events, backfill, row, saved } = await setup();
+    const told = vi.fn();
+
+    events.subscribe(({ event }) => {
+      if (event.type === 'insights.updated') told();
+    });
+
+    expect(() =>
+      store.transaction(() => {
+        backfill.refresh('you');
+
+        throw new Error('rolled back');
+      }),
+    ).toThrow('rolled back');
+
+    expect(told).not.toHaveBeenCalled();
+    expect(row('you')).toBeUndefined();
+    expect(saved()?.force ?? null).toBeNull();
+  });
+
+  it('reads a refresh whose time cannot be read as none, never as one done', async () => {
+    const { store, imported, searched, saved } = await setup();
+
+    storeRaw(store, BACKFILL.of('you').key, {
+      doneWindows: [],
+      finishedAt: null,
+      lastError: null,
+      force: { id: 'refresh-1', at: 'not a time', windows: [] },
+    });
+
+    expect(saved()!.force).toBeNull();
+
+    await imported('you');
+
+    // An ordinary import: every window read.
+    expect(searched).toHaveLength(3);
   });
 
   it('tells the page an import stopped only once its end is saved, a retried save included', async () => {
