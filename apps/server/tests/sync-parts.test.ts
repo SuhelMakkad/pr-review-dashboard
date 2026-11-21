@@ -233,6 +233,9 @@ describe('SyncRunner', () => {
     const { service, identify, identity } = demo();
     let release: (() => void) | undefined;
 
+    // Runs before the service stops, so a failed assertion cannot leave the sync held.
+    cleanups.push(() => release?.());
+
     identity.mockImplementationOnce(async () => {
       await new Promise<void>((resolve) => (release = resolve));
 
@@ -275,6 +278,9 @@ describe('SyncRunner', () => {
     const { service, fixture, identity } = demo();
     const discover = fixture.discover.bind(fixture);
     let release: (() => void) | undefined;
+
+    // Runs before the service stops, so a failed assertion cannot leave the sync held.
+    cleanups.push(() => release?.());
 
     vi.spyOn(fixture, 'discover').mockImplementation(async (login, source) => {
       if (source === 'requested' && !release)
