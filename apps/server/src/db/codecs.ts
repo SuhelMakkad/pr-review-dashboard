@@ -3,8 +3,9 @@ import { normalizeSnapshot } from '@review-desk/shared/snapshot';
 import type { LocalTriageState, PullRequestSnapshot } from '@review-desk/shared/types';
 
 /**
- * How the store reads the JSON documents it keeps, written as they are. Every legacy shape is told
- * apart by its shape alone, so no document carries a stored version of its format.
+ * How the store reads the JSON documents it keeps, written as they are, with no version envelope
+ * around them. Older shapes are told apart by their shape. A snapshot also keeps the `version`
+ * field it always had, which marks one cached before the app's current snapshot version.
  */
 
 /**
