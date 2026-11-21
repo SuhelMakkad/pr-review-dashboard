@@ -51,24 +51,34 @@ export function retryAtFromHeaders(
   return null;
 }
 
-interface RunResult {
+export interface RunResult {
   code: number | null;
   stdout: string;
   stderr: string;
   timedOut: boolean;
 }
 
+/** Runs one `gh` call with its environment; the default spawns gh (tests stand in for it). */
+export type GhRunner = (
+  args: string[],
+  input: string | undefined,
+  env: NodeJS.ProcessEnv,
+) => Promise<RunResult>;
+
 export class GhCli implements GitHubTransport {
   constructor(
     private readonly timeoutMs = 35_000,
     /** The selected account's by default; a client for one account's work binds its own. */
     private readonly credentials: CredentialSource = ghCredentials,
+    private readonly runner: GhRunner | null = null,
   ) {}
 
   private async spawn(args: string[], input?: string): Promise<RunResult> {
     const started = performance.now();
     const env = await this.credentials.environment();
     const prepared = performance.now();
+
+    if (this.runner) return this.runner(args, input, env);
 
     return new Promise((resolve, reject) => {
       const child = spawn('gh', args, {

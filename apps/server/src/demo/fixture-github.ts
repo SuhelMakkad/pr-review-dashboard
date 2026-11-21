@@ -691,11 +691,15 @@ export class FixtureGitHub implements GitHubApi, GitHubAccounts {
     return this.receipt('AddComment', { id, url: `${pull.snapshot.url}#issuecomment-${id}` });
   }
 
-  /** Answers the backfill's searches from the scenario plus fictional history. */
+  /**
+   * Answers the backfill's searches from the scenario plus fictional history. Both are its viewer's
+   * alone, so a search for any other account finds nothing: the whole account key is compared,
+   * ignoring case, so a GitLab account of the same name is another account.
+   */
   async searchPullIds(query: HistoryQuery): Promise<string[]> {
-    if (this.outsider) return [];
-
     const login = this.scenario.world.viewer.login;
+
+    if (this.outsider || query.login.toLowerCase() !== login.toLowerCase()) return [];
     const from = Date.parse(query.from);
     const to = Date.parse(query.to) + 24 * 3_600_000;
     const field = query.kind === 'authored' ? 'createdAt' : 'updatedAt';
