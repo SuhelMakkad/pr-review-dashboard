@@ -111,6 +111,8 @@ type ComposerState =
       view?: DiffView;
       recovers?: string;
       refused?: { key: string; text: string };
+      /** Why its last send was refused: this opening's alone. */
+      error?: string;
       /** This opening's own: its editor, its text and its answers are never another's. */
       opening?: string;
     })
@@ -128,27 +130,27 @@ function Workspace() {
   const [railOpen, setRailOpen] = useState(() => storage.get('review-desk-rail') !== 'closed');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [composer, setComposerState] = useState<ComposerState>(null);
-  /** The composer as it is now, for answers that come later than the render that sent them. */
-  const composerNow = useRef<ComposerState>(null);
-
-  composerNow.current = composer;
 
   // Each composer opened is a new one: its editor starts from its own text, and an answer to an
   // earlier one never reaches it.
   const setComposer = (next: ComposerState | ((current: ComposerState) => ComposerState)) =>
     setComposerState((current) => {
       const value = typeof next === 'function' ? next(current) : next;
-      const opened = value && !value.opening ? { ...value, opening: crypto.randomUUID() } : value;
 
-      composerNow.current = opened;
-
-      return opened;
+      return value && !value.opening ? { ...value, opening: crypto.randomUUID() } : value;
     });
 
-  /** Whether `opened` is the composer open now: an answer to another is no longer its. */
-  const stillOpen = (opened: NonNullable<ComposerState>) =>
-    composerNow.current?.opening === opened.opening;
-  const [composerError, setComposerError] = useState<string | null>(null);
+  /**
+   * An answer to the opening `opened`, applied in the very update that checks it is still the one
+   * open: never to a composer opened since, whatever order the updates run in.
+   */
+  const toOpening = (
+    opened: NonNullable<ComposerState>,
+    change: (current: NonNullable<ComposerState>) => ComposerState,
+  ) =>
+    setComposerState((current) =>
+      current && current.opening === opened.opening ? change(current) : current,
+    );
   /** Text kept from a composer closed because its diff changed, for the next one. */
   const [keptBody, setKeptBody] = useState<string | null>(null);
   /** Lines selected for a comment, with the file and patch they were selected in. */
@@ -371,7 +373,6 @@ function Workspace() {
 
     setRecoveredBody(keptBody ?? '');
     setKeptBody(null);
-    setComposerError(null);
     setComposer(selection ?? { path: current.path, line: null, view: diffView(diff.data) });
   };
 
@@ -641,7 +642,6 @@ function Workspace() {
 
     setKeptBody(body);
     setComposer(null);
-    setComposerError(null);
     toast.error(
       'The diff changed while you were writing. Select the line again; your text is kept.',
     );
@@ -656,17 +656,15 @@ function Workspace() {
   const keepRefused = (opened: NonNullable<ComposerState>, error: unknown, text: string) => {
     const kept = (error as { details?: { kept?: unknown } }).details?.kept;
 
-    setComposer((current) =>
-      current && current.opening === opened.opening
-        ? { ...current, refused: typeof kept === 'string' ? { key: kept, text } : undefined }
-        : current,
-    );
+    toOpening(opened, (current) => ({
+      ...current,
+      error: (error as Error).message,
+      refused: typeof kept === 'string' ? { key: kept, text } : undefined,
+    }));
   };
 
   /** Closes the composer, if it is still the opening `opened` now: never one opened since. */
-  const closeOpening = (opened: NonNullable<ComposerState>) => {
-    if (stillOpen(opened)) closeComposer();
-  };
+  const closeOpening = (opened: NonNullable<ComposerState>) => toOpening(opened, () => null);
 
   /**
    * Opens a composer with a kept comment's text, to add it as a new comment: on the lines it was
@@ -696,7 +694,6 @@ function Workspace() {
 
     selectFile(where.path);
     setRecoveredBody(text);
-    setComposerError(null);
 
     // A collapsed file (generated) shows no lines: opened, so the composer on them is shown too.
     if (restorable) setExpanded((open) => new Set([...open, where.path]));
@@ -722,7 +719,6 @@ function Workspace() {
 
   const closeComposer = () => {
     setComposer(null);
-    setComposerError(null);
     setComposerBody('');
   };
 
@@ -732,7 +728,7 @@ function Workspace() {
       label={target.line === null ? `Comment on ${target.path}` : `Comment on line ${target.line}`}
       initial={recoveredBody}
       busy={review.addComment.isPending || review.commentNow.isPending || locked}
-      error={composerError}
+      error={target.error ?? null}
       onChange={setComposerBody}
       onCancel={closeComposer}
       primary={{
@@ -761,10 +757,7 @@ function Workspace() {
             });
             closeOpening(target);
           } catch (error) {
-            // Its own composer's, still open: never shown in one opened since.
-            if (!stillOpen(target)) return;
-
-            setComposerError((error as Error).message);
+            // Its own composer's, if still open: never shown in one opened since.
             keepRefused(target, error, body);
           }
         },
@@ -794,7 +787,7 @@ function Workspace() {
             closeOpening(target);
             toast('Comment queued', { action: { label: 'View activity', onClick: openActivity } });
           } catch (error) {
-            if (stillOpen(target)) setComposerError((error as Error).message);
+            toOpening(target, (current) => ({ ...current, error: (error as Error).message }));
           }
         },
       }}
@@ -1030,7 +1023,6 @@ function Workspace() {
 
                     setRecoveredBody(keptBody ?? '');
                     setKeptBody(null);
-                    setComposerError(null);
                     setComposer({ ...target, path: current.path, view: diffView(diff.data) });
                   }}
                   onCommentFile={() => {
