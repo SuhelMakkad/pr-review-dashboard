@@ -168,6 +168,12 @@ const guard = {
   baseGeneration: z.number().int().nonnegative().optional(),
 };
 
+/**
+ * The PR a guarded write to a run's draft is for: its claim is that PR's, and the run must be one
+ * of it. Runs are addressed by their own id, which names no PR.
+ */
+const runPr = z.string().min(1).max(200).optional();
+
 const newComment = z
   .object({
     account,
@@ -317,12 +323,13 @@ export const aiRequests = {
     baseGeneration: guard.baseGeneration,
   }),
   run: z.strictObject({ account }),
-  apply: z.strictObject({ account, ...guard }),
+  apply: z.strictObject({ account, ...guard, prId: runPr }),
   accept: z.strictObject({
     account,
     index: z.number().int().min(0),
     body: z.string().trim().min(1).max(65_536).optional(),
     ...guard,
+    prId: runPr,
   }),
   prepare: z
     .strictObject({
@@ -334,6 +341,7 @@ export const aiRequests = {
         .regex(/^[a-f0-9]{64}$/)
         .optional(),
       ...guard,
+      prId: runPr,
     })
     .refine((value) => !value.replace || Boolean(value.expectedDraftRevision)),
 };

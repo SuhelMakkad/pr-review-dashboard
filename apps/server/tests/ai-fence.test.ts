@@ -126,13 +126,60 @@ describe('AI starts under their guard', () => {
     await finished(a.json().id);
     await save('Later');
 
-    // Each attempt is its own record of the run it joined, whatever has happened since.
-    for (const request of [first, second])
-      expect((await start(request)).json().id).toBe(a.json().id);
+    // Each attempt is its own record of the run it joined, answered as it was when it joined,
+    // whatever has happened since.
+    expect((await start(first)).json()).toEqual(a.json());
+    expect((await start(second)).json()).toEqual(b.json());
+  });
+
+  it('refuse a start on a draft that moved on, even one that would join a cached run', async () => {
+    const { start, finished, revision, save, runs } = await demo();
+    const cached = await finished((await start({ task: 'brief' })).json().id);
+    const seen = revision();
+
+    await save('Changed since');
+
+    const before = (await runs()).length;
+    // Not forced: it would join the cached run, were its base current.
+    const stale = await start({ task: 'brief', attemptId: randomUUID(), baseRevision: seen });
+
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().code).toBe('DRAFT_REVISION_CONFLICT');
+    expect((await runs()).length).toBe(before);
+    expect(cached.status).toBe('done');
   });
 });
 
 describe('AI draft writes under their guard', () => {
+  it("are claimed under the PR they name: a refusal for an unknown run is found by that PR's lookup", async () => {
+    const { pr, call, start, finished } = await demo();
+    const writeId = randomUUID();
+    const missing = await call('POST', '/api/accounts/you/ai/runs/no-such-run/summary', {
+      writeId,
+      prId: pr.id,
+      baseRevision: 0,
+    });
+
+    expect(missing.statusCode).toBe(404);
+
+    // Its answer was lost: the PR's lookup finds the refusal, never "not arrived".
+    const lookup = await call(
+      'GET',
+      `/api/accounts/you/pulls/${pr.id}/draft/attempts/${writeId}?base=0`,
+    );
+
+    expect(lookup.json().attempt).toMatchObject({ id: writeId, state: 'refused' });
+
+    // A run of another PR is refused for this one.
+    const other = await finished((await start({ task: 'draft_summary' })).json().id);
+    const elsewhere = await call('POST', `/api/accounts/you/ai/runs/${other.id}/summary`, {
+      writeId: randomUUID(),
+      prId: 'PR_elsewhere',
+    });
+
+    expect(elsewhere.statusCode).toBe(404);
+  });
+
   it('are refused on a draft that moved on, and answered from their claim when retried', async () => {
     const { pr, call, start, finished, revision, save } = await demo();
     const suggested = await finished((await start({ task: 'draft_comments' })).json().id);

@@ -58,6 +58,17 @@ export function registerAiRoutes(
       run,
       aiFailure,
     ) as never;
+  /**
+   * The PR a write to a run's draft is claimed under: the one it names, so its outcome is found by
+   * that PR's lookup whatever became of the run; else the run's.
+   */
+  const prOf = (account: string, runId: string, prId?: string) =>
+    prId ?? runner.runPr(account, runId) ?? '';
+  /** Refuses a write naming a PR the run is not of: the claim records it under that PR. */
+  const ofPr = (account: string, runId: string, prId?: string) => {
+    if (prId !== undefined && runner.runPr(account, runId) !== prId)
+      throw new ReviewError('NOT_FOUND', 404, 'That AI run is not of this PR.');
+  };
   /** The guard a body carries. */
   const guardOf = (body: WriteGuard & { attemptId?: string }): WriteGuard => ({
     writeId: body.writeId ?? body.attemptId,
@@ -208,11 +219,15 @@ export function registerAiRoutes(
     ({ params, body }) =>
       guarded(
         body.account,
-        runner.runPr(body.account, params.runId) ?? '',
+        prOf(body.account, params.runId, body.prId),
         'write',
         guardOf(body),
         { route: 'acceptAi', runId: params.runId, body },
-        (fence) => runner.accept(body.account, params.runId, body.index, body.body, fence),
+        (fence) => {
+          ofPr(body.account, params.runId, body.prId);
+
+          return runner.accept(body.account, params.runId, body.index, body.body, fence);
+        },
       ),
     serving,
   );
@@ -223,18 +238,21 @@ export function registerAiRoutes(
     ({ params, body }) =>
       guarded(
         body.account,
-        runner.runPr(body.account, params.runId) ?? '',
+        prOf(body.account, params.runId, body.prId),
         'write',
         guardOf(body),
         { route: 'prepareAi', runId: params.runId, body },
-        (fence) =>
-          runner.prepareReview(
+        (fence) => {
+          ofPr(body.account, params.runId, body.prId);
+
+          return runner.prepareReview(
             body.account,
             params.runId,
             body.indices,
             { replace: body.replace, expectedDraftRevision: body.expectedDraftRevision },
             fence,
-          ),
+          );
+        },
       ),
     serving,
   );
@@ -245,11 +263,15 @@ export function registerAiRoutes(
     ({ params, body }) =>
       guarded(
         body.account,
-        runner.runPr(body.account, params.runId) ?? '',
+        prOf(body.account, params.runId, body.prId),
         'write',
         guardOf(body),
         { route: 'applyAi', runId: params.runId, body },
-        (fence) => runner.applySummary(body.account, params.runId, fence),
+        (fence) => {
+          ofPr(body.account, params.runId, body.prId);
+
+          return runner.applySummary(body.account, params.runId, fence);
+        },
       ),
     serving,
   );
