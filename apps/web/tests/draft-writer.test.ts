@@ -1826,6 +1826,24 @@ describe('comment and AI write recovery', () => {
     expect(transport.checkpoint).toHaveBeenCalledTimes(2);
   });
 
+  it('waits as long as the checkpoint takes, for a write with no bound', async () => {
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+
+    writer.observe(draft(0));
+    // A real answer takes a moment: never taken as no answer.
+    vi.mocked(transport.checkpoint).mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ checkpoint: 7, seal: '0123456789abcdef' }), 30),
+        ),
+    );
+    await writer.write('addComment', comment, { body: 'One' });
+
+    expect(transport.checkpoint).toHaveBeenCalledTimes(1);
+    expect(sent.map((request) => request.body.writeId)).toEqual([expect.stringMatching(SEALED)]);
+  });
+
   it('sends nothing unsealed: it waits for a checkpoint it cannot read yet', async () => {
     const { sent, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);
@@ -3281,6 +3299,53 @@ describe('the summary start', () => {
 
     expect(vi.mocked(transport.checkpoint).mock.calls).toHaveLength(reads);
     expect(sent).toEqual([]);
+  });
+
+  it('lets the queue go on at once when a start sent again is settled by its first answer', async () => {
+    vi.useFakeTimers();
+
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', PR, transport, instant, NEVER);
+    let admit: () => void = () => {};
+
+    writer.observe(draft(1));
+    answers.push(
+      (request) =>
+        new Promise((resolve) => {
+          admit = () =>
+            resolve({
+              id: 'run-1',
+              attempt: { id: request.body.attemptId, state: 'committed', revision: 1 },
+            });
+        }),
+    );
+
+    const unknown = expect(writer.startSummary({})).rejects.toMatchObject({
+      code: 'SUMMARY_START_UNKNOWN',
+    });
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await unknown;
+    vi.useRealTimers();
+    vi.mocked(transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+    await writer.reconcile();
+    // The resend's own answer never comes.
+    answers.push(() => new Promise(() => {}));
+
+    const again = writer.sendStartAgain(writer.startViews()[0]!.key);
+    const behind = writer.write('addComment', pr, { body: 'Behind' });
+
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    admit();
+    await again;
+    await behind;
+
+    expect(routes(sent)).toEqual(['startAi', 'startAi', 'addComment']);
+    expect(writer.startViews()).toEqual([]);
   });
 
   it('is held back by a submit not known, as any write is', async () => {

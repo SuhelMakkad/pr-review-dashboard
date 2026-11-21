@@ -385,6 +385,8 @@ export class DraftWriter {
   private starts: StartRecord[] = [];
   /** Starts being looked up now, by key: a lookup asked for meanwhile joins the one on its way. */
   private readonly checkingStarts = new Map<string, Promise<void>>();
+  /** What waits on a start being sent again, by key: woken once it is no longer being sent. */
+  private readonly startWaits = new Map<string, (() => void)[]>();
   /** Writes being looked up now, by key: a lookup asked for meanwhile joins the one on its way. */
   private readonly checkingWrites = new Map<string, Promise<void>>();
   /**
@@ -1017,9 +1019,15 @@ export class DraftWriter {
       const deadline = Date.now() + COMMAND_BOUND_MS;
       const expected = { writeId: attempt.writeId, base: attempt.base };
       const answer = decode(this.transport.send(attempt.request), false, expected);
-      let settled = await beforeDeadline(answer, deadline).catch(() => null);
+      // Settled meanwhile (by a late answer of its first send): the queue need not wait on it.
+      const settles = this.startSettles(record).then(() => null);
+      let settled = await Promise.race([
+        beforeDeadline(answer, deadline).catch(() => null),
+        settles,
+      ]);
 
-      // Not answered in time: the queue goes on, and its answer still settles it if it comes.
+      // Not answered in time, or settled already: the queue goes on, and its answer still settles
+      // it if it comes and it is still to be settled.
       if (!settled) {
         void answer.then((late) => this.settleStartAnswer(record, late, true));
 
@@ -1031,8 +1039,13 @@ export class DraftWriter {
         return;
       }
 
-      // Answered without its outcome: the queue waits, within the bound, on its claim.
-      if (resending()) settled = await this.awaitClaim(record, settled, deadline);
+      // Answered without its outcome: the queue waits, within the bound, on its claim, or until it
+      // is settled otherwise.
+      if (resending())
+        settled = await Promise.race([
+          this.awaitClaim(record, settled, deadline),
+          settles.then(() => settled!),
+        ]);
       if (resending()) this.settleStartAnswer(record, settled);
     });
   }
@@ -1838,7 +1851,9 @@ export class DraftWriter {
     for (
       let attempt = 0;
       (outcome.kind === 'pending' || outcome.kind === 'unknown' || outcome.kind === 'gap') &&
-      Date.now() < deadline;
+      Date.now() < deadline &&
+      this.starts.includes(record) &&
+      record.phase === 'sending';
       attempt++
     ) {
       await beforeDeadline(sleep(this.backoff(attempt)), deadline).catch(() => {});
@@ -2003,11 +2018,30 @@ export class DraftWriter {
   ) {
     Object.assign(record, extra, { phase });
     this.changed();
+    this.wakeStart(record);
   }
 
   private dropStart(record: StartRecord) {
     this.starts = this.starts.filter((other) => other !== record);
     this.changed();
+    this.wakeStart(record);
+  }
+
+  /** Resolves once `record` is no longer being sent: settled, or back to its lookups. */
+  private startSettles(record: StartRecord): Promise<void> {
+    if (!this.starts.includes(record) || record.phase !== 'sending') return Promise.resolve();
+
+    return new Promise((resolve) =>
+      this.startWaits.set(record.key, [...(this.startWaits.get(record.key) ?? []), resolve]),
+    );
+  }
+
+  private wakeStart(record: StartRecord) {
+    if (this.starts.includes(record) && record.phase === 'sending') return;
+
+    for (const wake of this.startWaits.get(record.key) ?? []) wake();
+
+    this.startWaits.delete(record.key);
   }
 
   private canSendStartAgain(record: StartRecord): boolean {
@@ -3047,8 +3081,11 @@ const unsettled = (record: AttemptRecord) =>
 const writeNeedsLookup = (record: AttemptRecord) =>
   (record.phase === 'checking' || record.phase === 'unknown') && record.writeId !== undefined;
 
-/** `promise`, or a rejection once `deadline` passes first. */
+/** `promise`, or a rejection once `deadline` passes first. With no deadline, `promise` itself. */
 function beforeDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+  // A timer cannot wait forever (its delay would be taken as almost none): none is set at all.
+  if (!Number.isFinite(deadline)) return promise;
+
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error('Past its deadline.')),
