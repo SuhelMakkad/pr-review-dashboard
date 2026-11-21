@@ -474,7 +474,7 @@ export class AutoReviewer {
     });
     const { actions, waited } = settleCheck(
       entries,
-      waits && changed ? changed.headOid : null,
+      waits && changed !== null ? changed.headOid : null,
       run.finishedAt,
     );
 

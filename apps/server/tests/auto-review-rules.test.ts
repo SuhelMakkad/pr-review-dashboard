@@ -517,4 +517,11 @@ describe('settling a check', () => {
     });
     expect(settleCheck([], 'head-2', null)).toEqual({ actions: [], waited: false });
   });
+
+  it('waits for an outdated head even when it is empty, as a snapshot may keep it', () => {
+    expect(settleCheck(['a'], '', '2026-11-01T00:00:00Z')).toEqual({
+      actions: [{ entry: 'a', kind: 'wait', head: '', began: '2026-11-01T00:00:00Z' }],
+      waited: true,
+    });
+  });
 });

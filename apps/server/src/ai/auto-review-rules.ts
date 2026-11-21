@@ -440,8 +440,9 @@ export function settleCheck<E>(
   finishedAt: string | null,
 ): { actions: SettleAction<E>[]; waited: boolean } {
   return {
+    // An empty head is a head (a snapshot may keep one): only null means nothing is outdated.
     actions: entries.map((entry) =>
-      outdatedHead
+      outdatedHead !== null
         ? { entry, kind: 'wait', head: outdatedHead, began: finishedAt }
         : { entry, kind: 'started' },
     ),
