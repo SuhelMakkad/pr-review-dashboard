@@ -41,6 +41,8 @@ import type { SyncService } from '@/sync/service.js';
 import type { MutationStep, OperationRecord } from './types.js';
 import { WRITE_COOLDOWN } from '@/db/settings.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
+import { log as serverLog } from '@/log.js';
+import { held, heldUntil, nextDue, pick } from './due.js';
 
 const MUTATIONS = new Set([
   'approveReview',
@@ -220,8 +222,19 @@ function receiptOf(row: OperationRecord): CommandReceipt {
   };
 }
 
+/** The soonest a wake sends: a burst of actions queued together is picked up as one. */
+const MIN_WAKE_MS = 100;
+/** The longest a wake sleeps: wall time can jump meanwhile, so it looks again by then. */
+const MAX_SLEEP_MS = 5 * 60_000;
+/** How soon a wake looks again after it could not read what is due. */
+const WAKE_RETRY_MS = 1000;
+
 export class OperationQueue {
   private cancelWake: Cancel | null = null;
+  /** When the armed wake fires, on the monotonic clock; null while none is armed. */
+  private wakeAt: number | null = null;
+  /** Stops listening for status changes; set while open. */
+  private unsubscribe: (() => void) | null = null;
   private active: Promise<void> | null = null;
   private suspended = false;
   private opened = false;
@@ -274,6 +287,10 @@ export class OperationQueue {
       });
     }
 
+    // A cooldown ending, or another account in use, can make an action due.
+    this.unsubscribe = this.sync.events.subscribe(({ event }) => {
+      if (event.type === 'status') this.wake();
+    });
     this.wake();
   }
 
@@ -796,6 +813,8 @@ export class OperationQueue {
 
     this.log.update(next);
     this.emit(next);
+    // Any change of a row can make it, or one held behind it, due: looked at once it commits.
+    this.sync.store.afterCommit(() => this.wake());
 
     return next;
   }
@@ -923,17 +942,60 @@ export class OperationQueue {
     });
   }
 
-  /** Schedules the next send. Nothing is sent before `open()` has recovered interrupted actions. */
+  /**
+   * Arms the next send for when an action is due, and arms nothing while none waits. Nothing is
+   * sent before `open()` has recovered interrupted actions. Called after every change that can
+   * make an action due; never throws, so a caller whose write committed always hears of it.
+   */
   wake(): void {
     if (!this.opened || this.closed || this.suspended || this.holds > 0) return;
-    if (this.active || this.cancelWake) return;
+    // A tick in progress wakes again when it ends, reading what changed meanwhile.
+    if (this.active) return;
 
+    let delay: number | null;
+
+    try {
+      delay = this.nextDelay();
+    } catch {
+      // Looked at again soon, or when the wake already armed fires. Nothing of the error is kept.
+      serverLog.event('warn', 'outbox.wake-failed', {});
+
+      if (this.cancelWake) return;
+
+      delay = WAKE_RETRY_MS;
+    }
+
+    if (delay === null) {
+      this.disarm();
+
+      return;
+    }
+
+    // Compared on the monotonic clock: a jump of wall time cannot keep a late wake over an
+    // action due now.
+    const fireAt = performance.now() + delay;
+
+    if (this.cancelWake && this.wakeAt !== null && this.wakeAt <= fireAt) return;
+
+    this.disarm();
+    this.wakeAt = fireAt;
     // The one timer that does not keep the process alive, as before.
     this.cancelWake = this.clock.after(
-      100,
+      delay,
       () => {
         this.cancelWake = null;
-        this.active = this.tick()
+        this.wakeAt = null;
+
+        if (this.active) return;
+
+        // Active before any of the tick runs, so a save it makes cannot arm another tick.
+        this.active = Promise.resolve()
+          .then(() => {
+            // Paused, held or closed since the timer fired: nothing is sent.
+            if (this.closed || this.suspended || this.holds > 0) return;
+
+            return this.tick();
+          })
           .catch(() => {
             // A failed preflight is recorded on its operation. Keep the outbox alive after a local error.
           })
@@ -946,28 +1008,46 @@ export class OperationQueue {
     );
   }
 
+  private disarm(): void {
+    this.cancelWake?.();
+    this.cancelWake = null;
+    this.wakeAt = null;
+  }
+
+  /**
+   * How long until an action of the account in use could be sent or checked, in ms: at least
+   * `MIN_WAKE_MS`, at most `MAX_SLEEP_MS`. Null when none waits.
+   */
+  private nextDelay(): number | null {
+    const account = this.sync.status.account?.login;
+
+    if (!account) return null;
+
+    const now = this.clock.now();
+    const deadline = nextDue(this.rows(account), this.heldUntil(account), now);
+
+    if (deadline === null) return null;
+
+    return Math.min(MAX_SLEEP_MS, Math.max(MIN_WAKE_MS, deadline - now));
+  }
+
+  /** Until when the account's write cooldown and the sync's `retryAt` hold sending back. */
+  private heldUntil(account: string): number {
+    return heldUntil(
+      this.sync.store.settings.get(WRITE_COOLDOWN.of(account)),
+      this.sync.status.retryAt,
+    );
+  }
+
   private async tick(): Promise<void> {
     const account = this.sync.status.account?.login;
     if (!account) return;
 
     const rows = this.rows(account);
-    const cooldown = this.sync.store.settings.get(WRITE_COOLDOWN.of(account));
-    if (
-      Math.max(
-        cooldown ? Date.parse(cooldown) : -Infinity,
-        this.sync.status.retryAt ? Date.parse(this.sync.status.retryAt) : -Infinity,
-      ) > this.clock.now()
-    )
-      return;
 
-    const row = rows.find(
-      (candidate, index) =>
-        ['queued', 'waiting', 'checking'].includes(candidate.status) &&
-        (!candidate.retryAt || Date.parse(candidate.retryAt) <= this.clock.now()) &&
-        !rows
-          .slice(0, index)
-          .some((prior) => prior.prId === candidate.prId && operationUnsettled(prior.status)),
-    );
+    if (held(this.heldUntil(account), this.clock.now())) return;
+
+    const row = pick(rows, this.clock.now());
     if (!row) return;
 
     // Checked before anything is sent or reconciled: reconciling an unfinished step could hide
@@ -2348,8 +2428,7 @@ export class OperationQueue {
 
   async pause(): Promise<void> {
     this.suspended = true;
-    this.cancelWake?.();
-    this.cancelWake = null;
+    this.disarm();
 
     await this.active;
     await Promise.allSettled([...this.refreshes]);
@@ -2366,8 +2445,7 @@ export class OperationQueue {
    */
   async hold(): Promise<() => void> {
     this.holds++;
-    this.cancelWake?.();
-    this.cancelWake = null;
+    this.disarm();
 
     await this.active;
 
@@ -2389,6 +2467,8 @@ export class OperationQueue {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
     await this.pause();
   }
 }

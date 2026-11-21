@@ -137,6 +137,7 @@ const schemas = {
     fetchMaxMs: 'number',
   },
   'loop.delay': { p50: 'number', p99: 'number', max: 'number', count: 'number' },
+  'outbox.wake-failed': {},
   'ai.archive': {
     side: ['before', 'after'],
     bytes: 'number',
