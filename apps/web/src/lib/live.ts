@@ -218,6 +218,47 @@ export function handle(client: QueryClient, event: ServerEvent, firstHello: { va
 /** Every query: what a resync, or a frame that could not be read, reads again. */
 const everything = () => true;
 
+/** Queries with a read again already due once their read in flight lands. */
+const followUps = new WeakSet<Query>();
+
+/**
+ * Reads every query again after frames that could not be read, never cancelling a read already
+ * on its way: a refetch slower than a recovery window still finishes. Such a read may have started
+ * before the frames, so it is read once more when it lands; one more at most, however many
+ * recoveries came meanwhile.
+ */
+function recover(client: QueryClient): void {
+  const cache = client.getQueryCache();
+
+  for (const query of cache.getAll()) {
+    if (query.state.fetchStatus !== 'fetching') {
+      void client.invalidateQueries(
+        { queryKey: query.queryKey, exact: true },
+        { cancelRefetch: false },
+      );
+      continue;
+    }
+
+    if (followUps.has(query)) continue;
+
+    followUps.add(query);
+
+    const unsubscribe = cache.subscribe((event) => {
+      if (event.query !== query) return;
+      if (event.type !== 'removed' && query.state.fetchStatus === 'fetching') return;
+
+      unsubscribe();
+      followUps.delete(query);
+
+      if (event.type !== 'removed')
+        void client.invalidateQueries(
+          { queryKey: query.queryKey, exact: true },
+          { cancelRefetch: false },
+        );
+    });
+  }
+}
+
 /** How long unreadable frames are gathered before the one refresh that recovers from them. */
 export const UNREADABLE_WINDOW_MS = 250;
 
@@ -246,7 +287,7 @@ export function frameReader(client: QueryClient) {
 
     due = setTimeout(() => {
       due = null;
-      refresh(client, everything);
+      recover(client);
     }, UNREADABLE_WINDOW_MS);
   };
 

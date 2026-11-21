@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { routes } from '@review-desk/shared/contract';
 import { api } from '@/lib/api';
 import { pathOf } from '@/lib/call';
@@ -58,6 +58,7 @@ describe('frames the page cannot read', () => {
     const frames = frameReader(client);
 
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    client.setQueryData(['anything'], 1);
     frames.read('not json');
     vi.advanceTimersByTime(UNREADABLE_WINDOW_MS - 50);
     // Joins the refresh already due, which comes after it.
@@ -90,6 +91,7 @@ describe('frames the page cannot read', () => {
     const frames = frameReader(client);
 
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    client.setQueryData(['anything'], 1);
 
     // One unreadable frame every 200 ms for a second: windows at 0, 400 and 800 ms.
     for (let at = 0; at <= 800; at += 200) {
@@ -103,17 +105,65 @@ describe('frames the page cannot read', () => {
     client.clear();
   });
 
-  it('read again rather than show a status or notification of the wrong shape', () => {
+  it.each([
+    ['a status', { type: 'status', status: {} }],
+    ['a notification', { type: 'notify', notifications: [{}] }],
+  ])('read everything again rather than show %s of the wrong shape', (_case, frame) => {
+    vi.useFakeTimers();
+
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    const frames = frameReader(client);
+
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    client.setQueryData(['anything'], 1);
+    frames.read(JSON.stringify(frame));
+    vi.advanceTimersByTime(UNREADABLE_WINDOW_MS);
+
+    expect(client.getQueryData(queryKeys.status)).toBeUndefined();
+    expect(invalidate).toHaveBeenCalled();
+    frames.close();
+    client.clear();
+  });
+
+  it('let a slow read finish through a burst, and read it once more when it lands', async () => {
     vi.useFakeTimers();
 
     const client = new QueryClient();
     const frames = frameReader(client);
+    let reads = 0;
+    let aborted = 0;
+    const observer = new QueryObserver(client, {
+      queryKey: ['slow'],
+      queryFn: ({ signal }) => {
+        reads += 1;
+        signal.addEventListener('abort', () => (aborted += 1));
+
+        // The first read is quick; each read again takes four windows.
+        return new Promise<number>((resolve) =>
+          setTimeout(() => resolve(reads), reads === 1 ? 0 : UNREADABLE_WINDOW_MS * 4),
+        );
+      },
+    });
+    const unsubscribe = observer.subscribe(() => {});
 
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    frames.read(JSON.stringify({ type: 'status', status: {} }));
-    frames.read(JSON.stringify({ type: 'notify', notifications: [{}] }));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads).toBe(1);
 
-    expect(client.getQueryData(queryKeys.status)).toBeUndefined();
+    // An unreadable frame every 200 ms for 1.2 s: recoveries keep coming while the read is slow.
+    for (let at = 0; at < 1200; at += 200) {
+      frames.read('not json');
+      await vi.advanceTimersByTimeAsync(200);
+    }
+
+    await vi.advanceTimersByTimeAsync(UNREADABLE_WINDOW_MS * 12);
+
+    expect(aborted).toBe(0);
+    // The first recovery's read, then one more after it lands, for the frames during it.
+    expect(reads).toBe(3);
+    expect(observer.getCurrentResult().data).toBe(3);
+    unsubscribe();
     frames.close();
     client.clear();
   });

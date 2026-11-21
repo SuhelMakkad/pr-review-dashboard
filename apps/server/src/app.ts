@@ -65,7 +65,7 @@ export interface AppOptions {
   keepaliveMs?: number;
   operationQueue?: QueueOptions;
   /** Told of every route as it is registered: the contract test checks them against the contract. */
-  onRoute?: (route: { method: string | string[]; url: string }) => void;
+  onRoute?: (route: { method: string | string[]; url: string; handler: unknown }) => void;
 }
 
 export async function createApp(service: SyncService, options: AppOptions = {}) {
@@ -74,7 +74,7 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
   // Every route as declared, so a log record can name one without naming a request's own path.
   app.addHook('onRoute', (route) => {
     knownRoutes.add(route.url);
-    options.onRoute?.({ method: route.method, url: route.url });
+    options.onRoute?.({ method: route.method, url: route.url, handler: route.handler });
   });
   // How long each request took, by route: slow ones and server errors stand out.
   app.addHook('onResponse', async (request, reply) => {

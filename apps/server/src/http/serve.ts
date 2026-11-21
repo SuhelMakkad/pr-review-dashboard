@@ -13,20 +13,19 @@ import { knownAccount, type AccountParams } from '@/routes/pulls.js';
 import { input, type ScopedRequest } from '@/routes/scoped.js';
 import type { SyncService } from '@/sync/service.js';
 
-/** The statuses a refusal can have: never a success, which only `ok` sends, as declared. */
-export type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 502 | 503;
-
 /** A refusal a handler returns, or an area's error mapper makes of what a handler threw. */
 export interface Failed {
   failed: true;
-  status: ErrorStatus;
+  /** An HTTP error status, 400 to 599: never a success, which only `ok` sends, as declared. */
+  status: number;
   body: ErrorBody;
 }
 
 export const failed = (status: number, body: ErrorBody): Failed => {
-  if (status < 400) throw new Error(`A refusal cannot be a success (${status}).`);
+  if (!Number.isInteger(status) || status < 400 || status > 599)
+    throw new Error(`A refusal needs an error status, not ${status}.`);
 
-  return { failed: true, status: status as ErrorStatus, body };
+  return { failed: true, status, body };
 };
 
 /** A success the route declares: this status, with the body it carries. */

@@ -30,15 +30,15 @@ describe('GitHub GraphQL contract', () => {
 describe('the HTTP contract', () => {
   /** Every route an app registers, as `METHOD path`, but Fastify's own `HEAD` copies of `GET`s. */
   async function registered(demo: boolean) {
-    const seen: string[] = [];
+    const seen: { route: string; handler: unknown }[] = [];
     const store = new Store(':memory:');
     const fixture = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
     const service = new SyncService(store, fixture, new EventBus(), fixture);
     const app = await createApp(service, {
       sessionToken: 'test-session',
       ...(demo ? { fixture } : {}),
-      onRoute: ({ method, url }) => {
-        for (const one of [method].flat()) seen.push(`${one} ${url}`);
+      onRoute: ({ method, url, handler }) => {
+        for (const one of [method].flat()) seen.push({ route: `${one} ${url}`, handler });
       },
     });
 
@@ -47,16 +47,43 @@ describe('the HTTP contract', () => {
     service.stop();
     store.close();
 
-    // Fastify adds a `HEAD` for each `GET`; only those are left out, never one declared itself.
-    const gets = new Set(
-      seen.filter((route) => route.startsWith('GET ')).map((route) => route.slice(4)),
+    return generatedHeadsLeftOut(seen);
+  }
+
+  /**
+   * Fastify adds a `HEAD` for each `GET`, with that `GET`'s own handler: only those are left out.
+   * A `HEAD` registered with a handler of its own is compared like any other route.
+   */
+  function generatedHeadsLeftOut(seen: { route: string; handler: unknown }[]) {
+    const gets = new Map(
+      seen
+        .filter(({ route }) => route.startsWith('GET '))
+        .map(({ route, handler }) => [route.slice(4), handler]),
     );
 
     return seen
-      .filter((route) => route.includes(' /api/'))
-      .filter((route) => !(route.startsWith('HEAD ') && gets.has(route.slice(5))))
+      .filter(({ route }) => route.includes(' /api/'))
+      .filter(
+        ({ route, handler }) =>
+          !(route.startsWith('HEAD ') && gets.get(route.slice(5)) === handler),
+      )
+      .map(({ route }) => route)
       .sort();
   }
+
+  it('compares a HEAD registered with its own handler', () => {
+    const get = () => undefined;
+    const head = () => undefined;
+
+    expect(
+      generatedHeadsLeftOut([
+        { route: 'GET /api/status', handler: get },
+        { route: 'HEAD /api/status', handler: get },
+        { route: 'GET /api/sync', handler: get },
+        { route: 'HEAD /api/sync', handler: head },
+      ]),
+    ).toEqual(['GET /api/status', 'GET /api/sync', 'HEAD /api/sync']);
+  });
 
   const declared = (entries: Record<string, { method: string; path: string }>) =>
     Object.values(entries).map((route) => `${route.method} ${route.path}`);
