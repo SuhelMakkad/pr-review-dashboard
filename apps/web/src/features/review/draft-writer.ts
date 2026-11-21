@@ -368,8 +368,11 @@ export class DraftWriter {
   private writes: AttemptRecord[];
   /** Writes being looked up now, by key: a lookup asked for meanwhile joins the one on its way. */
   private readonly checkingWrites = new Map<string, Promise<void>>();
-  /** Raised for a write as it is sent again: a lookup begun before then says nothing after. */
-  private readonly resends = new Map<string, number>();
+  /**
+   * Raised for a write as it is sent again, or found received: a lookup begun before then says
+   * nothing after.
+   */
+  private readonly evidence = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   /** Raised on every change, so a subscriber can tell one state from the next. */
   version = 0;
@@ -1000,8 +1003,7 @@ export class DraftWriter {
     if (gate) throw new WriteRefused(gate.message, gate.code);
 
     // A lookup on its way now was made before this send: its answer says nothing of it.
-    this.resends.set(record.key, (this.resends.get(record.key) ?? 0) + 1);
-    this.checkingWrites.delete(record.key);
+    this.supersedeLookups(record);
 
     // Recorded as sent before it is, or never sent.
     this.moveWrite(record, 'sending');
@@ -1111,28 +1113,38 @@ export class DraftWriter {
 
     if (known) return known;
 
-    const looking = this.lookUpWrite(record).finally(() => this.checkingWrites.delete(record.key));
+    const looking: Promise<void> = this.lookUpWrite(record).finally(() => {
+      // Only its own entry: one superseded since leaves the lookup that replaced it.
+      if (this.checkingWrites.get(record.key) === looking) this.checkingWrites.delete(record.key);
+    });
 
     this.checkingWrites.set(record.key, looking);
 
     return looking;
   }
 
+  /** New evidence of a write: every lookup of it on its way now says nothing after. */
+  private supersedeLookups(record: AttemptRecord) {
+    this.evidence.set(record.key, (this.evidence.get(record.key) ?? 0) + 1);
+    this.checkingWrites.delete(record.key);
+  }
+
   private async lookUpWrite(record: AttemptRecord): Promise<void> {
     const { writeId, base } = record;
-    const resends = this.resends.get(record.key) ?? 0;
+    const evidence = this.evidence.get(record.key) ?? 0;
 
     if (!writeId || !base) return;
 
     try {
       const looked = fromLookup(await this.transport.lookup(writeId, base), { writeId, base });
 
-      // Settled meanwhile (stopped), or sent again since it was asked: this lookup is stale.
+      // Settled meanwhile (stopped), sent again or found received since it was asked: this
+      // lookup is stale.
       if (
         !this.writes.includes(record) ||
         !writeNeedsLookup(record) ||
         record.writeId !== writeId ||
-        (this.resends.get(record.key) ?? 0) !== resends
+        (this.evidence.get(record.key) ?? 0) !== evidence
       )
         return;
 
@@ -1148,7 +1160,10 @@ export class DraftWriter {
           resendable: looked === 'resend' && isSealed(writeId),
         });
       } else if (looked.kind === 'pending') {
-        // Received, and may still commit: never offered to be sent again.
+        // Received, and may still commit: never offered to be sent again, whatever an older
+        // lookup answers after.
+        this.supersedeLookups(record);
+
         if (record.resendable) this.moveWrite(record, record.phase, { resendable: false });
       } else if (looked.kind === 'committed') this.writeCommitted(record, looked.revision);
       else if (looked.kind === 'conflict')
@@ -1160,8 +1175,11 @@ export class DraftWriter {
   }
 
   private settleStop(record: AttemptRecord, read: WriteStop) {
-    if (read.kind === 'pending') this.moveWrite(record, 'checking');
-    else if (read.kind === 'committed') this.writeCommitted(record, read.revision);
+    // Received, and may still commit: an older lookup's miss says nothing now.
+    if (read.kind === 'pending') {
+      this.supersedeLookups(record);
+      this.moveWrite(record, 'checking', { resendable: false });
+    } else if (read.kind === 'committed') this.writeCommitted(record, read.revision);
     else if (read.kind === 'refused') this.refused(record, read.error);
     else if (read.kind === 'not-admitted') this.notSaved(record, ATTEMPT_MESSAGES.stoppedNever);
     else this.moveWrite(record, 'lost');

@@ -2430,6 +2430,80 @@ describe('comment and AI write recovery', () => {
     expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
   });
 
+  it('keeps one lookup at a time: a stale one ending never clears the one that replaced it', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded, sent } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+
+    let older: (value: unknown) => void = () => {};
+    let newer: (value: unknown) => void = () => {};
+
+    vi.mocked(next.transport.lookup)
+      .mockImplementationOnce(() => new Promise((resolve) => (older = resolve)))
+      .mockImplementationOnce(() => new Promise((resolve) => (newer = resolve)));
+
+    // A lookup on its way, then a resend, then a lookup made after it.
+    const first = reloaded.reconcile();
+
+    next.answers.push(unreachable);
+    await reloaded.sendWriteAgain(reloaded.writeViews()[0]!.key);
+
+    const second = reloaded.reconcile();
+
+    older({ arrived: false, fenced: false, provable: true });
+    await first;
+
+    // The newer is still on its way: a lookup asked for now joins it.
+    const calls = vi.mocked(next.transport.lookup).mock.calls.length;
+    const third = reloaded.reconcile();
+
+    expect(vi.mocked(next.transport.lookup).mock.calls).toHaveLength(calls);
+
+    newer({ attempt: { id: sent.body.writeId, state: 'pending' } });
+    await second;
+    await third;
+
+    expect(reloaded.writeViews()).toMatchObject([{ phase: 'unknown', canSendAgain: false }]);
+  });
+
+  it('ignores a miss looked up before a stop found it received', async () => {
+    const next = server();
+
+    vi.mocked(next.transport.lookup).mockResolvedValue({
+      arrived: false,
+      fenced: false,
+      provable: true,
+    });
+
+    const { reloaded } = await reloadedWithSent(next);
+
+    await reloaded.reconcile();
+
+    let older: (value: unknown) => void = () => {};
+
+    vi.mocked(next.transport.lookup).mockImplementationOnce(
+      () => new Promise((resolve) => (older = resolve)),
+    );
+
+    const first = reloaded.reconcile();
+
+    vi.mocked(next.transport.abandonWrite).mockResolvedValueOnce({ outcome: 'pending' });
+    await reloaded.stopWrite(reloaded.writeViews()[0]!.key);
+    older({ arrived: false, fenced: false, provable: true });
+    await first;
+
+    // Still being looked up, received: never shown as not arrived, nor offered again.
+    expect(reloaded.writeViews()).toEqual([]);
+  });
+
   it('never holds up the draft for a write not confirmed', async () => {
     const { sent, answers, transport } = server();
     const writer = new DraftWriter('you', PR, transport, instant, NEVER);
