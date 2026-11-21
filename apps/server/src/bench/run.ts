@@ -178,6 +178,30 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
     stats: stats(await timed(iterations * 3, list)),
   });
 
+  // Closed and merged PRs stay cached: the list must not read them. Removed again afterwards, so
+  // the cases below measure the same queue.
+  const closedCount = smoke ? 100 : 3000;
+  const open = populated.store.snapshots('you');
+  const closed = Array.from({ length: closedCount }, (_, index) => ({
+    ...open[index % open.length],
+    id: `closed-${index}`,
+    state: index % 2 === 0 ? ('CLOSED' as const) : ('MERGED' as const),
+  }));
+
+  for (const pr of closed) populated.store.saveSnapshot('you', pr);
+
+  const withClosed = (await list()).json() as { items: { id: string }[] };
+
+  if (JSON.stringify(withClosed.items.map(({ id }) => id).sort()) !== JSON.stringify(inbox))
+    throw new Error(`With closed PRs cached, the PR list has ${withClosed.items.length} PRs.`);
+
+  add({
+    name: `PR list, ${largest} PRs and ${closedCount} closed, idle`,
+    stats: stats(await timed(iterations * 3, list)),
+  });
+
+  for (const pr of closed) populated.store.forgetPull('you', pr.id);
+
   // The route while a background sync of a hundred changed PRs runs, its reads paced so the
   // sync lasts long enough to be sampled. A request counts when it started during the sync,
   // however long it then took.

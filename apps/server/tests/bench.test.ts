@@ -16,6 +16,8 @@ describe('the benchmark', () => {
       'cold full sync, 40 PRs',
       'warm sync (1 changed), 40 PRs',
       'PR list, 40 PRs, idle',
+      // Closed and merged PRs cached next to the open ones, which the list must not read.
+      'PR list, 40 PRs and 100 closed, idle',
       'PR list, 40 PRs, during a sync',
       'inbox derivation, 40 PRs',
       // Every fifth of the many is yours.

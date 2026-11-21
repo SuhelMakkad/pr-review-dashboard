@@ -26,10 +26,6 @@ export class PullReads {
     private readonly clock: Clock,
   ) {}
 
-  private openSnapshots(account: string): PullRequestSnapshot[] {
-    return this.store.snapshots(account).filter((pr) => pr.state === 'OPEN');
-  }
-
   /** The selected account's inbox (see `listFor`). */
   list(): PullRequestList {
     const account = this.state.status.account?.login;
@@ -41,7 +37,8 @@ export class PullReads {
   listFor(account: string): PullRequestList {
     const teams = this.state.teamsOf(account);
     const now = this.clock.now();
-    const items = this.openSnapshots(account)
+    const items = this.store
+      .openSnapshots(account)
       .filter((pr) => !isSameUser(pr.author.login, account))
       .filter(
         (pr) =>
@@ -79,7 +76,8 @@ export class PullReads {
     return {
       account,
       items: sortAuthorItems(
-        this.openSnapshots(account)
+        this.store
+          .openSnapshots(account)
           .filter((pr) => isSameUser(pr.author.login, account))
           .map((pr) =>
             deriveAuthorItem(pr, account, this.store.triage(account, pr.id).note.trim().length > 0),

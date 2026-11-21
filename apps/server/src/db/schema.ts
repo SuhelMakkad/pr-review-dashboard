@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import type {
   AiEffort,
@@ -26,8 +27,21 @@ export const snapshots = sqliteTable(
     account: text('account').notNull(),
     id: text('id').notNull(),
     data: text('data', { mode: 'json' }).$type<PullRequestSnapshot>().notNull(),
+    /**
+     * The document's own state, read from it by SQLite so the two never disagree. Null for a row
+     * whose JSON is malformed, which the index can then still hold.
+     */
+    state: text('state')
+      .$type<PullRequestSnapshot['state']>()
+      .generatedAlwaysAs(sql`CASE WHEN json_valid(data) THEN json_extract(data, '$.state') END`, {
+        mode: 'virtual',
+      }),
   },
-  (table) => [primaryKey({ columns: [table.account, table.id] })],
+  (table) => [
+    primaryKey({ columns: [table.account, table.id] }),
+    // Open PRs in ID order, without reading closed and merged ones.
+    index('snapshots_by_state').on(table.account, table.state, table.id),
+  ],
 );
 
 /** Local triage (snoozes, notes, last review marker) per PR. */

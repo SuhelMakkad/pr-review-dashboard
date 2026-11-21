@@ -131,11 +131,27 @@ export class Store {
     else this.committed.push(effect);
   }
 
+  /** Every cached PR of the account, closed and merged ones included, in ID order. */
   snapshots(account: string): PullRequestSnapshot[] {
     return this.db
       .select({ data: snapshots.data })
       .from(snapshots)
       .where(eq(snapshots.account, account))
+      .orderBy(asc(snapshots.id))
+      .all()
+      .map((row) => normalizeSnapshot(row.data));
+  }
+
+  /**
+   * The account's open PRs, in ID order, through the state index: closed and merged ones are never
+   * read. A row whose JSON is malformed has no state, so this skips it where `snapshots` fails.
+   */
+  openSnapshots(account: string): PullRequestSnapshot[] {
+    return this.db
+      .select({ data: snapshots.data })
+      .from(snapshots)
+      .where(and(eq(snapshots.account, account), eq(snapshots.state, 'OPEN')))
+      .orderBy(asc(snapshots.id))
       .all()
       .map((row) => normalizeSnapshot(row.data));
   }

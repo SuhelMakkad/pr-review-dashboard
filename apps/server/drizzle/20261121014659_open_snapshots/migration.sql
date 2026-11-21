@@ -1,0 +1,2 @@
+ALTER TABLE `snapshots` ADD `state` text GENERATED ALWAYS AS (CASE WHEN json_valid(data) THEN json_extract(data, '$.state') END) VIRTUAL;--> statement-breakpoint
+CREATE INDEX `snapshots_by_state` ON `snapshots` (`account`,`state`,`id`);
