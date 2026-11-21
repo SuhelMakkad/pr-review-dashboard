@@ -4,6 +4,7 @@ import type { DraftComment, ReviewDraft, ReviewEvent, Side } from '@review-desk/
 import { showsViewedTarget, type ViewedTarget } from '@review-desk/shared/operations';
 import type { OperationReceipt } from '@review-desk/shared/operations';
 import type { Field } from '@/features/review/draft-writer';
+import type { Carried } from '@/features/review/draft-commands';
 import { newerDraft, useDraftWriter } from '@/features/review/use-draft-writer';
 import { ApiError } from '@/lib/api';
 import { routes } from '@review-desk/shared/contract';
@@ -147,9 +148,11 @@ export function useReview(prId: string | null, account: string) {
   });
 
   const discard = useMutation({
-    // Queued in the writer, carrying the summary and verdict as shown: until its cleanup is final
-    // your edits are parked, then saved on the draft it left, or kept for you to confirm.
-    mutationFn: () => writer.discard(writer.carry(draft.data)),
+    // Queued in the writer at once, offline too, carrying the summary and verdict as shown at the
+    // click: until its cleanup is final your edits are parked, then saved on the draft it left,
+    // or kept for you to confirm.
+    networkMode: 'always',
+    mutationFn: (carried: Carried) => writer.discard(carried),
     onSuccess: () => {
       void refreshDraft();
       void refreshOperations();
@@ -157,6 +160,8 @@ export function useReview(prId: string | null, account: string) {
   });
 
   const submit = useMutation({
+    // Queued in the writer at once, offline too: never paused to run later than its click.
+    networkMode: 'always',
     mutationFn: ({
       carried,
       expectedPendingReviewId,

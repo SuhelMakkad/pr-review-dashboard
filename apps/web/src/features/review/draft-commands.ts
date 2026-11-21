@@ -48,6 +48,13 @@ export interface CommandRecord {
   seq: number;
   /** What it carries; none for a legacy id, which claims nothing of your current edits. */
   carried: Carried | null;
+  /**
+   * Each field's version as it was queued (or adopted): an edit past it is parked behind it, and
+   * only such an edit resumes on the draft a discard left.
+   */
+  from: { body: number; event: number };
+  /** Sent again by you: a late refusal of its first send then proves nothing. */
+  resent?: boolean;
   input?: SubmitInput;
   /** The pending review the sheet showed, for a submit. */
   expectedPendingReviewId?: string | null;

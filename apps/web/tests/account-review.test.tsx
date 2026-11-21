@@ -386,7 +386,7 @@ describe('drafts and Activity per account', () => {
             carried: hook.result.current.writer.carry(undefined).versions,
             expectedPendingReviewId: null,
           })
-        : hook.result.current.discard.mutateAsync(),
+        : hook.result.current.discard.mutateAsync(hook.result.current.writer.carry(undefined)),
     );
     await new Promise((resolve) => setTimeout(resolve, 900));
 
@@ -538,6 +538,49 @@ describe('drafts and Activity per account', () => {
 
     await waitFor(() => expect(hook.result.current.writer.commandViews()).toEqual([]));
     client.clear();
+  });
+
+  it('discards with what was shown at the click, offline too, never text typed after it', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const { onlineManager } = await import('@tanstack/react-query');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const paths: string[] = [];
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+
+      paths.push(`${method} ${path}`);
+
+      return Promise.resolve(
+        method === 'DELETE'
+          ? reply({ operation: { id: JSON.parse(String(options?.body)).operationId } }, 202)
+          : path.endsWith('/receipt-epoch')
+            ? reply({ epoch: 0 })
+            : reply({ kind: 'forge', prId: 'p1', type: 'discard', status: 'running' }),
+      );
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+    onlineManager.setOnline(false);
+
+    try {
+      const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+      const writer = () => hook.result.current.writer;
+
+      act(() => writer().edit('body', 'At the click'));
+
+      const carried = writer().carry(undefined);
+
+      act(() => hook.result.current.discard.mutate(carried));
+      act(() => writer().edit('body', 'Typed after'));
+
+      await waitFor(() => expect(paths).toContain('DELETE /api/accounts/me/pulls/p1/draft'));
+      await waitFor(() => expect(writer().commandViews()).toMatchObject([{ phase: 'admitted' }]));
+
+      expect(writer().commandViews()[0]!.carried?.body).toBe('At the click');
+    } finally {
+      onlineManager.setOnline(true);
+      client.clear();
+    }
   });
 
   it('keeps the newer draft whatever is published into its query, as it is published', async () => {

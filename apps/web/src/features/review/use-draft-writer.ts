@@ -137,8 +137,14 @@ function adoptLegacy(writer: DraftWriter, account: string, prId: string) {
     })),
   ];
 
-  if (legacy.length > 0 && writer.adopt(legacy.map(({ id, kind }) => ({ id, kind }))))
-    for (const entry of legacy) forgetLegacy(entry.key);
+  // Held by the writer at once; forgotten here only once its journal holds them.
+  if (legacy.length > 0)
+    writer.adopt(
+      legacy.map(({ id, kind }) => ({ id, kind })),
+      () => {
+        for (const entry of legacy) forgetLegacy(entry.key);
+      },
+    );
 }
 
 /**

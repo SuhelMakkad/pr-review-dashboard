@@ -131,7 +131,11 @@ export function FullReview({
   // Already prepared for this run and selection, with no inline comments of its own, and fresh:
   // opened as it is, read only, with no prepare queued behind a summary start. A legacy inline
   // draft still takes the prepare path; the submit's own fences apply either way.
-  const openable = reusable && !run?.stale && !prepared?.content?.comments?.length;
+  const openable =
+    reusable &&
+    !run?.stale &&
+    Array.isArray(prepared?.content?.comments) &&
+    prepared.content.comments.length === 0;
   const preparing = ai.preparation?.status === 'pending';
   const prepareError =
     ai.preparation?.status === 'error' &&

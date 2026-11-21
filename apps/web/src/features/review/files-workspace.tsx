@@ -972,7 +972,10 @@ function Workspace() {
         onFinish={() => setFinishOpen(true)}
         onDiscard={() => {
           if (window.confirm('Discard your pending review and all its comments?')) {
-            review.discard.mutate(undefined, { onError: (error) => toast.error(error.message) });
+            // What it carries is read at the click, as the confirmation shows it.
+            review.discard.mutate(review.writer.carry(draft), {
+              onError: (error) => toast.error(error.message),
+            });
           }
         }}
       />

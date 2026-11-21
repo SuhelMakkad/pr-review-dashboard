@@ -1325,8 +1325,9 @@ describe('submit and discard', () => {
     commands.push(async (request) => ({ operation: { id: request.body.operationId } }));
     await writer.discard(carried(writer));
     writer.edit('body', 'Parked');
-    // A reset deleted its receipt.
+    // A reset deleted its receipt, and moved the receipt-history epoch.
     vi.mocked(transport.receipt).mockResolvedValueOnce(null);
+    vi.mocked(transport.epoch).mockResolvedValueOnce(1);
     await writer.reconcile();
 
     expect(writer.commandViews()).toMatchObject([{ phase: 'lost' }]);
@@ -1336,24 +1337,188 @@ describe('submit and discard', () => {
   it('adopts an earlier version’s id as recovery-only: looked up or stopped, never sent again', () => {
     const { transport } = server();
     const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+    const forget = vi.fn();
 
-    expect(writer.adopt([{ id: 'legacy', kind: 'submit' }])).toBe(true);
+    writer.adopt([{ id: 'legacy', kind: 'submit' }], forget);
+
     expect(writer.commandViews()).toMatchObject([
       { id: 'legacy', legacy: true, canSendAgain: false, carried: null },
     ]);
     expect(writer.blocked()).not.toBeNull();
+    expect(forget).toHaveBeenCalledOnce();
   });
 
-  it('keeps an earlier version’s id where it was when it could not be journaled', () => {
+  it('holds the gate for an earlier version’s id it could not journal, forgetting it there only once it can', () => {
     const { transport } = server();
     const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
-
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+    const forget = vi.fn();
+    const full = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('Quota exceeded');
     });
 
-    expect(writer.adopt([{ id: 'legacy', kind: 'discard' }])).toBe(false);
+    writer.adopt([{ id: 'legacy', kind: 'discard' }], forget);
+
+    expect(writer.blocked()).not.toBeNull();
+    expect(forget).not.toHaveBeenCalled();
+
+    full.mockRestore();
+    writer.observe(draft(1));
+
+    expect(forget).toHaveBeenCalledOnce();
+  });
+
+  it('takes a miss of a discard known received as lost only when receipt history changed', async () => {
+    const { commands, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+
+    writer.observe(draft(1));
+    commands.push(async (request) => ({ operation: { id: request.body.operationId } }));
+    await writer.discard(carried(writer));
+
+    // The same epoch: a lookup that crossed its admission, nothing more.
+    vi.mocked(transport.receipt).mockResolvedValueOnce(null);
+    await writer.reconcile();
+    expect(writer.commandViews()).toMatchObject([{ phase: 'admitted' }]);
+    expect(writer.blocked()).not.toBeNull();
+
+    // A reset since it was sent.
+    vi.mocked(transport.receipt).mockResolvedValueOnce(null);
+    vi.mocked(transport.epoch).mockResolvedValueOnce(1);
+    await writer.reconcile();
+    expect(writer.commandViews()).toMatchObject([{ phase: 'lost' }]);
+  });
+
+  it('ignores a miss from a lookup made before the discard was known received', async () => {
+    const { commands, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+    let miss: (answer: unknown) => void = () => {};
+
+    writer.observe(draft(1));
+    commands.push(async () => {
+      throw new ApiError('Not reachable', 0);
+    });
+    await writer.discard(carried(writer)).catch(() => {});
+
+    vi.mocked(transport.receipt).mockImplementationOnce(
+      () => new Promise((resolve) => (miss = resolve)),
+    );
+
+    const looking = writer.reconcile();
+
+    // Meanwhile its receipt shows it received; then the earlier lookup's miss arrives.
+    vi.mocked(transport.receipt).mockResolvedValueOnce(receipt('discard', 'running'));
+    vi.mocked(transport.epoch).mockResolvedValue(1);
+    await writer.sendAgain(writer.commandViews()[0]!.id);
+    miss(null);
+    await looking;
+
+    expect(writer.commandViews()).toMatchObject([{ phase: 'admitted' }]);
+  });
+
+  it('settles a command sent again only by evidence, a late refusal of its first send aside', async () => {
+    const { commands, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+    let refuseFirst: () => void = () => {};
+
+    vi.useFakeTimers();
+    writer.observe(draft(1));
+    commands.push(
+      () =>
+        new Promise((_, reject) => {
+          refuseFirst = () => reject(new ApiError('Switch back', 409, 'ACCOUNT_NOT_ACTIVE'));
+        }),
+    );
+
+    const submitting = writer.submit(review, carried(writer), null).catch(() => {});
+
+    await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
+    await submitting;
+
+    let admitResend: () => void = () => {};
+
+    commands.push(
+      (request) =>
+        new Promise((resolve) => {
+          admitResend = () => resolve({ operation: { id: request.body.operationId } });
+        }),
+    );
+
+    const resending = writer.sendAgain(writer.commandViews()[0]!.id);
+
+    refuseFirst();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(writer.commandViews()).toMatchObject([{ phase: 'unknown' }]);
+
+    admitResend();
+    await resending;
+
     expect(writer.commandViews()).toEqual([]);
+  });
+
+  it('settles a command once: a stop answered after its receipt settled it changes nothing', async () => {
+    const { commands, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+    let answerStop: (answer: unknown) => void = () => {};
+
+    writer.observe(draft(1));
+    commands.push(async () => {
+      throw new ApiError('Not reachable', 0);
+    });
+    await writer.submit(review, carried(writer), null).catch(() => {});
+    vi.mocked(transport.abandon).mockImplementationOnce(
+      () => new Promise((resolve) => (answerStop = resolve)),
+    );
+
+    const stopping = writer.stop(writer.commandViews()[0]!.id);
+
+    vi.mocked(transport.receipt).mockResolvedValueOnce(receipt('review', 'queued'));
+    await writer.reconcile();
+    // Typed after the submit was settled: an edit for the next draft.
+    writer.edit('body', 'Next draft');
+    answerStop({ outcome: 'admitted', receipt: receipt('review', 'queued') });
+    await stopping;
+
+    expect(writer.state('body')).not.toBe('error');
+  });
+
+  it('retires what a discard carried once it succeeded, though the draft it left is not known', async () => {
+    const { commands, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+
+    writer.observe(draft(1));
+    writer.edit('body', 'Discarded with the draft');
+    commands.push(async (request) => ({ operation: { id: request.body.operationId } }));
+    await writer.discard(carried(writer));
+    vi.mocked(transport.receipt).mockResolvedValueOnce(receipt('discard', 'succeeded'));
+    await writer.reconcile();
+
+    expect(writer.state('body')).toBe('saved');
+  });
+
+  it('never moves text from before a legacy discard into the draft it left', async () => {
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant, 2_000_000_000);
+
+    let final: (answer: unknown) => void = () => {};
+
+    writer.observe(draft(1));
+    // Typed before the earlier version's discard was adopted; not carried by it.
+    writer.edit('body', 'Before it');
+    vi.mocked(transport.receipt).mockImplementationOnce(
+      () => new Promise((resolve) => (final = resolve)),
+    );
+    writer.adopt([{ id: 'legacy', kind: 'discard' }], () => {});
+    writer.edit('event', 'APPROVE');
+    final(receipt('discard', 'succeeded', [5, 1]));
+    await vi.waitFor(() => expect(writer.commandViews()).toEqual([]));
+    await writer.settled();
+
+    // Typed behind it: saved on the draft it left. From before it: kept for you to confirm.
+    expect(sent.map((request) => [request.body.event, request.body.body])).toEqual([
+      ['APPROVE', undefined],
+    ]);
+    expect(writer.failure('body')).toMatch(/Kept from before the discard/);
   });
 });
 
