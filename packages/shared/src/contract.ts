@@ -311,12 +311,18 @@ export const aiRequests = {
     task,
     provider: provider.optional(),
     force: z.boolean().optional(),
+    /** The start's own id: a retry answers with the run it started or joined. */
+    attemptId: guard.writeId,
+    baseRevision: guard.baseRevision,
+    baseGeneration: guard.baseGeneration,
   }),
   run: z.strictObject({ account }),
+  apply: z.strictObject({ account, ...guard }),
   accept: z.strictObject({
     account,
     index: z.number().int().min(0),
     body: z.string().trim().min(1).max(65_536).optional(),
+    ...guard,
   }),
   prepare: z
     .strictObject({
@@ -327,6 +333,7 @@ export const aiRequests = {
         .string()
         .regex(/^[a-f0-9]{64}$/)
         .optional(),
+      ...guard,
     })
     .refine((value) => !value.replace || Boolean(value.expectedDraftRevision)),
 };
@@ -599,7 +606,7 @@ export const routes = {
   aiRuns: json('GET', `${pulls}/:id/ai`, { responses: { 200: as<AiRunsResponse>() } }),
   startAi: json('POST', `${pulls}/:id/ai`, {
     body: { canonical: aiRequests.start },
-    responses: { 200: as<AiRun>() },
+    responses: { 200: as<AiRun & Attempted>(), 202: pendingAttempt },
   }),
   cancelAi: json('DELETE', runs, { body: { canonical: aiRequests.run }, responses: { 200: ok } }),
   pauseAi: json('POST', `${runs}/pause`, {
@@ -612,15 +619,15 @@ export const routes = {
   }),
   acceptAi: json('POST', `${runs}/accept`, {
     body: { canonical: aiRequests.accept },
-    responses: { 200: as<DraftComment>() },
+    responses: { 200: as<DraftComment & Attempted>(), 202: pendingAttempt },
   }),
   prepareAi: json('POST', `${runs}/draft`, {
     body: { canonical: aiRequests.prepare },
-    responses: { 200: as<ReviewDraft>() },
+    responses: { 200: as<ReviewDraft & Attempted>(), 202: pendingAttempt },
   }),
   applyAi: json('POST', `${runs}/summary`, {
-    body: { canonical: aiRequests.run },
-    responses: { 200: as<ReviewDraft>() },
+    body: { canonical: aiRequests.apply },
+    responses: { 200: as<ReviewDraft & Attempted>(), 202: pendingAttempt },
   }),
 
   // Insights: an account's; the review target is every account's.

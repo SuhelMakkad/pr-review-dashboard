@@ -1,4 +1,6 @@
 import type { FastifyInstance } from 'fastify';
+import type { WriteFence } from '@/db/versions.js';
+import { claimed, type WriteGuard } from '@/routes/claims.js';
 import type { AutoReviewer } from '@/ai/auto-review.js';
 import type { AiRunner } from '@/ai/runner.js';
 import { AccountUnavailable } from '@/forge/account.js';
@@ -34,6 +36,34 @@ export function registerAiRoutes(
 ): void {
   const serving = { sync, errors: aiFailure };
   const done = () => ok(200, { ok: true as const });
+  /** An AI draft write or start under its guard: claimed by its id, fenced by its base. */
+  const guarded = <B extends object>(
+    account: string,
+    prId: string,
+    kind: 'write' | 'start',
+    guard: WriteGuard,
+    request: unknown,
+    run: (fence: WriteFence) => Promise<B>,
+  ) =>
+    claimed(
+      sync.store,
+      {
+        account,
+        prId,
+        kind,
+        guard,
+        request,
+        current: () => runner.draftOf(account, prId),
+      },
+      run,
+      aiFailure,
+    ) as never;
+  /** The guard a body carries. */
+  const guardOf = (body: WriteGuard & { attemptId?: string }): WriteGuard => ({
+    writeId: body.writeId ?? body.attemptId,
+    baseRevision: body.baseRevision,
+    baseGeneration: body.baseGeneration,
+  });
 
   serve(
     app,
@@ -125,8 +155,20 @@ export function registerAiRoutes(
   serve(
     app,
     routes.startAi,
-    async ({ params, body }) =>
-      ok(200, await runner.start(body.account, params.id, body.task, body)),
+    ({ params, body }) =>
+      guarded(
+        body.account,
+        params.id,
+        'start',
+        guardOf(body),
+        { route: 'startAi', prId: params.id, body },
+        (fence) =>
+          runner.start(body.account, params.id, body.task, {
+            provider: body.provider,
+            force: body.force,
+            fence,
+          }),
+      ),
     serving,
   );
 
@@ -163,23 +205,52 @@ export function registerAiRoutes(
   serve(
     app,
     routes.acceptAi,
-    async ({ params, body }) =>
-      ok(200, await runner.accept(body.account, params.runId, body.index, body.body)),
+    ({ params, body }) =>
+      guarded(
+        body.account,
+        runner.runPr(body.account, params.runId) ?? '',
+        'write',
+        guardOf(body),
+        { route: 'acceptAi', runId: params.runId, body },
+        (fence) => runner.accept(body.account, params.runId, body.index, body.body, fence),
+      ),
     serving,
   );
 
   serve(
     app,
     routes.prepareAi,
-    async ({ params, body }) =>
-      ok(200, await runner.prepareReview(body.account, params.runId, body.indices, body)),
+    ({ params, body }) =>
+      guarded(
+        body.account,
+        runner.runPr(body.account, params.runId) ?? '',
+        'write',
+        guardOf(body),
+        { route: 'prepareAi', runId: params.runId, body },
+        (fence) =>
+          runner.prepareReview(
+            body.account,
+            params.runId,
+            body.indices,
+            { replace: body.replace, expectedDraftRevision: body.expectedDraftRevision },
+            fence,
+          ),
+      ),
     serving,
   );
 
   serve(
     app,
     routes.applyAi,
-    async ({ params, body }) => ok(200, await runner.applySummary(body.account, params.runId)),
+    ({ params, body }) =>
+      guarded(
+        body.account,
+        runner.runPr(body.account, params.runId) ?? '',
+        'write',
+        guardOf(body),
+        { route: 'applyAi', runId: params.runId, body },
+        (fence) => runner.applySummary(body.account, params.runId, fence),
+      ),
     serving,
   );
 }

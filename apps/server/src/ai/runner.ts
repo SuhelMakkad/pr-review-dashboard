@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import type { WriteFence } from '@/db/versions.js';
 import { render, say, type Wording } from '@/messages.js';
 import { isoNow, type Clock } from '@/clock.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -669,8 +670,24 @@ export class AiRunner {
        * refuses the run with NOT_ADMITTED. Cached results are returned without asking.
        */
       admit?: (detail: PullRequestDetail) => boolean;
+      /**
+       * A start from the web: checked against the draft it saw after every await, and recorded with
+       * the run it started or joined, on every admission path, a cached run's included.
+       */
+      fence?: WriteFence;
     } = {},
   ): Promise<AiRun> {
+    // A cached or running run, joined: admitted as a new one is, against the draft it saw.
+    const joined = (run: AiRun) => {
+      if (options.fence)
+        this.sync.store.transaction(() => {
+          options.fence!.check();
+          options.fence!.committed(run);
+        });
+
+      return run;
+    };
+
     this.detail(account, prId);
 
     if (task === 'full_review' || task === 'draft_summary')
@@ -735,7 +752,7 @@ export class AiRunner {
     const existing = findExisting();
 
     if (existing && (!options.force || ['queued', 'running'].includes(existing.status)))
-      return this.toRun(existing, head);
+      return joined(this.toRun(existing, head));
 
     // A cached answer costs nothing; a new Codex run must fit in the plan.
     if (provider === 'codex') {
@@ -754,7 +771,7 @@ export class AiRunner {
     const concurrent = findExisting();
 
     if (concurrent && (!options.force || ['queued', 'running'].includes(concurrent.status)))
-      return this.toRun(concurrent, head);
+      return joined(this.toRun(concurrent, head));
 
     const id = randomUUID();
 
@@ -768,28 +785,34 @@ export class AiRunner {
     if (options.admit && !options.admit(this.detail(account, prId)))
       throw new ReviewError('NOT_ADMITTED', 409, 'This run is no longer wanted.');
 
-    this.aiRuns.insert({
-      id,
-      account,
-      prId,
-      task,
-      provider,
-      model,
-      effort: taskSettings.effort,
-      headOid: head,
-      promptVersion: promptVersions[task],
-      cacheKey: key,
-      context,
-      request: {
-        input,
-        snapshot: structuredClone(detail.snapshot),
-        instructions: instructions[task],
-        schema: jsonSchemaFor(task),
-      },
-      status: 'queued',
-      progress: 'Waiting to start…',
-      trigger: options.trigger ?? 'manual',
-      createdAt: isoNow(this.clock),
+    // Created in one transaction with its fence: checked against the draft the start saw, and
+    // recorded with the run.
+    this.sync.store.transaction(() => {
+      options.fence?.check();
+      this.aiRuns.insert({
+        id,
+        account,
+        prId,
+        task,
+        provider,
+        model,
+        effort: taskSettings.effort,
+        headOid: head,
+        promptVersion: promptVersions[task],
+        cacheKey: key,
+        context,
+        request: {
+          input,
+          snapshot: structuredClone(detail.snapshot),
+          instructions: instructions[task],
+          schema: jsonSchemaFor(task),
+        },
+        status: 'queued',
+        progress: 'Waiting to start…',
+        trigger: options.trigger ?? 'manual',
+        createdAt: isoNow(this.clock),
+      });
+      options.fence?.committed(this.toRun(this.row(id)!, head));
     });
     const superseded = this.aiRuns.withStatus(account, prId, task, [
       'paused',
@@ -1285,7 +1308,13 @@ export class AiRunner {
   }
 
   /** Copies one suggested comment into the user's draft review; nothing is posted. */
-  async accept(account: string, id: string, index: number, body?: string): Promise<DraftComment> {
+  async accept(
+    account: string,
+    id: string,
+    index: number,
+    body?: string,
+    fence?: WriteFence,
+  ): Promise<DraftComment> {
     const row = this.row(id);
 
     if (!row || row.account !== account || row.task !== 'draft_comments' || !row.result) {
@@ -1310,7 +1339,7 @@ export class AiRunner {
         body: body ?? suggestion.body,
         origin: 'ai',
       },
-      { expectedHeadOid: row.headOid },
+      { expectedHeadOid: row.headOid, fence },
     );
   }
 
@@ -1320,6 +1349,7 @@ export class AiRunner {
     id: string,
     indices: number[],
     options: PrepareReviewOptions = {},
+    fence?: WriteFence,
   ): Promise<ReviewDraft> {
     const row = this.row(id);
 
@@ -1361,7 +1391,7 @@ export class AiRunner {
       indicesKey(draft.preparedReview.indices) === indicesKey(indices) &&
       draft.preparedReview.content?.comments.length === 0
     )
-      return draft;
+      return this.unchanged(fence, account, row.prId);
 
     const summary = [
       result.overall,
@@ -1385,8 +1415,10 @@ export class AiRunner {
       throw new ReviewError('HEAD_MOVED', 409, say('ai.new-commits'));
     }
 
-    // One synchronous transaction avoids partial drafts or duplicate comments on retries.
-    this.sync.store.transaction(() => {
+    // One synchronous transaction avoids partial drafts or duplicate comments on retries. Its
+    // fence is checked first, and records the draft it leaves.
+    const prepared = this.sync.store.transaction(() => {
+      fence?.check();
       this.reviews.drafts.assertEditable(account, row.prId);
 
       const current = this.reviews.draft(account, row.prId);
@@ -1395,8 +1427,11 @@ export class AiRunner {
         current.preparedReview?.runId === id &&
         indicesKey(current.preparedReview.indices) === indicesKey(indices) &&
         current.preparedReview.content?.comments.length === 0
-      )
-        return;
+      ) {
+        fence?.committed(current);
+
+        return current;
+      }
 
       if (preparationRevision(current) !== initialRevision) throw draftChanged();
 
@@ -1426,14 +1461,48 @@ export class AiRunner {
           ...(previousDrafts.length ? { previousDrafts } : {}),
         },
       });
+
+      const left = this.reviews.draft(account, row.prId);
+
+      fence?.committed(left);
+
+      return left;
     });
     this.events.emit({ type: 'draft.updated', account: row.account, id: row.prId });
 
-    return this.reviews.draft(account, row.prId);
+    return prepared;
+  }
+
+  /**
+   * A draft write that finds nothing to change: still admitted against the draft it saw, and
+   * recorded with the draft as it is.
+   */
+  private unchanged(fence: WriteFence | undefined, account: string, prId: string): ReviewDraft {
+    return this.sync.store.transaction(() => {
+      fence?.check();
+
+      const draft = this.reviews.draft(account, prId);
+
+      fence?.committed(draft);
+
+      return draft;
+    });
+  }
+
+  /** The PR a run of `account`'s is about, or null when there is no such run. */
+  runPr(account: string, id: string): string | null {
+    const row = this.row(id);
+
+    return row && row.account === account ? row.prId : null;
+  }
+
+  /** `account`'s draft of `prId`, as draft answers give it. */
+  draftOf(account: string, prId: string): ReviewDraft {
+    return this.reviews.draft(account, prId);
   }
 
   /** Apply an explicitly selected summary only after checking its evidence against live GitHub. */
-  async applySummary(account: string, id: string): Promise<ReviewDraft> {
+  async applySummary(account: string, id: string, fence?: WriteFence): Promise<ReviewDraft> {
     const row = this.row(id);
 
     if (
@@ -1454,11 +1523,22 @@ export class AiRunner {
 
     if (reason) throw new ReviewError('STALE_REVIEW', 409, say('ai.stale-summary', { reason }));
 
-    this.reviews.drafts.saveMeta(account, row.prId, {
-      body: (JSON.parse(row.result) as { body: string }).body,
+    // Applied in one transaction with its fence, which records the draft it leaves.
+    const applied = this.sync.store.transaction(() => {
+      fence?.check();
+      this.reviews.drafts.saveMeta(account, row.prId, {
+        body: (JSON.parse(row.result!) as { body: string }).body,
+      });
+
+      const left = this.reviews.draft(account, row.prId);
+
+      fence?.committed(left);
+
+      return left;
     });
+
     this.events.emit({ type: 'draft.updated', account: row.account, id: row.prId });
 
-    return this.reviews.draft(account, row.prId);
+    return applied;
   }
 }
