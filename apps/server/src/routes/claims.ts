@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { DraftAttempt } from '@review-desk/shared/review';
 import type { WriteClaim } from '@/db/draft-writes.js';
 import type { Store } from '@/db/store.js';
 import { draftVersionsOf, type WriteFence } from '@/db/versions.js';
@@ -17,11 +18,7 @@ export interface WriteGuard {
 }
 
 /** A write's outcome as its answer carries it: a commit with the revision it made. */
-export interface AttemptState {
-  id: string;
-  state: WriteClaim['state'];
-  revision?: number;
-}
+export type AttemptState = DraftAttempt;
 
 /** A claim settled before its write could commit (an account reset): its outcome stands. */
 class ClaimSettled extends Error {
@@ -88,7 +85,7 @@ export function attemptOf(claim: WriteClaim): AttemptState {
   const result = claim.result as { revision?: number } | null;
 
   return claim.state === 'committed'
-    ? { id: claim.id, state: 'committed', revision: result?.revision }
+    ? { id: claim.id, state: 'committed', revision: result?.revision ?? 0 }
     : { id: claim.id, state: claim.state };
 }
 
@@ -132,13 +129,27 @@ export async function claimed<B extends object>(
   const { account, prId, kind, guard } = claim;
   const fence = fenceFor(store, account, prId, guard);
   const id = guard.writeId;
-  // A refusal as answered: a revision conflict with the draft it conflicts with.
+  // A refusal as answered: a revision conflict with the draft it conflicts with, its versions
+  // taken from that same read, so the web rebases on one consistent draft.
   const refused = (error: unknown) => {
     const answer = refusal(error);
 
-    return error instanceof ReviewError && error.code === 'DRAFT_REVISION_CONFLICT' && claim.current
-      ? failed(answer.status, { ...answer.body, draft: claim.current() })
-      : answer;
+    if (!(
+      error instanceof ReviewError &&
+      error.code === 'DRAFT_REVISION_CONFLICT' &&
+      claim.current
+    ))
+      return answer;
+
+    const draft = claim.current() as { versions?: { revision: number; generation: number } };
+
+    return failed(answer.status, {
+      ...answer.body,
+      ...(draft.versions
+        ? { revision: draft.versions.revision, generation: draft.versions.generation }
+        : {}),
+      draft,
+    });
   };
 
   if (!id) {

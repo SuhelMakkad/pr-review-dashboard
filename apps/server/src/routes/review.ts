@@ -71,9 +71,15 @@ export function registerReviewRoutes(
     } catch (error) {
       if (!(error instanceof ReviewError)) throw error;
 
+      // The draft and its versions from one read, in the admitting transaction.
+      const draft = reviews.draft(account, prId);
+
       throw new ReviewError(error.code, error.status, error.wording, {
         ...error.details,
-        draft: reviews.draft(account, prId),
+        ...(draft.versions
+          ? { revision: draft.versions.revision, generation: draft.versions.generation }
+          : {}),
+        draft,
       });
     }
   };

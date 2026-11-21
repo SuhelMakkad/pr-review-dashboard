@@ -147,6 +147,11 @@ describe('the draft fence', () => {
       generation,
       draft: { body: 'A' },
     });
+    // One read: the versions it names are the draft's it answers with.
+    expect(stale.json().draft.versions).toMatchObject({
+      revision: stale.json().revision,
+      generation: stale.json().generation,
+    });
     expect((await call('GET', draftUrl)).json().body).toBe('A');
 
     const current = await save({ body: 'C', baseRevision: revision, baseGeneration: generation });

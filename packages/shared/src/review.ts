@@ -35,11 +35,13 @@ export interface DraftVersions {
   observation: number;
 }
 
-/** A guarded draft write's outcome, as its answer and the attempt lookup carry it. */
-export interface DraftAttempt {
-  id: string;
-  state: 'pending' | 'committed' | 'refused';
-}
+/**
+ * A guarded draft write's outcome, as its answer, its replays and the attempt lookup carry it: a
+ * commit with the draft revision it made.
+ */
+export type DraftAttempt =
+  | { id: string; state: 'committed'; revision: number }
+  | { id: string; state: 'pending' | 'refused' };
 
 export interface ReviewDraft {
   prId: string;
