@@ -136,6 +136,9 @@ export function useAi(prId: string | null, account: string) {
 
   const start = useMutation({
     mutationKey: startKey,
+    // Queued at the click, offline too: a summary start captures what is shown then, never text
+    // typed while a paused mutation waited.
+    networkMode: 'always',
     mutationFn: async ({
       task,
       provider,
@@ -145,15 +148,13 @@ export function useAi(prId: string | null, account: string) {
       provider?: AiProvider;
       force?: boolean;
     }) => {
-      // The summary is written from the verdict and text as you left them in the writer: started
-      // once every save queued before it settled, and not on a draft that refused them.
-      if (task === 'draft_summary') {
-        // `settled` checks the writer's gate before it waits, and behind the saves it waits on.
-        const refusal = (await writer.settled(['body', 'event'])) ?? writer.blocked();
-
-        // Checked again just before it is sent: a submit or discard asked for meanwhile wins.
-        if (refusal) throw new Error(refusal);
-      }
+      // The summary is written from the verdict and text as you left them: the writer's own job,
+      // which saves them first and fences the start on the draft that save left.
+      if (task === 'draft_summary')
+        return writer.startSummary({
+          ...(provider ? { provider } : {}),
+          ...(force !== undefined ? { force } : {}),
+        });
 
       return call(routes.startAi, { params: pr, body: { task, provider, force } });
     },
@@ -214,8 +215,12 @@ export function useAi(prId: string | null, account: string) {
   const completed = (task: AiTask) =>
     runs.data?.runs.find((run) => run.task === task && run.status === 'done') ?? null;
   const startError = (task: AiTask) => starts.filter((state) => state.task === task).at(-1)?.error;
+  // A summary start is the writer's own job: starting while it is queued or on its way, across a
+  // navigation or a reload too. Resuming a paused run starts it as well.
   const isStarting = (task: AiTask) =>
-    starts.some((state) => state.task === task && state.status === 'pending') ||
+    (task === 'draft_summary'
+      ? writer.summaryStarting()
+      : starts.some((state) => state.task === task && state.status === 'pending')) ||
     controls.some(
       (state) =>
         state.operation === 'resume' &&
