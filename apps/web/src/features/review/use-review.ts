@@ -182,7 +182,7 @@ export function useReview(prId: string | null, account: string) {
         input,
         { body: input.body, event: input.event, versions: carried },
         expectedPendingReviewId,
-      ) as Promise<OperationReceipt>,
+      ) as Promise<OperationReceipt | null>,
     onSettled: refreshDraft,
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.pulls(account) });

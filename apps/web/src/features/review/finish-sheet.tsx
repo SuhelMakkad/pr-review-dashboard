@@ -73,9 +73,10 @@ export interface FinishSheetProps {
     carried: Record<Field, number>;
     /** The pending review this sheet showed: admission refuses the submit if it is another. */
     expectedPendingReviewId: string | null;
-  }) => Promise<OperationReceipt>;
+  }) => Promise<OperationReceipt | null>;
   busy: boolean;
-  onSubmitted: (result: OperationReceipt) => void;
+  /** Admitted: its receipt, or null when its receipt was read before its own answer came. */
+  onSubmitted: (result: OperationReceipt | null) => void;
   onReviewNewCommits: () => void;
 }
 

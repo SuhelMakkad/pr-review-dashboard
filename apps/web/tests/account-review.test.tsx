@@ -68,6 +68,40 @@ describe('action IDs across the move to account routes', () => {
     expect(scopedKey('not json')).toBe('not json');
   });
 
+  it('never brings back an id another tab forgot, as it forgets or saves its own', async () => {
+    const key = (path: string) => JSON.stringify({ path, body: {}, method: 'POST' });
+    const saved = () =>
+      new Map(
+        JSON.parse(localStorage.getItem('review-desk-pending-command-ids')!) as [string, string][],
+      );
+
+    localStorage.setItem(
+      'review-desk-pending-command-ids',
+      JSON.stringify([
+        [key('/api/accounts/me/pulls/a/review'), 'a'],
+        [key('/api/accounts/me/pulls/b/review'), 'b'],
+      ]),
+    );
+    vi.resetModules();
+
+    const { forgetLegacy, githubCommand } = await import('@/lib/operation-command');
+
+    // Another tab forgets A, after this one read both.
+    localStorage.setItem(
+      'review-desk-pending-command-ids',
+      JSON.stringify([[key('/api/accounts/me/pulls/b/review'), 'b']]),
+    );
+
+    expect(forgetLegacy(key('/api/accounts/me/pulls/b/review'), 'b')).toBe(true);
+    expect(saved().size).toBe(0);
+
+    // Its own command's id is kept and forgotten the same way, never restoring A.
+    vi.stubGlobal('fetch', async () => reply({ operation: { id: 'x' } }, 202));
+    await githubCommand('/api/accounts/me/pulls/c/viewed', {});
+
+    expect(saved().size).toBe(0);
+  });
+
   it('sends an ID saved by an earlier version again on the account’s route', async () => {
     localStorage.setItem(
       'review-desk-pending-command-ids',

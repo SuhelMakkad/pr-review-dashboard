@@ -139,7 +139,9 @@ function adoptLegacy(writer: DraftWriter, account: string, prId: string) {
 
   // Held by the writer at once; each forgotten here only once its journal holds it, or its
   // outcome. Called with none too, so the writer drops what it kept for ids already gone here.
-  writer.adopt(legacy.map(({ id, kind, key }) => ({ id, kind, forget: () => forgetLegacy(key) })));
+  writer.adopt(
+    legacy.map(({ id, kind, key }) => ({ id, kind, forget: () => forgetLegacy(key, id) })),
+  );
 }
 
 /**

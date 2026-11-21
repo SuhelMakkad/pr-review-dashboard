@@ -809,8 +809,8 @@ export class DraftWriter {
         })),
     );
 
-    for (const command of legacy)
-      if (!known.has(command.id)) this.unjournaled.set(command.id, command.forget);
+    // Each one, adopted now or restored already from the journal: forgotten there once settled.
+    for (const command of legacy) this.unjournaled.set(command.id, command.forget);
 
     this.changed();
     this.poll();
@@ -986,7 +986,8 @@ export class DraftWriter {
   private reconciledOr(command: CommandRecord, unsettled: () => never): unknown {
     const outcome = this.outcomes.get(command);
 
-    if (outcome === 'admitted' || phaseOf(command) === 'admitted') return {};
+    // Admitted, its receipt said, its own answer still to come: nothing to return but that.
+    if (outcome === 'admitted' || phaseOf(command) === 'admitted') return null;
     if (outcome === 'refused')
       throw new WriteRefused(
         'This was not received, and cannot be now. Nothing was sent; try again.',

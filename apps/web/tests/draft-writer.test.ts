@@ -1640,7 +1640,7 @@ describe('submit and discard', () => {
     await writer.reconcile();
     await vi.advanceTimersByTimeAsync(COMMAND_BOUND_MS + 1);
 
-    await expect(discarding).resolves.toEqual({});
+    await expect(discarding).resolves.toBeNull();
     expect(writer.commandViews()).toEqual([]);
   });
 
@@ -1664,7 +1664,7 @@ describe('submit and discard', () => {
     await writer.reconcile();
     unreadable();
 
-    await expect(submitting).resolves.toEqual({});
+    await expect(submitting).resolves.toBeNull();
   });
 
   it('never adopts again, after a reload, a legacy id it settled, and forgets it there once it can', async () => {
@@ -1690,6 +1690,27 @@ describe('submit and discard', () => {
     expect(sessionStorage.getItem('review-desk-draft-writer:you:PR_1') ?? '').not.toContain(
       'legacy',
     );
+  });
+
+  it('forgets a legacy id restored from the journal once it settles, a first deletion having failed', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', 'PR_1', first.transport, instant, 2_000_000_000);
+
+    // Journaled, but its deletion there failed.
+    writer.adopt([{ id: 'legacy', kind: 'submit', forget: () => false }]);
+
+    const second = server();
+    const reloaded = new DraftWriter('you', 'PR_1', second.transport, instant, 2_000_000_000);
+    const forget = vi.fn(() => true);
+
+    vi.mocked(second.transport.receipt).mockResolvedValue(receipt('review', 'queued'));
+    reloaded.adopt([{ id: 'legacy', kind: 'submit', forget }]);
+    await vi.waitFor(async () => {
+      await reloaded.reconcile();
+      expect(reloaded.commandViews()).toEqual([]);
+    });
+
+    expect(forget).toHaveBeenCalled();
   });
 
   it('saves as it is an edit made on the draft a discard left, shown before its receipt was read', async () => {
