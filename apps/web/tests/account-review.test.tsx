@@ -212,6 +212,39 @@ describe('drafts and Activity per account', () => {
     client.clear();
   });
 
+  it('never starts a summary on a verdict whose save was refused', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const { useAi } = await import('@/features/ai/use-ai');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const paths: string[] = [];
+
+    vi.stubGlobal('fetch', (path: string, options?: RequestInit) => {
+      const method = options?.method ?? 'GET';
+
+      paths.push(`${method} ${path}`);
+
+      return Promise.resolve(
+        method === 'PUT' ? reply(notActive, 409) : reply({ items: [], nextCursor: null, runs: [] }),
+      );
+    });
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => ({ review: useReview('p1', 'me'), ai: useAi('p1', 'me') }), {
+      wrapper: wrapper(client),
+    });
+
+    act(() => hook.result.current.review.writer.edit('event', 'APPROVE'));
+    await act(() =>
+      hook.result.current.ai.start.mutateAsync({ task: 'draft_summary' }).catch(() => {}),
+    );
+
+    await waitFor(() => expect(hook.result.current.ai.start.error?.message).toBe(notActive.error));
+
+    expect(paths).toContain('PUT /api/accounts/me/pulls/p1/draft');
+    expect(paths).not.toContain('POST /api/accounts/me/pulls/p1/ai');
+    client.clear();
+  });
+
   it('lets a read on its way land when a write seeds the draft, keeping the newer of the two', async () => {
     const { useReview } = await import('@/features/review/use-review');
     const { seedNewer } = await import('@/features/review/use-draft-writer');
@@ -308,9 +341,19 @@ describe('drafts and Activity per account', () => {
   });
 
   it.each([
-    ['a submit carried into the draft it submitted', 'POST /api/accounts/me/pulls/p1/review'],
-    ['a discard dropped into the draft it discarded', 'DELETE /api/accounts/me/pulls/p1/draft'],
-  ])('never autosaves the summary %s', async (_case, sentAs) => {
+    // Submitted: your text is in the review, retired from the draft.
+    [
+      'a submit carried into the draft it submitted',
+      'POST /api/accounts/me/pulls/p1/review',
+      'saved',
+    ],
+    // Discarded, its cleanup yet to come: your text is kept, unsent, until you edit it.
+    [
+      'a discard dropped into the draft it discarded',
+      'DELETE /api/accounts/me/pulls/p1/draft',
+      'error',
+    ],
+  ])('never autosaves the summary %s', async (_case, sentAs, state) => {
     const { useReview } = await import('@/features/review/use-review');
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const paths: string[] = [];
@@ -345,7 +388,36 @@ describe('drafts and Activity per account', () => {
 
     expect(paths).toContain(sentAs);
     expect(paths).not.toContain('PUT /api/accounts/me/pulls/p1/draft');
-    expect(hook.result.current.writer.state('body')).toBe('saved');
+    expect(hook.result.current.writer.state('body')).toBe(state);
+    client.clear();
+  });
+
+  it('keeps the newer draft whatever is published into its query, as it is published', async () => {
+    const { useReview } = await import('@/features/review/use-review');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const at = (revision: number, body: string) => ({
+      prId: 'p1',
+      body,
+      event: 'COMMENT',
+      comments: [],
+      versions: { revision, generation: 0, observation: 0 },
+    });
+    const key = queryKeys.draft('me', 'p1');
+
+    vi.stubGlobal('fetch', (path: string) =>
+      Promise.resolve(reply(path.endsWith('/pulls/p1/draft') ? at(3, 'Read') : { items: [] })),
+    );
+    client.setQueryData(queryKeys.status, as('me'));
+
+    const hook = renderHook(() => useReview('p1', 'me'), { wrapper: wrapper(client) });
+
+    await waitFor(() => expect(hook.result.current.draft.data).toMatchObject({ body: 'Read' }));
+
+    // A newer draft, then an older one published over it (a read computed before it landed).
+    act(() => void client.setQueryData(key, at(6, 'Newer')));
+    act(() => void client.setQueryData(key, at(4, 'Older, published later')));
+
+    expect(client.getQueryData(key)).toMatchObject({ body: 'Newer' });
     client.clear();
   });
 

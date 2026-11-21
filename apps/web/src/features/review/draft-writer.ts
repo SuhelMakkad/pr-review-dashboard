@@ -135,7 +135,8 @@ export async function decode(
     const attempt = attemptOf(error.details.attempt, expected);
 
     if (attempt?.state === 'refused') return refusedOutcome(error);
-    if (attempt) return { kind: 'unknown', error };
+    // An attempt, but not this write's in a state that settles it: no outcome.
+    if (attempt || error.details.attempt !== undefined) return { kind: 'unknown', error };
 
     // No outcome recorded: no answer, an unreadable one, a server error, or a refusal before the
     // claim (a session or schema check). Only the last is definite, and only when nothing earlier
@@ -161,11 +162,12 @@ export function fromLookup(answer: unknown, expected: Expected): Outcome | 'neve
       : 'resend';
 
   const attempt = attemptOf(answer.attempt, expected);
-  const result = isObject(answer.attempt) ? answer.attempt.result : undefined;
-  const recorded = isObject(result) ? result : {};
+  const recorded = isObject(answer.attempt) ? answer.attempt.result : undefined;
 
   if (!attempt) return 'resend';
   if (attempt.state === 'pending') return { kind: 'pending' };
+  // A settled attempt answers with what it recorded: one without it is not read as settled.
+  if (!isObject(recorded)) return 'resend';
   if (attempt.state === 'committed')
     return { kind: 'committed', body: recorded.body, revision: attempt.revision };
 
@@ -195,8 +197,13 @@ interface FieldState {
    */
   generation: number | null;
   since: number | null;
-  /** The version a running command (submit, discard) carries: no autosave of it meanwhile. */
-  owned: number | null;
+  /** The running command (submit, discard) that carries `version`: no autosave of it meanwhile. */
+  owned: { token: symbol; version: number } | null;
+  /**
+   * Whether the latest save queued of it committed: what a write that replaces it, or waits on
+   * it, depends on, whatever was typed since.
+   */
+  lastSave: Promise<boolean> | null;
 }
 
 /** A field's text as a save carries it. */
@@ -204,7 +211,11 @@ interface Snapshot {
   value: string;
   version: number;
   generation: number | null;
+  since: number | null;
 }
+
+/** The fields a save committed. */
+type Committed = Set<Field>;
 
 /** A write sent and not yet settled. */
 interface Inflight {
@@ -225,7 +236,7 @@ interface Inflight {
  * read then shows whether it was kept.
  */
 interface Journal {
-  fields: Record<Field, Omit<FieldState, 'queued' | 'owned'>>;
+  fields: Record<Field, Omit<FieldState, 'queued' | 'owned' | 'lastSave'>>;
   inflight: Omit<Inflight, 'stamp'>[];
 }
 
@@ -233,16 +244,25 @@ const DEBOUNCE_MS = 800;
 /** How long a write is sent again, and an unsaved edit kept to be saved: then only kept. */
 export const ATTEMPT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const journalKey = (account: string, prId: string) => `review-desk-draft-writer:${account}:${prId}`;
+const ZERO: Base = { revision: 0, generation: 0 };
 
 const DISCARDED_ELSEWHERE =
   'This draft was discarded or submitted elsewhere. Your text is kept here and was not saved.';
 const NOT_CONFIRMED =
   'This could not be confirmed as saved. Your text is kept here; check the draft before saving it again.';
 const EXPIRED = 'Kept from more than a week ago, and not saved. Edit it to save it.';
+const KEPT_FROM_DISCARD =
+  'Kept from before you discarded the draft, and not saved. Edit it to save it.';
 const UNSAVED_REPLACED =
   'Your own summary or verdict was not saved, and this would replace it. Copy or clear it, then try again.';
+const UNSAVED = 'Your summary or verdict was not saved. Check it, then try again.';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const notConfirmed = (): Outcome => ({
+  kind: 'refused',
+  error: new ApiError(NOT_CONFIRMED, 0, 'NOT_CONFIRMED'),
+});
 
 export class DraftWriter {
   private readonly fields: Record<Field, FieldState>;
@@ -252,9 +272,12 @@ export class DraftWriter {
   private queued = 0;
   /** The draft as last read or written: what a write queued while nothing runs acts on. */
   private seen: Base | null = null;
-  /** The revision the queue's last committed write made: what the next queued write acts on. */
-  private last: Base | null = null;
-  /** A write in this run of the queue was refused or rebased: actions behind it stop. */
+  /**
+   * What a write queued behind others acts on: the base the queue began on, moved only by its own
+   * commits and by the drafts its conflicts returned, never by a read meanwhile.
+   */
+  private tail: Base | null = null;
+  /** A write in this run of the queue met a change elsewhere: actions behind it stop. */
   private broken = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly listeners = new Set<() => void>();
@@ -281,23 +304,25 @@ export class DraftWriter {
       generation: null,
       since: null,
       owned: null,
+      lastSave: null,
     });
     // After a reload nothing is queued: an unsaved edit is saved again, besides the very save
     // the journal kept. A refused one stays refused, kept until you edit it.
     const restored = (field: Field): FieldState =>
       saved
-        ? { ...saved.fields[field], queued: saved.fields[field].settled, owned: null }
+        ? {
+            ...saved.fields[field],
+            queued: saved.fields[field].settled,
+            owned: null,
+            lastSave: null,
+          }
         : fresh(field);
 
     this.fields = { body: restored('body'), event: restored('event') };
 
     // An unsaved edit from more than a week ago is kept, never saved on its own.
     for (const state of Object.values(this.fields))
-      if (
-        state.version > state.settled &&
-        !state.failed &&
-        now - (state.since ?? now) >= ATTEMPT_TTL_MS
-      )
+      if (state.version > state.settled && !state.failed && isOld(state.since, now))
         state.failed = EXPIRED;
 
     // Autosaves a reload interrupted are sent again as they were, each answering once by its id,
@@ -307,17 +332,28 @@ export class DraftWriter {
     this.inflight = [];
 
     for (const write of saved?.inflight ?? []) {
-      if (now >= write.deadline) this.markFailed(write.fields ?? {}, NOT_CONFIRMED);
-      else {
-        const resumed = { ...write, stamp };
+      const fields = write.fields ?? {};
+
+      if (now >= write.deadline) {
+        this.markFailed(fields, NOT_CONFIRMED);
+        continue;
+      }
+
+      const resumed = { ...write, stamp };
+      const job = this.enqueue(() => this.resume(resumed));
+
+      // What is queued behind it acts on the draft it was sent on, until it commits.
+      if (!this.tail || write.base.revision > this.tail.revision) this.tail = write.base;
+
+      for (const [field, version] of entries(fields)) {
+        const state = this.fields[field];
 
         // Queued already: a flush meanwhile does not send the same versions twice.
-        for (const [field, version] of Object.entries(write.fields ?? {}) as [Field, number][])
-          this.fields[field].queued = Math.max(this.fields[field].queued, version);
-
-        this.inflight.push(resumed);
-        void this.enqueue(() => this.resume(resumed));
+        state.queued = Math.max(state.queued, version);
+        state.lastSave = job.then((done) => done.has(field));
       }
+
+      this.inflight.push(resumed);
     }
   }
 
@@ -418,29 +454,35 @@ export class DraftWriter {
     if (fields.length === 0) return Promise.resolve();
 
     // Resolved now, not when it runs: an edit after this is the next save's.
-    const snapshot: Partial<Record<Field, Snapshot>> = {};
-
-    for (const field of fields) {
-      const state = this.fields[field];
-
-      snapshot[field] = {
-        value: state.value,
-        version: state.version,
-        generation: state.generation,
-      };
-      state.queued = state.version;
-    }
-
+    const snapshot = this.snapshotOf(fields);
     const base = this.baseNow();
+    const job = this.enqueue(() => this.save(snapshot, base));
 
-    return this.enqueue(() => this.save(snapshot, base));
+    for (const field of fields) this.fields[field].lastSave = job.then((done) => done.has(field));
+
+    return job.then(() => {});
+  }
+
+  /**
+   * Resolves once every write queued so far has settled, pending edits saved first: with why the
+   * latest save of any of `fields` was not kept, if one was not. What waits on it runs outside the
+   * queue, so a slow one never holds up the writes queued after it.
+   */
+  async settled(fields: Field[] = []): Promise<string | null> {
+    void this.flush();
+
+    const saves = this.savesOf(fields);
+
+    await this.enqueue(async () => {});
+
+    return this.unsaved(fields, await saves) ? (this.failureOf(fields) ?? UNSAVED) : null;
   }
 
   /**
    * Queues a draft write (a comment's add, edit or delete, an AI accept, apply or prepare): sent
    * after every write before it, on the draft you saw, with its own id. Resolves with its answer
    * once it committed; rejects with `WriteRefused` when it was refused, its input yours to keep.
-   * One that `replaces` the summary or verdict is refused while your own text of it is unsaved.
+   * One that `replaces` the summary or verdict is refused unless your own text of it was kept.
    */
   write<T>(
     route: string,
@@ -452,6 +494,8 @@ export class DraftWriter {
     void this.flush();
 
     const base = this.baseNow();
+    const replaces = options.replaces ?? [];
+    const saves = this.savesOf(replaces);
 
     return this.enqueue(async () => {
       if (base === 'chain' && this.broken)
@@ -460,7 +504,8 @@ export class DraftWriter {
           'DRAFT_CHANGED_LOCALLY',
         );
 
-      if ((options.replaces ?? []).some((field) => this.fields[field].failed))
+      // Whatever was typed since, the saves it was queued behind must have kept your text.
+      if (this.unsaved(replaces, await saves))
         throw new WriteRefused(UNSAVED_REPLACED, 'DRAFT_EDIT_UNSAVED');
 
       const write = this.attempt(this.guard(base), { route, params, body });
@@ -476,11 +521,8 @@ export class DraftWriter {
         return outcome.body as T;
       }
 
-      this.broken = true;
-
       if (outcome.kind === 'conflict') {
-        this.observe(outcome.draft);
-        this.transport.committed(outcome.draft, write.stamp);
+        this.conflicted(outcome.draft, write.stamp);
 
         throw new WriteRefused(
           'The draft changed since you saw it. Nothing was saved; check it, then try again.',
@@ -494,42 +536,50 @@ export class DraftWriter {
   }
 
   /**
-   * Resolves once every write queued so far has settled, pending edits saved first. What waits on
-   * it runs outside the queue, so a slow one never holds up the writes queued after it.
-   */
-  settled(): Promise<void> {
-    void this.flush();
-
-    return this.enqueue(async () => {});
-  }
-
-  /**
    * Runs a command (submit, discard) that carries or drops `fields` as they are now: none of them
-   * is autosaved while it runs. Its success retires the versions it carried; its failure releases
-   * them, to be saved as before.
+   * is autosaved while it runs, even by a save queued before it. Its failure releases them, to be
+   * saved as before. Its success either retires what it carried (a submit: it is in the review),
+   * or keeps your unsaved text, unsent, until you edit it (a discard: cleanup may yet not happen).
    */
-  async command<T>(fields: Field[], run: () => Promise<T>): Promise<T> {
+  async command<T>(
+    fields: Field[],
+    run: () => Promise<T>,
+    onSuccess: 'retire' | 'keep',
+  ): Promise<T> {
     if (this.timer) clearTimeout(this.timer);
 
     this.timer = null;
 
+    const token = Symbol('command');
     const owned = new Map(fields.map((field) => [field, this.fields[field].version]));
 
-    for (const [field, version] of owned) this.fields[field].owned = version;
+    for (const [field, version] of owned) this.fields[field].owned = { token, version };
 
     this.changed();
+
+    const release = () => {
+      for (const field of owned.keys())
+        if (this.fields[field].owned?.token === token) this.fields[field].owned = null;
+    };
 
     try {
       const result = await run();
 
+      release();
+
       for (const [field, version] of owned) {
         const state = this.fields[field];
 
-        state.owned = null;
+        if (onSuccess === 'keep') {
+          if (state.version > state.settled) state.failed = KEPT_FROM_DISCARD;
+
+          continue;
+        }
 
         if (version > state.settled) {
           state.settled = version;
           state.savedAt = 0;
+          state.lastSave = null;
         }
 
         if (state.version === version) state.failed = null;
@@ -537,7 +587,7 @@ export class DraftWriter {
 
       return result;
     } catch (error) {
-      for (const field of owned.keys()) this.fields[field].owned = null;
+      release();
 
       throw error;
     } finally {
@@ -549,6 +599,9 @@ export class DraftWriter {
 
   /** Runs `job` after every write before it. */
   private enqueue<T>(job: () => Promise<T>): Promise<T> {
+    // A run of the queue begins on the draft as shown.
+    if (this.queued === 0) this.tail = this.seen ?? ZERO;
+
     this.queued += 1;
 
     const run = this.chain.then(job);
@@ -566,19 +619,18 @@ export class DraftWriter {
 
     // Nothing queued: the next write acts on the draft as shown, and nothing ahead of it broke.
     if (this.queued === 0) {
-      this.last = null;
+      this.tail = null;
       this.broken = false;
     }
   }
 
-  /** The base a write queued now acts on: the draft shown, or, behind others, their last commit. */
+  /** The base a write queued now acts on: the draft shown, or, behind others, the queue's tail. */
   private baseNow(): Base | 'chain' {
-    return this.queued === 0 ? (this.seen ?? { revision: 0, generation: 0 }) : 'chain';
+    return this.queued === 0 ? (this.seen ?? ZERO) : 'chain';
   }
 
   private guard(base: Base | 'chain'): Guard {
-    const resolved =
-      base === 'chain' ? (this.last ?? this.seen ?? { revision: 0, generation: 0 }) : base;
+    const resolved = base === 'chain' ? (this.tail ?? this.seen ?? ZERO) : base;
 
     return {
       writeId: crypto.randomUUID(),
@@ -605,36 +657,94 @@ export class DraftWriter {
 
   /** A write on a base of `generation` committed at `revision`: the next queued acts on it. */
   private advance(revision: number, generation: number) {
-    this.last = { revision, generation };
+    this.tail = { revision, generation };
 
     if (!this.seen || revision > this.seen.revision) this.seen = { revision, generation };
   }
 
-  private async save(snapshot: Partial<Record<Field, Snapshot>>, base: Base | 'chain') {
-    let guard = this.guard(base);
+  /** A write met a change elsewhere: shown, and what is queued behind it stops, on that draft. */
+  private conflicted(draft: ReviewDraft, stamp: number) {
+    const versions = draft.versions!;
 
-    // Text begun on another generation (before a discard elsewhere) is never sent into this one.
-    const elsewhere = (Object.entries(snapshot) as [Field, Snapshot][]).filter(
-      ([, saved]) => saved.generation !== null && saved.generation !== guard.baseGeneration,
-    );
+    this.observe(draft);
+    this.transport.committed(draft, stamp);
+    this.broken = true;
+    this.tail = { revision: versions.revision, generation: versions.generation };
+  }
 
-    if (elsewhere.length > 0) {
-      this.failFields(
-        Object.fromEntries(elsewhere.map(([field, saved]) => [field, saved.version])),
-        DISCARDED_ELSEWHERE,
-      );
+  /** What each of `fields` holds now, marked queued. */
+  private snapshotOf(fields: Field[]): Partial<Record<Field, Snapshot>> {
+    const snapshot: Partial<Record<Field, Snapshot>> = {};
 
-      for (const [field] of elsewhere) delete snapshot[field];
+    for (const field of fields) {
+      const state = this.fields[field];
+
+      snapshot[field] = {
+        value: state.value,
+        version: state.version,
+        generation: state.generation,
+        since: state.since,
+      };
+      state.queued = state.version;
     }
 
-    const sent = Object.entries(snapshot) as [Field, Snapshot][];
+    return snapshot;
+  }
 
-    if (sent.length === 0) return;
+  /** The outcomes of the latest saves queued of `fields`, as of now. */
+  private savesOf(fields: Field[]): Promise<boolean[]> {
+    return Promise.all(fields.map((field) => this.fields[field].lastSave ?? true));
+  }
 
-    const fields = Object.fromEntries(sent.map(([field, saved]) => [field, saved.version]));
-    const values = Object.fromEntries(sent.map(([field, saved]) => [field, saved.value]));
+  /** Whether any of `fields` is refused, or its latest save before this was not kept. */
+  private unsaved(fields: Field[], saves: boolean[]): boolean {
+    return saves.includes(false) || this.failureOf(fields) !== null;
+  }
+
+  private failureOf(fields: Field[]): string | null {
+    return fields.map((field) => this.fields[field].failed).find(Boolean) ?? null;
+  }
+
+  /**
+   * Takes out of `snapshot`, as it is about to be sent, each field that must not be: held by a
+   * command (sent again once it releases it), from more than a week ago, or begun on another
+   * generation (each kept, refused).
+   */
+  private sendable(snapshot: Partial<Record<Field, Snapshot>>, guard: Guard) {
+    const now = Date.now();
+
+    for (const [field, saved] of entries(snapshot)) {
+      const state = this.fields[field];
+      const reason = isOld(saved.since, now)
+        ? EXPIRED
+        : saved.generation !== null && saved.generation !== guard.baseGeneration
+          ? DISCARDED_ELSEWHERE
+          : null;
+
+      if (state.owned) {
+        if (state.queued === saved.version) state.queued = state.settled;
+      } else if (reason) this.failFields({ [field]: saved.version }, reason);
+      else continue;
+
+      delete snapshot[field];
+    }
+  }
+
+  private async save(
+    snapshot: Partial<Record<Field, Snapshot>>,
+    base: Base | 'chain',
+  ): Promise<Committed> {
+    let guard = this.guard(base);
 
     for (;;) {
+      this.sendable(snapshot, guard);
+
+      const sent = entries(snapshot);
+
+      if (sent.length === 0) return new Set();
+
+      const fields = Object.fromEntries(sent.map(([field, saved]) => [field, saved.version]));
+      const values = Object.fromEntries(sent.map(([field, saved]) => [field, saved.value]));
       const write = this.attempt(
         guard,
         { route: 'saveDraft', params: { account: this.account, id: this.prId }, body: values },
@@ -649,40 +759,32 @@ export class DraftWriter {
         if (isDraft(outcome.body)) this.transport.committed(outcome.body, write.stamp);
         else this.transport.stale();
 
-        return;
+        return new Set(sent.map(([field]) => field));
       }
 
       if (outcome.kind === 'conflict') {
-        const draft = outcome.draft;
-        const versions = draft.versions!;
-
-        this.observe(draft);
-        this.transport.committed(draft, write.stamp);
-        // Either way the draft is not the one the actions behind this chose: they stop, and what
-        // is queued behind acts on the draft as it is.
-        this.broken = true;
-        this.last = { revision: versions.revision, generation: versions.generation };
+        this.conflicted(outcome.draft, write.stamp);
 
         // Changed by another tab or window: your newest edit wins, on the draft as it is now.
         // Discarded, submitted or locked since: nothing is sent into another draft.
-        if (versions.generation === guard.baseGeneration) {
+        if (outcome.draft.versions!.generation === guard.baseGeneration) {
           guard = this.guard('chain');
           continue;
         }
 
         this.failFields(fields, DISCARDED_ELSEWHERE);
 
-        return;
+        return new Set();
       }
 
       this.failFields(fields, refusalOf(outcome).message);
 
-      return;
+      return new Set();
     }
   }
 
   /** An autosave the journal kept across a reload: sent again as it was, by its id. */
-  private async resume(write: Inflight): Promise<void> {
+  private async resume(write: Inflight): Promise<Committed> {
     const fields = write.fields ?? {};
     const outcome = await this.dispatch(write, false);
 
@@ -691,41 +793,46 @@ export class DraftWriter {
       this.advance(outcome.revision, write.base.generation);
       this.transport.stale();
 
-      return;
+      return new Set(Object.keys(fields) as Field[]);
     }
 
     if (outcome.kind === 'conflict') {
-      const versions = outcome.draft.versions!;
+      this.conflicted(outcome.draft, write.stamp);
 
-      this.observe(outcome.draft);
-      this.transport.committed(outcome.draft, write.stamp);
-      // What is queued behind it chose another draft: it stops, and acts on the draft as it is.
-      this.broken = true;
-      this.last = { revision: versions.revision, generation: versions.generation };
+      // Changed elsewhere since, the same draft: its edits are saved again on the draft as it is,
+      // in this job, so what waits behind it waits for that too. A field a newer save is already
+      // queued for is left to it.
+      if (outcome.draft.versions!.generation === write.base.generation) {
+        const again = entries(fields)
+          .filter(([field, version]) => {
+            const state = this.fields[field];
 
-      // Changed elsewhere since, the same draft: its edits are saved again on the draft as it is.
-      if (versions.generation === write.base.generation) {
-        for (const [field, version] of Object.entries(fields) as [Field, number][])
-          if (this.fields[field].queued === version)
-            this.fields[field].queued = this.fields[field].settled;
+            return (
+              state.queued === version &&
+              state.version > state.settled &&
+              !state.failed &&
+              !state.owned
+            );
+          })
+          .map(([field]) => field);
 
-        void this.flush();
-
-        return;
+        return this.save(this.snapshotOf(again), 'chain');
       }
 
       this.failFields(fields, DISCARDED_ELSEWHERE);
 
-      return;
+      return new Set();
     }
 
     this.failFields(fields, refusalOf(outcome).message);
+
+    return new Set();
   }
 
   /**
    * Sends a write and learns its outcome. An answer that says nothing is sent again as it was,
-   * the same id answering once; one still on its way is looked up until it settles, or until its
-   * deadline, when it is taken as unconfirmed.
+   * the same id answering once; one still on its way is looked up until it settles. Nothing is
+   * sent, nor looked up, past its deadline: it is then taken as unconfirmed.
    */
   private async dispatch(
     write: Inflight,
@@ -734,17 +841,20 @@ export class DraftWriter {
     this.inflight = [...this.inflight.filter((other) => other.writeId !== write.writeId), write];
     this.changed();
 
-    const send = (isFirst: boolean) => decode(this.transport.send(write.request), isFirst, write);
+    const send = (isFirst: boolean) =>
+      Date.now() >= write.deadline
+        ? Promise.resolve(notConfirmed())
+        : decode(this.transport.send(write.request), isFirst, write);
     let outcome = await send(first);
     let attempt = 0;
 
     while (outcome.kind === 'pending' || outcome.kind === 'unknown') {
+      await sleep(this.backoff(attempt++));
+
       if (Date.now() >= write.deadline) {
-        outcome = { kind: 'refused', error: new ApiError(NOT_CONFIRMED, 0, 'NOT_CONFIRMED') };
+        outcome = notConfirmed();
         break;
       }
-
-      await sleep(this.backoff(attempt++));
 
       if (outcome.kind === 'pending') {
         const looked = await this.transport
@@ -768,11 +878,11 @@ export class DraftWriter {
     this.inflight = this.inflight.filter((other) => other.writeId !== write.writeId);
     this.changed();
 
-    return outcome;
+    return outcome as Exclude<Outcome, { kind: 'pending' } | { kind: 'unknown' }>;
   }
 
   private settleFields(fields: Partial<Record<Field, number>>, revision: number) {
-    for (const [field, version] of Object.entries(fields) as [Field, number][]) {
+    for (const [field, version] of entries(fields)) {
       const state = this.fields[field];
 
       if (version > state.settled) {
@@ -788,7 +898,7 @@ export class DraftWriter {
   private markFailed(fields: Partial<Record<Field, number>>, reason: string): boolean {
     let failed = false;
 
-    for (const [field, version] of Object.entries(fields) as [Field, number][])
+    for (const [field, version] of entries(fields))
       if (this.fields[field].version === version) {
         this.fields[field].failed = reason;
         failed = true;
@@ -805,6 +915,12 @@ export class DraftWriter {
     if (failed) this.transport.refused(reason);
   }
 }
+
+const entries = <V>(record: Partial<Record<Field, V>>) => Object.entries(record) as [Field, V][];
+
+/** Whether unsaved text begun at `since` is older than a week by `now`. */
+const isOld = (since: number | null, now: number) =>
+  since !== null && now - since >= ATTEMPT_TTL_MS;
 
 const guardOf = (guard: Guard) => ({
   writeId: guard.writeId,
@@ -827,7 +943,8 @@ function refusalOf(outcome: Outcome): WriteRefused {
   return new WriteRefused(NOT_CONFIRMED, 'NOT_CONFIRMED');
 }
 
-const strip = ({ queued: _queued, owned: _owned, ...state }: FieldState) => state;
+const strip = ({ queued: _queued, owned: _owned, lastSave: _lastSave, ...state }: FieldState) =>
+  state;
 
 function readJournal(account: string, prId: string): Journal | null {
   try {

@@ -109,13 +109,11 @@ export function useReview(prId: string | null, account: string) {
   const draftKey = queryKeys.draft(account, prId ?? 'none');
   const draft = useQuery({
     queryKey: draftKey,
-    // Kept the newer of each part, against the cache as the read lands: a read that started
-    // before a write never undoes it.
-    queryFn: async ({ signal }) => {
-      const read = await call(routes.draft, { params: pr, signal });
-
-      return newerDraft(client.getQueryData<ReviewDraft>(draftKey), read);
-    },
+    queryFn: ({ signal }) => call(routes.draft, { params: pr, signal }),
+    // Kept the newer of each part as any data is published, a read landing or a write's answer:
+    // neither an older read nor an older write ever undoes a newer.
+    structuralSharing: (cached, next) =>
+      newerDraft(cached as ReviewDraft | undefined, next as ReviewDraft),
     enabled: Boolean(prId && account),
   });
   // Every draft write goes through the PR's writer, in one queue, on the draft you saw. The
@@ -147,8 +145,10 @@ export function useReview(prId: string | null, account: string) {
   });
 
   const discard = useMutation({
-    // Drops your unsaved summary and verdict with the draft: none is autosaved meanwhile.
-    mutationFn: () => writer.command(['body', 'event'], () => command(routes.discard, pr, {})),
+    // None of your summary and verdict is autosaved into the draft it discards; text not saved
+    // is kept, unsent, since its cleanup may yet not happen (a cancel in Activity).
+    mutationFn: () =>
+      writer.command(['body', 'event'], () => command(routes.discard, pr, {}), 'keep'),
     onSuccess: () => {
       void refreshDraft();
       void refreshOperations();
@@ -164,7 +164,7 @@ export function useReview(prId: string | null, account: string) {
     }) =>
       // Carries the summary and verdict as you left them: none is autosaved into the draft it
       // submits meanwhile, nor after it was accepted.
-      writer.command(['body', 'event'], () => command(routes.submit, pr, input)),
+      writer.command(['body', 'event'], () => command(routes.submit, pr, input), 'retire'),
     onSettled: refreshDraft,
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.pulls(account) });

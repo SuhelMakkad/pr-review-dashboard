@@ -370,6 +370,7 @@ describe('the draft writer', () => {
     const submitting = writer.command(
       ['body', 'event'],
       () => new Promise<string>((resolve) => (accept = resolve)),
+      'retire',
     );
 
     await writer.flush();
@@ -393,13 +394,147 @@ describe('the draft writer', () => {
     writer.edit('body', 'Still mine');
 
     await expect(
-      writer.command(['body', 'event'], async () => {
-        throw new Error('Head moved');
-      }),
+      writer.command(
+        ['body', 'event'],
+        async () => {
+          throw new Error('Head moved');
+        },
+        'retire',
+      ),
     ).rejects.toThrow('Head moved');
     await vi.waitFor(() =>
       expect(sent.map((request) => request.body.body)).toEqual(['Still mine']),
     );
+  });
+
+  it('keeps your unsaved text, unsent, after a discard was accepted, its cleanup yet to come', async () => {
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+
+    writer.observe(draft(1));
+    writer.edit('body', 'Typed just before');
+    await writer.command(['body', 'event'], async () => 'queued', 'keep');
+    await writer.flush();
+
+    expect(sent).toEqual([]);
+    expect(writer.state('body')).toBe('error');
+    expect(writer.value('body', draft(2))).toBe('Typed just before');
+  });
+
+  it('never sends a save queued before a command while the command holds its text', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+    const comment = held();
+    let accept: () => void = () => {};
+
+    writer.observe(draft(1));
+    answers.push(comment.answer);
+    void writer.write('addComment', pr, { body: 'First' });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    writer.edit('body', 'Queued behind the comment');
+
+    const queued = writer.flush();
+    const submitting = writer.command(
+      ['body', 'event'],
+      () => new Promise<void>((resolve) => (accept = resolve)),
+      'retire',
+    );
+
+    comment.release((request) => ({
+      attempt: { id: request.body.writeId, state: 'committed', revision: 2 },
+    }));
+    await queued;
+
+    expect(sent.map((request) => request.route)).toEqual(['addComment']);
+
+    accept();
+    await submitting;
+    await writer.flush();
+
+    expect(sent.map((request) => request.route)).toEqual(['addComment']);
+  });
+
+  it('keeps a command holding its text however another command around it ends', async () => {
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+    let second: () => void = () => {};
+
+    writer.observe(draft(1));
+    writer.edit('body', 'Held');
+
+    const first = writer.command(
+      ['body'],
+      async () => {
+        throw new Error('Refused');
+      },
+      'retire',
+    );
+    const holding = writer.command(
+      ['body'],
+      () => new Promise<void>((resolve) => (second = resolve)),
+      'retire',
+    );
+
+    await expect(first).rejects.toThrow('Refused');
+    await writer.flush();
+
+    expect(sent).toEqual([]);
+
+    second();
+    await holding;
+  });
+
+  it('acts behind a refused save on the draft the queue began on, never on a read meanwhile', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+    const save = held();
+
+    writer.observe(draft(2));
+    answers.push(save.answer);
+    writer.edit('event', 'APPROVE');
+
+    const added = writer.write('addComment', pr, { body: 'Behind it' });
+
+    // Another tab's change, read while the save is on its way; then the save is refused.
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    writer.observe(draft(7));
+    save.release(() => {
+      throw new ApiError('Invalid', 400, 'INVALID');
+    });
+    await added.catch(() => {});
+
+    expect(sent.map((request) => [request.route, request.body.baseRevision])).toEqual([
+      ['saveDraft', 2],
+      ['addComment', 2],
+    ]);
+  });
+
+  it('refuses a replacement queued behind a save that was refused, though you typed since', async () => {
+    const { sent, answers, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+    const save = held();
+
+    writer.observe(draft(1));
+    answers.push(save.answer);
+    writer.edit('body', 'One');
+    void writer.flush();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    const applying = writer.write(
+      'applyAi',
+      { account: 'you', runId: 'r' },
+      { prId: 'PR_1' },
+      { replaces: ['body'] },
+    );
+
+    // Typed after choosing to apply: its own save is queued behind the apply.
+    writer.edit('body', 'Two');
+    save.release(() => {
+      throw new ApiError('Switch back to do this.', 409, 'ACCOUNT_NOT_ACTIVE');
+    });
+
+    await expect(applying).rejects.toMatchObject({ code: 'DRAFT_EDIT_UNSAVED' });
+    expect(sent.map((request) => request.route)).toEqual(['saveDraft']);
   });
 
   it('refuses to replace a summary or verdict of yours that was not saved, until you save or clear it', async () => {
@@ -513,14 +648,19 @@ describe('the draft writer', () => {
 
     writer.observe(draft(6, {}, 1));
     writer.edit('body', 'Three');
-    // Nothing ahead of it commits: it would act on the draft the read showed.
+    // Nothing ahead of it commits: it still acts on the draft the queue began on, which the
+    // server refuses, and never on the one the read showed.
+    answers.push(conflict(draft(6, {}, 1)));
     first.release(() => {
       throw new ApiError('Switch back to do this.', 409, 'ACCOUNT_NOT_ACTIVE');
     });
     await queued;
     await writer.flush();
 
-    expect(sent.map((request) => request.body.body)).toEqual(['One']);
+    expect(sent.map((request) => [request.body.body, request.body.baseGeneration])).toEqual([
+      ['One', 0],
+      ['Two', 0],
+    ]);
     expect(writer.state('body')).toBe('error');
   });
 
@@ -587,6 +727,91 @@ describe('the draft writer', () => {
     await new DraftWriter('you', 'PR_1', second.transport, instant).flush();
 
     expect(second.sent).toEqual([]);
+  });
+
+  it('never sends once its deadline has passed, a wait past it included', async () => {
+    const { sent, answers, transport } = server();
+    const now = 1_000;
+    // The tab sleeps past the deadline while waiting to send again.
+    const writer = new DraftWriter('you', 'PR_1', transport, () => {
+      clock(now + ATTEMPT_TTL_MS);
+
+      return 0;
+    });
+
+    clock(now);
+    writer.observe(draft(1));
+    answers.push(async () => {
+      throw new ApiError('Not reachable', 0);
+    });
+
+    await expect(writer.write('addComment', pr, { body: 'Late' })).rejects.toMatchObject({
+      code: 'NOT_CONFIRMED',
+    });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('never sends again an autosave a reload restored whose deadline passed before its turn', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', 'PR_1', first.transport, instant);
+
+    clock(1_000);
+    writer.observe(draft(2));
+    first.answers.push(() => new Promise(() => {}));
+    writer.edit('event', 'APPROVE');
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+
+    // Restored just before its deadline; its turn to be sent comes just after.
+    vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(1_000 + ATTEMPT_TTL_MS - 1)
+      .mockReturnValue(1_000 + ATTEMPT_TTL_MS);
+
+    const second = server();
+    const reloaded = new DraftWriter('you', 'PR_1', second.transport, instant);
+
+    await reloaded.settled();
+
+    expect(second.sent).toEqual([]);
+    expect(reloaded.state('event')).toBe('error');
+  });
+
+  it('never saves text begun more than a week ago, though its pause ends only now', async () => {
+    const { sent, transport } = server();
+    const writer = new DraftWriter('you', 'PR_1', transport, instant);
+
+    clock(1_000);
+    writer.observe(draft(1));
+    writer.edit('body', 'Typed before the tab slept');
+    clock(1_000 + ATTEMPT_TTL_MS);
+    await writer.flush();
+
+    expect(sent).toEqual([]);
+    expect(writer.state('body')).toBe('error');
+    expect(writer.value('body', draft(1))).toBe('Typed before the tab slept');
+  });
+
+  it('waits, for the queue to settle, for the rebase of an autosave a reload resent', async () => {
+    const first = server();
+    const writer = new DraftWriter('you', 'PR_1', first.transport, instant);
+
+    writer.observe(draft(2));
+    first.answers.push(() => new Promise(() => {}));
+    writer.edit('event', 'APPROVE');
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+
+    const second = server();
+
+    second.answers.push(conflict(draft(5)));
+
+    const reloaded = new DraftWriter('you', 'PR_1', second.transport, instant);
+    const refusal = await reloaded.settled(['event']);
+
+    expect(refusal).toBeNull();
+    expect(second.sent.map((request) => [request.body.event, request.body.baseRevision])).toEqual([
+      ['APPROVE', 2],
+      ['APPROVE', 5],
+    ]);
+    expect(reloaded.state('event')).toBe('saved');
   });
 
   it('keeps, unsent, an autosave past its deadline and an edit from more than a week ago', async () => {
@@ -696,6 +921,15 @@ describe('decoding a write', () => {
         expected,
       ),
     ).toMatchObject({ kind: 'unknown' });
+    // A first client error carrying an attempt not this write's, or not one at all, is no outcome.
+    for (const attempt of [{ id: 'x', state: 'refused' }, 'refused', { id: 'w', state: 'lost' }])
+      expect(
+        await decode(
+          failing(new ApiError('Locked', 409, 'DRAFT_LOCKED', { attempt })),
+          true,
+          expected,
+        ),
+      ).toMatchObject({ kind: 'unknown' });
   });
 
   it('reads a lookup only in its declared shapes', () => {
@@ -705,6 +939,11 @@ describe('decoding a write', () => {
     expect(fromLookup({ fenced: true }, expected)).toBe('resend');
     expect(fromLookup({ attempt: { id: 'w', state: 'lost' } }, expected)).toBe('resend');
     expect(fromLookup({ attempt: { id: 'x', state: 'refused' } }, expected)).toBe('resend');
+    // A settled attempt without what it recorded is not read as settled.
+    expect(fromLookup({ attempt: { id: 'w', state: 'refused' } }, expected)).toBe('resend');
+    expect(fromLookup({ attempt: { id: 'w', state: 'committed', revision: 5 } }, expected)).toBe(
+      'resend',
+    );
     expect(
       fromLookup(
         {
