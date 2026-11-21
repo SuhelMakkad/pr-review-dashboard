@@ -198,12 +198,15 @@ const conflict = () =>
     'This action ID was already used for different content.',
   );
 
-/** A stopped id's arrival: refused, recording nothing, whatever its request. */
+/**
+ * A stopped id's arrival: refused, recording nothing, whatever its request. It proves only that
+ * the id cannot be admitted now; what happened to it before is its receipt's to say.
+ */
 const abandoned = () =>
   new ReviewError(
     'COMMAND_ABANDONED',
     409,
-    'You stopped waiting for this, so it was not received. Nothing was sent.',
+    'You stopped waiting for this, so it can no longer be received. Its receipt shows what happened to it before.',
   );
 
 /** What a receipt answers about the action under an id: its target, kind and status. */

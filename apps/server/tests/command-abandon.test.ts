@@ -146,6 +146,12 @@ describe('stopping a command', () => {
     const { store, pr, call, epoch, abandon } = await demo();
     const review = randomUUID();
     const at = await epoch();
+    // Another PR, found while the account still has its PRs.
+    const other = (await call('GET', '/api/accounts/you/pulls'))
+      .json()
+      .items.find((item: { id: string }) => item.id !== pr.id) as { id: string };
+
+    expect(other).toBeDefined();
 
     await abandon(review, 'review', at);
     store.clearAccount('you');
@@ -154,19 +160,14 @@ describe('stopping a command', () => {
     expect((await abandon(review, 'review', at)).json()).toEqual({ outcome: 'not-admitted' });
     expect((await abandon(review, 'discard', at)).json().code).toBe('OPERATION_CONFLICT');
 
-    const other = (await call('GET', '/api/accounts/you/pulls'))
-      .json()
-      .items.find((item: { id: string }) => item.id !== pr.id);
-
-    if (other)
-      expect(
-        (
-          await call('POST', `/api/accounts/you/pulls/${other.id}/commands/${review}/abandon`, {
-            type: 'review',
-            epoch: at,
-          })
-        ).json().code,
-      ).toBe('OPERATION_CONFLICT');
+    expect(
+      (
+        await call('POST', `/api/accounts/you/pulls/${other.id}/commands/${review}/abandon`, {
+          type: 'review',
+          epoch: at,
+        })
+      ).json().code,
+    ).toBe('OPERATION_CONFLICT');
   });
 
   it("answers a stopped id's decision from the receipt route", async () => {
