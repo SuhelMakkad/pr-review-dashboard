@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { prepareReviewWorkspace, type RepositoryExporter } from '@/ai/workspace.js';
+import { archiveAccess, prepareReviewWorkspace, type RepositoryExporter } from '@/ai/workspace.js';
 import { githubOperations } from '@/db/schema.js';
 import { initialStatus, STATUS, WRITE_COOLDOWN } from '@/db/settings.js';
 import { DraftStore } from '@/db/drafts.js';
@@ -15,7 +15,7 @@ import type { DiffManifest } from '@review-desk/shared/diff';
 import { DiffService } from '@/diff/service.js';
 import { EventBus } from '@/events.js';
 import { AccountUnavailable } from '@/forge/account.js';
-import { ForgeRouter } from '@/forge/router.js';
+import { BoundForge, ForgeRouter } from '@/forge/router.js';
 import type { GitHubApi } from '@/github/api.js';
 import { GhCredentials } from '@/github/credentials.js';
 import { GitHubError } from '@/github/errors.js';
@@ -146,6 +146,27 @@ describe('bound GitHub credentials', () => {
   });
 });
 
+describe('archive access', () => {
+  it("shares a bound forge's own GitHub credentials, and binds anew only without them", () => {
+    const credentials = { environment: vi.fn(), forget: vi.fn() };
+    const router = new ForgeRouter(
+      {} as GitHubApi,
+      { list: async () => [], select: () => undefined },
+      { list: async () => [] },
+      () => ({}) as GitHubApi,
+    );
+    const forge = new BoundForge('you', {} as GitHubApi, router, credentials);
+
+    expect(archiveAccess('you', forge)).toEqual({ account: 'you', credentials });
+    // A stand-in carries none: the run's account gets credentials of its own.
+    expect(archiveAccess('you', {} as GitHubApi).credentials).not.toBe(credentials);
+    expect(archiveAccess('ann@gitlab.example', forge)).toEqual({
+      account: 'ann@gitlab.example',
+      credentials: null,
+    });
+  });
+});
+
 describe('the router', () => {
   /** A client that answers `identity` as `login`, and names itself in `teams`. */
   const client = (login: string, failing = false) =>
@@ -249,16 +270,23 @@ describe('work bound to an account', () => {
     await sync.sync();
 
     const pull = sync.detail(sync.list().items[0].id)!.snapshot;
-    const bound = fixture.as('you');
+    const listing = await fixture.pullFiles(pull.repository, pull.number);
+    // A client of its own, apart from the fixture, so a read through either is told apart.
+    const supplied = {
+      snapshot: vi.fn(async () => pull),
+      pullFiles: vi.fn(async () => listing),
+    } as unknown as GitHubApi;
     const as = vi.spyOn(fixture, 'as');
-    const snapshot = vi.spyOn(bound, 'snapshot');
-    const files = vi.spyOn(bound, 'pullFiles');
+    const snapshot = vi.spyOn(fixture, 'snapshot');
+    const files = vi.spyOn(fixture, 'pullFiles');
 
-    await sync.refresh(pull.id, 'you', bound);
-    await new DiffService(fixture).manifest(pull, 'full', null, 'you', bound);
+    await sync.refresh(pull.id, 'you', supplied);
+    await new DiffService(fixture).manifest(pull, 'full', null, 'you', supplied);
 
-    expect(snapshot).toHaveBeenCalled();
-    expect(files).toHaveBeenCalled();
+    expect(supplied.snapshot).toHaveBeenCalled();
+    expect(supplied.pullFiles).toHaveBeenCalled();
+    expect(snapshot).not.toHaveBeenCalled();
+    expect(files).not.toHaveBeenCalled();
     expect(as).not.toHaveBeenCalled();
   });
 
@@ -306,8 +334,9 @@ describe('work bound to an account', () => {
     });
     queue.resume();
 
-    await vi.waitFor(() => expect(queue.get('you', operation.id).status).not.toBe('queued'));
-    await vi.waitFor(() => expect(queue.get('you', operation.id).status).not.toBe('running'));
+    // The receipt's own check ran and met the limit: the discard waits to retry, as nobody's limit.
+    await vi.waitFor(() => expect(queue.get('you', operation.id).status).toBe('waiting'));
+    expect(checks).toBe(3);
     expect(store.settings.get(WRITE_COOLDOWN.of('you'))).toBeNull();
     expect(sync.status.retryAt).toBeNull();
   });
