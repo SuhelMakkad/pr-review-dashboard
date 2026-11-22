@@ -1217,16 +1217,18 @@ function Workspace() {
 
               if (next) {
                 const target = refOf(next);
-                void goTo({
-                  to: '/inbox/$queue/$owner/$repo/$number',
-                  params: {
-                    queue,
-                    owner: target.owner,
-                    repo: target.repo,
-                    number: String(target.number),
-                  },
-                });
-              } else void goTo({ to: '/inbox/$queue', params: { queue } });
+                follow(
+                  goTo({
+                    to: '/inbox/$queue/$owner/$repo/$number',
+                    params: {
+                      queue,
+                      owner: target.owner,
+                      repo: target.repo,
+                      number: String(target.number),
+                    },
+                  }),
+                );
+              } else follow(goTo({ to: '/inbox/$queue', params: { queue } }));
             }
           }}
         />

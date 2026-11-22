@@ -2,8 +2,7 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    // This repository's own code only: never the data folders, whose AI workspaces hold the
-    // repositories under review, nor built or generated output.
+    // Never the default data folders, nor built or generated output.
     ignores: [
       '.data*/**',
       '**/dist/**',
@@ -18,7 +17,15 @@ export default tseslint.config(
     ],
   },
   {
-    files: ['**/*.ts', '**/*.tsx', '**/*.mts', '**/*.cts'],
+    // Named by where this repository keeps its code, so a data folder anywhere else (its AI
+    // workspaces hold the repositories under review) is never in scope, whatever it is called.
+    files: [
+      'apps/*/{src,tests}/**/*.{ts,tsx,mts,cts}',
+      'apps/*/*.{ts,mts,cts}',
+      'packages/*/{src,tests}/**/*.{ts,tsx,mts,cts}',
+      'tests/**/*.{ts,tsx,mts,cts}',
+      '*.{ts,mts,cts}',
+    ],
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
