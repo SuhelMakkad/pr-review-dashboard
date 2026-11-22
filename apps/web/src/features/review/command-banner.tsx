@@ -89,14 +89,20 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 /** Runs a banner action, saying why it failed. */
 function useAct() {
   const [busy, setBusy] = useState(false);
-  // A click handler that settles its own work: a failure is shown, never left unhandled.
+  // A click handler that settles its own work, a throw included: a failure is shown, and the
+  // buttons are enabled again.
   const act = (run: () => Promise<void>, failure: string) => () => {
-    setBusy(true);
-    void run()
-      .catch((error: unknown) => {
+    void (async () => {
+      setBusy(true);
+
+      try {
+        await run();
+      } catch (error) {
         toast.error(error instanceof Error && error.message ? error.message : failure);
-      })
-      .finally(() => setBusy(false));
+      } finally {
+        setBusy(false);
+      }
+    })();
   };
 
   return { busy, act };

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import type { ServerEvent } from '@review-desk/shared/events';
 import { createApp } from '@/app.js';
@@ -296,7 +296,8 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
       state,
       ids,
       heads,
-      api: api as unknown as Record<string, ReturnType<typeof vi.fn>>,
+      // Every forge read it stands in for answers a promise.
+      api: api as unknown as Record<string, Mock<(...args: never[]) => Promise<unknown>>>,
     };
   }
 
@@ -517,7 +518,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
 
     // glab became someone else, whose limit this is: passed on with no deadline, so neither this
     // refresh nor a caller (the outbox) saves it for the account.
-    api.snapshot.mockImplementationOnce(() => {
+    api.snapshot.mockImplementationOnce(async () => {
       state.signedIn = OTHER;
       throw limited();
     });
@@ -538,7 +539,9 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
 
     // Still the account: its limit is saved before the caller hears of it.
     state.signedIn = ACCOUNT;
-    api.snapshot.mockRejectedValueOnce(limited());
+    api.snapshot.mockImplementationOnce(async () => {
+      throw limited();
+    });
     await expect(service.refresh('mr-1', ACCOUNT)).rejects.toThrow('Rate limited');
     expect(store.settings.get(WRITE_COOLDOWN.of(ACCOUNT))).toBe(retryAt);
   });

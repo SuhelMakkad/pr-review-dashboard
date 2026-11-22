@@ -18,6 +18,7 @@ import { storage } from '@/lib/storage';
 import { dateTime, relativePhrase } from '@/lib/time';
 import { useStatus } from '@/lib/queries';
 import { queryKeys } from '@/lib/query-keys';
+import { follow } from '@/lib/navigation';
 import { Button, IconButton } from '@/ui/button';
 import { DialogClose, DialogDescription, DialogTitle, Drawer } from '@/ui/dialog';
 import { MarkdownView } from '@/ui/markdown';
@@ -163,7 +164,7 @@ function OperationCard({ operation }: { operation: GitHubOperation }) {
       void client.invalidateQueries({ queryKey: queryKeys.operations(changed.account) });
       void client.invalidateQueries({ queryKey: queryKeys.draft(changed.account, changed.prId) });
 
-      if (command === 'reopen') reopened(client, changed, (to) => void navigate(to));
+      if (command === 'reopen') reopened(client, changed, (to) => follow(navigate(to)));
     },
   });
   const attention = operation.status === 'needs_attention';

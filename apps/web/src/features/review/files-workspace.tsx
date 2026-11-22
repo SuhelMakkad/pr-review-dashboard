@@ -26,6 +26,7 @@ import { useRemountKey } from '@/lib/remount-key';
 import { useShortcuts } from '@/lib/shortcuts';
 import { storage } from '@/lib/storage';
 import { useAppearance } from '@/lib/theme';
+import { follow } from '@/lib/navigation';
 import { Button, IconButton } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { EmptyState } from '@/ui/empty-state';
@@ -291,9 +292,9 @@ function Workspace() {
     [threadsByFile],
   );
 
-  // A search change is a navigation: nothing waits for it, and a failed one is the router's to show.
+  // A search change is a navigation nothing waits for.
   const setSearch = (next: Partial<FilesSearch>, replace = true) => {
-    void navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace });
+    follow(navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace }));
   };
 
   // Lines selected in one comparison are other lines in the next, which renders without them.
