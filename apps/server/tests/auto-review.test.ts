@@ -96,6 +96,8 @@ async function setup() {
   let reviewer = new AutoReviewer(sync, runner, notifier);
 
   cleanups.push(() => runner.close());
+  // A window is open, so notifications go to it.
+  events.windowOpened();
   events.subscribe((stored) => {
     if (stored.event.type === 'notify') notified.push(...stored.event.notifications);
   });

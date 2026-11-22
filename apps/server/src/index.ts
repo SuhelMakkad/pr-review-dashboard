@@ -217,6 +217,9 @@ try {
     `Could not start Review Desk on port ${config.port}.`,
     error instanceof Error ? error.message : error,
   );
+  // A stop already under way keeps its drain: this failure joins it, never cuts it short.
+  if (stopping) await new Promise<never>(() => undefined);
+
   // Recovery may already have started work while the app got ready: the same bounded stop.
   await shutdown(1);
 }

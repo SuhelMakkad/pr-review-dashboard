@@ -5,6 +5,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +13,16 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { macosNotifier, escapeForNotifier } from '@/notify/macos.js';
 import { runCheck, type Exec } from '@/service/check.js';
-import { check, install, restart, servicePaths, type ServiceHost } from '@/service/cli.js';
+import {
+  check,
+  install,
+  installedJob,
+  restart,
+  servicePaths,
+  status,
+  uninstall,
+  type ServiceHost,
+} from '@/service/cli.js';
 import { servicePath, servicePlist } from '@/service/plist.js';
 
 const cleanups: (() => void)[] = [];
@@ -96,7 +106,10 @@ describe('native notifications', () => {
     const { notify } = macosNotifier('http://127.0.0.1:4317', async (command, args) => {
       calls.push([command, args]);
 
-      return command === 'terminal-notifier' && args[0] === '-version' ? true : ++sends === 1;
+      if (command === 'terminal-notifier' && args[0] === '-version')
+        return { ok: true, stdout: 'terminal-notifier 3.1.0.\n' };
+
+      return { ok: ++sends === 1, stdout: '' };
     });
     const notification = {
       title: '-api#7 · Fix',
@@ -125,12 +138,29 @@ describe('native notifications', () => {
     expect(await notify(notification)).toBe('failed');
   });
 
+  it('does not count on terminal-notifier before 3.0 to open the PR', async () => {
+    const calls: string[] = [];
+    const { notify } = macosNotifier('http://127.0.0.1:4317', async (command, args) => {
+      calls.push(`${command} ${args[0]}`);
+
+      return {
+        ok: true,
+        stdout: command === 'terminal-notifier' ? 'terminal-notifier 2.0.0\n' : '',
+      };
+    });
+
+    expect(await notify({ title: 't', body: 'b', path: '/inbox/attention', key: 'k' })).toBe(
+      'sent',
+    );
+    expect(calls).toEqual(['terminal-notifier -version', 'osascript -e']);
+  });
+
   it('falls back to AppleScript, which only shows a notification', async () => {
     const calls: string[] = [];
     const { notify } = macosNotifier('http://127.0.0.1:4317', async (command) => {
       calls.push(command);
 
-      return command === 'osascript';
+      return { ok: command === 'osascript', stdout: '' };
     });
 
     expect(await notify({ title: 't', body: 'b', path: '/inbox/attention', key: 'k' })).toBe(
@@ -167,6 +197,14 @@ describe('the check job’s report', () => {
       return answering(
         {
           '/usr/bin/which gh': { status: 0, stdout: '/opt/homebrew/bin/gh\n' },
+          '/usr/bin/which glab': { status: 0, stdout: '/opt/homebrew/bin/glab\n' },
+          'glab --version': { status: 0, stdout: 'glab 1.124.0\n' },
+          'glab auth status': {
+            status: 0,
+            stdout: JSON.stringify({
+              hosts: [{ host: 'gitlab.com', state: 'success', token: 'glpat-secret' }],
+            }),
+          },
           'gh --version': { status: 0, stdout: 'gh version 2.80.0\n' },
           'gh auth status --help': { status: 0, stdout: 'usage' },
           'gh auth status --json hosts': {
@@ -185,10 +223,23 @@ describe('the check job’s report', () => {
         log,
       )(command, args);
     };
-    const report = runCheck('check-1', run);
+    const contexts: unknown[] = [];
+    const report = runCheck(
+      'check-1',
+      (command, args, context) => {
+        if (command === 'glab' && args[0] === 'auth') contexts.push(context);
+
+        return run(command, args, context);
+      },
+      { cwd: () => '/glab-home', env: () => ({ GLAB_NO_PROMPT: '1' }) },
+    );
 
     expect(report.tools.gh).toEqual({ path: '/opt/homebrew/bin/gh', version: 'gh version 2.80.0' });
-    expect(report.tools.glab).toEqual({ path: null, version: null });
+    expect(report.gitlab).toEqual([{ host: 'gitlab.com', ok: true }]);
+    expect(JSON.stringify(report)).not.toContain('glpat-secret');
+    // As the server runs glab: its own working folder and environment.
+    expect(contexts).toEqual([{ cwd: '/glab-home', env: { GLAB_NO_PROMPT: '1' } }]);
+    expect(report.clickThrough).toBe(false);
     expect(report.github).toEqual([{ host: 'github.com', login: 'you', active: true, ok: true }]);
     expect(JSON.stringify(report)).not.toContain('gho_secret');
     expect(report.keychain).toBe('ok');
@@ -256,7 +307,11 @@ function machine(
     },
     now: () => clock,
     say: (line) => said.push(line),
-    forget: (service, account) => forgotten.push(`${service}/${account}`),
+    forget: (service, account) => {
+      forgotten.push(`${service}/${account}`);
+
+      return true;
+    },
   };
 
   return { host, calls, said, forgotten, repo };
@@ -336,12 +391,16 @@ describe('pnpm service', () => {
 
   it('restarts by stopping gracefully, waiting for the old process, then starting again', async () => {
     let alive = 3;
+    let loaded = true;
     const { host, calls } = machine((args, host) => {
-      if (args[0] === 'print') return { status: 0, stdout: 'state = running\npid = 9\n' };
+      if (args[0] === 'print')
+        return loaded ? { status: 0, stdout: 'state = running\npid = 9\n' } : { status: 113 };
+      if (args[0] === 'bootout') loaded = false;
       // Started again only once the old process is gone.
       if (args[0] === 'bootstrap') {
         if (alive > 0) return { status: 1, stderr: 'still running' };
 
+        loaded = true;
         publish(host);
       }
 
@@ -359,6 +418,106 @@ describe('pnpm service', () => {
       `bootstrap gui/501 ${servicePaths(host).plist}`,
     ]);
     expect(calls.join('\n')).not.toContain('kickstart -k');
+  });
+
+  it('never reports a stop launchd did not make, nor removes the plist of a job it still runs', async () => {
+    // Uninstall: bootout refused, and the job still loaded.
+    const stuck = machine((args) => ({
+      status: args[0] === 'bootout' ? 5 : 0,
+      stdout: 'state = running\n',
+    }));
+
+    mkdirSync(join(stuck.host.home, 'Library', 'LaunchAgents'), { recursive: true });
+    writeFileSync(servicePaths(stuck.host).plist, 'plist');
+    await expect(uninstall(stuck.host)).rejects.toThrow('did not stop');
+    expect(existsSync(servicePaths(stuck.host).plist)).toBe(true);
+
+    // A failed install whose job cannot be unloaded keeps its plist, and says so.
+    let loaded = false;
+    const unremovable = machine((args) => {
+      if (args[0] === 'bootstrap') loaded = true;
+      if (args[0] === 'print') return { status: loaded ? 0 : 113 };
+
+      return { status: 0 };
+    });
+
+    await expect(install(unremovable.host)).rejects.toThrow('could not be unloaded');
+    expect(existsSync(servicePaths(unremovable.host).plist)).toBe(true);
+  });
+
+  it('keeps the service’s logs private', async () => {
+    let loaded = false;
+    const { host } = machine((args, host) => {
+      if (args[0] === 'print') return { status: loaded ? 0 : 113, stdout: 'pid = 9\n' };
+      if (args[0] === 'bootstrap') {
+        loaded = true;
+        publish(host);
+      }
+
+      return { status: 0 };
+    });
+
+    await install(host);
+
+    for (const log of [servicePaths(host).out, servicePaths(host).err])
+      expect(statSync(log).mode & 0o777).toBe(0o600);
+  });
+
+  it('vouches only for the service: another process answering on its port is not it', async () => {
+    const { host, said } = machine((args) =>
+      args[0] === 'print' ? { status: 0, stdout: 'state = running\npid = 10\n' } : { status: 0 },
+    );
+
+    publish(host);
+    await status(host);
+
+    expect(said).toContain('Not answering as the service yet.');
+    expect(said.join('\n')).not.toContain('Linear');
+  });
+
+  it('checks with the installed service’s settings, and names what it could not remove', async () => {
+    const seen: string[] = [];
+    let loaded = false;
+    const { host, said } = machine((args) => {
+      if (args[0] === 'bootstrap') {
+        loaded = true;
+        seen.push(readFileSync(args[2]!, 'utf8'));
+      }
+      if (args[0] === 'bootout') loaded = false;
+      if (args[0] === 'print') return { status: loaded ? 0 : 113 };
+
+      return { status: 0 };
+    });
+
+    host.node = '/shell/node';
+    mkdirSync(join(host.home, 'Library', 'LaunchAgents'), { recursive: true });
+    writeFileSync(
+      servicePaths(host).plist,
+      servicePlist({
+        label: 'dev.reviewdesk.server',
+        program: ['/installed/node', '/installed/repo/apps/server/dist/index.js'],
+        cwd: '/installed/repo',
+        env: { PATH: '/installed/bin' },
+        stdout: '/o',
+        stderr: '/e',
+        keepAlive: true,
+      }),
+    );
+    host.forget = () => false;
+
+    expect(installedJob(host)).toEqual({
+      node: '/installed/node',
+      cwd: '/installed/repo',
+      path: '/installed/bin',
+    });
+    await check(host);
+
+    expect(seen[0]).toContain('<string>/installed/node</string>');
+    expect(seen[0]).toContain('<string>/installed/bin</string>');
+    expect(seen[0]).not.toContain('/shell/node');
+    expect(said).toContainEqual(
+      expect.stringMatching(/^Could not remove the Keychain item "Review Desk check" for check-/),
+    );
   });
 
   it('runs the check once and leaves nothing behind, whether or not it reported', async () => {

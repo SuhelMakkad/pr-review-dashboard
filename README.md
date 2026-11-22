@@ -67,7 +67,7 @@ Replacing `github.com` with `127.0.0.1:4317` in any PR URL opens that PR here; t
 security add-generic-password -U -s review-desk.linear -a api-key -w
 ```
 
-**Notifications.** In Settings → Notifications, click _Allow notifications_. Native macOS notifications for when no window is open are opt-in; clicking one opens Script Editor rather than the PR.
+**Notifications.** In Settings → Notifications, click _Allow notifications_. Native macOS notifications for when no window is open are opt-in (_Use macOS notifications when no window is open_). Clicking one opens its PR when [terminal-notifier](https://github.com/julienXX/terminal-notifier) 3 or later is installed (`brew install terminal-notifier`); without it, clicking opens Script Editor.
 
 ## GitHub account and safety
 
@@ -114,7 +114,7 @@ One Review Desk process uses a data folder at a time. A second `pnpm start` or `
 
 A crash or a failed start (the data folder in use, the port taken) is retried every 10 seconds until you uninstall. While the service runs, `pnpm start` exits "already running" and says the service holds the folder.
 
-Native notifications only click through to the PR when [terminal-notifier](https://github.com/julienXX/terminal-notifier) is installed (`brew install terminal-notifier`). Without it they still show, but clicking one opens Script Editor.
+Native notifications click through to the PR only with terminal-notifier 3 or later (see **Notifications** above). `pnpm service check` says whether it is there, and `pnpm service status` says how the last native notification went.
 
 To accept the pilot on your Mac:
 
@@ -124,7 +124,7 @@ To accept the pilot on your Mac:
    - a Codex review: it pauses at a checkpoint and resumes after the restart;
    - a Claude review: it is cancelled cleanly, and a new one works afterwards;
    - a write in Activity: a completed or confirmed write reached GitHub exactly once, and an unresolved one is in its expected Activity state, with no duplicate.
-4. Close every Review Desk window, get two native notifications for different PRs, and click the older one after the newer arrives. The exact PR opens; note whether the installed app or the browser opened it.
+4. Install terminal-notifier, turn on _Use macOS notifications when no window is open_ in Settings → Notifications, and allow terminal-notifier's notifications when macOS asks (or in System Settings → Notifications). Then close every Review Desk window, get two native notifications for different PRs, and click the older one after the newer arrives. The exact PR opens; note whether the installed app or the browser opened it.
 
 Syncing is incremental: a cheap fingerprint per PR decides when a full refresh is needed, with a full check every 30 minutes and on opening a PR. Search failures never drop a PR, and a PR leaves the list only once GitHub confirms it was closed or merged, or you remove a PR you added by hand.
 

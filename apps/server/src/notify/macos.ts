@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { log } from '@/log.js';
+import { supportsClickThrough } from '@/notify/terminal-notifier.js';
 
 /** One native notification: its texts, where clicking it goes, and its key (one per PR event). */
 export interface NativeNotification {
@@ -13,12 +14,18 @@ export interface NativeNotification {
 export type Delivery = 'sent' | 'failed';
 export type NativeNotify = (notification: NativeNotification) => Promise<Delivery | void>;
 
-/** Runs a command with arguments (never a shell), bounded: whether it exited 0 in time. */
-export type Runner = (command: string, args: string[], timeoutMs: number) => Promise<boolean>;
+/** Runs a command with arguments (never a shell), bounded: whether it exited 0 in time, and what it printed. */
+export type Runner = (
+  command: string,
+  args: string[],
+  timeoutMs: number,
+) => Promise<{ ok: boolean; stdout: string }>;
 
 const run: Runner = (command, args, timeoutMs) =>
   new Promise((resolve) => {
-    execFile(command, args, { timeout: timeoutMs }, (error) => resolve(!error));
+    execFile(command, args, { timeout: timeoutMs }, (error, stdout) =>
+      resolve({ ok: !error, stdout: String(stdout ?? '') }),
+    );
   });
 
 /**
@@ -39,13 +46,16 @@ export function escapeForNotifier(value: string): string {
  */
 export function macosNotifier(origin: string, runner: Runner = run) {
   let clickThrough: Promise<boolean> | null = null;
-  const opensPr = () => (clickThrough ??= runner('terminal-notifier', ['-version'], 5_000));
+  const opensPr = () =>
+    (clickThrough ??= runner('terminal-notifier', ['-version'], 5_000).then(
+      (answer) => answer.ok && supportsClickThrough(answer.stdout),
+    ));
 
   const notify: NativeNotify = async ({ title, body, path, key }) => {
     const shortTitle = title.slice(0, 120);
     const shortBody = body.slice(0, 240);
     const deliverer = (await opensPr()) ? 'terminal-notifier' : 'osascript';
-    const sent =
+    const { ok: sent } =
       deliverer === 'terminal-notifier'
         ? await runner(
             'terminal-notifier',

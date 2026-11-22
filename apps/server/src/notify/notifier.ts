@@ -181,7 +181,8 @@ export class Notifier {
 
     if (wanted.length === 0) return [];
 
-    if (this.events.subscriberCount > 0) {
+    // A browser window shows it; the server's own listeners (the outbox) are not one.
+    if (this.events.windowCount > 0) {
       this.events.emit({ type: 'notify', notifications: wanted });
       this.remember(account, wanted, 'browser');
     } else if (settings.macosWhenClosed) {

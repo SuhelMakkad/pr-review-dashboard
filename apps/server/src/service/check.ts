@@ -2,6 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { renameSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { baseGlabEnvironment, glabCwd } from '@/gitlab/transport.js';
+import { supportsClickThrough } from '@/notify/terminal-notifier.js';
 
 /** The Keychain service the check's throwaway item is filed under; its account is per run. */
 export const CHECK_KEYCHAIN_SERVICE = 'Review Desk check';
@@ -11,11 +13,15 @@ export interface Command {
   stdout: string;
 }
 
-/** Runs a command with arguments (never a shell), bounded at 10 s. */
-export type Exec = (command: string, args: string[]) => Command;
+/** Runs a command with arguments (never a shell), bounded at 10 s, where and as asked. */
+export type Exec = (
+  command: string,
+  args: string[],
+  context?: { cwd?: string; env?: NodeJS.ProcessEnv },
+) => Command;
 
-const exec: Exec = (command, args) => {
-  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 10_000 });
+const exec: Exec = (command, args, context = {}) => {
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 10_000, ...context });
 
   return { status: result.error ? null : result.status, stdout: result.stdout ?? '' };
 };
@@ -26,6 +32,8 @@ export interface CheckReport {
   gitlab: { host: string; ok: boolean }[] | null;
   codexSignedIn: boolean | null;
   keychain: 'ok' | 'mismatch' | 'failed';
+  /** terminal-notifier 3.x or later is there, so a native notification can open its PR. */
+  clickThrough: boolean;
   /** Left behind when cleanup failed: named so they can be removed by hand. */
   leftovers: string[];
 }
@@ -58,7 +66,14 @@ function json(text: string): unknown {
  * version, each GitHub and GitLab sign-in (host, login, whether it works: never a token or raw
  * output), whether Codex is signed in, and a Keychain round trip on a throwaway item of its own.
  */
-export function runCheck(account: string, run: Exec = exec): CheckReport {
+export function runCheck(
+  account: string,
+  run: Exec = exec,
+  glab: { cwd: () => string; env: () => NodeJS.ProcessEnv } = {
+    cwd: glabCwd,
+    env: baseGlabEnvironment,
+  },
+): CheckReport {
   const tools: CheckReport['tools'] = {};
 
   for (const [tool, flag] of TOOLS) {
@@ -92,8 +107,14 @@ export function runCheck(account: string, run: Exec = exec): CheckReport {
         })),
       )
     : null;
+  // As the server runs glab: its own working folder and environment, so the answer is the same.
   const glabHosts = tools.glab.path
-    ? json(run('glab', ['auth', 'status', '--all', '--output', 'json']).stdout)
+    ? json(
+        run('glab', ['auth', 'status', '--all', '--output', 'json'], {
+          cwd: glab.cwd(),
+          env: glab.env(),
+        }).stdout,
+      )
     : null;
   const glabList = (glabHosts as { hosts?: { host?: string; state?: string }[] } | null)?.hosts;
   const gitlab = Array.isArray(glabList)
@@ -117,6 +138,7 @@ export function runCheck(account: string, run: Exec = exec): CheckReport {
     gitlab,
     codexSignedIn,
     keychain,
+    clickThrough: supportsClickThrough(tools['terminal-notifier']?.version ?? ''),
     leftovers:
       added && !removed ? [`Keychain item "${CHECK_KEYCHAIN_SERVICE}" for ${account}`] : [],
   };

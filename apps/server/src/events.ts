@@ -56,4 +56,19 @@ export class EventBus {
   get subscriberCount(): number {
     return this.listeners.size;
   }
+
+  /** Browser windows with an event stream open: the server's own listeners are not windows. */
+  private windows = 0;
+
+  windowOpened(): void {
+    this.windows++;
+  }
+
+  windowClosed(): void {
+    this.windows = Math.max(0, this.windows - 1);
+  }
+
+  get windowCount(): number {
+    return this.windows;
+  }
 }

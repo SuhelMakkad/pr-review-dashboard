@@ -207,7 +207,7 @@ describe('server boundaries', () => {
       wordings: [
         /^GitHub /,
         /^GitLab /,
-        /^Notifications: clicking one opens its PR\.$/,
+        /^Notifications: terminal-notifier 3 or later is there, so clicking one can open its PR\.$/,
         /^Notifications: clicking one opens Script Editor\./,
       ],
     },
