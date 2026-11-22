@@ -38,6 +38,9 @@ interface Slot {
   exited: Promise<void>;
 }
 
+const failure = (error: unknown) =>
+  error instanceof Error ? error : new Error('The diff worker could not start.');
+
 /** Where the worker is: built JavaScript, or TypeScript source run through tsx (dev, tests). */
 function entry(): { url: URL; execArgv: string[] } {
   const source = import.meta.url.endsWith('.ts');
@@ -77,10 +80,10 @@ export class PatchPool {
 
   /** The patch of `oldText` to `newText`, as `textPatch` computes it; null when too large. */
   patch(oldText: string, newText: string, signal?: AbortSignal): Promise<TextPatch | null> {
-    // Too large to patch: decided here, never copied to a worker.
-    if (overCap(oldText, newText)) return Promise.resolve(null);
     if (this.closing) return Promise.reject(new PoolClosed());
     if (signal?.aborted) return Promise.reject(new PatchAborted());
+    // Too large to patch: decided here, never copied to a worker.
+    if (overCap(oldText, newText)) return Promise.resolve(null);
 
     return new Promise((resolve, reject) => {
       const task: Task = { oldText, newText, resolve, reject, signal };
@@ -121,25 +124,40 @@ export class PatchPool {
     return this.slots.size;
   }
 
-  /** Hands waiting pairs to free workers, starting one where the size allows. */
+  /**
+   * Hands waiting pairs to free workers, starting one where the size allows. It never throws (it
+   * also runs from a worker's exit): a worker that cannot start, or take its pair, fails that pair.
+   */
   private dispatch(): void {
     while (this.waiting.length > 0 && !this.closing) {
       let slot = [...this.slots].find((candidate) => !candidate.task && !candidate.stopping);
 
-      if (!slot) {
-        if (this.slots.size >= this.size) return;
-
-        slot = this.start();
-      }
+      if (!slot && this.slots.size >= this.size) return;
 
       const task = this.waiting.shift()!;
+
+      try {
+        slot ??= this.start();
+      } catch (error) {
+        this.settle(task, failure(error));
+
+        continue;
+      }
 
       if (slot.idle) clearTimeout(slot.idle);
 
       slot.idle = null;
       slot.task = task;
       slot.worker.ref();
-      slot.worker.postMessage({ oldText: task.oldText, newText: task.newText });
+
+      try {
+        slot.worker.postMessage({ oldText: task.oldText, newText: task.newText });
+      } catch (error) {
+        // Not this worker's to run: it stops, and the next pair gets a fresh one.
+        slot.task = null;
+        this.settle(task, failure(error));
+        this.stop(slot);
+      }
     }
   }
 

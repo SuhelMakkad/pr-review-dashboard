@@ -7,6 +7,7 @@ import {
   LARGE_PR,
   pushTo,
   REBASED_PR,
+  rebasedPull,
   syntheticScenario,
   type SyntheticOptions,
 } from '@/demo/synthetic.js';
@@ -398,36 +399,50 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
 
   await running.close();
 
-  // Four different diffs asked for at once through one service: two rebased builds (one per
-  // account, so neither is the other's cache) and two full ones.
+  // Four different rebased PRs asked for at once through one service and its pool: two build
+  // while two wait for a place, as the app admits them.
   {
+    const copies = 4;
+    const scenario = syntheticScenario({ ...shape(smoke ? 4 : 20), rebasedPulls: copies });
+    const github = new FixtureGitHub(() => scenario);
+    const replayed = replaying(github);
+    const pulls = await Promise.all(
+      Array.from({ length: copies }, (_, copy) =>
+        github.snapshot(rebasedPull(copy), 'you', ['requested']),
+      ),
+    );
+    const ask = (diffs: DiffService) =>
+      pulls.map(async (pull) => {
+        const started = performance.now();
+
+        await diffs.manifest(pull, 'since-review', pull.reviews[0].commitOid!);
+
+        return performance.now() - started;
+      });
+
+    // Recorded once, untimed.
+    await Promise.all(ask(new DiffService(replayed)));
+
     const patches = new PatchPool();
-    const diffs = new DiffService(forge, patches);
+    const diffs = new DiffService(replayed, patches);
     const histogram = monitorEventLoopDelay({ resolution: 10 });
     const baseRss = process.memoryUsage.rss();
     let peakRss = baseRss;
+    let last = performance.now();
+    let stall = 0;
     const sampler = setInterval(() => {
+      const now = performance.now();
+
       peakRss = Math.max(peakRss, process.memoryUsage.rss());
+      stall = Math.max(stall, Math.max(0, now - last - 5));
+      last = now;
     }, 5);
-    const asked = [
-      () => diffs.manifest(rebased, 'since-review', reviewed),
-      () => diffs.manifest(rebased, 'since-review', reviewed, 'you', forge),
-      () => diffs.manifest(rebased, 'full', null),
-      () => diffs.manifest(large, 'full', null),
-    ];
 
     histogram.enable();
 
-    const durations = await Promise.all(
-      asked.map(async (manifest) => {
-        const started = performance.now();
+    const durations = await Promise.all(ask(diffs));
 
-        await manifest();
-
-        return performance.now() - started;
-      }),
-    );
-
+    await new Promise((resolve) => setTimeout(resolve, 10));
     histogram.disable();
     clearInterval(sampler);
     await patches.close();
@@ -435,11 +450,13 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
     const megabytes = (bytes: number) => Math.round(bytes / 1e5) / 10;
 
     add({
-      name: 'four different diffs at once, one service',
+      name: `${copies} different rebased interdiffs at once, one service`,
       stats: stats(durations),
       notes: {
+        changed: shape(largest).rebasedFiles,
         baseRssMb: megabytes(baseRss),
         peakRssMb: megabytes(peakRss),
+        worstStallMs: Math.round(stall * 10) / 10,
         loopP99Ms: histogram.percentile(99) / 1e6,
       },
     });

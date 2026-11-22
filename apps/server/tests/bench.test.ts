@@ -28,7 +28,7 @@ describe('the benchmark', () => {
       'event-loop stall during the interdiff, a new pool',
       'rebased interdiff, 20 changed, 20 diffed, cold, a running pool',
       'event-loop stall during the interdiff, a running pool',
-      'four different diffs at once, one service',
+      '4 different rebased interdiffs at once, one service',
       'fingerprints of the large PR',
     ]);
 

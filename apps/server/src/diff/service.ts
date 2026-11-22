@@ -8,6 +8,7 @@ import {
 import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi, RemoteFile } from '@/github/api.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
+import { ForgeError } from '@/forge/port.js';
 import { accountCheck, bindForge, declaredTraits } from '@/forge/bind.js';
 import { textPatch, type TextPatch } from '@/diff/patch.js';
 import { PatchAborted, PoolClosed, type PatchPool } from '@/diff/patch-pool.js';
@@ -269,8 +270,7 @@ export class DiffService {
       signal,
     };
 
-    this.guard(build);
-
+    // Once closed, it reads nothing: each read and check is guarded.
     const running = this.build(build, pr, mode, reviewOid, account);
 
     this.builds.add(running);
@@ -317,9 +317,13 @@ export class DiffService {
     }
 
     return (async () => {
-      // A limit met by a check itself cannot be tied to the account: it is nobody's cooldown.
-      const check = () =>
-        verify(account).catch((error: unknown) => Promise.reject(unattributed(error)));
+      // A limit met by a check itself cannot be tied to the account: it is nobody's cooldown. A
+      // build stopped meanwhile asks nothing more: each check starts only while it is wanted.
+      const check = () => {
+        this.guard(build);
+
+        return verify(account).catch((error: unknown) => Promise.reject(unattributed(error)));
+      };
 
       await check();
 
@@ -328,8 +332,14 @@ export class DiffService {
       try {
         manifest = await work();
       } catch (error) {
-        // Stopped, not failed: no sign-in check, and its own error.
-        if (error instanceof AccountUnavailable || cancelled(error)) throw error;
+        if (error instanceof AccountUnavailable) throw error;
+
+        // Stopped, not failed, even when a read in flight failed late: no sign-in check, and the
+        // stop is the answer.
+        this.guard(build);
+
+        // Only a forge's failure can be the account's; any other (a crashed patch) is ours.
+        if (!(error instanceof ForgeError)) throw error;
 
         // A limit met while building is the account's only if glab is still signed in as it.
         const confirmed = await verify(account).then(
@@ -364,6 +374,9 @@ export class DiffService {
           baseOid: pr.baseOid ?? null,
         })) ?? null)
       : null;
+    // A forge that could not pin the listing falls back to reading it: only while still wanted.
+    if (!listing) this.guard(build);
+
     const files = listing ? listing.files : await build.forge.pullFiles(pr.repository, pr.number);
     const keyed = listing !== null;
     const manifest: DiffManifest = {
@@ -530,7 +543,9 @@ export class DiffService {
 
   /**
    * Each pair's patch, as `textPatch` computes it: through the pool, off the event loop, when there
-   * is one. The first patch to fail stops the build's others, and is its error.
+   * is one. A build has at most the pool's size outstanding, taken in file order, so another build's
+   * patches are not queued behind all of its own. The first patch to fail stops the build's others,
+   * and is its error.
    */
   private async patchAll<P extends { before: string; after: string }>(
     build: Build,
@@ -542,27 +557,34 @@ export class DiffService {
     const pool = this.patches;
     const controller = new AbortController();
     const stop = () => controller.abort();
+    const results = new Map<P, TextPatch | null>();
+    let next = 0;
+    // Set by `take`, so declared wide: TypeScript would otherwise narrow it to null.
+    let failed = null as { error: unknown } | null;
+    const take = async () => {
+      while (failed === null && next < pairs.length) {
+        const pair = pairs[next++];
+
+        try {
+          results.set(pair, await pool.patch(pair.before, pair.after, controller.signal));
+        } catch (error) {
+          failed ??= { error };
+          controller.abort();
+        }
+      }
+    };
 
     build.signal?.addEventListener('abort', stop, { once: true });
 
     try {
-      const results = await Promise.all(
-        pairs.map((pair) =>
-          pool.patch(pair.before, pair.after, controller.signal).catch((error: unknown) => {
-            controller.abort();
-
-            throw error;
-          }),
-        ),
-      );
-
-      return new Map(pairs.map((pair, index) => [pair, results[index]]));
-    } catch (error) {
-      if (error instanceof PoolClosed) throw shuttingDown();
-
-      throw error;
+      await Promise.all(Array.from({ length: Math.min(pool.size, pairs.length) }, take));
     } finally {
       build.signal?.removeEventListener('abort', stop);
     }
+
+    if (failed === null) return results;
+    if (failed.error instanceof PoolClosed) throw shuttingDown();
+
+    throw failed.error;
   }
 }

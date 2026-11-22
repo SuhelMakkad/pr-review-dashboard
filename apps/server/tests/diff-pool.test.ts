@@ -7,9 +7,11 @@ import { createApp } from '@/app.js';
 import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { defaultScenario } from '@/demo/scenario.js';
+import { textPatch } from '@/diff/patch.js';
 import { PatchAborted, PatchPool } from '@/diff/patch-pool.js';
 import { DiffService } from '@/diff/service.js';
 import { EventBus } from '@/events.js';
+import { ForgeError } from '@/forge/port.js';
 import { ReviewError } from '@/review/errors.js';
 import { SyncService } from '@/sync/service.js';
 
@@ -64,6 +66,7 @@ function heldPatches(fail = 0) {
   const stopped: string[] = [];
   let calls = 0;
   const patches = {
+    size: 2,
     patch: (_before: string, after: string, signal?: AbortSignal) => {
       calls++;
 
@@ -148,6 +151,39 @@ describe('rebased interdiffs through the patch pool', () => {
     await expect(
       new DiffService(github, patches).manifest(detail.snapshot, 'since-review', reviewOid),
     ).rejects.toMatchObject({ code: 'SHUTTING_DOWN', status: 503 });
+  });
+
+  it('has at most the pool’s size of patches outstanding per build', async () => {
+    const { github, detail, reviewOid } = await demo();
+    const taken: string[] = [];
+    let outstanding = 0;
+    let most = 0;
+    const counting = {
+      size: 2,
+      patch: async (before: string, after: string) => {
+        taken.push(after);
+        most = Math.max(most, ++outstanding);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        outstanding--;
+
+        return textPatch(before, after);
+      },
+    } as unknown as PatchPool;
+    const inPlace = await new DiffService(github).manifest(
+      detail.snapshot,
+      'since-review',
+      reviewOid,
+    );
+    const counted = await new DiffService(github, counting).manifest(
+      detail.snapshot,
+      'since-review',
+      reviewOid,
+    );
+
+    // Each file has its own patch, whatever order they finished in.
+    expect(counted).toEqual(inPlace);
+    expect(taken.length).toBeGreaterThan(2);
+    expect(most).toBe(2);
   });
 
   it('admits two rebased builds at once, and the third once one finishes', async () => {
@@ -266,6 +302,85 @@ describe('rebased interdiffs through the patch pool', () => {
       vi.mocked(github.blobs).mockRestore();
     }
   });
+
+  it('checks the account again only for a forge’s failure, and never once closed', async () => {
+    const { github, detail, reviewOid } = await demo();
+    const verifyAccount = vi.fn(async () => undefined);
+    const limited = () => new ForgeError('Rate limited.', null, 429, 'rate_limit');
+
+    Object.assign(github, { verifyAccount, traits: { ...github.traits, checksAccount: true } });
+
+    // A full diff's read answered after close, then one failing late: neither checks again, and
+    // each answers as shutting down.
+    for (const late of ['answered', 'failed'] as const) {
+      const held = gate();
+      const read = github.pullFiles.bind(github);
+
+      vi.spyOn(github, 'pullFiles').mockImplementationOnce(async (...args) => {
+        await held.opened;
+
+        if (late === 'failed') throw limited();
+
+        return read(...args);
+      });
+
+      const diffs = new DiffService(github, pool());
+      const build = diffs.manifest(detail.snapshot, 'full', null, 'you').catch((error) => error);
+
+      await vi.waitFor(() => expect(github.pullFiles).toHaveBeenCalled());
+
+      const closed = diffs.close();
+
+      held.open();
+
+      expect(await build).toMatchObject({ code: 'SHUTTING_DOWN' });
+      await closed;
+      expect(verifyAccount).toHaveBeenCalledTimes(1);
+
+      verifyAccount.mockClear();
+      vi.mocked(github.pullFiles).mockRestore();
+    }
+
+    // A pinned listing that cannot be had once closed falls back to no other read.
+    const pinned = gate();
+
+    const pinnedFiles = vi.fn(async () => {
+      await pinned.opened;
+
+      return null;
+    });
+
+    Object.assign(github, {
+      traits: { ...github.traits, checksAccount: true, pinnedFiles: true },
+      pinnedFiles,
+    });
+
+    const files = vi.spyOn(github, 'pullFiles');
+    const diffs = new DiffService(github, pool());
+    const listed = diffs.manifest(detail.snapshot, 'full', null, 'you').catch((error) => error);
+
+    await vi.waitFor(() => expect(pinnedFiles).toHaveBeenCalled());
+
+    const closed = diffs.close();
+
+    pinned.open();
+
+    expect(await listed).toMatchObject({ code: 'SHUTTING_DOWN' });
+    await closed;
+    expect(files).not.toHaveBeenCalled();
+
+    files.mockRestore();
+    verifyAccount.mockClear();
+    Object.assign(github, { traits: { ...github.traits, pinnedFiles: false } });
+
+    // A crashed patch is not the forge's: no second check.
+    const crashed = new DiffService(github, heldPatches(1).patches);
+
+    await expect(
+      crashed.manifest(detail.snapshot, 'since-review', reviewOid, 'you'),
+    ).rejects.toThrow('The worker crashed.');
+    expect(verifyAccount).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('the app’s diffs through the patch pool', () => {
@@ -354,11 +469,15 @@ describe('the app’s diffs through the patch pool', () => {
     const refused = await start;
 
     expect(refused.status).toBe(503);
+    expect(refused.headers.get('connection')).toBe('close');
     expect(await refused.json()).toMatchObject({ code: 'SHUTTING_DOWN' });
 
     open();
 
-    for (const view of await Promise.all(views)) expect(view.status).toBe(503);
+    for (const view of await Promise.all(views)) {
+      expect(view.status).toBe(503);
+      expect(view.headers.get('connection')).toBe('close');
+    }
 
     // Answered during shutdown, their connections close, so the app does not wait them out.
     await closed;

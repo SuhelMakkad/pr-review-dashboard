@@ -112,6 +112,53 @@ describe('the patch pool', () => {
     expect((await pool.patch('delay:0', 'after'))!.patch).toBe('delay:0 -> after');
   });
 
+  it('fails a pair whose worker cannot start, from a crash’s replacement too, and keeps serving', async () => {
+    const worker = {
+      url: new URL('../../../tests/fixtures/slow-patch-worker.mjs', import.meta.url),
+      execArgv: [] as string[],
+    };
+    const pool = new PatchPool({ size: 1, worker });
+
+    pools.push(pool);
+
+    const crashed = pool.patch('crash', 'x');
+    const next = pool.patch('delay:0', 'next');
+
+    await vi.waitFor(() => expect(pool.workers).toBe(1));
+    // Its replacement, started from the crashed worker's exit, cannot start.
+    worker.execArgv = ['--no-such-flag'];
+
+    await expect(crashed).rejects.toThrow('The worker crashed.');
+    await expect(next).rejects.toThrow();
+    expect(pool.workers).toBe(0);
+
+    // Once a worker can start again, the pool serves.
+    worker.execArgv = [];
+    expect((await pool.patch('delay:0', 'after'))!.patch).toBe('delay:0 -> after');
+  });
+
+  it('fails a pair its worker cannot take, and serves the next with a fresh one', async () => {
+    const pool = standIn(1);
+
+    // Not a text: it cannot be sent to a worker.
+    await expect(pool.patch((() => 'text') as never, 'x')).rejects.toThrow();
+    expect((await pool.patch('delay:0', 'next'))!.patch).toBe('delay:0 -> next');
+  });
+
+  it('refuses a pair too large to patch once closed or stopped, as any other', async () => {
+    const huge = 'x'.repeat(1_000_001);
+    const stopped = new AbortController();
+
+    stopped.abort();
+
+    await expect(real().patch(huge, 'small', stopped.signal)).rejects.toBeInstanceOf(PatchAborted);
+
+    const closed = real();
+
+    await closed.close();
+    await expect(closed.patch(huge, 'small')).rejects.toBeInstanceOf(PoolClosed);
+  });
+
   it('ends a worker idle for long enough', async () => {
     const pool = standIn(1, 50);
 

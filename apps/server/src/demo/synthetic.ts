@@ -13,11 +13,16 @@ export interface SyntheticOptions {
   /** Changed files in the PR rebased since your review, each `rebasedLines` long. */
   rebasedFiles: number;
   rebasedLines: number;
+  /** How many such rebased PRs, each in its own repository: one unless asked. */
+  rebasedPulls?: number;
   anchor?: number;
 }
 
 export const LARGE_PR = 'PR_synthetic_large_1';
 export const REBASED_PR = 'PR_synthetic_rebased_2';
+
+/** The `copy`th rebased PR: the first is `REBASED_PR`. */
+export const rebasedPull = (copy: number) => (copy === 0 ? REBASED_PR : `${REBASED_PR}_${copy}`);
 const VIEWER = 'you';
 
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
@@ -164,52 +169,57 @@ export function syntheticScenario(options: SyntheticOptions): Scenario {
     pull(LARGE_PR, 1, large, sha(`${large}:head`), { threads, baseOid: sha(`${large}:base`) }),
   );
 
-  // The rebased one: reviewed at one head, then rebuilt onto a newer main with more edits.
-  const rebased = 'synthetic/rebased';
-  const oldBase: Record<string, string> = {};
-  const reviewed: Record<string, string | null> = {};
-  const moved: Record<string, string | null> = {};
-  const current: Record<string, string | null> = {};
+  // The rebased ones: each reviewed at one head, then rebuilt onto a newer main with more edits.
+  for (let copy = 0; copy < (options.rebasedPulls ?? 1); copy++) {
+    const rebased = copy === 0 ? 'synthetic/rebased' : `synthetic/rebased-${copy}`;
+    const oldBase: Record<string, string> = {};
+    const reviewed: Record<string, string | null> = {};
+    const moved: Record<string, string | null> = {};
+    const current: Record<string, string | null> = {};
 
-  for (let index = 0; index < options.rebasedFiles; index++) {
-    const path = `src/feature/area-${index}.ts`;
+    // The first as it always was; each other one's texts its own.
+    const edit = (kind: string) => (copy === 0 ? kind : `${kind}-${copy}`);
 
-    oldBase[path] = source(path, options.rebasedLines);
-    reviewed[path] = source(path, options.rebasedLines, 'reviewed');
-    moved[path] = source(path, options.rebasedLines, 'main');
-    current[path] = source(path, options.rebasedLines + 5, 'current');
+    for (let index = 0; index < options.rebasedFiles; index++) {
+      const path = `src/feature/area-${index}.ts`;
+
+      oldBase[path] = source(path, options.rebasedLines, copy === 0 ? '' : edit('old'));
+      reviewed[path] = source(path, options.rebasedLines, edit('reviewed'));
+      moved[path] = source(path, options.rebasedLines, edit('main'));
+      current[path] = source(path, options.rebasedLines + 5, edit('current'));
+    }
+
+    repos.commit(rebased, sha(`${rebased}:old`), [], oldBase, at(60 * 72));
+    repos.derive(rebased, sha(`${rebased}:reviewed`), sha(`${rebased}:old`), reviewed, at(60 * 30));
+    repos.derive(rebased, sha(`${rebased}:main`), sha(`${rebased}:old`), moved, at(60 * 10));
+    repos.derive(rebased, sha(`${rebased}:head`), sha(`${rebased}:main`), current, at(40));
+    repos.ref(rebased, 'main', sha(`${rebased}:main`));
+    pulls.push(
+      pull(rebasedPull(copy), 2, rebased, sha(`${rebased}:head`), {
+        baseOid: sha(`${rebased}:main`),
+        reviews: [
+          {
+            id: copy === 0 ? 'review-rebased' : `review-rebased-${copy}`,
+            state: 'COMMENTED',
+            submittedAt: at(60 * 29),
+            updatedAt: at(60 * 29),
+            commitOid: sha(`${rebased}:reviewed`),
+            body: 'First pass.',
+            url: `https://github.com/${rebased}/pull/2#pullrequestreview-1`,
+          },
+        ],
+        forcePushes: [
+          {
+            id: copy === 0 ? 'force-push-rebased' : `force-push-rebased-${copy}`,
+            createdAt: at(40),
+            beforeOid: sha(`${rebased}:reviewed`),
+            afterOid: sha(`${rebased}:head`),
+            actor: 'author-1',
+          },
+        ],
+      }),
+    );
   }
-
-  repos.commit(rebased, sha(`${rebased}:old`), [], oldBase, at(60 * 72));
-  repos.derive(rebased, sha(`${rebased}:reviewed`), sha(`${rebased}:old`), reviewed, at(60 * 30));
-  repos.derive(rebased, sha(`${rebased}:main`), sha(`${rebased}:old`), moved, at(60 * 10));
-  repos.derive(rebased, sha(`${rebased}:head`), sha(`${rebased}:main`), current, at(40));
-  repos.ref(rebased, 'main', sha(`${rebased}:main`));
-  pulls.push(
-    pull(REBASED_PR, 2, rebased, sha(`${rebased}:head`), {
-      baseOid: sha(`${rebased}:main`),
-      reviews: [
-        {
-          id: 'review-rebased',
-          state: 'COMMENTED',
-          submittedAt: at(60 * 29),
-          updatedAt: at(60 * 29),
-          commitOid: sha(`${rebased}:reviewed`),
-          body: 'First pass.',
-          url: `https://github.com/${rebased}/pull/2#pullrequestreview-1`,
-        },
-      ],
-      forcePushes: [
-        {
-          id: 'force-push-rebased',
-          createdAt: at(40),
-          beforeOid: sha(`${rebased}:reviewed`),
-          afterOid: sha(`${rebased}:head`),
-          actor: 'author-1',
-        },
-      ],
-    }),
-  );
 
   return {
     name: 'synthetic',
@@ -232,7 +242,7 @@ export function pushTo(scenario: Scenario, count: number, round: number): string
   for (const { snapshot } of scenario.world.pulls) {
     if (moved.length >= count) break;
     if (!snapshot.id.startsWith('PR_synthetic_') || snapshot.id === LARGE_PR) continue;
-    if (snapshot.id === REBASED_PR) continue;
+    if (snapshot.id.startsWith(REBASED_PR)) continue;
 
     const head = sha(`${snapshot.repository}:${snapshot.number}:push-${round}`);
 
