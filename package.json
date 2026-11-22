@@ -25,7 +25,9 @@
     "bench": "pnpm --filter @review-desk/shared build && pnpm --filter @review-desk/server bench",
     "bench:forge": "pnpm --filter @review-desk/server bench:forge",
     "log:summary": "pnpm --filter @review-desk/server log:summary",
-    "prompt:pins": "pnpm --filter @review-desk/server prompt:pins"
+    "prompt:pins": "pnpm --filter @review-desk/server prompt:pins",
+    "ai:eval": "pnpm --filter @review-desk/server ai:eval",
+    "ai:eval:compare": "pnpm --filter @review-desk/server ai:eval:compare"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",

@@ -18,6 +18,7 @@ import {
 } from '@/ai/codex-usage.js';
 import {
   AgentError,
+  NoAnswerError,
   probeVersion,
   type AgentProvider,
   type AgentRequest,
@@ -441,7 +442,8 @@ export class CodexProvider implements AgentProvider {
       }
     })();
 
-    if (output === null) throw new AgentError('Codex did not return a structured answer.');
+    if (output === null)
+      throw new NoAnswerError('Codex did not return a structured answer.', thread.model);
 
     return {
       output,

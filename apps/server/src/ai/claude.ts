@@ -1,6 +1,7 @@
 import { redact } from '@/github/errors.js';
 import {
   AgentError,
+  NoAnswerError,
   probeVersion,
   runAgentProcess,
   type AgentProvider,
@@ -102,8 +103,8 @@ export class ClaudeProvider implements AgentProvider {
       throw new AgentError(redact(message || `Claude exited with code ${result.code}.`));
     }
 
-    if (final.structured_output === undefined)
-      throw new AgentError('Claude did not return a structured answer.');
+    if (final.structured_output === undefined || final.structured_output === null)
+      throw new NoAnswerError('Claude did not return a structured answer.', model);
 
     return {
       output: final.structured_output,
