@@ -228,6 +228,26 @@ describe('fixtures', () => {
       ...denial,
       overall: 'I checked for an off-by-one in the loop bound and found none.',
     };
+    // Answers that miss the finding, however their words overlap with it.
+    const misses = [
+      'The loop cannot make four attempts. The bound is correct.',
+      'Could we add one more test for the upload path?',
+    ];
+
+    for (const miss of misses) {
+      expect(scoreCase('full_review', { ...denial, overall: miss }, review.expect).passed).toBe(
+        false,
+      );
+      expect(scoreCase('draft_comments', comment(miss), comments.expect).passed).toBe(false);
+    }
+
+    expect(
+      scoreCase(
+        'full_review',
+        { ...denial, overall: 'This runs four times where three are allowed.' },
+        review.expect,
+      ).passed,
+    ).toBe(true);
 
     expect(scoreCase('full_review', found, review.expect).passed).toBe(false);
     expect(

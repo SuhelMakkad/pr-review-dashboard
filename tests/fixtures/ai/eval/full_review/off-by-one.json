@@ -76,9 +76,9 @@
   "expect": [
     {
       "matches": "/overall",
-      "pattern": "\\b(four|4) (attempts|times|tries|calls|uploads)\\b|\\bone (extra|more|too many)\\b|<\\s*3(?!\\d)",
+      "pattern": "^(?![\\s\\S]*(?:\\bcannot\\b|\\bcan't\\b|\\bcan not\\b|\\bno off-by-one\\b|\\bfound none\\b|\\b(bound|loop|limit)\\b[^.\\n]*\\b(is|looks) (correct|fine|right)\\b))[\\s\\S]*(?:\\b(makes?|runs?|tries|tried|performs?|allows?|retries|loops?|attempts?)\\b[^.\\n]*\\b(four|4) (attempts|times|tries)\\b|\\b(should|change|use|make it|instead)\\b[^.\\n]*<\\s*3(?!\\d))",
       "flags": "i",
-      "why": "It names the fourth attempt, or the tighter bound (`< 3`): four attempts where three are allowed."
+      "why": "It says the loop makes a fourth attempt, or proposes the tighter bound (`< 3`), and never denies the finding."
     },
     {
       "count": "/comments",
