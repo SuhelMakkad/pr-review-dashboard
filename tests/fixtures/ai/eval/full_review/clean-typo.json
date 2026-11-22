@@ -1,0 +1,87 @@
+{
+  "id": "clean-typo",
+  "note": "A README typo fixed: nothing blocking.",
+  "evidence": {
+    "pr": {
+      "id": "PR_eval",
+      "repository": "acme/sample",
+      "number": 7,
+      "url": "https://github.com/acme/sample/pull/7",
+      "title": "Fix a typo in the README",
+      "body": "Typo only.",
+      "author": {
+        "login": "author"
+      },
+      "baseRefName": "main",
+      "headRefName": "change",
+      "baseOid": "1111111111111111111111111111111111111111",
+      "headOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "README.md",
+          "viewerViewedState": "UNVIEWED"
+        }
+      ],
+      "threads": [],
+      "verdicts": [],
+      "conversation": [],
+      "reviews": []
+    },
+    "diff": {
+      "prId": "PR_eval",
+      "kind": "full",
+      "fromOid": "1111111111111111111111111111111111111111",
+      "toOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "README.md",
+          "status": "modified",
+          "additions": 1,
+          "deletions": 1,
+          "patch": "@@ -1,3 +1,3 @@\n # Sample\n-Run the tets with `pnpm test`.\n+Run the tests with `pnpm test`.\n"
+        }
+      ]
+    }
+  },
+  "workspace": {
+    "review": {
+      "repository": "acme/sample",
+      "number": 7,
+      "title": "Fix a typo in the README",
+      "description": "Typo only.",
+      "baseOid": "1111111111111111111111111111111111111111",
+      "headOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "README.md",
+          "status": "modified",
+          "additions": 1,
+          "deletions": 1,
+          "patch": "@@ -1,3 +1,3 @@\n # Sample\n-Run the tets with `pnpm test`.\n+Run the tests with `pnpm test`.\n"
+        }
+      ],
+      "expectedChangedFiles": 1,
+      "threads": [],
+      "reviews": [],
+      "conversation": [],
+      "notes": ["Compare before/ and after/ for missing or truncated patches."]
+    },
+    "before": {
+      "README.md": "# Sample\nRun the tets with `pnpm test`.\n"
+    },
+    "after": {
+      "README.md": "# Sample\nRun the tests with `pnpm test`.\n"
+    }
+  },
+  "expect": [
+    {
+      "clean": true,
+      "why": "A typo fix has no blocking finding."
+    },
+    {
+      "count": "/comments",
+      "max": 0,
+      "why": "A full review puts its findings in `overall`, never in comments."
+    }
+  ]
+}

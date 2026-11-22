@@ -1,0 +1,89 @@
+{
+  "id": "off-by-one",
+  "note": "The loop makes four attempts where three were meant, with no delay between them.",
+  "evidence": {
+    "pr": {
+      "id": "PR_eval",
+      "repository": "acme/sample",
+      "number": 7,
+      "url": "https://github.com/acme/sample/pull/7",
+      "title": "Retry failed uploads",
+      "body": "Retries an upload that fails, so a flaky network no longer drops files.",
+      "author": {
+        "login": "author"
+      },
+      "baseRefName": "main",
+      "headRefName": "change",
+      "baseOid": "1111111111111111111111111111111111111111",
+      "headOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "src/upload.ts",
+          "viewerViewedState": "UNVIEWED"
+        }
+      ],
+      "threads": [],
+      "verdicts": [],
+      "conversation": [],
+      "reviews": []
+    },
+    "diff": {
+      "prId": "PR_eval",
+      "kind": "full",
+      "fromOid": "1111111111111111111111111111111111111111",
+      "toOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "src/upload.ts",
+          "status": "modified",
+          "additions": 3,
+          "deletions": 1,
+          "patch": "@@ -10,3 +10,5 @@\n export async function send(file) {\n-  upload(file);\n+  for (let attempt = 0; attempt <= 3; attempt++) {\n+    if (await upload(file)) break;\n+  }\n   return true;"
+        }
+      ]
+    }
+  },
+  "workspace": {
+    "review": {
+      "repository": "acme/sample",
+      "number": 7,
+      "title": "Retry failed uploads",
+      "description": "Retries an upload that fails, so a flaky network no longer drops files.",
+      "baseOid": "1111111111111111111111111111111111111111",
+      "headOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "src/upload.ts",
+          "status": "modified",
+          "additions": 3,
+          "deletions": 1,
+          "patch": "@@ -10,3 +10,5 @@\n export async function send(file) {\n-  upload(file);\n+  for (let attempt = 0; attempt <= 3; attempt++) {\n+    if (await upload(file)) break;\n+  }\n   return true;"
+        }
+      ],
+      "expectedChangedFiles": 1,
+      "threads": [],
+      "reviews": [],
+      "conversation": [],
+      "notes": ["Compare before/ and after/ for missing or truncated patches."]
+    },
+    "before": {
+      "src/upload.ts": "export async function send(file) {\n  upload(file);\n  return true;\n}\n"
+    },
+    "after": {
+      "src/upload.ts": "export async function send(file) {\n  for (let attempt = 0; attempt <= 3; attempt++) {\n    if (await upload(file)) break;\n  }\n  return true;\n}\n"
+    }
+  },
+  "expect": [
+    {
+      "matches": "/overall",
+      "pattern": "<=|four|4 attempts|off-by-one|three",
+      "flags": "i",
+      "why": "The off-by-one in the loop bound is the finding."
+    },
+    {
+      "count": "/comments",
+      "max": 0,
+      "why": "A full review puts its findings in `overall`, never in comments."
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "id": "cap-retries",
+  "note": "One open thread asks for a retry cap: the author's action item is to cap retries.",
+  "evidence": {
+    "pr": {
+      "id": "PR_eval",
+      "repository": "acme/sample",
+      "number": 7,
+      "url": "https://github.com/acme/sample/pull/7",
+      "title": "Retry failed uploads",
+      "body": "Retries an upload that fails, so a flaky network no longer drops files.",
+      "author": {
+        "login": "author"
+      },
+      "baseRefName": "main",
+      "headRefName": "change",
+      "baseOid": "1111111111111111111111111111111111111111",
+      "headOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "src/upload.ts",
+          "viewerViewedState": "UNVIEWED"
+        }
+      ],
+      "threads": [
+        {
+          "id": "thread-1",
+          "path": "src/upload.ts",
+          "line": 11,
+          "isResolved": false,
+          "comments": [
+            {
+              "author": {
+                "login": "you"
+              },
+              "body": "Should this cap retries? A busy server would get hammered."
+            }
+          ]
+        }
+      ],
+      "verdicts": [
+        {
+          "login": "you",
+          "state": "CHANGES_REQUESTED"
+        }
+      ],
+      "conversation": [
+        {
+          "author": {
+            "login": "author"
+          },
+          "body": "Added the retry loop; ready for another look."
+        }
+      ],
+      "reviews": []
+    }
+  },
+  "expect": [
+    {
+      "count": "/actionItems",
+      "min": 1,
+      "why": "There is one open request."
+    },
+    {
+      "matches": "/actionItems/0/text",
+      "pattern": "cap|limit|retr",
+      "flags": "i",
+      "why": "The action is about capping retries."
+    },
+    {
+      "equals": "/actionItems/0/threadId",
+      "value": "thread-1",
+      "why": "It belongs to the open thread."
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "id": "retry-loop",
+  "note": "A small behavior change in one file: the brief should point at it and ask about the retry policy.",
+  "evidence": {
+    "pr": {
+      "id": "PR_eval",
+      "repository": "acme/sample",
+      "number": 7,
+      "url": "https://github.com/acme/sample/pull/7",
+      "title": "Retry failed uploads",
+      "body": "Retries an upload that fails, so a flaky network no longer drops files.",
+      "author": {
+        "login": "author"
+      },
+      "baseRefName": "main",
+      "headRefName": "change",
+      "baseOid": "1111111111111111111111111111111111111111",
+      "headOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "src/upload.ts",
+          "viewerViewedState": "UNVIEWED"
+        }
+      ],
+      "threads": [
+        {
+          "id": "thread-1",
+          "path": "src/upload.ts",
+          "line": 11,
+          "isResolved": false,
+          "comments": [
+            {
+              "author": {
+                "login": "you"
+              },
+              "body": "Should this cap retries? A busy server would get hammered."
+            }
+          ]
+        }
+      ],
+      "verdicts": [
+        {
+          "login": "you",
+          "state": "CHANGES_REQUESTED"
+        }
+      ],
+      "conversation": [
+        {
+          "author": {
+            "login": "author"
+          },
+          "body": "Added the retry loop; ready for another look."
+        }
+      ],
+      "reviews": []
+    },
+    "diff": {
+      "prId": "PR_eval",
+      "kind": "full",
+      "fromOid": "1111111111111111111111111111111111111111",
+      "toOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "src/upload.ts",
+          "status": "modified",
+          "additions": 3,
+          "deletions": 1,
+          "patch": "@@ -10,3 +10,5 @@\n export async function send(file) {\n-  upload(file);\n+  for (let attempt = 0; attempt <= 3; attempt++) {\n+    if (await upload(file)) break;\n+  }\n   return true;"
+        }
+      ]
+    }
+  },
+  "expect": [
+    {
+      "matches": "/focusFiles/0/path",
+      "pattern": "^src/upload\\.ts$",
+      "why": "The only changed file is the one to look at first."
+    },
+    {
+      "oneOf": "/risk",
+      "values": ["low", "medium"],
+      "why": "A bounded retry loop in one function is not high risk."
+    },
+    {
+      "count": "/questions",
+      "max": 3,
+      "why": "The prompt asks for at most three questions."
+    }
+  ]
+}

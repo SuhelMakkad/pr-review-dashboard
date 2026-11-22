@@ -1,0 +1,57 @@
+{
+  "id": "clean-rename",
+  "note": "A local variable renamed, nothing else: no blocking comment.",
+  "evidence": {
+    "pr": {
+      "id": "PR_eval",
+      "repository": "acme/sample",
+      "number": 7,
+      "url": "https://github.com/acme/sample/pull/7",
+      "title": "Rename a local in total()",
+      "body": "Readability only.",
+      "author": {
+        "login": "author"
+      },
+      "baseRefName": "main",
+      "headRefName": "change",
+      "baseOid": "1111111111111111111111111111111111111111",
+      "headOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "src/cart.ts",
+          "viewerViewedState": "UNVIEWED"
+        }
+      ],
+      "threads": [],
+      "verdicts": [],
+      "conversation": [],
+      "reviews": []
+    },
+    "diff": {
+      "prId": "PR_eval",
+      "kind": "full",
+      "fromOid": "1111111111111111111111111111111111111111",
+      "toOid": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "src/cart.ts",
+          "status": "modified",
+          "additions": 2,
+          "deletions": 2,
+          "patch": "@@ -1,4 +1,4 @@\n export function total(items) {\n-  const s = items.reduce((sum, item) => sum + item.price, 0);\n-  return s;\n+  const sum = items.reduce((acc, item) => acc + item.price, 0);\n+  return sum;\n }"
+        }
+      ]
+    }
+  },
+  "expect": [
+    {
+      "clean": true,
+      "why": "A rename with the same behavior has nothing blocking."
+    },
+    {
+      "count": "/comments",
+      "max": 1,
+      "why": "A rename needs at most a nit."
+    }
+  ]
+}
