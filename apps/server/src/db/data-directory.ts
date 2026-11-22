@@ -45,6 +45,7 @@ export interface ResolvedDataDirectory {
 /** What a test can stand in for, and where it can pause or crash. */
 export interface AdoptionHost {
   rename?: (from: string, to: string) => void;
+  mkdir?: (path: string) => void;
   syncDirectory?: (path: string) => void;
   /** With every lock held, right before the rename. */
   beforeRename?: () => void | Promise<void>;
@@ -75,17 +76,31 @@ function syncDirectory(path: string): void {
 }
 
 /** Creates `path` and its missing ancestors (0700): those it created, outermost first. */
-function ensureDirectory(path: string): string[] {
+function ensureDirectory(
+  path: string,
+  mkdir = (directory: string) => mkdirSync(directory, { mode: 0o700 }),
+): string[] {
   const missing: string[] = [];
 
   for (let current = path; !stat(current); current = dirname(current)) missing.unshift(current);
 
-  for (const directory of missing) mkdirSync(directory, { mode: 0o700 });
+  for (const directory of missing) {
+    try {
+      mkdir(directory);
+    } catch (error) {
+      // Another first launch made it a moment ago: as good, if it is a folder.
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || !statSync(directory).isDirectory())
+        throw error;
+    }
+  }
 
   return missing;
 }
 
-/** What `review-desk.sqlite` in `folder` is, read without changing it. */
+/**
+ * What `review-desk.sqlite` in `folder` is. Opened as the store opens it, while this process holds
+ * the folder's lock, so SQLite recovers a hot journal or WAL it left first.
+ */
 function databaseIn(folder: string): 'missing' | 'established' | 'empty' | 'unusable' {
   const path = join(folder, DATABASE);
   const entry = stat(path);
@@ -94,7 +109,7 @@ function databaseIn(folder: string): 'missing' | 'established' | 'empty' | 'unus
   if (!entry.isFile()) return 'unusable';
 
   try {
-    const client = new DatabaseSync(path, { readOnly: true, timeout: 0 });
+    const client = new DatabaseSync(path, { timeout: 0 });
 
     try {
       const check = client.prepare('PRAGMA quick_check').get() as { quick_check?: string };
@@ -126,14 +141,24 @@ function destinationIn(
   if (database === 'unusable') return 'unusable';
 
   const names = readdirSync(folder);
-  const recovering =
-    names.some((name) => RECOVERY.includes(name) || /^backup-v\d+\.sqlite$/.test(name)) ||
-    names.includes('backups');
+  const backups =
+    names.includes('backups') || names.some((name) => /^backup-v\d+\.sqlite$/.test(name));
 
-  if (recovering) return 'recovery';
-  if (database === 'empty') return 'fresh';
+  // An empty database SQLite recovered is a first start that stopped early, unless backups say
+  // there was data once. Recovery files without their database are never replaced.
+  if (database === 'empty') return backups ? 'recovery' : 'fresh';
+  if (backups || names.some((name) => RECOVERY.includes(name))) return 'recovery';
 
   return names.every((name) => RESIDUE.has(name)) ? 'fresh' : 'occupied';
+}
+
+/** Whether the checkout's folder holds a database, links followed: only to say it is ignored. */
+function hasData(folder: string): boolean {
+  try {
+    return statSync(folder).isDirectory() && statSync(join(folder, DATABASE)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** The checkout's folder, if it holds data: refused when it cannot be moved as one folder. */
@@ -258,7 +283,7 @@ export async function resolveDataDirectory(
   const waitMs = host.waitMs ?? 30_000;
   const pollMs = host.pollMs ?? 1_000;
   const parent = dirname(directory);
-  const created = ensureDirectory(parent);
+  const created = ensureDirectory(parent, host.mkdir);
 
   // One launch at a time decides, from whichever checkout: the folder cannot change meanwhile.
   const startupDeadline = Date.now() + waitMs;
@@ -275,18 +300,18 @@ export async function resolveDataDirectory(
 
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const before = legacyIn(legacy);
-      let lock: DataDirectoryLock | null = null;
-
       const target = stat(directory);
 
-      if (target) {
-        if (!(target.isSymbolicLink() ? statSync(directory) : target).isDirectory())
-          throw new DataDirectoryRefused(`${directory} is not a folder.`);
+      if (target && !(target.isSymbolicLink() ? statSync(directory) : target).isDirectory())
+        throw new DataDirectoryRefused(`${directory} is not a folder.`);
 
-        lock = lockDataDirectory(directory);
-
+      // A folder with nothing in it is no destination yet: a rename replaces it, and taking its
+      // lock first would leave a file in it.
+      if (target && readdirSync(directory).length > 0) {
+        const lock = lockDataDirectory(directory);
         const destination = destinationIn(directory);
+        // Whether the checkout has data, for what to say: its move-safety checks are the move's.
+        const before = hasData(legacy);
 
         if (destination === 'established') {
           const adoption: Adoption | null = before
@@ -307,6 +332,8 @@ export async function resolveDataDirectory(
             : `${directory} holds files a database may need to recover, but no database Review Desk can open. Move it aside, with Review Desk stopped, to start afresh.`,
         );
       }
+
+      const before = legacyIn(legacy);
 
       if (!before) return { lock: lockDataDirectory(directory), adoption: null };
 

@@ -96,5 +96,10 @@ describe('the dev server’s session', () => {
     // Another boot answers now: its session file is not this one.
     boot = 'next-boot';
     expect((await page()).status).toBe(503);
+
+    // Nor does a request that does not ask for HTML get the stale session.
+    const anything = await fetch(vite.resolvedUrls!.local[0]!, { headers: { accept: '*/*' } });
+
+    expect(await anything.text()).not.toContain('new-token');
   }, 30_000);
 });

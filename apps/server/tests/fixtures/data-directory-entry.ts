@@ -18,8 +18,11 @@ interface Entry {
   env?: Record<string, string>;
   /** Waits, with every lock held, until this file exists. */
   pauseFile?: string;
-  /** Dies right after the rename commits, or right after creating an empty database. */
-  kill?: 'afterRename' | 'afterCreate';
+  /**
+   * Dies right after the rename commits; or right after creating an empty database; or, as the
+   * store does, after turning WAL on and starting its first migration, before it commits.
+   */
+  kill?: 'afterRename' | 'afterCreate' | 'afterWal' | 'afterJournal';
   /** Keeps running, holding the folder, until SIGTERM. */
   hold?: boolean;
 }
@@ -64,6 +67,34 @@ try {
 if (entry.kill === 'afterCreate') {
   // As the store's first step does, before any migration.
   new DatabaseSync(config.databasePath).close();
+  process.kill(process.pid, 'SIGKILL');
+}
+
+if (entry.kill === 'afterJournal') {
+  // A rollback journal SQLite must replay before anything reads the database.
+  const client = new DatabaseSync(config.databasePath);
+
+  client.exec('PRAGMA journal_mode = DELETE');
+  // An empty ledger, as a first migration begins with; its first entry is never committed.
+  client.exec(
+    'CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash text NOT NULL, created_at numeric, name text, applied_at TEXT)',
+  );
+  // A cache too small to hold the transaction, so its changes reach the database file before it
+  // commits: the journal is then hot, and must be replayed.
+  client.exec('PRAGMA cache_size = 1');
+  client.exec('BEGIN IMMEDIATE');
+  client.exec(
+    'WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400) INSERT INTO __drizzle_migrations (hash) SELECT hex(randomblob(2000)) FROM n',
+  );
+  process.kill(process.pid, 'SIGKILL');
+}
+
+if (entry.kill === 'afterWal') {
+  const client = new DatabaseSync(config.databasePath);
+
+  client.exec('PRAGMA journal_mode = WAL');
+  client.exec('BEGIN IMMEDIATE');
+  client.exec('CREATE TABLE half (done INTEGER)');
   process.kill(process.pid, 'SIGKILL');
 }
 

@@ -156,8 +156,9 @@ describe('moving a checkout’s data, across processes', () => {
 
     mover.child.kill('SIGTERM');
     expect((await finished(mover)).at(-1)).toEqual({ released: true });
-    // Given up cleanly: no owner file is left where the data is now.
+    // Given up cleanly: no owner file or lock journal is left where the data is now.
     expect(existsSync(join(target, 'review-desk.owner.json'))).toBe(false);
+    expect(existsSync(join(target, 'review-desk.lock-journal'))).toBe(false);
 
     // Started again once the first has stopped: the OS folder's data is used.
     expect((await finished(start({ home, root: second }))).at(-2)).toMatchObject({
@@ -256,16 +257,45 @@ describe('moving a checkout’s data, across processes', () => {
     const { home, target, checkout } = machine();
     const project = checkout('project');
 
-    expect((await start({ home, root: project, kill: 'afterCreate' }).exited).signal).toBe(
-      'SIGKILL',
-    );
-    expect(existsSync(join(target, 'review-desk.sqlite'))).toBe(true);
+    for (const kill of ['afterCreate', 'afterWal', 'afterJournal'] as const) {
+      expect((await start({ home, root: project, kill }).exited).signal).toBe('SIGKILL');
+      expect(existsSync(join(target, 'review-desk.sqlite'))).toBe(true);
 
-    expect((await finished(start({ home, root: project }))).at(-2)).toMatchObject({
-      directory: target,
-      outcome: null,
-      account: null,
-    });
+      // Killed inside its first migration: SQLite has a WAL to recover, and recovers it.
+      if (kill === 'afterWal')
+        expect(existsSync(join(target, 'review-desk.sqlite-wal'))).toBe(true);
+      // Or a rollback journal, which only a writable open replays.
+      if (kill === 'afterJournal')
+        expect(existsSync(join(target, 'review-desk.sqlite-journal'))).toBe(true);
+
+      expect((await finished(start({ home, root: project }))).at(-2)).toMatchObject({
+        directory: target,
+        outcome: null,
+        account: null,
+      });
+      rmSync(target, { recursive: true });
+    }
+  });
+
+  it('lets two first launches create the OS folder’s parents at once', async () => {
+    const { root, checkout } = machine();
+    const home = join(root, 'bare-home');
+    const target = join(home, 'Library', 'Application Support', 'Review Desk');
+    const projects = [checkout('one', 'one'), checkout('two', 'two')];
+
+    mkdirSync(home);
+
+    const outcomes = await Promise.all(
+      projects.map((project) => finished(start({ home, root: project }))),
+    );
+
+    // One moved its data; the other found it there, or found it in use. Neither failed to start
+    // over a folder the other had just made.
+    expect(outcomes.map((said) => said.at(-1))).not.toContainEqual(
+      expect.objectContaining({ refused: 'error' }),
+    );
+    expect(outcomes.flat()).toContainEqual(expect.objectContaining({ outcome: 'moved' }));
+    expect(existsSync(join(target, 'review-desk.sqlite'))).toBe(true);
   });
 
   it('keeps an agent from starting in a workspace while it moves, or in the old one after', async () => {

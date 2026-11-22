@@ -162,6 +162,43 @@ describe('moving a checkout’s data to the OS folder', () => {
     lockDataDirectory(target).release();
   });
 
+  it('creates the OS folder’s parents beside another first launch doing the same', async () => {
+    const { config, legacy, home, target } = machine();
+
+    withData(legacy);
+    rmSync(join(home, 'Library'), { recursive: true });
+
+    // The other launch makes each folder a moment before this one does.
+    const raced = (directory: string) => {
+      mkdirSync(directory);
+      mkdirSync(directory);
+    };
+
+    expect((await resolve(config, { mkdir: raced })).adoption).toMatchObject({ outcome: 'moved' });
+    expect(accountIn(target)).toBe('kept');
+  });
+
+  it('moves into an OS folder that exists with nothing in it', async () => {
+    const { config, legacy, target } = machine();
+
+    withData(legacy);
+    mkdirSync(target);
+
+    expect((await resolve(config)).adoption).toMatchObject({ outcome: 'moved' });
+    expect(accountIn(target)).toBe('kept');
+  });
+
+  it('uses the OS folder’s data even when the checkout’s folder is one it could not move', async () => {
+    const { config, legacy, target, root } = machine();
+
+    withData(join(root, 'elsewhere'), 'old');
+    symlinkSync(join(root, 'elsewhere'), legacy);
+    withData(target, 'new');
+
+    expect((await resolve(config)).adoption).toMatchObject({ outcome: 'kept' });
+    expect(accountIn(target)).toBe('new');
+  });
+
   it('starts afresh in the OS folder when the checkout has no data', async () => {
     const { config, target, legacy } = machine();
 

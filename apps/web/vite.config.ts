@@ -71,7 +71,12 @@ async function liveBoot(): Promise<string | null> {
  * reloads itself.
  */
 function devSession(): Plugin {
-  let verified: Session | null = null;
+  /** The session, when the API answers as the boot it is from. */
+  const live = async (): Promise<Session | null> => {
+    const session = readSession();
+
+    return session && (await liveBoot()) === session.bootId ? session : null;
+  };
 
   return {
     name: 'review-desk-dev-session',
@@ -86,11 +91,7 @@ function devSession(): Plugin {
         if (!document) return next();
 
         void (async () => {
-          const session = readSession();
-          const boot = session ? await liveBoot() : null;
-
-          if (session && boot === session.bootId) {
-            verified = session;
+          if (await live()) {
             next();
 
             return;
@@ -103,7 +104,11 @@ function devSession(): Plugin {
         })();
       });
     },
-    transformIndexHtml() {
+    // Checked again for each page it renders, so a request that skipped the check above (one not
+    // asking for HTML) never carries a session from another boot.
+    async transformIndexHtml() {
+      const verified = await live();
+
       if (!verified) return [];
 
       return [
