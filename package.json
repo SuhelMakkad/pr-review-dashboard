@@ -12,6 +12,7 @@
     "dev:demo": "REVIEW_DESK_MODE=demo pnpm dev",
     "build": "pnpm typecheck && pnpm -r build",
     "start": "pnpm --filter @review-desk/server start",
+    "service": "pnpm --filter @review-desk/server service",
     "demo": "pnpm build && REVIEW_DESK_MODE=demo pnpm start",
     "typecheck": "pnpm --filter @review-desk/shared build && pnpm -r typecheck && tsc --noEmit",
     "lint": "pnpm --filter @review-desk/shared build && eslint .",

@@ -19,7 +19,7 @@ async function setup(options: { browser?: boolean } = {}) {
   const github = new FixtureGitHub(() => defaultScenario(Date.parse('2026-11-05T10:00:00Z')));
   const events = new EventBus();
   const sync = new SyncService(store, github, events);
-  const native = vi.fn(async () => undefined);
+  const native = vi.fn(async (): Promise<'sent' | 'failed' | void> => undefined);
   const notifier = new Notifier(store, events, native);
   const received: ServerEvent[] = [];
 
@@ -105,9 +105,29 @@ describe('notifications', () => {
     await native.sync.sync();
 
     expect(native.native).toHaveBeenCalledWith(
-      'api#2041 · Product metadata schema with versioned migrations',
-      'New reply in a thread you joined',
+      expect.objectContaining({
+        title: 'api#2041 · Product metadata schema with versioned migrations',
+        body: 'New reply in a thread you joined',
+        path: '/inbox/attention/acme/api/2041',
+      }),
     );
+  });
+
+  it('remembers a native notification that could not be sent, so it is not resent', async () => {
+    const { store, notifier, native, sync, github } = await setup({ browser: false });
+
+    native.mockImplementation(async () => 'failed' as const);
+    notifier.saveSettings({ ...defaultNotificationSettings(), macosWhenClosed: true });
+    await sync.sync();
+    github.advance();
+    await sync.sync();
+
+    const channels = store.db.$client
+      .prepare("SELECT DISTINCT channel FROM notification_log WHERE channel LIKE 'macos%'")
+      .all() as { channel: string }[];
+
+    expect(native).toHaveBeenCalled();
+    expect(channels.map((row) => row.channel)).toEqual(['macos-failed']);
   });
 
   it('tells you when your own PR is approved', async () => {

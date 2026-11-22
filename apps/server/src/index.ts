@@ -7,7 +7,13 @@ import { createApp } from '@/app.js';
 import { log, LogFile } from '@/log.js';
 import { watchEventLoop } from '@/http/loop.js';
 import { loadConfig } from '@/config.js';
-import { DataDirectoryRefused, resolveDataDirectory, type Adoption } from '@/db/data-directory.js';
+import {
+  DataDirectoryRefused,
+  resolveDataDirectory,
+  StartCancelled,
+  type Adoption,
+} from '@/db/data-directory.js';
+import { publishReadiness, serviceHint } from '@/service/runtime.js';
 import { DataDirectoryLocked, type DataDirectoryLock } from '@/db/lock.js';
 import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
@@ -36,6 +42,16 @@ const SHUTDOWN_DEADLINE_MS = 20_000;
 
 const config = loadConfig();
 
+// A stop asked for while Review Desk starts (SIGTERM from launchd, Ctrl-C) cancels the start at
+// its next step; once the app exists, it is the normal bounded shutdown. Heard from the first line.
+const starting = new AbortController();
+let stopApp: (() => void) | null = null;
+let stopping = false;
+const onStop = () => (stopApp ? stopApp() : starting.abort());
+
+process.on('SIGTERM', onStop);
+process.on('SIGINT', onStop);
+
 // This process must own the data directory before anything opens, migrates or recovers the
 // database in it, or writes the dev session file another running instance depends on. The first
 // start after an upgrade also moves a checkout's `.data` to the OS's folder here.
@@ -43,13 +59,19 @@ let lock: DataDirectoryLock;
 let adoption: Adoption | null;
 
 try {
-  ({ lock, adoption } = await resolveDataDirectory(config));
+  ({ lock, adoption } = await resolveDataDirectory(config, { signal: starting.signal }));
 } catch (error) {
+  if (error instanceof StartCancelled) process.exit(0);
   if (!(error instanceof DataDirectoryLocked) && !(error instanceof DataDirectoryRefused))
     throw error;
 
-  console.error(error.message);
+  console.error(error.message + (error instanceof DataDirectoryLocked ? serviceHint(error) : ''));
   process.exit(1);
+}
+
+if (starting.signal.aborted) {
+  lock.release();
+  process.exit(0);
 }
 
 // The log file is this process's too: opened, rotated and closed only while it holds the lock.
@@ -93,6 +115,11 @@ const store = new Store(config.databasePath);
 
 // Opening the store applied any migrations; only now is an older backup safe to let go.
 await pruneBackups(config.dataDir);
+
+if (starting.signal.aborted) {
+  store.close();
+  await release(0, true);
+}
 // GitHub accounts come from the GitHub CLI, GitLab accounts (any host) from the GitLab CLI.
 const forges = fixture
   ? null
@@ -150,6 +177,11 @@ const app = await createApp(service, {
   linearConnector: linearOAuth ?? undefined,
 });
 
+// From here a stop is the bounded shutdown below, whatever else is still starting.
+stopApp = () => void shutdown();
+
+if (starting.signal.aborted) await shutdown();
+
 try {
   await app.listen({ host: '127.0.0.1', port: config.port });
 
@@ -164,6 +196,15 @@ try {
     renameSync(draft, session);
   }
 
+  // Stopped while it bound the port: that shutdown is under way and ends the process. Never ready.
+  if (stopping) await new Promise<never>(() => undefined);
+
+  publishReadiness(process.env.REVIEW_DESK_READY_FILE, {
+    bootId,
+    pid: process.pid,
+    port: config.port,
+  });
+
   const label = config.mode === 'demo' ? 'Review Desk (demo)' : 'Review Desk';
 
   console.log(`${label}${config.viteDev ? ' API' : ''} → http://127.0.0.1:${config.port}`);
@@ -176,15 +217,12 @@ try {
     `Could not start Review Desk on port ${config.port}.`,
     error instanceof Error ? error.message : error,
   );
-  // Recovery may already have started work while the app got ready; stop it before closing.
-  await app.close().catch(() => undefined);
-  store.close();
-  await release(1, false);
+  // Recovery may already have started work while the app got ready: the same bounded stop.
+  await shutdown(1);
 }
 
-let stopping = false;
-
-async function shutdown() {
+/** Stops the app within the deadline, then closes the store and the log and gives up the folder. */
+async function shutdown(code: 0 | 1 = 0): Promise<never> {
   // A second Ctrl-C exits at once; interrupted work is checked on the next start.
   if (stopping) process.exit(1);
 
@@ -220,12 +258,6 @@ async function shutdown() {
   // Nothing can touch the database any more: close it and the log, then give up the data
   // directory.
   store.close();
-  await release(0, true);
-}
 
-process.on('SIGTERM', () => {
-  void shutdown();
-});
-process.on('SIGINT', () => {
-  void shutdown();
-});
+  return release(code, code === 0);
+}
