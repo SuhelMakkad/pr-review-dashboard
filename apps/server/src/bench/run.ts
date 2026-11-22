@@ -10,6 +10,7 @@ import {
   syntheticScenario,
   type SyntheticOptions,
 } from '@/demo/synthetic.js';
+import { PatchPool } from '@/diff/patch-pool.js';
 import { DiffService } from '@/diff/service.js';
 import { EventBus } from '@/events.js';
 import { SyncService } from '@/sync/service.js';
@@ -295,58 +296,155 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
 
   const rebased = populated.store.snapshot('you', REBASED_PR)!;
   const reviewed = rebased.reviews[0].commitOid!;
-  const builds: number[] = [];
-  const stalls: number[] = [];
-  let diffed = 0;
-  const histogram = monitorEventLoopDelay({ resolution: 10 });
+  const changed = shape(largest).rebasedFiles;
 
+  /**
+   * Cold rebased builds, each through a new service so its cache never answers, with the event
+   * loop's longest stall around each build. `diffs` makes each build's service.
+   */
+  const interdiff = async (diffs: () => { service: DiffService; done?: () => Promise<void> }) => {
+    const builds: number[] = [];
+    const stalls: number[] = [];
+    let diffed = 0;
+    const histogram = monitorEventLoopDelay({ resolution: 10 });
+
+    histogram.enable();
+
+    for (let index = 0; index < iterations; index++) {
+      // A probe armed before the build and kept after it: its latest firing is the longest stall.
+      let last = performance.now();
+      let stall = 0;
+      const probe = setInterval(() => {
+        const now = performance.now();
+
+        stall = Math.max(stall, Math.max(0, now - last - 5));
+        last = now;
+      }, 5);
+      const { service, done } = diffs();
+      const started = performance.now();
+
+      diffed = (await service.manifest(rebased, 'since-review', reviewed)).files.length;
+      builds.push(performance.now() - started);
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      clearInterval(probe);
+      stalls.push(stall);
+      await done?.();
+    }
+
+    histogram.disable();
+
+    return {
+      builds: stats(builds),
+      stall: stats(stalls),
+      diffed,
+      loopP99Ms: histogram.percentile(99) / 1e6,
+    };
+  };
+  const stallGate = (stall: Stats) => ({
+    limit: `worst < ${LOOP_P99_MS} ms`,
+    verdict:
+      stall.n === 0
+        ? ('insufficient samples' as const)
+        : stall.max < LOOP_P99_MS
+          ? ('pass' as const)
+          : ('fail' as const),
+  });
+
+  // Recorded once, untimed.
   await new DiffService(forge).manifest(rebased, 'since-review', reviewed);
 
-  histogram.enable();
+  // For comparison: patched on the event loop, as the outbox and tests still do.
+  const inPlace = await interdiff(() => ({ service: new DiffService(forge) }));
 
-  for (let index = 0; index < iterations; index++) {
-    // A probe armed before the build and kept after it: its latest firing is the longest stall.
-    let last = performance.now();
-    let stall = 0;
-    const probe = setInterval(() => {
-      const now = performance.now();
+  add({
+    name: `rebased interdiff, ${changed} changed, ${inPlace.diffed} diffed, cold, patched in place`,
+    stats: inPlace.builds,
+    notes: { worstStallMs: inPlace.stall.max, loopP99Ms: inPlace.loopP99Ms },
+  });
 
-      stall = Math.max(stall, Math.max(0, now - last - 5));
-      last = now;
-    }, 5);
-    const started = performance.now();
+  // As the app runs it: patched on worker threads, started for the build or already running.
+  const running = new PatchPool();
 
-    diffed = (await new DiffService(forge).manifest(rebased, 'since-review', reviewed)).files
-      .length;
-    builds.push(performance.now() - started);
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    clearInterval(probe);
-    stalls.push(stall);
+  // Its workers started, untimed.
+  await new DiffService(forge, running).manifest(rebased, 'since-review', reviewed);
+
+  const pools = [
+    {
+      name: 'a new pool',
+      diffs: () => {
+        const patches = new PatchPool();
+
+        return { service: new DiffService(forge, patches), done: () => patches.close() };
+      },
+    },
+    { name: 'a running pool', diffs: () => ({ service: new DiffService(forge, running) }) },
+  ];
+
+  for (const pool of pools) {
+    const run = await interdiff(pool.diffs);
+
+    add({
+      name: `rebased interdiff, ${changed} changed, ${run.diffed} diffed, cold, ${pool.name}`,
+      stats: run.builds,
+      notes: { changed, diffed: run.diffed, worstStallMs: run.stall.max, loopP99Ms: run.loopP99Ms },
+    });
+    add({
+      name: `event-loop stall during the interdiff, ${pool.name}`,
+      stats: run.stall,
+      gate: stallGate(run.stall),
+    });
   }
 
-  histogram.disable();
+  await running.close();
 
-  const stall = stats(stalls);
+  // Four different diffs asked for at once through one service: two rebased builds (one per
+  // account, so neither is the other's cache) and two full ones.
+  {
+    const patches = new PatchPool();
+    const diffs = new DiffService(forge, patches);
+    const histogram = monitorEventLoopDelay({ resolution: 10 });
+    const baseRss = process.memoryUsage.rss();
+    let peakRss = baseRss;
+    const sampler = setInterval(() => {
+      peakRss = Math.max(peakRss, process.memoryUsage.rss());
+    }, 5);
+    const asked = [
+      () => diffs.manifest(rebased, 'since-review', reviewed),
+      () => diffs.manifest(rebased, 'since-review', reviewed, 'you', forge),
+      () => diffs.manifest(rebased, 'full', null),
+      () => diffs.manifest(large, 'full', null),
+    ];
 
-  add({
-    name: `rebased interdiff, ${shape(largest).rebasedFiles} changed, ${diffed} diffed, cold`,
-    stats: stats(builds),
-    notes: {
-      changed: shape(largest).rebasedFiles,
-      diffed,
-      worstStallMs: stall.max,
-      loopP99Ms: histogram.percentile(99) / 1e6,
-    },
-  });
-  add({
-    name: 'event-loop stall during the interdiff',
-    stats: stall,
-    gate: {
-      limit: `worst < ${LOOP_P99_MS} ms`,
-      verdict: stall.n === 0 ? 'insufficient samples' : stall.max < LOOP_P99_MS ? 'pass' : 'fail',
-    },
-  });
+    histogram.enable();
+
+    const durations = await Promise.all(
+      asked.map(async (manifest) => {
+        const started = performance.now();
+
+        await manifest();
+
+        return performance.now() - started;
+      }),
+    );
+
+    histogram.disable();
+    clearInterval(sampler);
+    await patches.close();
+
+    const megabytes = (bytes: number) => Math.round(bytes / 1e5) / 10;
+
+    add({
+      name: 'four different diffs at once, one service',
+      stats: stats(durations),
+      notes: {
+        baseRssMb: megabytes(baseRss),
+        peakRssMb: megabytes(peakRss),
+        loopP99Ms: histogram.percentile(99) / 1e6,
+      },
+    });
+  }
+
   add({
     name: 'fingerprints of the large PR',
     stats: stats(

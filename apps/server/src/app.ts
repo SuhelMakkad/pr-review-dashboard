@@ -10,6 +10,7 @@ import { registerSecret } from '@/github/errors.js';
 import { loadIndexHtml } from '@/http/html.js';
 import { createSessionToken, registerSecurity } from '@/http/security.js';
 import { registerEventStream } from '@/http/sse.js';
+import { PatchPool } from '@/diff/patch-pool.js';
 import { DiffService } from '@/diff/service.js';
 import { registerAccountRoutes } from '@/routes/accounts.js';
 import { registerDevRoutes } from '@/routes/dev.js';
@@ -123,7 +124,9 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
     keepaliveMs: options.keepaliveMs,
   });
   registerPullRoutes(app, service);
-  const diffs = new DiffService(service.github);
+  // Rebased interdiffs are patched on worker threads, so a large one never stalls the server.
+  const patches = new PatchPool();
+  const diffs = new DiffService(service.github, patches);
 
   registerDiffRoutes(app, service, diffs);
   const reviews = new ReviewService(service, service.github, diffs, service.events);
@@ -241,10 +244,23 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
       backfill.close(),
       operations.close(),
       runner.close(),
+      // Builds read and publish nothing more; patches still running are refused as shutting down.
+      diffs.close(),
+      patches.close(),
     ]));
 
+  let closing = false;
+
   app.addHook('preClose', async () => {
+    closing = true;
     void stopWork();
+  });
+  // A request still in flight when shutdown starts closes its connection once answered. Kept
+  // open, the connection would hold the server, and so onClose, until its keep-alive ran out.
+  app.addHook('onSend', async (_request, reply, payload) => {
+    if (closing) reply.header('connection', 'close');
+
+    return payload;
   });
   app.addHook('onClose', async () => {
     const failures = (await stopWork()).flatMap((result) =>

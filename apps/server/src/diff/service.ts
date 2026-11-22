@@ -9,10 +9,82 @@ import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import type { GitHubApi, RemoteFile } from '@/github/api.js';
 import { AccountUnavailable, unattributed } from '@/forge/account.js';
 import { accountCheck, bindForge, declaredTraits } from '@/forge/bind.js';
-import { textPatch } from '@/diff/patch.js';
+import { textPatch, type TextPatch } from '@/diff/patch.js';
+import { PatchAborted, PoolClosed, type PatchPool } from '@/diff/patch-pool.js';
+import { ReviewError } from '@/review/errors.js';
 
 const CACHE_LIMIT = 40;
 const MAX_INTERDIFF_FILES = 300;
+/** Rebased builds at once: each holds up to twice `MAX_INTERDIFF_FILES` texts while it runs. */
+const REBASED_BUILDS = 2;
+
+/** The server is stopping: no build starts, and none goes on reading or publishes. */
+const shuttingDown = () =>
+  new ReviewError('SHUTTING_DOWN', 503, 'The server is restarting. Try again shortly.');
+
+/** A build stopped by its caller or by shutdown: never a forge failure. */
+export const cancelled = (error: unknown) =>
+  error instanceof PatchAborted ||
+  error instanceof PoolClosed ||
+  (error instanceof ReviewError && error.code === 'SHUTTING_DOWN');
+
+/** At most `limit` holders at once; the rest wait in order, each until its signal aborts. */
+class Admission {
+  private active = 0;
+  private closed = false;
+  private readonly waiting: { admit: () => void; refuse: (error: Error) => void }[] = [];
+
+  constructor(private readonly limit: number) {}
+
+  /** Admitted: resolves with the release, which frees the place for the next. */
+  acquire(signal?: AbortSignal): Promise<() => void> {
+    if (this.closed) return Promise.reject(shuttingDown());
+    if (signal?.aborted) return Promise.reject(new PatchAborted());
+
+    let released = false;
+    const release = () => {
+      if (released) return;
+
+      released = true;
+      this.active--;
+      this.waiting.shift()?.admit();
+    };
+
+    if (this.active < this.limit) {
+      this.active++;
+
+      return Promise.resolve(release);
+    }
+
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        this.waiting.splice(this.waiting.indexOf(entry), 1);
+        reject(new PatchAborted());
+      };
+      const entry = {
+        admit: () => {
+          signal?.removeEventListener('abort', onAbort);
+          this.active++;
+          resolve(release);
+        },
+        refuse: (error: Error) => {
+          signal?.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      };
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waiting.push(entry);
+    });
+  }
+
+  /** Admits no one more: those waiting are refused as shutting down. */
+  close(): void {
+    this.closed = true;
+
+    for (const entry of this.waiting.splice(0)) entry.refuse(shuttingDown());
+  }
+}
 
 const statuses: FileStatus[] = [
   'added',
@@ -34,6 +106,8 @@ interface Build {
   /** The forge, bound to `account` when there is one, so every read is that account's. */
   forge: GitHubApi;
   staged: [string, DiffManifest][];
+  /** Its caller stops waiting: nothing more is read or published. */
+  signal?: AbortSignal;
 }
 
 export function toDiffFile(file: RemoteFile, viewed?: DiffFile['viewed']): DiffFile {
@@ -66,8 +140,33 @@ export function toDiffFile(file: RemoteFile, viewed?: DiffFile['viewed']): DiffF
  */
 export class DiffService {
   private readonly cache = new Map<string, DiffManifest>();
+  private readonly admission = new Admission(REBASED_BUILDS);
+  /** Builds in progress, which `close` waits for. */
+  private readonly builds = new Set<Promise<unknown>>();
+  private closing = false;
 
-  constructor(private readonly github: GitHubApi) {}
+  constructor(
+    private readonly github: GitHubApi,
+    /** Patches rebased diffs off the event loop; without it they are computed in place. */
+    private readonly patches: PatchPool | null = null,
+  ) {}
+
+  /**
+   * Starts no build, refuses those waiting for a place, and waits for those in progress, which
+   * read nothing more and publish nothing.
+   */
+  async close(): Promise<void> {
+    this.closing = true;
+    this.admission.close();
+
+    await Promise.allSettled([...this.builds]);
+  }
+
+  /** Before each read and before publishing: stopped by shutdown, or by the build's caller. */
+  private guard(build: Build): void {
+    if (this.closing) throw shuttingDown();
+    if (build.signal?.aborted) throw new PatchAborted();
+  }
 
   /** A cache key for this build's account: one account's diff is never served to another. */
   private key(build: Build, key: string): string {
@@ -128,7 +227,12 @@ export class DiffService {
     if (manifest.files.length === 0 || manifest.kind === 'unavailable') return manifest;
     if (!pr.files.some((file) => file.viewedKey)) return manifest;
 
-    const full = await this.full(build, pr).catch(() => null);
+    // Best effort, but never past a cancelled build.
+    const full = await this.full(build, pr).catch((error: unknown) => {
+      if (cancelled(error)) throw error;
+
+      return null;
+    });
     const keys = new Map(full?.files.map((file) => [file.path, file.viewedKey]) ?? []);
 
     return {
@@ -155,12 +259,33 @@ export class DiffService {
     account: string | null = null,
     /** The caller's own binding to `account`, kept for its whole operation; else one is made. */
     forge?: GitHubApi,
+    /** Aborted when the caller stops waiting: the build reads and publishes nothing more. */
+    signal?: AbortSignal,
   ): Promise<DiffManifest> {
     const build: Build = {
       account,
       forge: forge ?? (account ? bindForge(this.github, account) : this.github),
       staged: [],
+      signal,
     };
+
+    this.guard(build);
+
+    const running = this.build(build, pr, mode, reviewOid, account);
+
+    this.builds.add(running);
+    void running.finally(() => this.builds.delete(running)).catch(() => undefined);
+
+    return running;
+  }
+
+  private async build(
+    build: Build,
+    pr: PullRequestSnapshot,
+    mode: DiffMode,
+    reviewOid: string | null,
+    account: string | null,
+  ): Promise<DiffManifest> {
     const work = async () => {
       if (mode === 'full' || !reviewOid) return this.withViewed(await this.full(build, pr), pr);
 
@@ -174,6 +299,7 @@ export class DiffService {
     if (!account) {
       const manifest = await work();
 
+      this.guard(build);
       this.publish(build);
 
       return manifest;
@@ -184,6 +310,7 @@ export class DiffService {
     if (!verify) {
       const manifest = await work();
 
+      this.guard(build);
       this.publish(build);
 
       return manifest;
@@ -201,7 +328,8 @@ export class DiffService {
       try {
         manifest = await work();
       } catch (error) {
-        if (error instanceof AccountUnavailable) throw error;
+        // Stopped, not failed: no sign-in check, and its own error.
+        if (error instanceof AccountUnavailable || cancelled(error)) throw error;
 
         // A limit met while building is the account's only if glab is still signed in as it.
         const confirmed = await verify(account).then(
@@ -213,6 +341,8 @@ export class DiffService {
       }
 
       await check();
+      // Checked again after the sign-in check, right before publishing.
+      this.guard(build);
       this.publish(build);
 
       return manifest;
@@ -224,6 +354,8 @@ export class DiffService {
     const cached = this.cache.get(key) ?? build.staged.find(([staged]) => staged === key)?.[1];
 
     if (cached) return cached;
+
+    this.guard(build);
 
     // Where viewed state follows each diff, the files of exactly this revision, keyed.
     const listing = declaredTraits(build.forge).pinnedFiles
@@ -274,6 +406,8 @@ export class DiffService {
 
     if (cached) return cached;
 
+    this.guard(build);
+
     const comparison = await build.forge.compare(pr.repository, reviewOid, pr.headOid);
 
     if (!comparison) {
@@ -311,60 +445,124 @@ export class DiffService {
       });
     }
 
-    return this.remember(build, key, await this.rebased(build.forge, pr, reviewOid, prPaths, base));
+    return this.remember(build, key, await this.rebased(build, pr, reviewOid, prPaths, base));
   }
 
   /** History was rewritten: diff each file as reviewed against its current content. */
   private async rebased(
-    forge: GitHubApi,
+    build: Build,
     pr: PullRequestSnapshot,
     reviewOid: string,
     prPaths: Set<string>,
     base: Pick<DiffManifest, 'prId' | 'mode' | 'fromOid' | 'toOid'>,
   ): Promise<DiffManifest> {
-    const atReview = await forge.compare(pr.repository, pr.baseRefName, reviewOid);
-    const paths = [...new Set([...prPaths, ...(atReview?.files.map((file) => file.path) ?? [])])]
-      .sort()
-      .slice(0, MAX_INTERDIFF_FILES);
-    const blobs = await forge.blobs(pr.repository, [
-      ...paths.map((path) => ({ oid: reviewOid, path })),
-      ...paths.map((path) => ({ oid: pr.headOid, path })),
-    ]);
-    const files: DiffFile[] = [];
+    // A place before its texts are read: a few builds hold them at once, never every request's.
+    const release = await this.admission.acquire(build.signal);
 
-    paths.forEach((path, index) => {
-      const before = blobs[index];
-      const after = blobs[index + paths.length];
+    try {
+      this.guard(build);
 
-      if (!before && !after) return;
-      if (before?.text === after?.text && before?.isBinary === after?.isBinary) return;
+      const forge = build.forge;
+      const atReview = await forge.compare(pr.repository, pr.baseRefName, reviewOid);
+      const paths = [...new Set([...prPaths, ...(atReview?.files.map((file) => file.path) ?? [])])]
+        .sort()
+        .slice(0, MAX_INTERDIFF_FILES);
 
-      const status: FileStatus = !before ? 'added' : !after ? 'removed' : 'modified';
+      this.guard(build);
 
-      if (before?.isBinary || after?.isBinary) {
-        files.push({ path, status, additions: 0, deletions: 0, binary: true });
-        return;
-      }
+      const blobs = await forge.blobs(pr.repository, [
+        ...paths.map((path) => ({ oid: reviewOid, path })),
+        ...paths.map((path) => ({ oid: pr.headOid, path })),
+      ]);
 
-      if (before?.isTruncated || after?.isTruncated) {
-        files.push({ path, status, additions: 0, deletions: 0, tooLarge: true });
-        return;
-      }
+      this.guard(build);
 
-      const patch = textPatch(before?.text ?? '', after?.text ?? '');
+      // Each file decided from its texts, in path order; text pairs are patched below.
+      const decided: (
+        DiffFile | { path: string; status: FileStatus; before: string; after: string }
+      )[] = [];
 
-      files.push(
-        patch
-          ? { path, status, ...patch, generated: isGeneratedPath(path) || undefined }
-          : { path, status, additions: 0, deletions: 0, tooLarge: true },
+      paths.forEach((path, index) => {
+        const before = blobs[index];
+        const after = blobs[index + paths.length];
+
+        if (!before && !after) return;
+        if (before?.text === after?.text && before?.isBinary === after?.isBinary) return;
+
+        const status: FileStatus = !before ? 'added' : !after ? 'removed' : 'modified';
+
+        if (before?.isBinary || after?.isBinary)
+          decided.push({ path, status, additions: 0, deletions: 0, binary: true });
+        else if (before?.isTruncated || after?.isTruncated)
+          decided.push({ path, status, additions: 0, deletions: 0, tooLarge: true });
+        else decided.push({ path, status, before: before?.text ?? '', after: after?.text ?? '' });
+      });
+
+      const patches = await this.patchAll(
+        build,
+        decided.flatMap((file) => ('before' in file ? [file] : [])),
       );
-    });
+      const files = decided.map((file): DiffFile => {
+        if (!('before' in file)) return file;
 
-    return {
-      ...base,
-      kind: 'rebased',
-      note: `The branch was rebased or force-pushed since your review at ${shortSha(reviewOid)}. Each file is compared as you reviewed it with its current version, so changes brought in from ${pr.baseRefName} can appear too.`,
-      files,
-    };
+        const patch = patches.get(file)!;
+
+        return patch
+          ? {
+              path: file.path,
+              status: file.status,
+              ...patch,
+              generated: isGeneratedPath(file.path) || undefined,
+            }
+          : { path: file.path, status: file.status, additions: 0, deletions: 0, tooLarge: true };
+      });
+
+      return {
+        ...base,
+        kind: 'rebased',
+        note: `The branch was rebased or force-pushed since your review at ${shortSha(reviewOid)}. Each file is compared as you reviewed it with its current version, so changes brought in from ${pr.baseRefName} can appear too.`,
+        files,
+      };
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Each pair's patch, as `textPatch` computes it: through the pool, off the event loop, when there
+   * is one. The first patch to fail stops the build's others, and is its error.
+   */
+  private async patchAll<P extends { before: string; after: string }>(
+    build: Build,
+    pairs: P[],
+  ): Promise<Map<P, TextPatch | null>> {
+    if (!this.patches)
+      return new Map(pairs.map((pair) => [pair, textPatch(pair.before, pair.after)]));
+
+    const pool = this.patches;
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+
+    build.signal?.addEventListener('abort', stop, { once: true });
+
+    try {
+      const results = await Promise.all(
+        pairs.map((pair) =>
+          pool.patch(pair.before, pair.after, controller.signal).catch((error: unknown) => {
+            controller.abort();
+
+            throw error;
+          }),
+        ),
+      );
+
+      return new Map(pairs.map((pair, index) => [pair, results[index]]));
+    } catch (error) {
+      if (error instanceof PoolClosed) throw shuttingDown();
+
+      throw error;
+    } finally {
+      build.signal?.removeEventListener('abort', stop);
+    }
   }
 }
