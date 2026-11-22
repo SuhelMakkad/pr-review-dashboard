@@ -138,6 +138,10 @@ export function lockDataDirectory(
       if (readOwner(current)?.pid === process.pid)
         rmSync(join(current, OWNER_FILE), { force: true });
 
+      // SQLite removes the lock's journal by the path it opened, which a move left behind: it is
+      // removed here, while still held (nothing is ever written through this connection).
+      if (current !== directory) rmSync(join(current, `${LOCK_FILE}-journal`), { force: true });
+
       connection.close();
     },
   };

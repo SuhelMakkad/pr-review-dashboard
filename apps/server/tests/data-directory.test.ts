@@ -158,6 +158,7 @@ describe('moving a checkout’s data to the OS folder', () => {
     // Given up where it is now: the owner file there goes too.
     lock.release();
     expect(existsSync(join(target, 'review-desk.owner.json'))).toBe(false);
+    expect(existsSync(join(target, 'review-desk.lock-journal'))).toBe(false);
     lockDataDirectory(target).release();
   });
 
@@ -243,6 +244,15 @@ describe('moving a checkout’s data to the OS folder', () => {
     }
 
     writeFileSync(join(target, 'review-desk.sqlite'), 'not a database');
+    await expect(resolveDataDirectory(config, fast)).rejects.toThrow(DataDirectoryRefused);
+
+    // A database, but not ours: never migrated over.
+    rmSync(join(target, 'review-desk.sqlite'));
+
+    const foreign = new DatabaseSync(join(target, 'review-desk.sqlite'));
+
+    foreign.exec('CREATE TABLE notes (text TEXT)');
+    foreign.close();
     await expect(resolveDataDirectory(config, fast)).rejects.toThrow(DataDirectoryRefused);
   });
 
