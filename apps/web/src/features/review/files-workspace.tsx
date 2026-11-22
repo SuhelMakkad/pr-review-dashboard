@@ -26,6 +26,7 @@ import { useRemountKey } from '@/lib/remount-key';
 import { useShortcuts } from '@/lib/shortcuts';
 import { storage } from '@/lib/storage';
 import { useAppearance } from '@/lib/theme';
+import { follow } from '@/lib/navigation';
 import { Button, IconButton } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { EmptyState } from '@/ui/empty-state';
@@ -291,8 +292,10 @@ function Workspace() {
     [threadsByFile],
   );
 
-  const setSearch = (next: Partial<FilesSearch>, replace = true) =>
-    navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace });
+  // A search change is a navigation nothing waits for.
+  const setSearch = (next: Partial<FilesSearch>, replace = true) => {
+    follow(navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace }));
+  };
 
   // Lines selected in one comparison are other lines in the next, which renders without them.
   useEffect(() => setSelection(null), [mode]);
@@ -1214,16 +1217,18 @@ function Workspace() {
 
               if (next) {
                 const target = refOf(next);
-                void goTo({
-                  to: '/inbox/$queue/$owner/$repo/$number',
-                  params: {
-                    queue,
-                    owner: target.owner,
-                    repo: target.repo,
-                    number: String(target.number),
-                  },
-                });
-              } else void goTo({ to: '/inbox/$queue', params: { queue } });
+                follow(
+                  goTo({
+                    to: '/inbox/$queue/$owner/$repo/$number',
+                    params: {
+                      queue,
+                      owner: target.owner,
+                      repo: target.repo,
+                      number: String(target.number),
+                    },
+                  }),
+                );
+              } else follow(goTo({ to: '/inbox/$queue', params: { queue } }));
             }
           }}
         />

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import type { ServerEvent } from '@review-desk/shared/events';
 import { createApp } from '@/app.js';
@@ -296,7 +296,8 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
       state,
       ids,
       heads,
-      api: api as unknown as Record<string, ReturnType<typeof vi.fn>>,
+      // Every forge read it stands in for answers a promise.
+      api: api as unknown as Record<string, Mock<(...args: never[]) => Promise<unknown>>>,
     };
   }
 

@@ -26,6 +26,7 @@ import { accountHandle } from '@review-desk/shared/accounts';
 import { useAccounts, useForge, useMine, usePulls, useStatus, useSyncNow } from '@/lib/queries';
 import { appearance } from '@/lib/theme';
 import { snoozePresets } from '@/lib/time';
+import { follow } from '@/lib/navigation';
 import { DialogTitle, Modal } from '@/ui/dialog';
 import { Kbd } from '@/ui/kbd';
 import { usePullActions } from '@/features/pulls/actions';
@@ -144,14 +145,16 @@ export function CommandPalette({
                 value={`open-link ${query}`}
                 className={itemClass}
                 onSelect={run(() =>
-                  navigate({
-                    to: '/pr/$owner/$repo/$number',
-                    params: {
-                      owner: pastedRef.owner,
-                      repo: pastedRef.repo,
-                      number: String(pastedRef.number),
-                    },
-                  }),
+                  follow(
+                    navigate({
+                      to: '/pr/$owner/$repo/$number',
+                      params: {
+                        owner: pastedRef.owner,
+                        repo: pastedRef.repo,
+                        number: String(pastedRef.number),
+                      },
+                    }),
+                  ),
                 )}
               >
                 <GitPullRequest size={15} className="text-fg-subtle" aria-hidden="true" />
@@ -241,10 +244,12 @@ export function CommandPalette({
                   value={`${numberSign(item.url)}${item.number} ${item.title} ${item.repository} ${item.author.login}`}
                   className={itemClass}
                   onSelect={run(() =>
-                    navigate({
-                      to: '/pr/$owner/$repo/$number',
-                      params: { ...ref, number: String(ref.number) },
-                    }),
+                    follow(
+                      navigate({
+                        to: '/pr/$owner/$repo/$number',
+                        params: { ...ref, number: String(ref.number) },
+                      }),
+                    ),
                   )}
                 >
                   <GitPullRequest
@@ -273,7 +278,9 @@ export function CommandPalette({
                   key={slug}
                   value={`go ${meta.label}`}
                   className={itemClass}
-                  onSelect={run(() => navigate({ to: '/inbox/$queue', params: { queue: slug } }))}
+                  onSelect={run(() =>
+                    follow(navigate({ to: '/inbox/$queue', params: { queue: slug } })),
+                  )}
                 >
                   <Icon size={15} className="text-fg-subtle" aria-hidden="true" />
                   {meta.label}
@@ -284,7 +291,7 @@ export function CommandPalette({
             <Command.Item
               value="go insights trends review speed"
               className={itemClass}
-              onSelect={run(() => navigate({ to: '/insights' }))}
+              onSelect={run(() => follow(navigate({ to: '/insights' })))}
             >
               <GitPullRequest size={15} className="text-fg-subtle" aria-hidden="true" />
               Insights
@@ -293,7 +300,7 @@ export function CommandPalette({
             <Command.Item
               value="go my prs authored"
               className={itemClass}
-              onSelect={run(() => navigate({ to: '/mine' }))}
+              onSelect={run(() => follow(navigate({ to: '/mine' })))}
             >
               <GitPullRequest size={15} className="text-fg-subtle" aria-hidden="true" />
               My PRs
@@ -303,7 +310,9 @@ export function CommandPalette({
               value="go settings preferences"
               className={itemClass}
               onSelect={run(() =>
-                navigate({ to: '/settings/$section', params: { section: firstSettingsSlug } }),
+                follow(
+                  navigate({ to: '/settings/$section', params: { section: firstSettingsSlug } }),
+                ),
               )}
             >
               <Settings size={15} className="text-fg-subtle" aria-hidden="true" />
@@ -324,7 +333,9 @@ export function CommandPalette({
                     value={`settings ${section.label} ${section.keywords.join(' ')}`}
                     className={itemClass}
                     onSelect={run(() =>
-                      navigate({ to: '/settings/$section', params: { section: section.slug } }),
+                      follow(
+                        navigate({ to: '/settings/$section', params: { section: section.slug } }),
+                      ),
                     )}
                   >
                     <Icon size={15} className="text-fg-subtle" aria-hidden={true} />

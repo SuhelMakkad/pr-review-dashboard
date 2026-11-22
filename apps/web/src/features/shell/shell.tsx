@@ -8,6 +8,7 @@ import { useForge, useMine, useNotificationSettings, usePulls, useStatus } from 
 import { useRemountKey } from '@/lib/remount-key';
 import { useEffect } from 'react';
 import { useAppearance } from '@/lib/theme';
+import { follow } from '@/lib/navigation';
 import { Enter, MotionProvider } from '@/ui/motion';
 import { TooltipProvider } from '@/ui/tooltip';
 import { undoLast } from '@/features/pulls/actions';
@@ -78,7 +79,7 @@ export function Shell() {
     keys: queueMeta[slug].keys,
     label: `Go to ${queueMeta[slug].label.toLowerCase()}`,
     group: 'Navigate',
-    run: () => navigate({ to: '/inbox/$queue', params: { queue: slug } }),
+    run: () => follow(navigate({ to: '/inbox/$queue', params: { queue: slug } })),
   }));
 
   useShortcuts([
@@ -97,18 +98,24 @@ export function Shell() {
     },
     { keys: 'z', label: 'Undo last action', group: 'General', run: () => void undoLast(client) },
     ...goTo,
-    { keys: 'g m', label: 'Go to my PRs', group: 'Navigate', run: () => navigate({ to: '/mine' }) },
+    {
+      keys: 'g m',
+      label: 'Go to my PRs',
+      group: 'Navigate',
+      run: () => follow(navigate({ to: '/mine' })),
+    },
     {
       keys: 'g t',
       label: 'Go to insights',
       group: 'Navigate',
-      run: () => navigate({ to: '/insights' }),
+      run: () => follow(navigate({ to: '/insights' })),
     },
     {
       keys: 'g s',
       label: 'Go to settings',
       group: 'Navigate',
-      run: () => navigate({ to: '/settings/$section', params: { section: firstSettingsSlug } }),
+      run: () =>
+        follow(navigate({ to: '/settings/$section', params: { section: firstSettingsSlug } })),
     },
   ]);
 

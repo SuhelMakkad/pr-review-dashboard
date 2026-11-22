@@ -1,4 +1,5 @@
 import { call } from '@/lib/call';
+import { follow } from '@/lib/navigation';
 import { routes } from '@review-desk/shared/contract';
 import { useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -40,12 +41,14 @@ export function LinearSettings({ result }: { result?: 'connected' | 'failed' }) 
 
     void queryClient.invalidateQueries({ queryKey: ['linear-status'] });
     void queryClient.invalidateQueries({ predicate: (query) => isTicketQuery(query.queryKey) });
-    void navigate({
-      to: '/settings/$section',
-      params: { section: 'linear' },
-      search: {},
-      replace: true,
-    });
+    follow(
+      navigate({
+        to: '/settings/$section',
+        params: { section: 'linear' },
+        search: {},
+        replace: true,
+      }),
+    );
   }, [result, navigate, queryClient]);
 
   if (!data) return <CardSkeleton label="Loading the Linear connection…" rows={1} />;

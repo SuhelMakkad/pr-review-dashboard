@@ -7,6 +7,7 @@ import { refOf } from '@/lib/pr-ref';
 import { usePulls } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
 import { shortDateTime } from '@/lib/time';
+import { follow } from '@/lib/navigation';
 import { Button } from '@/ui/button';
 import { EmptyState } from '@/ui/empty-state';
 import { ErrorState } from '@/ui/error-state';
@@ -93,24 +94,30 @@ export function InboxPage() {
   const flat = useMemo(() => sections.flatMap((section) => section.items), [sections]);
   const index = current ? flat.findIndex((item) => item.id === current.id) : -1;
 
-  const setSearch = (next: Partial<InboxSearch>) =>
-    navigate({
-      to: '.',
-      search: (previous: InboxSearch) => ({ ...previous, ...next }),
-      replace: true,
-    });
+  // A search change is a navigation nothing waits for.
+  const setSearch = (next: Partial<InboxSearch>) => {
+    follow(
+      navigate({
+        to: '.',
+        search: (previous: InboxSearch) => ({ ...previous, ...next }),
+        replace: true,
+      }),
+    );
+  };
 
   const select = (item: PullRequestItem | undefined, replace = true) => {
     if (!item) return;
 
     const target = refOf(item);
 
-    void navigate({
-      to: '/inbox/$queue/$owner/$repo/$number',
-      params: { queue, owner: target.owner, repo: target.repo, number: String(target.number) },
-      search: (previous: InboxSearch) => previous,
-      replace,
-    });
+    follow(
+      navigate({
+        to: '/inbox/$queue/$owner/$repo/$number',
+        params: { queue, owner: target.owner, repo: target.repo, number: String(target.number) },
+        search: (previous: InboxSearch) => previous,
+        replace,
+      }),
+    );
   };
 
   const open = (item: PullRequestItem | null | undefined) => {
@@ -118,11 +125,13 @@ export function InboxPage() {
 
     const target = refOf(item);
 
-    void navigate({
-      to: '/pr/$owner/$repo/$number/files',
-      params: { owner: target.owner, repo: target.repo, number: String(target.number) },
-      search: { inbox: queue },
-    });
+    follow(
+      navigate({
+        to: '/pr/$owner/$repo/$number/files',
+        params: { owner: target.owner, repo: target.repo, number: String(target.number) },
+        search: { inbox: queue },
+      }),
+    );
   };
 
   const close = () =>
@@ -164,7 +173,12 @@ export function InboxPage() {
     { keys: 'ArrowDown', label: 'Next PR', group: 'Queue', run: () => move(1), hidden: true },
     { keys: 'ArrowUp', label: 'Previous PR', group: 'Queue', run: () => move(-1), hidden: true },
     { keys: 'Enter', label: 'Review changes', group: 'Queue', run: () => open(current) },
-    { keys: 'Escape', label: 'Close reading pane', group: 'Queue', run: () => ref && void close() },
+    {
+      keys: 'Escape',
+      label: 'Close reading pane',
+      group: 'Queue',
+      run: () => ref && follow(close()),
+    },
     {
       keys: '/',
       label: 'Filter',
@@ -187,7 +201,7 @@ export function InboxPage() {
         );
 
         if (next) select(next);
-        else void close();
+        else follow(close());
       },
     }),
     [flat, index, queue, operations.data],

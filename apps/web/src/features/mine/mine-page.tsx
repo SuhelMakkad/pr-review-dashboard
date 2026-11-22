@@ -13,6 +13,7 @@ import { Kbd } from '@/ui/kbd';
 import { FadeSwap, IndicatorGroup, LayoutScroll, ListItem, ListPresence } from '@/ui/motion';
 import { useRouteRef } from '@/features/pulls/use-current-pull';
 import { sameRef } from '@/lib/pr-ref';
+import { follow } from '@/lib/navigation';
 import { groupMeta, groupOrder } from '@/features/mine/meta';
 import { MineRow } from '@/features/mine/mine-row';
 
@@ -49,11 +50,13 @@ export function MinePage() {
 
     const target = refOf(item);
 
-    void navigate({
-      to: '/mine/$owner/$repo/$number',
-      params: { ...target, number: String(target.number) },
-      replace,
-    });
+    follow(
+      navigate({
+        to: '/mine/$owner/$repo/$number',
+        params: { ...target, number: String(target.number) },
+        replace,
+      }),
+    );
   };
 
   const open = (item: AuthorItem | undefined) => {
@@ -61,11 +64,13 @@ export function MinePage() {
 
     const target = refOf(item);
 
-    void navigate({
-      to: '/pr/$owner/$repo/$number/files',
-      params: { ...target, number: String(target.number) },
-      search: {},
-    });
+    follow(
+      navigate({
+        to: '/pr/$owner/$repo/$number/files',
+        params: { ...target, number: String(target.number) },
+        search: {},
+      }),
+    );
   };
 
   useEffect(() => {
@@ -86,7 +91,7 @@ export function MinePage() {
       keys: 'Escape',
       label: 'Close reading pane',
       group: 'Queue',
-      run: () => ref && void navigate({ to: '/mine' }),
+      run: () => ref && follow(navigate({ to: '/mine' })),
     },
   ]);
 

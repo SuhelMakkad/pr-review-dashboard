@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowUpRight } from 'lucide-react';
 import { filesUrl, isGitLabUrl, numberSign } from '@/lib/pr-ref';
 import { usePulls, useMine } from '@/lib/queries';
 import { useShortcuts } from '@/lib/shortcuts';
+import { follow } from '@/lib/navigation';
 import { IconButton } from '@/ui/button';
 import { cn } from '@/ui/cn';
 import { EmptyState } from '@/ui/empty-state';
@@ -33,7 +34,7 @@ export function PullLayout() {
 
   const back = () => {
     if (router.history.canGoBack()) router.history.back();
-    else void navigate({ to: '/inbox/$queue', params: { queue: 'attention' } });
+    else follow(navigate({ to: '/inbox/$queue', params: { queue: 'attention' } }));
   };
 
   useShortcuts([
@@ -42,13 +43,17 @@ export function PullLayout() {
       keys: '1',
       label: 'Overview',
       group: 'Pull request',
-      run: () => params && navigate({ to: '/pr/$owner/$repo/$number', params }),
+      run: () => {
+        if (params) follow(navigate({ to: '/pr/$owner/$repo/$number', params }));
+      },
     },
     {
       keys: '2',
       label: 'Files',
       group: 'Pull request',
-      run: () => params && navigate({ to: '/pr/$owner/$repo/$number/files', params, search: {} }),
+      run: () => {
+        if (params) follow(navigate({ to: '/pr/$owner/$repo/$number/files', params, search: {} }));
+      },
     },
   ]);
 

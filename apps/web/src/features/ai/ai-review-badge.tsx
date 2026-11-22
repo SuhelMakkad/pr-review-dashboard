@@ -55,7 +55,11 @@ function badgeFor(review: AiReviewStatus): BadgeMeta | null {
         tone: 'fail',
         icon: CircleAlert,
       };
-    default:
+    // Stopped, interrupted or paused, or never run: nothing to show on the row.
+    case 'cancelled':
+    case 'interrupted':
+    case 'paused':
+    case null:
       return null;
   }
 }
