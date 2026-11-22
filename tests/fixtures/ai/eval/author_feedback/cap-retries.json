@@ -8,7 +8,7 @@
       "number": 7,
       "url": "https://github.com/acme/sample/pull/7",
       "title": "Retry failed uploads",
-      "body": "Retries an upload that fails, so a flaky network no longer drops files.",
+      "body": "Retries a failed upload, making at most three attempts in total, so a flaky network no longer drops files.",
       "author": {
         "login": "author"
       },

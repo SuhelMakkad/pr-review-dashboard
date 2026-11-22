@@ -12,12 +12,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AiTask } from '@review-desk/shared/ai';
+import { ClaudeProvider } from '@/ai/claude.js';
 import { CodexProvider } from '@/ai/codex.js';
 import {
   at,
   check,
   compareReports,
   fixtureProblems,
+  scoreCase,
   type CaseReport,
   type EvalReport,
   type Expectation,
@@ -32,10 +34,11 @@ afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
 
   delete process.env.FAKE_CODEX_ANSWER;
+  delete process.env.FAKE_CLAUDE_ANSWER;
 });
 
 const temp = () => {
-  const directory = mkdtempSync(join(tmpdir(), 'review-desk-eval-test-'));
+  const directory = mkdtempSync(join(tmpdir(), 'rd-eval-test-'));
 
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
 
@@ -202,6 +205,51 @@ describe('fixtures', () => {
     expect(`${raw.id}.json`).toBe(file);
   });
 
+  it('fails an answer that denies the off-by-one, in a full review and in a comment', () => {
+    const review = checkedIn('full_review', 'off-by-one') as { expect: Expectation[] };
+    const comments = checkedIn('draft_comments', 'off-by-one') as { expect: Expectation[] };
+    const denial = {
+      overall: 'The loop makes three attempts and looks correct.',
+      assessment: 'no_blocking_findings',
+      comments: [],
+      coverage: ['Read src/upload.ts.'],
+    };
+    const finding = {
+      ...denial,
+      overall: 'The loop makes four attempts: `<= 3` allows one too many.',
+    };
+    const comment = (body: string) => ({
+      overall: '',
+      comments: [{ path: 'src/upload.ts', side: 'RIGHT', line: 11, severity: 'blocking', body }],
+    });
+
+    expect(scoreCase('full_review', denial, review.expect).passed).toBe(false);
+    expect(scoreCase('full_review', finding, review.expect).passed).toBe(true);
+    expect(
+      scoreCase(
+        'draft_comments',
+        comment('This loop looks right: three attempts.'),
+        comments.expect,
+      ).passed,
+    ).toBe(false);
+    expect(
+      scoreCase(
+        'draft_comments',
+        comment('`<= 3` makes four attempts, not three.'),
+        comments.expect,
+      ).passed,
+    ).toBe(true);
+  });
+
+  it('refuses a comment body that is not a pattern', () => {
+    expect(
+      fixtureProblems('draft_comments', {
+        ...base,
+        expect: [{ comment: { path: 'a', side: 'RIGHT', line: 1, body: '(' }, why: 'x' }],
+      }),
+    ).toEqual(['expect: ( is not a pattern.']);
+  });
+
   it('refuses a fixture missing evidence its task reads', () => {
     expect(fixtureProblems('since_review', { ...base, evidence: { pr: {} } })).toEqual([
       'evidence.diff: the task reads a diff.',
@@ -296,6 +344,25 @@ describe('comparing two runs', () => {
       regressed: false,
       changes: [{ change: 'still passing' }, { change: 'still failing' }],
     });
+  });
+
+  it('refuses what is not a report, one with no cases, a case twice, or a case with no known model', () => {
+    const refused = (baseline: unknown, candidate: unknown) =>
+      compareReports(baseline, candidate).refusals;
+    const twice = report([{}, {}]);
+
+    twice.tasks[0].cases[1].id = 'case-0';
+
+    expect(refused({ cases: [] }, report([{}]))).toEqual(['The baseline is not a report.']);
+    expect(refused(report([]), report([]))).toEqual([
+      'The baseline has no cases.',
+      'The candidate has no cases.',
+    ]);
+    expect(refused(twice, report([{}]))).toContain('The baseline has brief/case-0 more than once.');
+    expect(refused(report([{ model: null }]), report([{ model: null }]))).toEqual([
+      "The baseline's brief/case-0 was answered by an unknown model.",
+      "The candidate's brief/case-0 was answered by an unknown model.",
+    ]);
   });
 
   it('refuses runs that are incomplete, or ran differently, or on other cases', () => {
@@ -393,6 +460,123 @@ describe('a run', () => {
     });
     expect(codex.run).not.toHaveBeenCalled();
   });
+
+  it("asks no agent when a case's prompt cannot be built, or two cases share an id", async () => {
+    const codex = agent(() => ({}));
+    const fine = checkedIn('brief', 'retry-loop');
+    const broken = {
+      ...fine,
+      id: 'broken',
+      evidence: { pr: { id: 'PR' }, diff: { kind: 'full', files: [] } },
+    };
+    const twin = { ...fine, note: 'Another case with the same id.' };
+
+    expect(
+      await runEval(
+        options({
+          fixtures: folder({ brief: [fine, broken] }),
+          agents: { codex: codex.provider, claude: codex.provider },
+        }),
+      ),
+    ).toMatchObject({ problems: [expect.stringContaining('its prompt cannot be built')] });
+
+    const twins = folder({ brief: [fine] });
+
+    writeFileSync(join(twins, 'brief', 'zz-twin.json'), JSON.stringify(twin));
+
+    expect(
+      await runEval(
+        options({ fixtures: twins, agents: { codex: codex.provider, claude: codex.provider } }),
+      ),
+    ).toMatchObject({
+      problems: [expect.stringContaining('another brief case has the id retry-loop')],
+    });
+    expect(codex.run).not.toHaveBeenCalled();
+  });
+
+  it('records a workspace that cannot be laid out as a setup failure, removes its folder, and goes on', async () => {
+    const codex = agent(() => ({
+      overall: 'Typo fixed; nothing else changed.',
+      comments: [],
+      assessment: 'no_blocking_findings',
+      coverage: ['Read README.md.'],
+    }));
+    const clean = checkedIn('full_review', 'clean-typo');
+    // A file where a folder must go: laying it out fails.
+    const clashing = {
+      ...clean,
+      id: 'aa-clashing',
+      workspace: {
+        ...(clean.workspace as object),
+        before: { src: 'a file', 'src/inside.ts': 'cannot be written' },
+      },
+    };
+    const before = readdirSync(tmpdir()).filter((name) =>
+      name.startsWith('review-desk-eval-'),
+    ).length;
+    const outcome = await runEval(
+      options({
+        tasks: ['full_review'],
+        fixtures: folder({ full_review: [clashing, clean] }),
+        agents: { codex: codex.provider, claude: codex.provider },
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      report: {
+        complete: false,
+        tasks: [
+          {
+            cases: [
+              { id: 'aa-clashing', passed: false, error: expect.any(String) },
+              { id: 'clean-typo', passed: true },
+            ],
+          },
+        ],
+      },
+    });
+    expect(codex.run).toHaveBeenCalledTimes(1);
+    expect(
+      readdirSync(tmpdir()).filter((name) => name.startsWith('review-desk-eval-')).length,
+    ).toBe(before);
+  });
+
+  it.each([
+    ['codex', 'FAKE_CODEX_ANSWER', 'not json at all', 'gpt-fake'],
+    ['claude', 'FAKE_CLAUDE_ANSWER', 'null', null],
+  ] as const)(
+    'fails a case whose %s turn finished without an answer, keeping the run complete',
+    async (provider, variable, answer, model) => {
+      const file = join(temp(), 'answer.txt');
+
+      writeFileSync(file, answer);
+      process.env[variable] = file;
+
+      const agents = {
+        codex: new CodexProvider(join(fixtures, 'fake-codex.mjs')),
+        claude: new ClaudeProvider(join(fixtures, 'fake-claude.mjs')),
+      };
+      const outcome = await runEval(
+        options({
+          provider,
+          fixtures: folder({ brief: [checkedIn('brief', 'retry-loop')] }),
+          agents,
+        }),
+      );
+
+      expect(outcome).toMatchObject({
+        report: {
+          complete: true,
+          tasks: [
+            {
+              cases: [{ passed: false, shapeError: expect.stringContaining('structured answer') }],
+            },
+          ],
+        },
+      });
+      if (model) expect(outcome).toMatchObject({ report: { tasks: [{ cases: [{ model }] }] } });
+    },
+  );
 
   it('gives a full review its workspace in a fresh folder and a fresh session, and scores the answer', async () => {
     const answer = {

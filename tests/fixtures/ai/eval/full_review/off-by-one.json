@@ -1,6 +1,6 @@
 {
   "id": "off-by-one",
-  "note": "The loop makes four attempts where three were meant, with no delay between them.",
+  "note": "The description allows three attempts in total; the loop makes four (`<= 3`), with no delay between them.",
   "evidence": {
     "pr": {
       "id": "PR_eval",
@@ -8,7 +8,7 @@
       "number": 7,
       "url": "https://github.com/acme/sample/pull/7",
       "title": "Retry failed uploads",
-      "body": "Retries an upload that fails, so a flaky network no longer drops files.",
+      "body": "Retries a failed upload, making at most three attempts in total, so a flaky network no longer drops files.",
       "author": {
         "login": "author"
       },
@@ -48,7 +48,7 @@
       "repository": "acme/sample",
       "number": 7,
       "title": "Retry failed uploads",
-      "description": "Retries an upload that fails, so a flaky network no longer drops files.",
+      "description": "Retries a failed upload, making at most three attempts in total, so a flaky network no longer drops files.",
       "baseOid": "1111111111111111111111111111111111111111",
       "headOid": "2222222222222222222222222222222222222222",
       "files": [
@@ -76,9 +76,9 @@
   "expect": [
     {
       "matches": "/overall",
-      "pattern": "<=|four|4 attempts|off-by-one|three",
+      "pattern": "<=|\\bfour\\b|\\b4 (attempts|times|tries)\\b|off-by-one|off by one|one (extra|more|too many)",
       "flags": "i",
-      "why": "The off-by-one in the loop bound is the finding."
+      "why": "The off-by-one in the loop bound is the finding: four attempts where three are allowed."
     },
     {
       "count": "/comments",

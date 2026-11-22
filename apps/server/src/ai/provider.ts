@@ -51,6 +51,19 @@ export interface AgentProvider {
 export class AgentError extends Error {}
 
 /**
+ * The agent finished its turn without an answer in the requested shape: the prompt's failure, not
+ * the transport's. `model` is the one that answered, when known.
+ */
+export class NoAnswerError extends AgentError {
+  constructor(
+    message: string,
+    readonly model: string | null,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * Environment for agent processes: no GitHub or GitLab credentials, and gh and glab config
  * directories with no logins, so nothing the agent runs can reach GitHub or GitLab as the user.
  */

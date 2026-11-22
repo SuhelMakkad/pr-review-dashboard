@@ -1,6 +1,6 @@
 {
   "id": "off-by-one",
-  "note": "The loop runs four times (`<= 3`) where three attempts were meant: one comment on that line.",
+  "note": "The description allows three attempts in total; the loop makes four (`<= 3`): one comment on that line.",
   "evidence": {
     "pr": {
       "id": "PR_eval",
@@ -8,7 +8,7 @@
       "number": 7,
       "url": "https://github.com/acme/sample/pull/7",
       "title": "Retry failed uploads",
-      "body": "Retries an upload that fails, so a flaky network no longer drops files.",
+      "body": "Retries a failed upload, making at most three attempts in total, so a flaky network no longer drops files.",
       "author": {
         "login": "author"
       },
@@ -76,7 +76,7 @@
         "path": "src/upload.ts",
         "side": "RIGHT",
         "line": 11,
-        "body": "attempt|<=|four|4|three|3"
+        "body": "<=|\\bfour\\b|\\b4 (attempts|times|tries)\\b|off-by-one|off by one|one (extra|more|too many)"
       },
       "why": "The off-by-one is on the loop's line, R11."
     },

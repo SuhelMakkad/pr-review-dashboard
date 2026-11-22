@@ -105,12 +105,20 @@ export function fixtureProblems(task: AiTask, raw: unknown): string[] {
       if (!inside(path))
         problems.push(`workspace.${side}.${path}: a workspace path must stay inside its folder.`);
 
+  // Every pattern compiles now, never after an agent has answered.
   for (const item of fixture.expect) {
-    if ('matches' in item)
+    const pattern =
+      'matches' in item
+        ? { source: item.pattern, flags: item.flags }
+        : 'comment' in item && item.comment.body !== undefined
+          ? { source: item.comment.body, flags: 'i' }
+          : null;
+
+    if (pattern)
       try {
-        new RegExp(item.pattern, item.flags);
+        new RegExp(pattern.source, pattern.flags);
       } catch {
-        problems.push(`expect: ${item.pattern} is not a pattern.`);
+        problems.push(`expect: ${pattern.source} is not a pattern.`);
       }
   }
 
@@ -303,12 +311,75 @@ export interface CaseChange {
   labels: { why: string; from: boolean; to: boolean; reason: string }[];
 }
 
+const resultSchema = z.strictObject({ why: z.string(), passed: z.boolean(), reason: z.string() });
+
+/** A saved report, as it must be read back to be compared. */
+export const reportSchema = z.strictObject({
+  provider: z.enum(['codex', 'claude']),
+  model: z.string().nullable(),
+  effort: z.string(),
+  complete: z.boolean(),
+  tasks: z.array(
+    z.strictObject({
+      task: z.enum(Object.keys(TASKS) as [AiTask, ...AiTask[]]),
+      promptVersion: z.number(),
+      digest: z.string().nullable(),
+      cases: z.array(
+        z.strictObject({
+          id: z.string(),
+          hash: z.string(),
+          passed: z.boolean(),
+          results: z.array(resultSchema),
+          model: z.string().nullable(),
+          shapeError: z.string().optional(),
+          error: z.string().optional(),
+        }),
+      ),
+    }),
+  ),
+});
+
+/** What makes a report unfit to compare: no cases, a case twice, or a case with no known model. */
+function reportProblems(name: string, report: EvalReport): string[] {
+  const problems: string[] = [];
+  const ids = report.tasks.flatMap((task) => task.cases.map((item) => `${task.task}/${item.id}`));
+
+  if (ids.length === 0) problems.push(`The ${name} has no cases.`);
+
+  for (const id of new Set(ids.filter((key, index) => ids.indexOf(key) !== index)))
+    problems.push(`The ${name} has ${id} more than once.`);
+
+  for (const task of report.tasks)
+    for (const item of task.cases)
+      if (item.model === null)
+        problems.push(`The ${name}'s ${task.task}/${item.id} was answered by an unknown model.`);
+
+  return problems;
+}
+
 /**
- * The candidate against the baseline. Refused (`refusals`) unless both ran complete, with the same
- * provider and effort, on the same cases. `regressed` when any case that passed fails now.
+ * The candidate against the baseline. Refused (`refusals`) unless both are well-formed reports
+ * that ran complete, with the same provider, effort and models, on the same cases, each once.
+ * `regressed` when any case that passed fails now.
  */
-export function compareReports(baseline: EvalReport, candidate: EvalReport) {
-  const refusals: string[] = [];
+export function compareReports(rawBaseline: unknown, rawCandidate: unknown) {
+  const parsed = [reportSchema.safeParse(rawBaseline), reportSchema.safeParse(rawCandidate)];
+
+  if (!parsed[0].success || !parsed[1].success)
+    return {
+      refusals: parsed.flatMap((result, index) =>
+        result.success ? [] : [`The ${index === 0 ? 'baseline' : 'candidate'} is not a report.`],
+      ),
+      changes: [] as CaseChange[],
+      regressed: false,
+    };
+
+  const baseline = parsed[0].data as EvalReport;
+  const candidate = parsed[1].data as EvalReport;
+  const refusals: string[] = [
+    ...reportProblems('baseline', baseline),
+    ...reportProblems('candidate', candidate),
+  ];
 
   if (!baseline.complete) refusals.push('The baseline is incomplete: rerun it.');
   if (!candidate.complete) refusals.push('The candidate is incomplete: rerun it.');
@@ -339,7 +410,7 @@ export function compareReports(baseline: EvalReport, candidate: EvalReport) {
       );
   }
 
-  if (refusals.length > 0) return { refusals, changes: [], regressed: false };
+  if (refusals.length > 0) return { refusals, changes: [] as CaseChange[], regressed: false };
 
   const changes: CaseChange[] = keys.map((key) => {
     const left = before.get(key)!;

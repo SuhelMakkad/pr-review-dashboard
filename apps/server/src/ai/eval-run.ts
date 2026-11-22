@@ -20,7 +20,7 @@ import {
   type Fixture,
 } from '@/ai/eval.js';
 import type { PromptPins } from '@/ai/prompt-pins.js';
-import type { AgentProvider } from '@/ai/provider.js';
+import { NoAnswerError, type AgentProvider } from '@/ai/provider.js';
 import { safeError } from '@/redact.js';
 import { jsonSchemaFor, TASKS, type Evidence } from '@/ai/tasks.js';
 
@@ -51,10 +51,8 @@ function load(directory: string, task: AiTask): { file: string; raw: unknown }[]
     }));
 }
 
-/** A full review's workspace, laid out as the runner lays it out, in a fresh folder. */
-function workspace(fixture: Fixture): string {
-  const directory = mkdtempSync(join(tmpdir(), 'review-desk-eval-'));
-
+/** A full review's workspace, laid out in `directory` as the runner lays it out. */
+function populate(directory: string, fixture: Fixture): void {
   if (fixture.workspace) {
     writeFileSync(
       join(directory, 'review.json'),
@@ -69,8 +67,6 @@ function workspace(fixture: Fixture): string {
         writeFileSync(target, text);
       }
   }
-
-  return directory;
 }
 
 /**
@@ -82,22 +78,43 @@ export async function runEval(
   options: EvalOptions,
 ): Promise<{ problems: string[] } | { report: EvalReport }> {
   const problems: string[] = [];
-  const cases: { task: AiTask; fixture: Fixture }[] = [];
+  const cases: { task: AiTask; fixture: Fixture; input: string }[] = [];
 
+  // Every case is checked, and its prompt built, before any agent is asked anything.
   for (const task of options.tasks) {
     const only = TASKS[task].provider;
 
     if (only && only !== options.provider) problems.push(`${task} runs on ${only} only.`);
 
     const loaded = load(options.fixtures, task);
+    const ids = new Set<string>();
 
     if (loaded.length === 0) problems.push(`${task} has no fixtures in ${options.fixtures}.`);
 
     for (const { file, raw } of loaded) {
       const found = fixtureProblems(task, raw);
 
-      if (found.length > 0) problems.push(...found.map((problem) => `${file}: ${problem}`));
-      else cases.push({ task, fixture: fixtureSchema.parse(raw) });
+      if (found.length > 0) {
+        problems.push(...found.map((problem) => `${file}: ${problem}`));
+        continue;
+      }
+
+      const fixture = fixtureSchema.parse(raw);
+
+      if (ids.has(fixture.id))
+        problems.push(`${file}: another ${task} case has the id ${fixture.id}.`);
+
+      ids.add(fixture.id);
+
+      try {
+        cases.push({
+          task,
+          fixture,
+          input: TASKS[task].input(fixture.evidence as unknown as Evidence),
+        });
+      } catch (error) {
+        problems.push(`${file}: its prompt cannot be built from its evidence: ${safeError(error)}`);
+      }
     }
   }
 
@@ -107,18 +124,22 @@ export async function runEval(
   const reports = new Map<AiTask, CaseReport[]>(options.tasks.map((task) => [task, []]));
   let complete = true;
 
-  for (const { task, fixture } of cases) {
+  for (const { task, fixture, input } of cases) {
     const definition = TASKS[task];
     const evidence = fixture.evidence as unknown as Evidence;
     const hash = caseHash(fixture);
-    const directory = workspace(fixture);
+    let directory: string | null = null;
     let report: CaseReport;
 
     try {
+      // A fresh folder for each case, removed whatever becomes of it.
+      directory = mkdtempSync(join(tmpdir(), 'review-desk-eval-'));
+      populate(directory, fixture);
+
       const answer = await agent.run(
         {
           instructions: definition.instructions,
-          input: definition.input(evidence),
+          input,
           schema: jsonSchemaFor(task),
           effort: options.effort,
           model: options.model,
@@ -153,18 +174,30 @@ export async function runEval(
         };
       }
     } catch (error) {
-      // The provider or the setup failed: the case says nothing about the prompt.
-      complete = false;
-      report = {
-        id: fixture.id,
-        hash,
-        passed: false,
-        results: [],
-        model: null,
-        error: safeError(error),
-      };
+      if (error instanceof NoAnswerError) {
+        // The turn finished without an answer in shape: the prompt's failure.
+        report = {
+          id: fixture.id,
+          hash,
+          passed: false,
+          results: [],
+          model: error.model,
+          shapeError: error.message,
+        };
+      } else {
+        // The provider or the setup failed: the case says nothing about the prompt.
+        complete = false;
+        report = {
+          id: fixture.id,
+          hash,
+          passed: false,
+          results: [],
+          model: null,
+          error: safeError(error),
+        };
+      }
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      if (directory) rmSync(directory, { recursive: true, force: true });
     }
 
     reports.get(task)!.push(report);
