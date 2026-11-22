@@ -14,7 +14,10 @@ process.stdin.on('end', () => {
   for (const line of lines) {
     const event = JSON.parse(line);
 
-    if (event.type === 'result') {
+    // A recorded answer, replayed as given; else the known one.
+    if (event.type === 'result' && process.env.FAKE_CLAUDE_ANSWER) {
+      event.structured_output = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_ANSWER, 'utf8'));
+    } else if (event.type === 'result') {
       event.structured_output = {
         summary: 'Fake claude answer',
         risk: 'medium',

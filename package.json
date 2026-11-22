@@ -24,7 +24,8 @@
     "db:check": "pnpm --filter @review-desk/server db:check",
     "bench": "pnpm --filter @review-desk/shared build && pnpm --filter @review-desk/server bench",
     "bench:forge": "pnpm --filter @review-desk/server bench:forge",
-    "log:summary": "pnpm --filter @review-desk/server log:summary"
+    "log:summary": "pnpm --filter @review-desk/server log:summary",
+    "prompt:pins": "pnpm --filter @review-desk/server prompt:pins"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",

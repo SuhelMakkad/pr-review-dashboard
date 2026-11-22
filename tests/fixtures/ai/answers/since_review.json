@@ -1,0 +1,11 @@
+{
+  "summary": "The upload now retries up to three times, as asked.",
+  "threads": [
+    {
+      "threadId": "thread-1",
+      "verdict": "addressed",
+      "explanation": "The loop stops after three attempts."
+    }
+  ],
+  "newConcerns": ["Retries run back to back with no delay."]
+}

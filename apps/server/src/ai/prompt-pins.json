@@ -1,0 +1,26 @@
+{
+  "full_review": {
+    "version": 4,
+    "digest": "be7da77c9f69e216ef33207fe36808177446c192befd3d52ec976a97f21deb21"
+  },
+  "brief": {
+    "version": 1,
+    "digest": "6db2800e99beada9e788907f37c9b92eabdd981dbaf4350bf08cb417db5d678a"
+  },
+  "since_review": {
+    "version": 1,
+    "digest": "3290b7bf64ccca8ed8473b75bd2e8fddb467f49db6e022d82005bd377ec31854"
+  },
+  "draft_comments": {
+    "version": 3,
+    "digest": "77d26dba9db43f600c399dbdc4b0fbab1624634c4db24b4d034d2ce2ba2c3615"
+  },
+  "author_feedback": {
+    "version": 1,
+    "digest": "7589bbda91fffe0ccbd6875be73a877c3dc234ce32c94d6bad583cd39f19e0d6"
+  },
+  "draft_summary": {
+    "version": 3,
+    "digest": "b0947c0bedd07ca6cd24ad497787d74b00da74df24cc966f6ed3ac95fc381d96"
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "summary": "The reviewer asked to cap the retries.",
+  "actionItems": [{ "text": "Cap the upload retries.", "threadId": "thread-1" }]
+}

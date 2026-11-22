@@ -1,0 +1,7 @@
+{
+  "summary": "Adds a capped retry loop around uploads, so a transient failure no longer drops the file.",
+  "risk": "medium",
+  "riskReasons": ["The loop retries without a delay between attempts."],
+  "focusFiles": [{ "path": "src/upload.ts", "reason": "The retry loop and its exit condition." }],
+  "questions": ["Should a failed attempt back off before the next?"]
+}

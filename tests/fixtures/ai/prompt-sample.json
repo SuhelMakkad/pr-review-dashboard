@@ -1,0 +1,90 @@
+{
+  "pr": {
+    "id": "PR_sample_7",
+    "repository": "acme/sample",
+    "number": 7,
+    "title": "Retry failed uploads with a cap",
+    "body": "Adds a retry loop around uploads.\n\nFixes #6.",
+    "author": {
+      "login": "author"
+    },
+    "baseRefName": "main",
+    "headRefName": "retry-uploads",
+    "baseOid": "1111111111111111111111111111111111111111",
+    "headOid": "2222222222222222222222222222222222222222",
+    "threads": [
+      {
+        "id": "thread-1",
+        "path": "src/upload.ts",
+        "line": 12,
+        "isResolved": false,
+        "comments": [
+          {
+            "author": {
+              "login": "you"
+            },
+            "body": "Should this cap retries?"
+          }
+        ]
+      }
+    ],
+    "verdicts": [
+      {
+        "login": "you",
+        "state": "CHANGES_REQUESTED"
+      }
+    ],
+    "conversation": [
+      {
+        "author": {
+          "login": "author"
+        },
+        "body": "Ready for another look."
+      }
+    ],
+    "url": "https://github.com/acme/sample/pull/7",
+    "files": [
+      {
+        "path": "src/upload.ts",
+        "viewerViewedState": "UNVIEWED"
+      }
+    ]
+  },
+  "draft": {
+    "prId": "PR_sample_7",
+    "body": "",
+    "event": "REQUEST_CHANGES",
+    "comments": [
+      {
+        "path": "src/upload.ts",
+        "line": 12,
+        "side": "RIGHT",
+        "body": "Cap the retries.",
+        "status": "pending"
+      }
+    ],
+    "updatedAt": null
+  },
+  "completedReview": {
+    "id": "review-1",
+    "result": {
+      "overall": "One finding: the retry loop has no backoff.",
+      "assessment": "changes_requested",
+      "comments": [],
+      "coverage": ["Read src/upload.ts and its caller."]
+    }
+  },
+  "login": "you",
+  "files": [
+    {
+      "path": "src/upload.ts",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1,
+      "patch": "@@ -10,3 +10,5 @@\n context\n-  upload(file);\n+  for (let attempt = 0; attempt < 3; attempt++) {\n+    if (await upload(file)) break;\n+  }\n context",
+      "sha": null
+    }
+  ],
+  "before": "export async function send(file) {\n  upload(file);\n  return true;\n}\n",
+  "after": "export async function send(file) {\n  for (let attempt = 0; attempt < 3; attempt++) {\n    if (await upload(file)) break;\n  }\n  return true;\n}\n"
+}

@@ -1,0 +1,19 @@
+{
+  "overall": "The cap works; the retries need a delay between them.",
+  "comments": [
+    {
+      "path": "src/upload.ts",
+      "line": 12,
+      "side": "RIGHT",
+      "severity": "suggestion",
+      "body": "Wait a little before trying again, so a busy server can recover."
+    },
+    {
+      "path": "src/upload.ts",
+      "line": 99,
+      "side": "RIGHT",
+      "severity": "nit",
+      "body": "This line is outside the diff, so it is kept without a line."
+    }
+  ]
+}

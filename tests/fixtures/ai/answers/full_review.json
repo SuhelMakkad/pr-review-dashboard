@@ -1,0 +1,28 @@
+{
+  "overall": "One finding: the retry loop in src/upload.ts has no delay between attempts, so a busy server gets three requests at once. Add a short backoff.",
+  "comments": [
+    {
+      "path": "src/upload.ts",
+      "line": 11,
+      "side": "LEFT",
+      "severity": "blocking",
+      "body": "The single call is replaced by a loop with no delay."
+    },
+    {
+      "path": "src/missing.ts",
+      "line": 3,
+      "side": "RIGHT",
+      "severity": "nit",
+      "body": "This file is not in the diff, so it is kept without a line."
+    },
+    {
+      "path": "src/upload.ts",
+      "line": 13,
+      "side": "LEFT",
+      "severity": "nit",
+      "body": "Line 13 is only on the new side, so on the old side it is kept without a line."
+    }
+  ],
+  "assessment": "changes_requested",
+  "coverage": ["Read src/upload.ts and its caller. Tests were not executed."]
+}
