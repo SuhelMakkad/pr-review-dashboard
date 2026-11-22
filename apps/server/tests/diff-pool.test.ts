@@ -303,6 +303,80 @@ describe('rebased interdiffs through the patch pool', () => {
     }
   });
 
+  it('answers with the stop when one comes while the account is being checked', async () => {
+    const { github, detail } = await demo();
+    const limited = () => new ForgeError('Rate limited.', null, 429, 'rate_limit');
+    const verifyAccount = vi.fn(async () => undefined);
+
+    Object.assign(github, { verifyAccount, traits: { ...github.traits, checksAccount: true } });
+
+    /** Its next check held until `open`, then answered by `answer`. */
+    const holdCheck = (answer: () => Promise<undefined>) => {
+      const held = gate();
+
+      verifyAccount.mockImplementationOnce(async () => {
+        await held.opened;
+
+        return answer();
+      });
+
+      return held.open;
+    };
+
+    // The first check fails once the service has closed: the answer is the shutdown.
+    {
+      const open = holdCheck(() => Promise.reject(limited()));
+      const diffs = new DiffService(github, pool());
+      const build = diffs.manifest(detail.snapshot, 'full', null, 'you').catch((error) => error);
+
+      await vi.waitFor(() => expect(verifyAccount).toHaveBeenCalledTimes(1));
+
+      const closed = diffs.close();
+
+      open();
+
+      expect(await build).toMatchObject({ code: 'SHUTTING_DOWN' });
+      await closed;
+    }
+
+    // The first check passes once its caller has gone: the answer is the abort.
+    {
+      const open = holdCheck(async () => undefined);
+      const controller = new AbortController();
+      const build = new DiffService(github, pool())
+        .manifest(detail.snapshot, 'full', null, 'you', undefined, controller.signal)
+        .catch((error) => error);
+
+      await vi.waitFor(() => expect(verifyAccount).toHaveBeenCalledTimes(2));
+      controller.abort();
+      open();
+
+      expect(await build).toBeInstanceOf(PatchAborted);
+    }
+
+    // A read fails with a limit, and the check that would tie it to the account passes once the
+    // service has closed: the answer is the shutdown, not the limit.
+    {
+      vi.spyOn(github, 'pullFiles').mockRejectedValueOnce(limited());
+
+      // The first check passes at once; the one after the failure is held.
+      verifyAccount.mockImplementationOnce(async () => undefined);
+
+      const open = holdCheck(async () => undefined);
+      const diffs = new DiffService(github, pool());
+      const build = diffs.manifest(detail.snapshot, 'full', null, 'you').catch((error) => error);
+
+      await vi.waitFor(() => expect(verifyAccount).toHaveBeenCalledTimes(4));
+
+      const closed = diffs.close();
+
+      open();
+
+      expect(await build).toMatchObject({ code: 'SHUTTING_DOWN' });
+      await closed;
+    }
+  });
+
   it('checks the account again only for a forge’s failure, and never once closed', async () => {
     const { github, detail, reviewOid } = await demo();
     const verifyAccount = vi.fn(async () => undefined);

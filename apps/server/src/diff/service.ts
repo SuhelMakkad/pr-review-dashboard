@@ -318,11 +318,18 @@ export class DiffService {
 
     return (async () => {
       // A limit met by a check itself cannot be tied to the account: it is nobody's cooldown. A
-      // build stopped meanwhile asks nothing more: each check starts only while it is wanted.
-      const check = () => {
+      // build stopped meanwhile asks nothing more, and a stop while a check runs is the answer
+      // if the check fails (one that passes is followed by a guarded read, or the publish).
+      const check = async () => {
         this.guard(build);
 
-        return verify(account).catch((error: unknown) => Promise.reject(unattributed(error)));
+        try {
+          await verify(account);
+        } catch (error) {
+          this.guard(build);
+
+          throw unattributed(error);
+        }
       };
 
       await check();
@@ -346,6 +353,9 @@ export class DiffService {
           () => true,
           () => false,
         );
+
+        // Stopped while it was asked: the stop is the answer.
+        this.guard(build);
 
         throw confirmed ? error : unattributed(error);
       }
