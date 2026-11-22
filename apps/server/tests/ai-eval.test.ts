@@ -237,6 +237,7 @@ describe('fixtures', () => {
     ];
     // Each denies it, or misses it, however its words overlap with it.
     const misses = [
+      'There is no off-by-one in the retry loop.',
       'The loop does not make four attempts.',
       'The loop cannot make four attempts. The bound is correct.',
       "The loop doesn't run four times.",
@@ -260,6 +261,15 @@ describe('fixtures', () => {
     expect(passed('draft_comments', commentOf(finding, 'suggestion'), comments.expect)).toBe(true);
     expect(passed('draft_comments', commentOf(finding, 'nit'), comments.expect)).toBe(false);
     expect(passed('draft_comments', commentOf(finding, 'question'), comments.expect)).toBe(false);
+
+    // An action for another issue, beside a denial of this one, is not the finding.
+    const backoff = 'There is no off-by-one in the retry loop. Add backoff between attempts.';
+    const constant = 'There is no off-by-one in the loop, but name the 3 `MAX_ATTEMPTS`.';
+
+    expect(passed('full_review', reviewOf(backoff), review.expect)).toBe(false);
+    expect(passed('draft_comments', commentOf(constant, 'suggestion'), comments.expect)).toBe(
+      false,
+    );
 
     // A full review keeps its findings in its summary.
     expect(

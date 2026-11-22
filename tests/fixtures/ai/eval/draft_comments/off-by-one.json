@@ -77,7 +77,7 @@
         "side": "RIGHT",
         "line": 11,
         "severity": ["blocking", "suggestion"],
-        "body": "(?:^|[.;:,!?\\n])(?![^.;:,!?\\n]*(?:\\b(?:not|never|none|cannot)\\b|n't\\b))[^.;:,!?\\n]*?(?:<=\\s*3|<\\s*3(?!\\d)|\\b(?:four|4)\\s+(?:attempts|times|tries)\\b|\\boff-by-one\\b|\\bone too many\\b|\\bextra (?:attempt|retry|try)\\b)"
+        "body": "(?:^|[.;:,!?\\n])(?![^.;:,!?\\n]*(?:\\b(?:no|not|never|none|cannot)\\b|n't\\b))[^.;:,!?\\n]*?(?:<=\\s*3|<\\s*3(?!\\d)|\\b(?:four|4)\\s+(?:attempts|times|tries)\\b|\\boff-by-one\\b|\\bone too many\\b|\\bextra (?:attempt|retry|try)\\b)"
       },
       "why": "A comment asking for a change, anchored on the loop's line, R11, that states the extra attempt or a tighter bound in a clause that does not deny it."
     },

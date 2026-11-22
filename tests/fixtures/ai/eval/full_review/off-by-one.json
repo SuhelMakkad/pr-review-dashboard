@@ -81,7 +81,7 @@
     },
     {
       "matches": "/overall",
-      "pattern": "(?:^|[.;:,!?\\n])(?![^.;:,!?\\n]*(?:\\b(?:not|never|none|cannot)\\b|n't\\b))[^.;:,!?\\n]*?(?:<=\\s*3|<\\s*3(?!\\d)|\\b(?:four|4)\\s+(?:attempts|times|tries)\\b|\\boff-by-one\\b|\\bone too many\\b|\\bextra (?:attempt|retry|try)\\b)",
+      "pattern": "(?:^|[.;:,!?\\n])(?![^.;:,!?\\n]*(?:\\b(?:no|not|never|none|cannot)\\b|n't\\b))[^.;:,!?\\n]*?(?:<=\\s*3|<\\s*3(?!\\d)|\\b(?:four|4)\\s+(?:attempts|times|tries)\\b|\\boff-by-one\\b|\\bone too many\\b|\\bextra (?:attempt|retry|try)\\b)",
       "flags": "i",
       "why": "Its summary states the extra attempt (four attempts, `<= 3`, off-by-one, one too many) or a tighter bound (`< 3`), in a clause that does not deny it."
     },
