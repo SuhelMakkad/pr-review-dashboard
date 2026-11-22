@@ -14,7 +14,6 @@ import { parseAccount } from '@review-desk/shared/accounts';
 import { useMine, usePulls, useStatus } from '@/lib/queries';
 import { Avatar } from '@/ui/avatar';
 import { cn } from '@/ui/cn';
-import { Kbd } from '@/ui/kbd';
 import { IndicatorGroup } from '@/ui/motion';
 import { Tooltip } from '@/ui/tooltip';
 import { inQueue, queueMeta, queueSlugs } from '@/features/pulls/meta';
@@ -163,7 +162,7 @@ export function Sidebar() {
                   : 'Light theme'}
             </span>
           </button>
-          <div className="mt-2 flex items-center gap-1 border-t border-line pt-2">
+          <div className="mt-2 flex items-center border-t border-line pt-2">
             <AccountMenu>
               <button
                 type="button"
@@ -188,7 +187,6 @@ export function Sidebar() {
                 <ChevronsUpDown size={13} className="shrink-0 text-fg-subtle" aria-hidden="true" />
               </button>
             </AccountMenu>
-            <Kbd keys="[Shift]+?" />
           </div>
         </div>
       </IndicatorGroup>
