@@ -7,17 +7,19 @@ import { migrationsFolder } from '@/db/migrate.js';
 const repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 describe('workspace runtime paths', () => {
-  it('keeps application data at the repository root and serves the web workspace build', () => {
-    const config = loadConfig([], {});
+  it('keeps application data in the OS folder, moved from the checkout’s, and serves the web build', () => {
+    const config = loadConfig([], {}, { platform: 'darwin', home: '/Users/you' });
+    const folder = '/Users/you/Library/Application Support/Review Desk';
 
     expect(resolve(projectRoot)).toBe(resolve(repositoryRoot));
-    expect(config.dataDir).toBe(resolve(repositoryRoot, '.data'));
-    expect(config.databasePath).toBe(resolve(repositoryRoot, '.data/review-desk.sqlite'));
+    expect(config.dataDir).toBe(folder);
+    expect(config.databasePath).toBe(`${folder}/review-desk.sqlite`);
+    expect(config.dataLocation.legacy).toBe(resolve(repositoryRoot, '.data'));
     expect(config.webRoot).toBe(resolve(repositoryRoot, 'apps/web/dist'));
     expect(migrationsFolder).toBe(resolve(serverRoot, 'drizzle'));
   });
 
-  it('uses the same repository data location during development and demo mode', () => {
+  it('keeps demo mode’s data in the checkout, with its own ports', () => {
     const config = loadConfig(['--dev'], { REVIEW_DESK_MODE: 'demo' });
 
     expect(config.dataDir).toBe(resolve(repositoryRoot, '.data-demo'));

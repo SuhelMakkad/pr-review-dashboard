@@ -796,6 +796,7 @@ const syncStatus = z.object({
   warnings: z.array(z.string()),
   bootId: z.string().optional(),
   revision: z.number().optional(),
+  dataFolder: z.string().optional(),
 });
 
 const reviewNotification = z.object({

@@ -264,6 +264,8 @@ export interface SyncStatus {
    */
   bootId?: string;
   revision?: number;
+  /** The folder this server keeps its data in, to name it in Privacy Settings. Never stored. */
+  dataFolder?: string;
 }
 
 /**
