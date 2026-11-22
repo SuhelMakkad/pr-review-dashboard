@@ -108,6 +108,8 @@ export type ForgeOp = (typeof FORGE_OPS)[number];
 const schemas = {
   'server.started': { mode: ['production', 'development', 'demo'], port: 'number' },
   'server.stopped': { clean: 'boolean' },
+  // The data folder's one-time move to the OS's: never its paths, only what happened.
+  'data.adopt': { outcome: ['moved', 'kept'], synced: 'boolean' },
   'http.request': { route: 'route', method: METHODS, status: 'number', ms: 'number' },
   'forge.request': {
     forge: FORGES,

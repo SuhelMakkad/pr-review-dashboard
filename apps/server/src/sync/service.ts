@@ -90,6 +90,11 @@ export class SyncService {
     this.state.bootId = bootId;
   }
 
+  /** The data folder this process uses, sent with each status; set at start. */
+  set dataFolder(folder: string) {
+    this.state.dataFolder = folder;
+  }
+
   /** The last status published, as sent to the browser (see `AccountState.sentStatus`). */
   get sentStatus(): SyncStatus {
     return this.state.sentStatus;

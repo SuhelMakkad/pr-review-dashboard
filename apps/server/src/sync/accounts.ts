@@ -44,6 +44,8 @@ export class AccountState {
   status: SyncStatus;
   /** Identifies this server process in the statuses it sends; `createApp` sets the app's own. */
   bootId: string = randomUUID();
+  /** The data folder this process uses, for Privacy Settings to name; set at start. */
+  dataFolder: string | null = null;
   /** Status changes made by this process, counted from its start, never loaded from storage. */
   private revision = 0;
   /** The last status published, which a revision names: changes in between are not shown. */
@@ -309,7 +311,12 @@ export class AccountState {
   get sentStatus(): SyncStatus {
     const published = this.published ?? structuredClone(this.status);
 
-    return { ...structuredClone(published), bootId: this.bootId, revision: this.revision };
+    return {
+      ...structuredClone(published),
+      bootId: this.bootId,
+      revision: this.revision,
+      ...(this.dataFolder ? { dataFolder: this.dataFolder } : {}),
+    };
   }
 
   private emitStatus(): void {

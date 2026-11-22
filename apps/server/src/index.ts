@@ -1,13 +1,14 @@
 import { pruneBackups } from '@/db/backups.js';
 import { systemClock } from '@/clock.js';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '@/app.js';
 import { log, LogFile } from '@/log.js';
 import { watchEventLoop } from '@/http/loop.js';
 import { loadConfig } from '@/config.js';
-import { DataDirectoryLocked, lockDataDirectory, type DataDirectoryLock } from '@/db/lock.js';
+import { DataDirectoryRefused, resolveDataDirectory, type Adoption } from '@/db/data-directory.js';
+import { DataDirectoryLocked, type DataDirectoryLock } from '@/db/lock.js';
 import { Store } from '@/db/store.js';
 import { FixtureGitHub } from '@/demo/fixture-github.js';
 import { seedDemoQueue } from '@/demo/history.js';
@@ -36,13 +37,16 @@ const SHUTDOWN_DEADLINE_MS = 20_000;
 const config = loadConfig();
 
 // This process must own the data directory before anything opens, migrates or recovers the
-// database in it, or writes the dev session file another running instance depends on.
+// database in it, or writes the dev session file another running instance depends on. The first
+// start after an upgrade also moves a checkout's `.data` to the OS's folder here.
 let lock: DataDirectoryLock;
+let adoption: Adoption | null;
 
 try {
-  lock = lockDataDirectory(config.dataDir);
+  ({ lock, adoption } = await resolveDataDirectory(config));
 } catch (error) {
-  if (!(error instanceof DataDirectoryLocked)) throw error;
+  if (!(error instanceof DataDirectoryLocked) && !(error instanceof DataDirectoryRefused))
+    throw error;
 
   console.error(error.message);
   process.exit(1);
@@ -53,6 +57,15 @@ const logFile = new LogFile(join(config.dataDir, 'logs', 'review-desk.log'));
 
 logFile.open();
 log.open(logFile, process.env.REVIEW_DESK_LOG_LEVEL ?? 'info');
+
+if (adoption) {
+  log.event('info', 'data.adopt', { outcome: adoption.outcome, synced: adoption.synced });
+  console.log(
+    adoption.outcome === 'moved'
+      ? `Moved your data from ${adoption.from} to ${adoption.to}${adoption.synced ? '.' : '; the move could not be flushed to disk yet.'}`
+      : `Using the data in ${adoption.to}. The data in ${adoption.from} is ignored: to use it instead, stop Review Desk and start it with REVIEW_DESK_DATA_DIR=.data.`,
+  );
+}
 
 const stopWatchingLoop = watchEventLoop();
 
@@ -112,21 +125,11 @@ const service = new SyncService(
   fixture ?? forges,
   systemClock,
 );
+service.dataFolder = config.dataDir;
+
 const sessionToken = createSessionToken();
 const bootId = randomUUID();
 const linearOAuth = fixture ? null : new LinearOAuth(new KeychainCredentialStore());
-
-if (config.viteDev) {
-  // Vite injects the session into index.html during development; only this user can read it.
-  mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
-  writeFileSync(
-    join(config.dataDir, 'dev-session.json'),
-    JSON.stringify({ token: sessionToken, bootId }),
-    {
-      mode: 0o600,
-    },
-  );
-}
 
 const app = await createApp(service, {
   webRoot: config.webRoot,
@@ -149,6 +152,17 @@ const app = await createApp(service, {
 
 try {
   await app.listen({ host: '127.0.0.1', port: config.port });
+
+  if (config.viteDev) {
+    // Vite injects the session into index.html during development, once it sees this boot answer
+    // (see vite.config.ts). Published whole, and only now that the API is up; only this user can
+    // read it.
+    const session = join(config.dataDir, 'dev-session.json');
+    const draft = `${session}.${process.pid}.tmp`;
+
+    writeFileSync(draft, JSON.stringify({ token: sessionToken, bootId }), { mode: 0o600 });
+    renameSync(draft, session);
+  }
 
   const label = config.mode === 'demo' ? 'Review Desk (demo)' : 'Review Desk';
 

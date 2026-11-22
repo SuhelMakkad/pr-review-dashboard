@@ -1,16 +1,18 @@
 import { useLive } from '@/lib/live';
+import { useStatus } from '@/lib/queries';
 import { SettingsCard } from '@/features/settings/parts';
 
+const storage = (folder: string | undefined) => ({
+  term: 'Storage',
+  detail: (
+    <>
+      Cached GitHub and GitLab data, notes, snoozes and acknowledgements live in{' '}
+      {folder ? <code>{folder}</code> : 'the data folder'} on this machine.
+    </>
+  ),
+});
+
 const points = [
-  {
-    term: 'Storage',
-    detail: (
-      <>
-        Cached GitHub and GitLab data, notes, snoozes and acknowledgements live in{' '}
-        <code>.data/review-desk.sqlite</code> on this machine.
-      </>
-    ),
-  },
   {
     term: 'Network',
     detail:
@@ -31,11 +33,12 @@ const points = [
 
 export function PrivacySettings() {
   const live = useLive();
+  const status = useStatus();
 
   return (
     <SettingsCard title="On this machine">
       <dl className="divide-y divide-line">
-        {points.map((point) => (
+        {[storage(status.data?.dataFolder), ...points].map((point) => (
           <div key={point.term} className="grid grid-cols-[7rem_minmax(0,1fr)] gap-4 py-3.5">
             <dt className="text-sm font-medium">{point.term}</dt>
             <dd className="text-sm leading-relaxed text-fg-muted">{point.detail}</dd>

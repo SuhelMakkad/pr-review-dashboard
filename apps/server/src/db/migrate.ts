@@ -18,6 +18,28 @@ function hasTable(client: DatabaseSync, name: string): boolean {
   );
 }
 
+/**
+ * What a database holds, as migration reads it:
+ * - `drizzle`: migrations applied by Drizzle;
+ * - `legacy`: a database from before Drizzle (a schema version, or the first version's tables);
+ * - `empty`: nothing of ours yet, perhaps an empty ledger (a first start that stopped early);
+ * - `unknown`: tables that are not ours.
+ */
+export function databaseState(client: DatabaseSync): 'drizzle' | 'legacy' | 'empty' | 'unknown' {
+  if (appliedMigrations(client).length > 0) return 'drizzle';
+  if (
+    !hasTable(client, MIGRATIONS_TABLE) &&
+    (schemaVersion(client) > 0 || hasTable(client, 'snapshots'))
+  )
+    return 'legacy';
+
+  const tables = client
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+    .all() as { name: string }[];
+
+  return tables.every((table) => table.name === MIGRATIONS_TABLE) ? 'empty' : 'unknown';
+}
+
 /** Names of the Drizzle migrations already applied, which is how Drizzle decides what is pending. */
 export function appliedMigrations(client: DatabaseSync): string[] {
   if (!hasTable(client, MIGRATIONS_TABLE)) return [];
@@ -73,11 +95,7 @@ export function migrateDatabase(
   // A copy an interrupted backup left half-written can neither block this one nor outrank it.
   if (databasePath !== ':memory:') clearPartialBackups(dirname(databasePath));
 
-  const legacy =
-    !hasTable(client, MIGRATIONS_TABLE) &&
-    (schemaVersion(client) > 0 || hasTable(client, 'snapshots'));
-
-  if (legacy) {
+  if (databaseState(client) === 'legacy') {
     migrateLegacy(client, databasePath);
     adoptBaseline(client, local[0]!);
   }

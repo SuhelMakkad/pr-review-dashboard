@@ -7,3 +7,4 @@ coverage/
 test-results/
 playwright-report/
 bench-results.json
+.data-moved-to.txt
