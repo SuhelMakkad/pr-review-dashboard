@@ -213,7 +213,10 @@ async function identify(host: ServiceHost): Promise<Readiness | null> {
 
   const job = printed(host);
 
-  return job?.pid && job.pid !== record.pid ? null : record;
+  // Unloaded is not the service, whatever answers; loaded without a pid shown, the boot decides.
+  if (!job) return null;
+
+  return job.pid && job.pid !== record.pid ? null : record;
 }
 
 /** Waits for the job just started to say it is ready, and for the server to answer as it. */
@@ -533,7 +536,14 @@ export async function check(host: ServiceHost): Promise<CheckReport | null> {
 
     while (host.now() < deadline && !existsSync(report)) await host.sleep(250);
 
-    return existsSync(report) ? (JSON.parse(readFileSync(report, 'utf8')) as CheckReport) : null;
+    const result = existsSync(report)
+      ? (JSON.parse(readFileSync(report, 'utf8')) as CheckReport)
+      : null;
+
+    // This process's own cleanup is the last word on what is left: it says so itself.
+    cleanUp();
+
+    return result ? { ...result, leftovers: [] } : null;
   } finally {
     cleanUp();
     process.off('SIGINT', interrupted);

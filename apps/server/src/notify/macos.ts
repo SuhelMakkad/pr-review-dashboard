@@ -90,7 +90,8 @@ export function macosNotifier(origin: string, runner: Runner = run) {
           );
     const outcome: Delivery = sent ? 'sent' : 'failed';
 
-    log.event(sent ? 'debug' : 'warn', 'notify.native', { deliverer, outcome });
+    // At the default level either way: `pnpm service status` reads the last one.
+    log.event(sent ? 'info' : 'warn', 'notify.native', { deliverer, outcome });
 
     return outcome;
   };

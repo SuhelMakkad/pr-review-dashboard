@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { log } from '@/log.js';
 import { macosNotifier, escapeForNotifier } from '@/notify/macos.js';
 import { runCheck, type Exec } from '@/service/check.js';
 import {
@@ -155,6 +156,23 @@ describe('native notifications', () => {
     expect(calls).toEqual(['terminal-notifier -version', 'osascript -e']);
   });
 
+  it('records a sent notification at the default level, for pnpm service status', async () => {
+    const lines: string[] = [];
+
+    log.open({ write: (line) => void lines.push(line) }, 'info');
+    cleanups.push(() => log.silence());
+
+    const { notify } = macosNotifier('http://127.0.0.1:4317', async () => ({
+      ok: true,
+      stdout: '',
+    }));
+
+    await notify({ title: 't', body: 'b', path: '/inbox/attention', key: 'k' });
+    expect(lines.map((line) => JSON.parse(line) as Record<string, unknown>)).toContainEqual(
+      expect.objectContaining({ event: 'notify.native', outcome: 'sent' }),
+    );
+  });
+
   it('falls back to AppleScript, which only shows a notification', async () => {
     const calls: string[] = [];
     const { notify } = macosNotifier('http://127.0.0.1:4317', async (command) => {
@@ -251,6 +269,22 @@ describe('the check job’s report', () => {
       ),
       '/usr/bin/security delete-generic-password -s Review Desk check -a check-1',
     ]);
+  });
+
+  it('counts terminal-notifier only when its version probe worked, as the sender does', () => {
+    const report = runCheck(
+      'check-3',
+      answering({
+        '/usr/bin/which terminal-notifier': {
+          status: 0,
+          stdout: '/opt/homebrew/bin/terminal-notifier\n',
+        },
+        'terminal-notifier -version': { status: 1, stdout: 'terminal-notifier 3.1.0\n' },
+      }),
+    );
+
+    expect(report.tools['terminal-notifier']!.version).toBeNull();
+    expect(report.clickThrough).toBe(false);
   });
 
   it('names a Keychain item it could not remove', () => {
@@ -473,6 +507,62 @@ describe('pnpm service', () => {
 
     expect(said).toContain('Not answering as the service yet.');
     expect(said.join('\n')).not.toContain('Linear');
+  });
+
+  it('does not take an unloaded job for the service, whatever answers as its boot', async () => {
+    let prints = 0;
+    const { host, said } = machine((args) =>
+      args[0] === 'print'
+        ? // Loaded when status starts, gone by the time it identifies what answers.
+          prints++ === 0
+          ? { status: 0, stdout: 'state = running\npid = 9\n' }
+          : { status: 113 }
+        : { status: 0 },
+    );
+
+    publish(host);
+    await status(host);
+
+    expect(said).toContain('Not answering as the service yet.');
+  });
+
+  it('trusts its own cleanup over the check job’s, once it has removed the item', async () => {
+    let loaded = false;
+    let plist = '';
+    const { host, said } = machine((args) => {
+      if (args[0] === 'bootstrap') {
+        loaded = true;
+        plist = args[2]!;
+      }
+      if (args[0] === 'bootout') loaded = false;
+      if (args[0] === 'print') return { status: loaded ? 0 : 113 };
+      // The job reports that it could not delete its item.
+      if (args[0] === 'kickstart') {
+        const report = /<string>([^<]*report\.json)<\/string>/.exec(
+          readFileSync(plist, 'utf8'),
+        )![1]!;
+
+        writeFileSync(
+          report,
+          JSON.stringify({
+            tools: {},
+            github: null,
+            gitlab: null,
+            codexSignedIn: null,
+            keychain: 'ok',
+            clickThrough: false,
+            leftovers: ['Keychain item "Review Desk check" for check-x'],
+          }),
+        );
+      }
+
+      return { status: 0 };
+    });
+
+    const report = await check(host);
+
+    expect(report?.leftovers).toEqual([]);
+    expect(said.join('\n')).not.toContain('Could not remove');
   });
 
   it('checks with the installed service’s settings, and names what it could not remove', async () => {

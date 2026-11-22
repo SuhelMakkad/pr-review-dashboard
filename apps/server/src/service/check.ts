@@ -80,7 +80,10 @@ export function runCheck(
     const where = run('/usr/bin/which', [tool]);
     const path = where.status === 0 ? firstLine(where.stdout) : null;
 
-    tools[tool] = { path, version: path ? firstLine(run(tool, [flag]).stdout) : null };
+    const answer = path ? run(tool, [flag]) : null;
+
+    // A version only from a probe that worked, as the sender's own check requires.
+    tools[tool] = { path, version: answer?.status === 0 ? firstLine(answer.stdout) : null };
   }
 
   // Sign-ins as listed, never refreshed: `--no-refresh` where `gh` has it.
