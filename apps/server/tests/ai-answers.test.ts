@@ -1,12 +1,13 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AiTask } from '@review-desk/shared/ai';
 import { ClaudeProvider } from '@/ai/claude.js';
 import { CodexProvider } from '@/ai/codex.js';
 import type { AgentProvider } from '@/ai/provider.js';
 import { jsonSchemaFor, TASKS, type Evidence } from '@/ai/tasks.js';
+import { promptSamples } from './prompt-samples.js';
 
 const fixtures = new URL('../../../tests/fixtures/ai/', import.meta.url).pathname;
 const cleanups: (() => void)[] = [];
@@ -18,8 +19,12 @@ afterEach(() => {
   delete process.env.FAKE_CLAUDE_ANSWER;
 });
 
-/** The PR the recorded answers were given for. */
-const sample = JSON.parse(readFileSync(join(fixtures, 'prompt-sample.json'), 'utf8')) as Evidence;
+/** The PR the recorded answers were given for, with its full diff. */
+let sample: Evidence;
+
+beforeAll(async () => {
+  [sample] = (await promptSamples()).full;
+});
 const recorded = (task: AiTask) => join(fixtures, 'answers', `${task}.json`);
 const answer = (task: AiTask) => JSON.parse(readFileSync(recorded(task), 'utf8')) as unknown;
 

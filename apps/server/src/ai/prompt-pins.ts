@@ -18,10 +18,14 @@ export function canonical(value: unknown): string {
 }
 
 /**
- * What a task's provider receives, as a digest: its instructions, its wire schema, and the prompt
- * its builder renders for `sample`. A change to any of them is a change to the prompt.
+ * What a task's provider receives, as a digest: its instructions, its wire schema, and the prompts
+ * its builder renders for `samples` (one for each kind of diff it can be given). A change to any
+ * of them is a change to the prompt.
+ *
+ * Not covered: what a full review reads from its workspace beyond the prompt (`review.json`, built
+ * by `ai/workspace.ts`). A change there needs its version bumped by hand.
  */
-export function promptDigest(task: AiTask, sample: Evidence): string {
+export function promptDigest(task: AiTask, samples: Evidence[]): string {
   const definition = TASKS[task];
 
   return createHash('sha256')
@@ -29,7 +33,7 @@ export function promptDigest(task: AiTask, sample: Evidence): string {
       canonical({
         instructions: definition.instructions,
         schema: jsonSchemaFor(task),
-        prompt: definition.input(sample),
+        prompts: samples.map((sample) => definition.input(sample)),
       }),
     )
     .digest('hex');
@@ -59,4 +63,50 @@ export function pinProblems(base: PromptPins, head: PromptPins): string[] {
   }
 
   return problems;
+}
+
+/** Where the pins are kept, from the repository root. */
+export const PINS_PATH = 'apps/server/src/ai/prompt-pins.json';
+
+/** How the base's pins are read: through git, or by a test. */
+export interface BaseReader {
+  /** The commit `revision` names, or null when it names none. */
+  resolve(revision: string): string | null;
+  /** The file at `path` in `commit`, or null when that commit holds none. */
+  read(commit: string, path: string): string | null;
+}
+
+/**
+ * `head`'s pins against the branch merged into (`revision`): 0 when they agree, or when that
+ * branch has no pins yet; 1 for a problem; 2 when the base cannot be read. Never passes on a base
+ * it could not read.
+ */
+export function checkPins(
+  revision: string,
+  head: PromptPins,
+  git: BaseReader,
+): { code: 0 | 1 | 2; messages: string[] } {
+  const commit = git.resolve(revision);
+
+  if (!commit) return { code: 2, messages: [`${revision} names no commit to compare with.`] };
+
+  const text = git.read(commit, PINS_PATH);
+
+  if (text === null)
+    return { code: 0, messages: [`No prompt pins at ${revision} yet: nothing to compare.`] };
+
+  let base: unknown;
+
+  try {
+    base = JSON.parse(text);
+  } catch {
+    base = null;
+  }
+
+  if (!base || typeof base !== 'object' || Array.isArray(base))
+    return { code: 2, messages: [`The prompt pins at ${revision} cannot be read.`] };
+
+  const problems = pinProblems(base as PromptPins, head);
+
+  return { code: problems.length > 0 ? 1 : 0, messages: problems };
 }

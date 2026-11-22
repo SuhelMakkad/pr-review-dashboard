@@ -41,24 +41,12 @@
         },
         "body": "Ready for another look."
       }
-    ]
-  },
-  "diff": {
-    "prId": "PR_sample_7",
-    "kind": "full",
-    "fromOid": "1111111111111111111111111111111111111111",
-    "toOid": "2222222222222222222222222222222222222222",
-    "note": "Compared with your last review at 1111111.",
+    ],
+    "url": "https://github.com/acme/sample/pull/7",
     "files": [
       {
         "path": "src/upload.ts",
-        "status": "modified",
-        "additions": 3,
-        "deletions": 1,
-        "patch": "@@ -10,3 +10,5 @@\n context\n-  upload(file);\n+  for (let attempt = 0; attempt < 3; attempt++) {\n+    if (await upload(file)) break;\n+  }\n context",
-        "generated": false,
-        "binary": false,
-        "tooLarge": false
+        "viewerViewedState": "UNVIEWED"
       }
     ]
   },
@@ -86,5 +74,17 @@
       "coverage": ["Read src/upload.ts and its caller."]
     }
   },
-  "login": "you"
+  "login": "you",
+  "files": [
+    {
+      "path": "src/upload.ts",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1,
+      "patch": "@@ -10,3 +10,5 @@\n context\n-  upload(file);\n+  for (let attempt = 0; attempt < 3; attempt++) {\n+    if (await upload(file)) break;\n+  }\n context",
+      "sha": null
+    }
+  ],
+  "before": "export async function send(file) {\n  upload(file);\n  return true;\n}\n",
+  "after": "export async function send(file) {\n  for (let attempt = 0; attempt < 3; attempt++) {\n    if (await upload(file)) break;\n  }\n  return true;\n}\n"
 }

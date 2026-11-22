@@ -119,9 +119,10 @@ export interface TaskDefinition<R = unknown> {
   execution: 'workspace' | 'prompt';
   /**
    * Its answer, with its comments anchored to lines the full diff shows (others kept without a
-   * line): only for an answer with comments. Absent for a task without them.
+   * line): only for an answer with comments. Absent for a task without them. A property, not a
+   * method, so an entry's anchor is checked against its own answer's type.
    */
-  anchor?(result: R, diff: DiffManifest): unknown;
+  anchor?: (result: R, diff: DiffManifest) => unknown;
   /** Shows what it was given and whether it was posted (`inputs`, `publication`). */
   reportsInputs: boolean;
 }
@@ -139,29 +140,35 @@ interface Anchorable {
  * Keeps only anchors GitHub would accept: a comment on a line the file's full diff shows on its
  * side. The rest stay as suggestions without a line.
  */
+/** An answer as anchoring leaves it: each comment's line a number, or null where it fell off. */
+export type Anchored<R extends { comments: Anchorable[] }> = Omit<R, 'comments'> & {
+  comments: (Omit<R['comments'][number], 'line'> & { line: number | null })[];
+};
+
 export function anchorComments<R extends { comments: Anchorable[] }>(
   result: R,
   diff: DiffManifest,
-): Omit<R, 'comments'> & { comments: (R['comments'][number] & { line: number | null })[] } {
-  return {
-    ...result,
-    comments: result.comments.map((comment) => {
-      const file = diff.files.find((candidate) => candidate.path === comment.path);
-      const lines = commentableLines(file?.patch);
-      const visible = comment.side === 'LEFT' ? lines.left : lines.right;
+): Anchored<R> {
+  const comments = result.comments.map((comment) => {
+    const file = diff.files.find((candidate) => candidate.path === comment.path);
+    const lines = commentableLines(file?.patch);
+    const visible = comment.side === 'LEFT' ? lines.left : lines.right;
 
-      return file && comment.line !== null && visible.has(comment.line)
-        ? comment
-        : { ...comment, line: null };
-    }),
-  };
+    return file && comment.line !== null && visible.has(comment.line)
+      ? comment
+      : { ...comment, line: null };
+  });
+
+  return { ...result, comments } as unknown as Anchored<R>;
 }
 
 /** An entry checked against its own answer's type: an anchor only where the answer has comments. */
-const define = <R>(definition: TaskDefinition<R>): TaskDefinition<R> => definition;
+export const define = <R>(definition: TaskDefinition<R>): TaskDefinition<R> => definition;
 
 /** Every AI task, by its public id. */
-export const TASKS: Record<AiTask, TaskDefinition> = {
+// Each entry was checked against its own answer by `define`; the runner reads them alike.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const TASKS: Record<AiTask, TaskDefinition<any>> = {
   full_review: define({
     schema: fullReview,
     promptVersion: 4,

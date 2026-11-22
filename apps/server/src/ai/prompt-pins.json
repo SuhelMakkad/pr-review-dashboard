@@ -1,26 +1,26 @@
 {
   "full_review": {
     "version": 4,
-    "digest": "9e9ec8a952699445722b704dc62660796d16ed42880540a746b38c8bec834014"
+    "digest": "be7da77c9f69e216ef33207fe36808177446c192befd3d52ec976a97f21deb21"
   },
   "brief": {
     "version": 1,
-    "digest": "61ad308dffc8f801d6d1894d0fbc33cb7cacea56e15b5806dacefbffb5f974da"
+    "digest": "6db2800e99beada9e788907f37c9b92eabdd981dbaf4350bf08cb417db5d678a"
   },
   "since_review": {
     "version": 1,
-    "digest": "7d94a83207758825c23e1c8ec5a0ecd22de353c19e4a2e85d7f4c576b99cc62d"
+    "digest": "3290b7bf64ccca8ed8473b75bd2e8fddb467f49db6e022d82005bd377ec31854"
   },
   "draft_comments": {
     "version": 3,
-    "digest": "0b726f5a5c6435382166b72766925cfa1160e4248259894252c54d788a885163"
+    "digest": "77d26dba9db43f600c399dbdc4b0fbab1624634c4db24b4d034d2ce2ba2c3615"
   },
   "author_feedback": {
     "version": 1,
-    "digest": "2f321b88ec3b2b9445e3e2150448b2e9c5730750d5cae36cb701416ed3c76e52"
+    "digest": "7589bbda91fffe0ccbd6875be73a877c3dc234ce32c94d6bad583cd39f19e0d6"
   },
   "draft_summary": {
     "version": 3,
-    "digest": "4d30dac49113a780beb3f72cd102cae995a3defe9530a27f6448adfa7cc2eafd"
+    "digest": "b0947c0bedd07ca6cd24ad497787d74b00da74df24cc966f6ed3ac95fc381d96"
   }
 }

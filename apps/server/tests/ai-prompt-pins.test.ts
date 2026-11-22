@@ -1,13 +1,25 @@
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import type { AiTask } from '@review-desk/shared/ai';
-import { canonical, pinProblems, promptDigest, type PromptPins } from '@/ai/prompt-pins.js';
+import {
+  canonical,
+  checkPins,
+  PINS_PATH,
+  pinProblems,
+  promptDigest,
+  type BaseReader,
+  type PromptPins,
+} from '@/ai/prompt-pins.js';
 import { TASKS, type Evidence } from '@/ai/tasks.js';
+import { promptSamples, samplesFor } from './prompt-samples.js';
 
-/** A fixed PR and its evidence: prompts rendered from it change only when a builder does. */
-const sample = JSON.parse(
-  readFileSync(new URL('../../../tests/fixtures/ai/prompt-sample.json', import.meta.url), 'utf8'),
-) as Evidence;
+/** A fixed PR's evidence, its diffs built by the real diff service. */
+let samples: Record<'full' | 'since-review', Evidence[]>;
+
+beforeAll(async () => {
+  samples = await promptSamples();
+});
 const pins = JSON.parse(
   readFileSync(new URL('../src/ai/prompt-pins.json', import.meta.url), 'utf8'),
 ) as PromptPins;
@@ -19,13 +31,32 @@ describe('prompt versions', () => {
   });
 
   it.each(tasks)('pins what %s sends to its version', (task) => {
-    const now = { version: TASKS[task].promptVersion, digest: promptDigest(task, sample) };
+    const now = {
+      version: TASKS[task].promptVersion,
+      digest: promptDigest(task, samplesFor(samples, TASKS[task].evidence.diff)),
+    };
 
     // A change to its instructions, schema or prompt: bump `promptVersion`, then pin this.
     expect(
       now,
       `${task}'s prompt changed: bump its promptVersion and pin ${JSON.stringify(now)}`,
     ).toEqual(pins[task]);
+  });
+
+  it('samples every kind of diff a since-review prompt can be given', () => {
+    expect(samples['since-review'].map((sample) => sample.diff.kind)).toEqual([
+      'identical',
+      'fast-forward',
+      'rebased',
+      'unavailable',
+    ]);
+    // The service's own words about each are part of the prompt.
+    expect(samples['since-review'].map((sample) => Boolean(sample.diff.note))).toEqual([
+      false,
+      true,
+      true,
+      true,
+    ]);
   });
 
   it('renders the same digest for the same prompt, whatever the order of keys', () => {
@@ -59,5 +90,51 @@ describe('pins against the branch merged into', () => {
     expect(pinProblems(base, { ...base, since_review: { version: 1, digest: 'two' } })).toEqual([
       expect.stringContaining('since_review: its prompt version went back'),
     ]);
+  });
+});
+
+describe('the check against the branch merged into', () => {
+  const head: PromptPins = { brief: { version: 1, digest: 'one' } };
+  const reader = (files: Record<string, string | null>, commits = ['base']): BaseReader => ({
+    resolve: (revision) => (commits.includes(revision) ? revision : null),
+    read: (commit, path) => (path === PINS_PATH ? (files[commit] ?? null) : null),
+  });
+
+  it('fails when the revision names no commit, never passing unseen', () => {
+    expect(checkPins('gone', head, reader({}))).toMatchObject({ code: 2 });
+  });
+
+  it('passes when that branch has no pins yet', () => {
+    expect(checkPins('base', head, reader({ base: null }))).toMatchObject({ code: 0 });
+  });
+
+  it('fails when its pins cannot be read', () => {
+    expect(checkPins('base', head, reader({ base: '{ not json' }))).toMatchObject({ code: 2 });
+    expect(checkPins('base', head, reader({ base: '[]' }))).toMatchObject({ code: 2 });
+  });
+
+  it('fails on a problem, and passes when they agree', () => {
+    expect(
+      checkPins(
+        'base',
+        head,
+        reader({ base: JSON.stringify({ brief: { version: 1, digest: 'two' } }) }),
+      ),
+    ).toMatchObject({ code: 1, messages: [expect.stringContaining('brief')] });
+    expect(checkPins('base', head, reader({ base: JSON.stringify(head) }))).toMatchObject({
+      code: 0,
+      messages: [],
+    });
+  });
+
+  it('exits 2 from the command line for a revision that names no commit', () => {
+    const run = spawnSync(
+      'pnpm',
+      ['--filter', '@review-desk/server', 'prompt:pins', 'no-such-revision'],
+      { encoding: 'utf8' },
+    );
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr + run.stdout).toContain('no-such-revision names no commit');
   });
 });

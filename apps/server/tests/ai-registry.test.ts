@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { aiTaskLabels, type AiTask } from '@review-desk/shared/ai';
 import type { DiffManifest } from '@review-desk/shared/diff';
 import type { ReviewDraft } from '@review-desk/shared/review';
@@ -10,7 +11,14 @@ import type { PullRequestSnapshot } from '@review-desk/shared/types';
 import { draftFingerprint } from '@/ai/freshness.js';
 import { FixtureProvider } from '@/ai/fixture.js';
 import { AiRunner } from '@/ai/runner.js';
-import { jsonSchemaFor, TASKS, type Evidence, type TaskDefinition } from '@/ai/tasks.js';
+import {
+  anchorComments,
+  define,
+  jsonSchemaFor,
+  TASKS,
+  type Evidence,
+  type TaskDefinition,
+} from '@/ai/tasks.js';
 import type { RepositoryExporter } from '@/ai/workspace.js';
 import { aiRuns } from '@/db/schema.js';
 import { Store } from '@/db/store.js';
@@ -116,6 +124,35 @@ describe('the AI task registry', () => {
     if (context.includes('fullReviewId')) expect(evidence.completedReview).toBe(true);
     // A review is checked against the PR as refreshed for it.
     if (context.length > 0) expect(TASKS[task].refreshFirst).toBe(true);
+  });
+
+  it('lets only an answer with comments declare an anchor, and types a line that fell off as null', () => {
+    const diff = { files: [] } as unknown as DiffManifest;
+
+    define({
+      ...TASKS.brief,
+      schema: z.strictObject({ summary: z.string() }),
+      // @ts-expect-error: an answer without comments has nothing to anchor.
+      anchor: anchorComments,
+    });
+
+    // Nor where the answer's shape is not known.
+    const loose: TaskDefinition = {
+      ...TASKS.brief,
+      // @ts-expect-error: an answer of unknown shape may have no comments.
+      anchor: anchorComments,
+    };
+
+    expect(loose.anchor).toBe(anchorComments);
+
+    const anchored = anchorComments(
+      { comments: [{ path: 'src/gone.ts', line: 1, side: 'RIGHT' as const }] },
+      diff,
+    );
+    // @ts-expect-error: a comment whose line fell off has none.
+    const line: number = anchored.comments[0].line;
+
+    expect(line).toBeNull();
   });
 
   it('runs a task on a workspace only on the one provider that can', () => {
