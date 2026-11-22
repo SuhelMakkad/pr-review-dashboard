@@ -196,9 +196,15 @@ export async function runEval(
           error: safeError(error),
         };
       }
-    } finally {
-      if (directory) rmSync(directory, { recursive: true, force: true });
     }
+
+    // Removed whatever became of the case; a folder that cannot be is reported, and the run goes on.
+    if (directory)
+      try {
+        rmSync(directory, { recursive: true, force: true });
+      } catch (error) {
+        report.cleanupError = safeError(error);
+      }
 
     reports.get(task)!.push(report);
   }

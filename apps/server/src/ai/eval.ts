@@ -52,7 +52,28 @@ export const fixtureSchema = z.strictObject({
   note: z.string().min(1),
   evidence: z.strictObject({
     pr: z.record(z.string(), z.unknown()),
-    diff: z.looseObject({ files: z.array(z.record(z.string(), z.unknown())) }).optional(),
+    // The fields prompts and anchoring read, typed: a wrong one fails here, before any agent.
+    diff: z
+      .looseObject({
+        kind: z.string(),
+        fromOid: z.string().optional(),
+        toOid: z.string().optional(),
+        note: z.string().optional(),
+        files: z.array(
+          z.looseObject({
+            path: z.string(),
+            previousPath: z.string().optional(),
+            status: z.string(),
+            additions: z.number().int(),
+            deletions: z.number().int(),
+            patch: z.string().optional(),
+            binary: z.boolean().optional(),
+            generated: z.boolean().optional(),
+            tooLarge: z.boolean().optional(),
+          }),
+        ),
+      })
+      .optional(),
     draft: z.record(z.string(), z.unknown()).optional(),
     completedReview: z
       .strictObject({ id: z.string(), result: z.record(z.string(), z.unknown()).nullable() })
@@ -280,6 +301,8 @@ export interface CaseReport {
   model: string | null;
   /** The answer was in another shape: a failure of the prompt. */
   shapeError?: string;
+  /** Its folder could not be removed: left behind, the score stands. */
+  cleanupError?: string;
   /** The provider or the setup failed: the case says nothing about the prompt. */
   error?: string;
 }
@@ -332,6 +355,7 @@ export const reportSchema = z.strictObject({
           results: z.array(resultSchema),
           model: z.string().nullable(),
           shapeError: z.string().optional(),
+          cleanupError: z.string().optional(),
           error: z.string().optional(),
         }),
       ),

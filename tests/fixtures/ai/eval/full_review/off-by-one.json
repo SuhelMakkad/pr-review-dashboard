@@ -76,9 +76,9 @@
   "expect": [
     {
       "matches": "/overall",
-      "pattern": "<=|\\bfour\\b|\\b4 (attempts|times|tries)\\b|off-by-one|off by one|one (extra|more|too many)",
+      "pattern": "\\b(four|4) (attempts|times|tries|calls|uploads)\\b|\\bone (extra|more|too many)\\b|<\\s*3(?!\\d)",
       "flags": "i",
-      "why": "The off-by-one in the loop bound is the finding: four attempts where three are allowed."
+      "why": "It names the fourth attempt, or the tighter bound (`< 3`): four attempts where three are allowed."
     },
     {
       "count": "/comments",

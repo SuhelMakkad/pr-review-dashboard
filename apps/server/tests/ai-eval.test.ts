@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -9,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AiTask } from '@review-desk/shared/ai';
 import { ClaudeProvider } from '@/ai/claude.js';
@@ -223,6 +224,23 @@ describe('fixtures', () => {
       comments: [{ path: 'src/upload.ts', side: 'RIGHT', line: 11, severity: 'blocking', body }],
     });
 
+    const found = {
+      ...denial,
+      overall: 'I checked for an off-by-one in the loop bound and found none.',
+    };
+
+    expect(scoreCase('full_review', found, review.expect).passed).toBe(false);
+    expect(
+      scoreCase(
+        'draft_comments',
+        comment('I checked for an off-by-one in the loop bound and found none.'),
+        comments.expect,
+      ).passed,
+    ).toBe(false);
+    expect(
+      scoreCase('full_review', { ...denial, overall: 'It should be `attempt < 3`.' }, review.expect)
+        .passed,
+    ).toBe(true);
     expect(scoreCase('full_review', denial, review.expect).passed).toBe(false);
     expect(scoreCase('full_review', finding, review.expect).passed).toBe(true);
     expect(
@@ -239,6 +257,17 @@ describe('fixtures', () => {
         comments.expect,
       ).passed,
     ).toBe(true);
+  });
+
+  it('refuses a diff whose fields prompts and anchoring read are of the wrong kind', () => {
+    const file = { path: 'src/a.ts', status: 'modified', additions: 1, deletions: 0, patch: 42 };
+
+    expect(
+      fixtureProblems('draft_comments', {
+        ...base,
+        evidence: { pr: {}, diff: { kind: 'full', files: [file] } },
+      }).join(),
+    ).toContain('evidence.diff.files.0.patch');
   });
 
   it('refuses a comment body that is not a pattern', () => {
@@ -539,6 +568,56 @@ describe('a run', () => {
     expect(
       readdirSync(tmpdir()).filter((name) => name.startsWith('review-desk-eval-')).length,
     ).toBe(before);
+  });
+
+  it('records a folder that cannot be removed against its case, keeps its score, and goes on', async () => {
+    const locked: string[] = [];
+    const codex = agent((request) => {
+      // Something in the folder that cannot be removed.
+      const inner = join(request.workDir, 'locked');
+
+      mkdirSync(join(inner, 'deep'), { recursive: true });
+      writeFileSync(join(inner, 'deep', 'file'), 'x');
+      chmodSync(inner, 0o500);
+      locked.push(inner);
+
+      return {
+        summary: 'Retries uploads.',
+        risk: 'low',
+        riskReasons: [],
+        focusFiles: [{ path: 'src/upload.ts', reason: 'The loop.' }],
+        questions: [],
+      };
+    });
+
+    cleanups.push(() => {
+      for (const inner of locked) {
+        chmodSync(inner, 0o700);
+        rmSync(dirname(inner), { recursive: true, force: true });
+      }
+    });
+
+    const second = { ...checkedIn('brief', 'retry-loop'), id: 'second' };
+    const outcome = await runEval(
+      options({
+        fixtures: folder({ brief: [checkedIn('brief', 'retry-loop'), second] }),
+        agents: { codex: codex.provider, claude: codex.provider },
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      report: {
+        complete: true,
+        tasks: [
+          {
+            cases: [
+              { id: 'retry-loop', passed: true, cleanupError: expect.any(String) },
+              { id: 'second', passed: true, cleanupError: expect.any(String) },
+            ],
+          },
+        ],
+      },
+    });
   });
 
   it.each([

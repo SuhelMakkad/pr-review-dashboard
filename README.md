@@ -151,7 +151,7 @@ Each AI task is one entry in `apps/server/src/ai/tasks.ts`: its instructions, an
 1. Bump the task's `promptVersion` and pin its new digest.
 2. In a worktree of the base branch, run the baseline on this branch's fixtures: `pnpm ai:eval <task> --fixtures /absolute/path/to/this/branch/tests/fixtures/ai/eval --out /absolute/path/to/baseline.json`. The command runs from `apps/server`, so give absolute paths. The first time, the base has no `ai:eval`: use a scratch worktree of this branch with the base's `apps/server/src/ai/tasks.ts` and `prompt-pins.json` checked out, so the report's version and digest are the base's.
 3. On this branch, run the candidate with the same provider, model and effort: `--out /absolute/path/to/candidate.json`.
-4. `pnpm ai:eval:compare baseline.json candidate.json` lists every case and label that changed. It refuses runs that are incomplete, ran differently or on different cases, and exits 1 when a case that passed fails now.
+4. `pnpm ai:eval:compare /absolute/path/to/baseline.json /absolute/path/to/candidate.json` lists every case and label that changed. It refuses runs that are incomplete, ran differently or on different cases, and exits 1 when a case that passed fails now.
 5. Attach both reports and the comparison to the pull request.
 
 Every GraphQL document is validated against GitHub's published schema (`tests/schema/github.graphql`). Demo mode (`apps/server/src/demo/`) models commit graphs, force pushes, GitHub writes with a write log and failure injection, Linear issues, AI answers and review history, so end-to-end tests never touch GitHub or spend AI quota.
