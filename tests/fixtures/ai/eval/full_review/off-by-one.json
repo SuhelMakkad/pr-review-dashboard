@@ -1,6 +1,6 @@
 {
   "id": "off-by-one",
-  "note": "The description allows three attempts in total; the loop makes four (`<= 3`), with no delay between them.",
+  "note": "The description allows three attempts in total; the loop makes four (`<= 3`). Labelled by what the app acts on, the assessment, and by a claim about the bound: a clause that states the extra attempt or a tighter bound, with no negation in that clause.",
   "evidence": {
     "pr": {
       "id": "PR_eval",
@@ -75,10 +75,15 @@
   },
   "expect": [
     {
+      "equals": "/assessment",
+      "value": "changes_requested",
+      "why": "Four attempts where the PR allows three is a bug to fix before merging: a review that finds it requests changes."
+    },
+    {
       "matches": "/overall",
-      "pattern": "^(?![\\s\\S]*(?:\\bcannot\\b|\\bcan't\\b|\\bcan not\\b|\\bno off-by-one\\b|\\bfound none\\b|\\b(bound|loop|limit)\\b[^.\\n]*\\b(is|looks) (correct|fine|right)\\b))[\\s\\S]*(?:\\b(makes?|runs?|tries|tried|performs?|allows?|retries|loops?|attempts?)\\b[^.\\n]*\\b(four|4) (attempts|times|tries)\\b|\\b(should|change|use|make it|instead)\\b[^.\\n]*<\\s*3(?!\\d))",
+      "pattern": "(?:^|[.;:,!?\\n])(?![^.;:,!?\\n]*(?:\\b(?:not|never|none|cannot)\\b|n't\\b))[^.;:,!?\\n]*?(?:<=\\s*3|<\\s*3(?!\\d)|\\b(?:four|4)\\s+(?:attempts|times|tries)\\b|\\boff-by-one\\b|\\bone too many\\b|\\bextra (?:attempt|retry|try)\\b)",
       "flags": "i",
-      "why": "It says the loop makes a fourth attempt, or proposes the tighter bound (`< 3`), and never denies the finding."
+      "why": "Its summary states the extra attempt (four attempts, `<= 3`, off-by-one, one too many) or a tighter bound (`< 3`), in a clause that does not deny it."
     },
     {
       "count": "/comments",

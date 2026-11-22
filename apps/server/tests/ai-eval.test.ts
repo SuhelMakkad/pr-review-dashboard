@@ -206,77 +206,69 @@ describe('fixtures', () => {
     expect(`${raw.id}.json`).toBe(file);
   });
 
-  it('fails an answer that denies the off-by-one, in a full review and in a comment', () => {
+  it('labels the off-by-one by the action it calls for, and by a claim about the bound', () => {
     const review = checkedIn('full_review', 'off-by-one') as { expect: Expectation[] };
     const comments = checkedIn('draft_comments', 'off-by-one') as { expect: Expectation[] };
-    const denial = {
-      overall: 'The loop makes three attempts and looks correct.',
-      assessment: 'no_blocking_findings',
+    const reviewOf = (overall: string, assessment = 'changes_requested') => ({
+      overall,
+      assessment,
       comments: [],
       coverage: ['Read src/upload.ts.'],
-    };
-    const finding = {
-      ...denial,
-      overall: 'The loop makes four attempts: `<= 3` allows one too many.',
-    };
-    const comment = (body: string) => ({
+    });
+    const commentOf = (body: string, severity = 'blocking') => ({
       overall: '',
-      comments: [{ path: 'src/upload.ts', side: 'RIGHT', line: 11, severity: 'blocking', body }],
+      comments: [{ path: 'src/upload.ts', side: 'RIGHT', line: 11, severity, body }],
     });
 
-    const found = {
-      ...denial,
-      overall: 'I checked for an off-by-one in the loop bound and found none.',
-    };
-    // Answers that miss the finding, however their words overlap with it.
+    // Judged with the action a finding calls for, so only the words decide.
+    const scores = (text: string) => [
+      scoreCase('full_review', reviewOf(text), review.expect).passed,
+      scoreCase('draft_comments', commentOf(text), comments.expect).passed,
+    ];
+
+    // Each states the extra attempt, or a tighter bound, in a clause that does not deny it.
+    const findings = [
+      'The loop makes four attempts: `<= 3` allows one too many.',
+      'It should be `attempt < 3`.',
+      'This runs four times where three are allowed.',
+      '`<= 3` makes four attempts, not three.',
+      'The loop makes four attempts, so callers cannot rely on the documented cap. Use `attempt < 3`.',
+      'There is an off-by-one in the retry loop.',
+    ];
+    // Each denies it, or misses it, however its words overlap with it.
     const misses = [
+      'The loop does not make four attempts.',
       'The loop cannot make four attempts. The bound is correct.',
+      "The loop doesn't run four times.",
+      'I checked for an off-by-one in the loop bound and found none.',
+      'The loop makes three attempts and looks correct.',
+      'This loop looks right: three attempts.',
       'Could we add one more test for the upload path?',
     ];
 
-    for (const miss of misses) {
-      expect(scoreCase('full_review', { ...denial, overall: miss }, review.expect).passed).toBe(
-        false,
-      );
-      expect(scoreCase('draft_comments', comment(miss), comments.expect).passed).toBe(false);
-    }
+    for (const finding of findings) expect(scores(finding), finding).toEqual([true, true]);
+    for (const miss of misses) expect(scores(miss), miss).toEqual([false, false]);
 
+    const finding = findings[0]!;
+    const passed = (task: AiTask, output: unknown, wanted: Expectation[]) =>
+      scoreCase(task, output, wanted).passed;
+
+    // The words count only with the action they call for.
+    expect(passed('full_review', reviewOf(finding, 'no_blocking_findings'), review.expect)).toBe(
+      false,
+    );
+    expect(passed('draft_comments', commentOf(finding, 'suggestion'), comments.expect)).toBe(true);
+    expect(passed('draft_comments', commentOf(finding, 'nit'), comments.expect)).toBe(false);
+    expect(passed('draft_comments', commentOf(finding, 'question'), comments.expect)).toBe(false);
+
+    // A full review keeps its findings in its summary.
     expect(
-      scoreCase(
+      passed(
         'full_review',
-        { ...denial, overall: 'This runs four times where three are allowed.' },
+        { ...reviewOf(finding), comments: commentOf(finding).comments },
         review.expect,
-      ).passed,
-    ).toBe(true);
-
-    expect(scoreCase('full_review', found, review.expect).passed).toBe(false);
-    expect(
-      scoreCase(
-        'draft_comments',
-        comment('I checked for an off-by-one in the loop bound and found none.'),
-        comments.expect,
-      ).passed,
+      ),
     ).toBe(false);
-    expect(
-      scoreCase('full_review', { ...denial, overall: 'It should be `attempt < 3`.' }, review.expect)
-        .passed,
-    ).toBe(true);
-    expect(scoreCase('full_review', denial, review.expect).passed).toBe(false);
-    expect(scoreCase('full_review', finding, review.expect).passed).toBe(true);
-    expect(
-      scoreCase(
-        'draft_comments',
-        comment('This loop looks right: three attempts.'),
-        comments.expect,
-      ).passed,
-    ).toBe(false);
-    expect(
-      scoreCase(
-        'draft_comments',
-        comment('`<= 3` makes four attempts, not three.'),
-        comments.expect,
-      ).passed,
-    ).toBe(true);
   });
 
   it('refuses a diff whose fields prompts and anchoring read are of the wrong kind', () => {

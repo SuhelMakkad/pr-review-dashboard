@@ -29,6 +29,11 @@ const expectation = z.union([
       side: z.enum(['LEFT', 'RIGHT']),
       line: z.number().int().nullable(),
       body: z.string().optional(),
+      /** Its severity, one of these: what it asks of the author. */
+      severity: z
+        .array(z.enum(['blocking', 'suggestion', 'nit', 'question']))
+        .min(1)
+        .optional(),
     }),
     why,
   }),
@@ -261,6 +266,8 @@ export function check(task: AiTask, output: unknown, item: Expectation): Result 
         comment.path === wanted.path &&
         comment.side === wanted.side &&
         comment.line === wanted.line &&
+        (wanted.severity === undefined ||
+          wanted.severity.includes(comment.severity as (typeof wanted.severity)[number])) &&
         (pattern === null || pattern.test(comment.body)),
     );
 
