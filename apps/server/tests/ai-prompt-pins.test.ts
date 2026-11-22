@@ -1,10 +1,13 @@
-import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { AiTask } from '@review-desk/shared/ai';
 import {
   canonical,
   checkPins,
+  gitReader,
   PINS_PATH,
   pinProblems,
   promptDigest,
@@ -108,6 +111,17 @@ describe('the check against the branch merged into', () => {
     expect(checkPins('base', head, reader({ base: null }))).toMatchObject({ code: 0 });
   });
 
+  it('fails when its pins could not be looked up, never taking that for none', () => {
+    const failing: BaseReader = {
+      resolve: () => 'base',
+      read: () => {
+        throw new Error('fatal: unable to read tree');
+      },
+    };
+
+    expect(checkPins('base', head, failing)).toMatchObject({ code: 2 });
+  });
+
   it('fails when its pins cannot be read', () => {
     expect(checkPins('base', head, reader({ base: '{ not json' }))).toMatchObject({ code: 2 });
     expect(checkPins('base', head, reader({ base: '[]' }))).toMatchObject({ code: 2 });
@@ -136,5 +150,77 @@ describe('the check against the branch merged into', () => {
 
     expect(run.status).not.toBe(0);
     expect(run.stderr + run.stdout).toContain('no-such-revision names no commit');
+  });
+});
+
+describe('the base read through git', () => {
+  const pins = JSON.stringify({ brief: { version: 1, digest: 'one' } });
+
+  /** A repository whose first commit has no pins, and whose second has them. */
+  function repository() {
+    const root = mkdtempSync(join(tmpdir(), 'review-desk-pins-'));
+    const git = (args: string[]) =>
+      execFileSync('git', args, {
+        cwd: root,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    const commit = (message: string) => {
+      git(['add', '-A']);
+      git(['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', message]);
+
+      return git(['rev-parse', 'HEAD']).trim();
+    };
+
+    git(['init', '-q']);
+    writeFileSync(join(root, 'README.md'), 'sample\n');
+
+    const without = commit('no pins');
+
+    mkdirSync(dirname(join(root, PINS_PATH)), { recursive: true });
+    writeFileSync(join(root, PINS_PATH), pins);
+
+    const pinned = commit('pins');
+
+    return {
+      root,
+      git,
+      without,
+      pinned,
+      cleanup: () => rmSync(root, { recursive: true, force: true }),
+    };
+  }
+
+  it('reads pins as absent only from a commit whose tree has none', () => {
+    const { git, without, pinned, cleanup } = repository();
+
+    try {
+      const reader = gitReader(git);
+
+      expect(reader.resolve(without)).toBe(without);
+      expect(reader.resolve('no-such-revision')).toBeNull();
+      expect(reader.read(without, PINS_PATH)).toBeNull();
+      expect(reader.read(pinned, PINS_PATH)).toBe(pins);
+      expect(checkPins(without, JSON.parse(pins) as PromptPins, reader)).toMatchObject({ code: 0 });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('fails the check when the tree cannot be listed', () => {
+    const { git, pinned, cleanup } = repository();
+
+    try {
+      const reader = gitReader((args) => {
+        if (args[0] === 'ls-tree') throw new Error('fatal: unable to read tree');
+
+        return git(args);
+      });
+
+      expect(() => reader.read(pinned, PINS_PATH)).toThrow();
+      expect(checkPins(pinned, JSON.parse(pins) as PromptPins, reader)).toMatchObject({ code: 2 });
+    } finally {
+      cleanup();
+    }
   });
 });

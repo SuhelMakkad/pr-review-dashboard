@@ -72,8 +72,30 @@ export const PINS_PATH = 'apps/server/src/ai/prompt-pins.json';
 export interface BaseReader {
   /** The commit `revision` names, or null when it names none. */
   resolve(revision: string): string | null;
-  /** The file at `path` in `commit`, or null when that commit holds none. */
+  /** The file at `path` in `commit`, or null when that commit holds none; throws when unsure. */
   read(commit: string, path: string): string | null;
+}
+
+/** Runs git with `args`, returning what it printed; throws when it fails. */
+export type Git = (args: string[]) => string;
+
+/** The base read through git: absent only when the commit's tree has no such entry. */
+export function gitReader(git: Git): BaseReader {
+  return {
+    resolve: (revision) => {
+      try {
+        return git(['rev-parse', '--verify', '--quiet', `${revision}^{commit}`]).trim() || null;
+      } catch {
+        return null;
+      }
+    },
+    read: (commit, path) => {
+      // A listing that fails is not an absence: it throws, and the check cannot pass.
+      if (!git(['ls-tree', commit, '--', path]).trim()) return null;
+
+      return git(['show', `${commit}:${path}`]);
+    },
+  };
 }
 
 /**
@@ -90,7 +112,13 @@ export function checkPins(
 
   if (!commit) return { code: 2, messages: [`${revision} names no commit to compare with.`] };
 
-  const text = git.read(commit, PINS_PATH);
+  let text: string | null;
+
+  try {
+    text = git.read(commit, PINS_PATH);
+  } catch {
+    return { code: 2, messages: [`The prompt pins at ${revision} cannot be read.`] };
+  }
 
   if (text === null)
     return { code: 0, messages: [`No prompt pins at ${revision} yet: nothing to compare.`] };
