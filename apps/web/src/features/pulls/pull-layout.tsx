@@ -42,13 +42,14 @@ export function PullLayout() {
       keys: '1',
       label: 'Overview',
       group: 'Pull request',
-      run: () => params && navigate({ to: '/pr/$owner/$repo/$number', params }),
+      run: () => void (params && navigate({ to: '/pr/$owner/$repo/$number', params })),
     },
     {
       keys: '2',
       label: 'Files',
       group: 'Pull request',
-      run: () => params && navigate({ to: '/pr/$owner/$repo/$number/files', params, search: {} }),
+      run: () =>
+        void (params && navigate({ to: '/pr/$owner/$repo/$number/files', params, search: {} })),
     },
   ]);
 

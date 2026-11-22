@@ -93,8 +93,9 @@ function replaying<T extends object>(forge: T): T {
   });
 }
 
-function close({ store, service }: World): void {
-  service.stop();
+/** Stops the world's sync, then closes its store: nothing still running reads a closed store. */
+async function close({ store, service }: World): Promise<void> {
+  await service.stop();
   store.close();
 }
 
@@ -139,7 +140,7 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
         warm.push(...(await timed(1, () => subject.service.sync())));
       }
 
-      close(subject);
+      await close(subject);
     }
 
     add({ name: `cold full sync, ${size} PRs`, stats: stats(cold) });
@@ -473,7 +474,7 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchCase[]>
   });
 
   await app.close();
-  close(populated);
+  await close(populated);
 
   return cases;
 }

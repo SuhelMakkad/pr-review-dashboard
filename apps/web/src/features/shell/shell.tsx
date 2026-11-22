@@ -97,18 +97,24 @@ export function Shell() {
     },
     { keys: 'z', label: 'Undo last action', group: 'General', run: () => void undoLast(client) },
     ...goTo,
-    { keys: 'g m', label: 'Go to my PRs', group: 'Navigate', run: () => navigate({ to: '/mine' }) },
+    {
+      keys: 'g m',
+      label: 'Go to my PRs',
+      group: 'Navigate',
+      run: () => void navigate({ to: '/mine' }),
+    },
     {
       keys: 'g t',
       label: 'Go to insights',
       group: 'Navigate',
-      run: () => navigate({ to: '/insights' }),
+      run: () => void navigate({ to: '/insights' }),
     },
     {
       keys: 'g s',
       label: 'Go to settings',
       group: 'Navigate',
-      run: () => navigate({ to: '/settings/$section', params: { section: firstSettingsSlug } }),
+      run: () =>
+        void navigate({ to: '/settings/$section', params: { section: firstSettingsSlug } }),
     },
   ]);
 

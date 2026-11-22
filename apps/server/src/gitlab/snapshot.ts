@@ -212,6 +212,8 @@ export function stateOf(state: RawMergeRequest['state']): PullRequestSnapshot['s
 }
 
 export function pipelineState(status: string | null | undefined): CiState {
+  if (!status) return 'none';
+
   switch (status) {
     case 'success':
       return 'success';

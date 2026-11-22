@@ -80,10 +80,11 @@ export function CommandPalette({
   // Running a command clears the query, but only once the palette has faded out of view.
   const clearOnExit = useRef(false);
 
-  const run = (action: () => void) => () => {
+  // An action may navigate: nothing waits for it.
+  const run = (action: () => unknown) => () => {
     clearOnExit.current = true;
     onOpenChange(false);
-    action();
+    void action();
   };
 
   return (

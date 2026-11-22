@@ -517,7 +517,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
 
     // glab became someone else, whose limit this is: passed on with no deadline, so neither this
     // refresh nor a caller (the outbox) saves it for the account.
-    api.snapshot.mockImplementationOnce(async () => {
+    api.snapshot.mockImplementationOnce(() => {
       state.signedIn = OTHER;
       throw limited();
     });
@@ -538,9 +538,7 @@ describe('GitLab syncs, written only between two checks of glab’s sign-in', ()
 
     // Still the account: its limit is saved before the caller hears of it.
     state.signedIn = ACCOUNT;
-    api.snapshot.mockImplementationOnce(async () => {
-      throw limited();
-    });
+    api.snapshot.mockRejectedValueOnce(limited());
     await expect(service.refresh('mr-1', ACCOUNT)).rejects.toThrow('Rate limited');
     expect(store.settings.get(WRITE_COOLDOWN.of(ACCOUNT))).toBe(retryAt);
   });

@@ -111,7 +111,8 @@ export function AuthorBlockers({ item, account }: { item: AuthorItem; account: s
             <ArrowUpRight size={11} />
           </a>
         );
-      default:
+      // Blocked by branch protection: nothing here can clear it.
+      case 'blocked':
         return null;
     }
   };

@@ -93,12 +93,14 @@ export function InboxPage() {
   const flat = useMemo(() => sections.flatMap((section) => section.items), [sections]);
   const index = current ? flat.findIndex((item) => item.id === current.id) : -1;
 
-  const setSearch = (next: Partial<InboxSearch>) =>
-    navigate({
+  // A search change is a navigation: nothing waits for it, and a failed one is the router's to show.
+  const setSearch = (next: Partial<InboxSearch>) => {
+    void navigate({
       to: '.',
       search: (previous: InboxSearch) => ({ ...previous, ...next }),
       replace: true,
     });
+  };
 
   const select = (item: PullRequestItem | undefined, replace = true) => {
     if (!item) return;

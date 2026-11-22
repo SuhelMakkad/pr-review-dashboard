@@ -44,7 +44,7 @@ describe('the HTTP contract', () => {
 
     await app.ready();
     await app.close();
-    service.stop();
+    await service.stop();
     store.close();
 
     return generatedHeadsLeftOut(seen);
@@ -172,7 +172,7 @@ describe('routes that take an empty body', () => {
       expect((await send('POST', '/api/accounts/you/insights/backfill')).statusCode).toBe(202);
     } finally {
       await app.close();
-      service.stop();
+      await service.stop();
       store.close();
     }
   });

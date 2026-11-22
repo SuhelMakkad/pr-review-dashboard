@@ -291,8 +291,10 @@ function Workspace() {
     [threadsByFile],
   );
 
-  const setSearch = (next: Partial<FilesSearch>, replace = true) =>
-    navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace });
+  // A search change is a navigation: nothing waits for it, and a failed one is the router's to show.
+  const setSearch = (next: Partial<FilesSearch>, replace = true) => {
+    void navigate({ search: (previous: FilesSearch) => ({ ...previous, ...next }), replace });
+  };
 
   // Lines selected in one comparison are other lines in the next, which renders without them.
   useEffect(() => setSelection(null), [mode]);

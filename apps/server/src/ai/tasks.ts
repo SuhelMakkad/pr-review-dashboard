@@ -167,7 +167,6 @@ export const define = <R>(definition: TaskDefinition<R>): TaskDefinition<R> => d
 
 /** Every AI task, by its public id. */
 // Each entry was checked against its own answer by `define`; the runner reads them alike.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const TASKS: Record<AiTask, TaskDefinition<any>> = {
   full_review: define({
     schema: fullReview,

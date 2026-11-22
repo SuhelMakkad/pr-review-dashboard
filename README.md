@@ -119,6 +119,7 @@ Each workspace has its own dependencies, TypeScript configuration and unit or co
 pnpm test          # unit and component tests (Vitest)
 pnpm e2e           # builds, then Playwright against demo mode in light and dark, with axe scans and visual baselines
 pnpm typecheck
+pnpm lint          # type-checked lint: promises left floating or misused, and switches that miss a case
 pnpm format:check
 pnpm db:check      # the migration history is consistent (Drizzle Kit's check)
 ```
