@@ -2,6 +2,10 @@ import { structuredPatch } from 'diff';
 
 const MAX_TEXT_BYTES = 1_000_000;
 
+/** Too large to patch: `textPatch` returns null for it, and a worker is never sent it. */
+export const overCap = (oldText: string, newText: string) =>
+  oldText.length > MAX_TEXT_BYTES || newText.length > MAX_TEXT_BYTES;
+
 export interface TextPatch {
   patch: string;
   additions: number;
@@ -10,7 +14,7 @@ export interface TextPatch {
 
 /** Unified hunks (GitHub style, no file headers) between two versions of a text file. */
 export function textPatch(oldText: string, newText: string, context = 3): TextPatch | null {
-  if (oldText.length > MAX_TEXT_BYTES || newText.length > MAX_TEXT_BYTES) return null;
+  if (overCap(oldText, newText)) return null;
 
   const result = structuredPatch('a', 'b', oldText, newText, '', '', { context });
   let additions = 0;

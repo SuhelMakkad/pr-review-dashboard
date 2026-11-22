@@ -23,8 +23,12 @@ describe('the benchmark', () => {
       // Every fifth of the many is yours.
       'My PRs derivation, 8 of 40 PRs yours',
       'full diff of a 60-file PR, cold',
-      'rebased interdiff, 20 changed, 20 diffed, cold',
-      'event-loop stall during the interdiff',
+      'rebased interdiff, 20 changed, 20 diffed, cold, patched in place',
+      'rebased interdiff, 20 changed, 20 diffed, cold, a new pool',
+      'event-loop stall during the interdiff, a new pool',
+      'rebased interdiff, 20 changed, 20 diffed, cold, a running pool',
+      'event-loop stall during the interdiff, a running pool',
+      '4 different rebased interdiffs at once, one service',
       'fingerprints of the large PR',
     ]);
 
