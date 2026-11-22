@@ -97,6 +97,21 @@ describe('the dev server’s session', () => {
     boot = 'next-boot';
     expect((await page()).status).toBe(503);
 
+    // A boot that changes while the page is answered: the page is the boot it was checked as.
+    let answered = 0;
+
+    api.removeAllListeners('request');
+    api.on('request', (_request, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ bootId: answered++ === 0 ? 'new-boot' : 'next-boot' }));
+    });
+
+    const during = await page();
+
+    expect(during.status).toBe(200);
+    expect(during.html).toContain('content="new-token"');
+    expect(during.html).toContain('content="new-boot"');
+
     // Nor does a request that does not ask for HTML get the stale session.
     const anything = await fetch(vite.resolvedUrls!.local[0]!, { headers: { accept: '*/*' } });
 

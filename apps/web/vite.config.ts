@@ -70,14 +70,19 @@ async function liveBoot(): Promise<string | null> {
  * once the API answers as the boot the file names, and until then with a token-free page that
  * reloads itself.
  */
+/** The page's session meta tags, as the production server writes them (`http/html.ts`). */
+function sessionTags(session: Session): string {
+  const attribute = (value: string) =>
+    value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+  return [
+    `<meta name="review-desk-session" content="${attribute(session.token)}" />`,
+    `<meta name="review-desk-boot" content="${attribute(session.bootId)}" />`,
+    `<meta name="review-desk-demo" content="${demo ? '1' : '0'}" />`,
+  ].join('');
+}
+
 function devSession(): Plugin {
-  /** The session, when the API answers as the boot it is from. */
-  const live = async (): Promise<Session | null> => {
-    const session = readSession();
-
-    return session && (await liveBoot()) === session.bootId ? session : null;
-  };
-
   return {
     name: 'review-desk-dev-session',
     apply: 'serve',
@@ -88,46 +93,37 @@ function devSession(): Plugin {
           !request.url?.startsWith('/api/') &&
           request.headers.accept?.includes('text/html');
 
+        // Anything else Vite answers itself; its index.html never carries a session.
         if (!document) return next();
 
         void (async () => {
-          if (await live()) {
-            next();
+          const session = readSession();
+
+          // One check per page: the session it renders is the one this answer was checked for.
+          if (!session || (await liveBoot()) !== session.bootId) {
+            response.statusCode = 503;
+            response.setHeader('Content-Type', 'text/html; charset=utf-8');
+            response.setHeader('Cache-Control', 'no-store');
+            response.end(STARTING);
 
             return;
           }
 
-          response.statusCode = 503;
-          response.setHeader('Content-Type', 'text/html; charset=utf-8');
-          response.setHeader('Cache-Control', 'no-store');
-          response.end(STARTING);
+          try {
+            const html = await server.transformIndexHtml(
+              request.originalUrl ?? request.url ?? '/',
+              readFileSync(path.resolve(server.config.root, 'index.html'), 'utf8'),
+            );
+
+            response.statusCode = 200;
+            response.setHeader('Content-Type', 'text/html; charset=utf-8');
+            response.setHeader('Cache-Control', 'no-store');
+            response.end(html.replace('</head>', `${sessionTags(session)}</head>`));
+          } catch (error) {
+            next(error);
+          }
         })();
       });
-    },
-    // Checked again for each page it renders, so a request that skipped the check above (one not
-    // asking for HTML) never carries a session from another boot.
-    async transformIndexHtml() {
-      const verified = await live();
-
-      if (!verified) return [];
-
-      return [
-        {
-          tag: 'meta',
-          attrs: { name: 'review-desk-session', content: verified.token },
-          injectTo: 'head',
-        },
-        {
-          tag: 'meta',
-          attrs: { name: 'review-desk-boot', content: verified.bootId },
-          injectTo: 'head',
-        },
-        {
-          tag: 'meta',
-          attrs: { name: 'review-desk-demo', content: demo ? '1' : '0' },
-          injectTo: 'head',
-        },
-      ];
     },
   };
 }
