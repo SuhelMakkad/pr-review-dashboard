@@ -67,7 +67,7 @@ Replacing `github.com` with `127.0.0.1:4317` in any PR URL opens that PR here; t
 security add-generic-password -U -s review-desk.linear -a api-key -w
 ```
 
-**Notifications.** In Settings → Notifications, click _Allow notifications_. Native macOS notifications for when no window is open are opt-in; clicking one opens Script Editor rather than the PR.
+**Notifications.** In Settings → Notifications, click _Allow notifications_. Native macOS notifications for when no window is open are opt-in (_Use macOS notifications when no window is open_). Clicking one opens its PR when [terminal-notifier](https://github.com/julienXX/terminal-notifier) 3 or later is installed (`brew install terminal-notifier`); without it, clicking opens Script Editor.
 
 ## GitHub account and safety
 
@@ -98,6 +98,33 @@ Some things differ from GitHub. Requesting changes needs GitLab 19.2 or later, w
 **Moving from `.data/`.** Earlier versions kept each checkout's data in `.data/` at its root. The first start after updating moves that folder to `<data>` as a single rename, while holding the folder and the lock of every AI run in it, after waiting up to 30 seconds for agents from an earlier run to finish. It prints "Moved your data from … to …" and leaves `.data-moved-to.txt` in the checkout naming the new place. A crash at any moment leaves the folder whole, in one place or the other. When `<data>` already holds data, it is used, and each start says the checkout's `.data/` is ignored. The move is refused, and the app stops saying why, when the two folders are on different disks, `<data>` exists with files but no database, `.data/` or something in it is a link, an agent is still running after 30 seconds, or on Windows. Then stop Review Desk and its agents and move `.data/` to `<data>` yourself (`<data>` must not exist yet), or keep using it by starting with `REVIEW_DESK_DATA_DIR=.data`. To go back after a move, stop the app and its agents, move `<data>` back to `.data/` in the checkout (only if there is no `.data/` there now), and start with `REVIEW_DESK_DATA_DIR=.data` so it stays there. A checkout of an older version starts with an empty `.data/` of its own despite the note, and may need a backup from `<data>/backups/` restored, since upgrades change the database.
 
 One Review Desk process uses a data folder at a time. A second `pnpm start` or `pnpm dev` on the same folder exits with "Review Desk is already running" before it opens the database, so it never touches the running one's queued actions or AI runs; to run another instance, give it its own `REVIEW_DESK_DATA_DIR` and `REVIEW_DESK_PORT` (`pnpm dev` always uses Vite on 4317, so run a second instance with `pnpm start`). The hold ends when the process exits, even after a crash. Stopping the app (Ctrl-C) stops new work first, lets the action being sent and running AI reviews reach a safe point for up to 20 seconds, then exits; a second Ctrl-C exits at once, and anything interrupted is checked on the next start.
+
+**Running as a service (macOS, a pilot).** `pnpm service install` runs the built server (`pnpm build` first) as a launchd agent of yours, so Review Desk syncs and notifies after you log in, with no terminal open. It writes `~/Library/LaunchAgents/dev.reviewdesk.server.plist` and starts it, then waits until the server it started answers. The service uses the Node that ran the install and your shell's `PATH` as it was then, with each folder resolved to the one it really is, so `gh`, `glab`, `codex`, `claude` and `terminal-notifier` are found as in your terminal. Reinstall after switching Node or moving the checkout. It uses the sign-ins saved for your login session. Its output goes to `~/Library/Logs/Review Desk/` (`service.out.log` and `service.err.log`, each rotated past 10 MB), never into the data folder.
+
+- **`pnpm service status`:** what launchd reports (best-effort), whether the server answers, and Linear's connection.
+- **`pnpm service restart`:** after `git pull && pnpm build`. It stops the service the way Ctrl-C does, which drains for up to 20 seconds, waits for it to exit, then starts it again.
+- **`pnpm service uninstall`:** stops it the same way and removes the plist.
+- **`pnpm service check`:** runs a one-off launchd job as the service would run, and reports what it can reach:
+  - each tool's path and version;
+  - each GitHub and GitLab sign-in, by host and login;
+  - whether Codex is signed in;
+  - a Keychain round trip on a throwaway item of its own, removed afterwards.
+
+  It leaves nothing behind, and names anything it could not remove.
+
+A crash or a failed start (the data folder in use, the port taken) is retried every 10 seconds until you uninstall. While the service runs, `pnpm start` exits "already running" and says the service holds the folder.
+
+Native notifications click through to the PR only with terminal-notifier 3 or later (see **Notifications** above). `pnpm service check` says whether it is there, and `pnpm service status` says how the last native notification went.
+
+To accept the pilot on your Mac:
+
+1. After a fresh login, with no terminal open, the service syncs with your existing sign-ins.
+2. An AI review runs with each provider you use.
+3. Run `pnpm service restart` while each of these is active:
+   - a Codex review: it pauses at a checkpoint and resumes after the restart;
+   - a Claude review: it is cancelled cleanly, and a new one works afterwards;
+   - a write in Activity: a completed or confirmed write reached GitHub exactly once, and an unresolved one is in its expected Activity state, with no duplicate.
+4. Install terminal-notifier, turn on _Use macOS notifications when no window is open_ in Settings → Notifications, and allow terminal-notifier's notifications when macOS asks (or in System Settings → Notifications). Then close every Review Desk window, get two native notifications for different PRs, and click the older one after the newer arrives. The exact PR opens; note whether the installed app or the browser opened it.
 
 Syncing is incremental: a cheap fingerprint per PR decides when a full refresh is needed, with a full check every 30 minutes and on opening a PR. Search failures never drop a PR, and a PR leaves the list only once GitHub confirms it was closed or merged, or you remove a PR you added by hand.
 

@@ -17,6 +17,7 @@ import { loadConfig } from '@/config.js';
 import {
   DataDirectoryRefused,
   resolveDataDirectory,
+  StartCancelled,
   type AdoptionHost,
 } from '@/db/data-directory.js';
 import { DataDirectoryLocked, holdExclusive, lockDataDirectory } from '@/db/lock.js';
@@ -378,6 +379,41 @@ describe('moving a checkout’s data to the OS folder', () => {
     writeFileSync(join(legacy, 'ai-runs', '.locks', 'run-1.lock'), 'not a database at all, really');
 
     await expect(resolveDataDirectory(config, fast)).rejects.toThrow(/AI run run-1/);
+  });
+
+  it('stops waiting, and moves nothing, when the start is asked to stop', async () => {
+    const { config, legacy, home } = machine();
+
+    withData(legacy);
+
+    // Waiting for another launch's startup lock.
+    const other = holdExclusive(
+      join(home, 'Library', 'Application Support', 'review-desk-startup.lock'),
+    )!;
+    const waiting = new AbortController();
+    const started = resolveDataDirectory(config, {
+      waitMs: 10_000,
+      pollMs: 20,
+      signal: waiting.signal,
+    });
+
+    setTimeout(() => waiting.abort(), 50);
+    await expect(started).rejects.toBeInstanceOf(StartCancelled);
+    other.release();
+
+    // Asked to stop with every lock held, right before the rename: nothing moves, all is let go.
+    const moving = new AbortController();
+
+    await expect(
+      resolveDataDirectory(config, {
+        ...fast,
+        signal: moving.signal,
+        beforeRename: () => moving.abort(),
+      }),
+    ).rejects.toBeInstanceOf(StartCancelled);
+    expect(accountIn(legacy)).toBe('kept');
+    lockDataDirectory(legacy).release();
+    expect((await resolve(config)).adoption?.outcome).toBe('moved');
   });
 
   it('leaves an override and demo mode where they say', async () => {

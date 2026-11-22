@@ -110,6 +110,7 @@ const schemas = {
   'server.stopped': { clean: 'boolean' },
   // The data folder's one-time move to the OS's: never its paths, only what happened.
   'data.adopt': { outcome: ['moved', 'kept'], synced: 'boolean' },
+  'notify.native': { deliverer: ['terminal-notifier', 'osascript'], outcome: ['sent', 'failed'] },
   'http.request': { route: 'route', method: METHODS, status: 'number', ms: 'number' },
   'forge.request': {
     forge: FORGES,

@@ -24,7 +24,7 @@ import { registerNotifyRoutes } from '@/routes/notify.js';
 import { registerInsightsRoutes } from '@/routes/insights.js';
 import { Backfill } from '@/insights/backfill.js';
 import { Notifier } from '@/notify/notifier.js';
-import { macosNotify } from '@/notify/macos.js';
+import { macosNotifier, type NativeNotify } from '@/notify/macos.js';
 import { FixtureLinear, LinearService, type LinearSource } from '@/linear/service.js';
 import type { LinearConnector } from '@/linear/oauth.js';
 import { AiRunner } from '@/ai/runner.js';
@@ -64,7 +64,7 @@ export interface AppOptions {
   /** Signs in to Linear from Settings; a fixture source acts as its own. */
   linearConnector?: LinearConnector | null;
   /** Native notification sender used when no window is open (macOS by default). */
-  nativeNotify?: (title: string, body: string) => Promise<void>;
+  nativeNotify?: NativeNotify;
   keepaliveMs?: number;
   operationQueue?: QueueOptions;
   /** Told of every route as it is registered: the contract test checks them against the contract. */
@@ -177,7 +177,13 @@ export async function createApp(service: SyncService, options: AppOptions = {}) 
 
   registerLinearRoutes(app, service, linear);
 
-  const notifier = new Notifier(service.store, service.events, options.nativeNotify ?? macosNotify);
+  // A click opens the PR where the browser reaches the app: the UI's port.
+  const notifier = new Notifier(
+    service.store,
+    service.events,
+    options.nativeNotify ??
+      macosNotifier(`http://127.0.0.1:${(options.ports ?? [4317]).at(-1)}`).notify,
+  );
   // Background work run at its due time: restarts of automatic reviews, and history imports.
   const scheduler = new Scheduler(service.store, service.clock, bootId);
   const autoReviewer = new AutoReviewer(service, runner, notifier, scheduler);

@@ -102,7 +102,7 @@ export function NotificationSettingsPage({ account }: { account: string }) {
         </SettingRow>
         <SettingRow
           label="Use macOS notifications when no window is open"
-          hint="Sent by the local server; clicking one opens Script Editor rather than the PR."
+          hint="Sent by the local server. Clicking one opens its PR when terminal-notifier is installed (brew install terminal-notifier); otherwise it opens Script Editor."
         >
           <Switch
             aria-label="Use macOS notifications when no Review Desk window is open"

@@ -68,6 +68,7 @@ export function registerEventStream(app: FastifyInstance, options: SseOptions): 
     }
 
     streams.add(stream);
+    options.bus.windowOpened();
 
     const unsubscribe = options.bus.subscribe(send);
     const keepalive = setInterval(() => {
@@ -78,6 +79,7 @@ export function registerEventStream(app: FastifyInstance, options: SseOptions): 
       clearInterval(keepalive);
       unsubscribe();
       streams.delete(stream);
+      options.bus.windowClosed();
     });
   });
 

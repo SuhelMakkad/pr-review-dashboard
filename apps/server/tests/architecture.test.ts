@@ -202,6 +202,16 @@ describe('server boundaries', () => {
    */
   const allowed: { path: string; reason: string; wordings: RegExp[] }[] = [
     {
+      path: 'service/cli.ts',
+      reason: "`pnpm service check`'s terminal report, which names each CLI's own forge",
+      wordings: [
+        /^GitHub /,
+        /^GitLab /,
+        /^Notifications: terminal-notifier 3 or later is there, so clicking one can open its PR\.$/,
+        /^Notifications: clicking one opens Script Editor\./,
+      ],
+    },
+    {
       path: 'ai/context.ts',
       reason: "the agent's prompt, never shown to users",
       wordings: [/Review the complete PR using review\.json/],

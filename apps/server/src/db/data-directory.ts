@@ -28,6 +28,26 @@ const RECOVERY = [`${DATABASE}-wal`, `${DATABASE}-shm`, `${DATABASE}-journal`];
 /** Why the data folder could not be settled: the start stops, and the message says what to do. */
 export class DataDirectoryRefused extends Error {}
 
+/** The start was asked to stop (SIGTERM, Ctrl-C) while it waited: nothing was moved or kept. */
+export class StartCancelled extends Error {
+  constructor() {
+    super('Review Desk was stopped while it started.');
+  }
+}
+
+/** Waits `ms`, or throws `StartCancelled` as soon as `signal` aborts. */
+async function wait(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) throw new StartCancelled();
+
+  try {
+    await delay(ms, undefined, { signal });
+  } catch (error) {
+    if (signal?.aborted) throw new StartCancelled();
+
+    throw error;
+  }
+}
+
 export interface Adoption {
   /** `moved`: the checkout's folder became the OS's. `kept`: the OS's has data; the checkout's is ignored. */
   outcome: 'moved' | 'kept';
@@ -51,6 +71,8 @@ export interface AdoptionHost {
   beforeRename?: () => void | Promise<void>;
   /** Right after the rename committed, before anything else. */
   afterRename?: () => void;
+  /** Aborted when the start is asked to stop: every wait ends, and nothing more is moved. */
+  signal?: AbortSignal;
   waitMs?: number;
   pollMs?: number;
 }
@@ -201,6 +223,7 @@ async function holdRunLocks(
   folder: string,
   waitMs: number,
   pollMs: number,
+  signal: AbortSignal | undefined,
 ): Promise<{ release(): void }[]> {
   const runs = join(folder, 'ai-runs');
 
@@ -244,7 +267,7 @@ async function holdRunLocks(
             `An AI agent started by an earlier Review Desk is still running in ${join(runs, id)}.`,
           );
 
-        await delay(pollMs);
+        await wait(pollMs, signal);
       }
     }
 
@@ -295,7 +318,7 @@ export async function resolveDataDirectory(
         `Another Review Desk has been starting for ${waitMs / 1000} s. Try again once it has started or stopped.`,
       );
 
-    await delay(pollMs);
+    await wait(pollMs, host.signal);
   }
 
   try {
@@ -360,8 +383,11 @@ export async function resolveDataDirectory(
       let committed = false;
 
       try {
-        runLocks = await holdRunLocks(legacy, waitMs, pollMs);
+        runLocks = await holdRunLocks(legacy, waitMs, pollMs, host.signal);
         await host.beforeRename?.();
+
+        // The last point a stop can still leave everything where it was.
+        if (host.signal?.aborted) throw new StartCancelled();
 
         try {
           (host.rename ?? renameSync)(legacy, directory);

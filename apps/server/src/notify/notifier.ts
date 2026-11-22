@@ -12,6 +12,7 @@ import type { PullRequestItem } from '@review-desk/shared/types';
 import type { Store } from '@/db/store.js';
 import type { EventBus } from '@/events.js';
 import { NOTIFICATION_SETTINGS } from '@/db/settings.js';
+import type { NativeNotify } from '@/notify/macos.js';
 
 const pathFor = (item: { repository: string; number: number }, base: 'inbox/attention' | 'mine') =>
   pullPath(base, item);
@@ -88,7 +89,7 @@ export class Notifier {
   constructor(
     private readonly store: Store,
     private readonly events: EventBus,
-    private readonly macos: (title: string, body: string) => Promise<void>,
+    private readonly macos: NativeNotify,
   ) {}
 
   /** Forget that an account was primed (demo reset), so its backlog is not announced as new. */
@@ -180,15 +181,23 @@ export class Notifier {
 
     if (wanted.length === 0) return [];
 
-    if (this.events.subscriberCount > 0) {
+    // A browser window shows it; the server's own listeners (the outbox) are not one.
+    if (this.events.windowCount > 0) {
       this.events.emit({ type: 'notify', notifications: wanted });
       this.remember(account, wanted, 'browser');
     } else if (settings.macosWhenClosed) {
       const first = wanted[0];
       const more = wanted.length > 1 ? ` (+${wanted.length - 1} more)` : '';
 
-      await this.macos(first.title, `${first.body}${more}`);
-      this.remember(account, wanted, 'macos');
+      const delivered = await this.macos({
+        title: first.title,
+        body: `${first.body}${more}`,
+        path: first.path,
+        key: first.key,
+      });
+
+      // Remembered either way, so a denied permission is not asked again on every sync.
+      this.remember(account, wanted, delivered === 'failed' ? 'macos-failed' : 'macos');
     } else {
       this.remember(account, wanted, 'none');
     }
